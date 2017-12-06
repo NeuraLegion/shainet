@@ -1,0 +1,9 @@
+name: shainet
+version: 0.1.0
+
+authors:
+  - bararchy <bar.hofesh@safe-t.com>
+
+crystal: 0.24.0+58
+
+license: MIT
