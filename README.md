@@ -23,7 +23,14 @@ TODO: Write usage instructions here
 
 ## Development
 
-TODO: Write development instructions here
+- [ ] Add multi-channel filtration, cut the string into multiple "segments" and let each channel process different ones.  
+- [ ] Add back-prop\r-prop.  
+- [ ] Add needed activation functions.  
+- https://en.wikipedia.org/wiki/Recurrent_neural_network  
+- [ ] Build diverse and relevant tests to check Neural Net capabilities.  
+- [ ] Bind and use CUDA  
+- [ ] Research compression-on-the-fly as a mean to minimize the size of the payload sample.  
+
 
 ## Contributing
 
