@@ -21,7 +21,7 @@ module SHAInet
     end
 
     def randomize_all_wights
-      @synapses.each &.randomize_wight
+      @synapses.each &.randomize_weight
     end
 
     def fully_connect

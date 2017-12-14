@@ -1,5 +1,7 @@
 require "./shainet/*"
 
+require "linalg"
+
 # TODO: Write documentation for `Shainet`
 module SHAInet
   # TODO: Put your code here

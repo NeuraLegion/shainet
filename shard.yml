@@ -7,3 +7,7 @@ authors:
 crystal: 0.24.0+58
 
 license: MIT
+
+dependencies:
+  linalg:
+    github: konovod/linalg
