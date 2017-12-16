@@ -1,2 +1,3 @@
 require "spec"
-require "../src/shainet"
+require "../src/shainet/*"
+# include LA

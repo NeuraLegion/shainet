@@ -1,12 +1,13 @@
 module SHAInet
   class NeuralNet
+    # property :
     getter :synapses
 
-    def initialize(input_layer : Int32, hidden_layer : Array(Int32), output_layer : Int32)
-      raise NeuralNetInitalizationError.new("Cannot initialize a network without hidden layers") if hidden_layer.empty?
-      @input_layer = Array(Neuron).new(input_layer, Neuron.new)
+    def initialize(input_size : Int32, hidden_layers : Array(Int32), output_size : Int32)
+      raise NeuralNetInitalizationError.new("Cannot initialize a network without hidden layers") if hidden_layers.empty?
+      @input_layer = Array(Neuron).new(input_size, Neuron.new)
       @output_layer = Array(Neuron).new(output_layer, Neuron.new)
-      @hidden_layer = Array(Array(Neuron)).new
+      @hidden_layers = Array(Layer).new
       hidden_layer.each do |l|
         @hidden_layer << Array(Neuron).new(l, Neuron.new)
       end

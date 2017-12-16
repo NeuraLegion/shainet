@@ -1,13 +1,13 @@
 module SHAInet
-  class Neuron
-    property :synapses_in, :synapses_out, :output, :memory
-    neuron_types = [:memory, :eraser, :amplifier, :fader, :sensor]
-    activation_types = [:Tanh, :Sigmoid, :ReLU, :Leaky_Relu]
+  # Each type of neuron uses and propogates data differently
+  NEURON_TYPES     = [:memory, :eraser, :amplifier, :fader, :sensor]
+  ACTIVATION_TYPES = [:Tanh, :Sigmoid, :ReLU, :Leaky_Relu]
 
-    # Each type of neuron uses and propogates data differently
+  class Neuron
+    property :synapses_in, :synapses_out, :output, :memory, :n_type
 
     def initialize(@n_type : Symbol, memory_size : Int32)
-      raise NeuralNetInitalizationError.new("Must choose currect neuron types, if you're not sure choose :memory") if neuron_types.any? { |x| x == @n_type } == false
+      raise NeuralNetInitalizationError.new("Must choose currect neuron types, if you're not sure choose :memory as a standard neuron") if NEURON_TYPES.any? { |x| x == @n_type } == false
       @synapses_in = [] of Synapse
       @synapses_out = [] of Synapse
 
@@ -19,7 +19,7 @@ module SHAInet
     # Allows the neuron to absorbs information from its' own input neurons through the synapses
     # Then, it sums the information and an activation function is applied to normalize the data
     def learn(activation_function : Symbol)
-      raise NeuralNetRunError.new("Propogation requires a valid activation function.") if activation_types.any? { |x| x == activation_function } == false
+      raise NeuralNetRunError.new("Propogation requires a valid activation function.") if ACTIVATION_TYPES.any? { |x| x == activation_function } == false
 
       new_memory = Array(Array(Float64)).new
       @synapses_in.each do |x|
