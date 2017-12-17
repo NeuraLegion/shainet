@@ -1,33 +1,31 @@
 module SHAInet
   # Activation functions
-  def sigmoid(value : Int32 | Float32 | Float64)
-    result = (1.0/(1.0 + Math.exp(-value))).to_f64
-    return result
+  def self.sigmoid(value : Int32 | Float32 | Float64)
+    (1.0/(1.0 + Math.exp(-value))).to_f64
   end
 
-  def tanh(value : Int32 | Float32 | Float64)
-    result = ((1.0 - Math.exp(-2*value))/(1.0 + Math.exp(-2*value))).to_f64
-    return result
+  def self.tanh(value : Int32 | Float32 | Float64)
+    ((1.0 - Math.exp(-2*value))/(1.0 + Math.exp(-2*value))).to_f64
   end
 
-  def relu(value : Int32 | Float32 | Float64)
+  def self.relu(value : Int32 | Float32 | Float64)
     if value <= 0
-      return (0).to_f64
+      (0).to_f64
     else
-      return value.to_f64
+      value.to_f64
     end
   end
 
-  def l_relu(value : Int32 | Float32 | Float64, slope : Float64)
+  def self.l_relu(value : Int32 | Float32 | Float64, slope : Float64)
     if value <= 0
-      return slope.to_f64*value
+      slope.to_f64*value
     else
-      return value.to_f64
+      value.to_f64
     end
   end
 
   # vector multiplication
-  def vector_mult(array1 : Array(Float64), array2 : Array(Float64))
+  def self.vector_mult(array1 : Array(Float64), array2 : Array(Float64))
     if array1.size != array2.size
       puts "Vectors must be the same size to multiply!"
     else
@@ -40,7 +38,7 @@ module SHAInet
     end
   end
 
-  def vector_sum(array1 : Array(Float64), array2 : Array(Float64))
+  def self.vector_sum(array1 : Array(Float64), array2 : Array(Float64))
     if array1.size != array2.size
       puts "Vectors must be the same size to sum!"
     else
@@ -54,7 +52,7 @@ module SHAInet
   end
 
   # translate an array of strings to one-hot vector matrix and hash dictionary
-  def normalize_stcv(payloads : Array(String))
+  def self.normalize_stcv(payloads : Array(String))
     s = payloads.max_by &.size # Find biggest string, all strings will be padded to its' size
     input_size = s.size
     payloads_c = Array(Array(String)).new

@@ -1,46 +1,55 @@
 module SHAInet
   # Each type of neuron uses and propogates data differently
   NEURON_TYPES     = [:memory, :eraser, :amplifier, :fader, :sensor]
-  ACTIVATION_TYPES = [:Tanh, :Sigmoid, :ReLU, :Leaky_Relu]
+  ACTIVATION_TYPES = [:tanh, :sigmoid, :relu, :l_relu]
 
   class Neuron
-    property :synapses_in, :synapses_out, :output, :memory, :n_type
+    property :n_type, :memory_size, :memory, :synapses_in, :synapses_out, :output
 
-    def initialize(@n_type : Symbol, memory_size : Int32)
+    def initialize(@n_type : Symbol, @memory_size : Int32)
       raise NeuralNetInitalizationError.new("Must choose currect neuron types, if you're not sure choose :memory as a standard neuron") if NEURON_TYPES.any? { |x| x == @n_type } == false
       @synapses_in = [] of Synapse
       @synapses_out = [] of Synapse
 
       # Memory size is determined by total of possible choices per neuron
-      @memory = Array(Float64).new(memory_size) { |i| 0.0 }
+      @memory = Array(Float64).new(@memory_size) { |i| 0.0 }
       @output = Array(Float64).new
     end
 
     # Allows the neuron to absorbs information from its' own input neurons through the synapses
     # Then, it sums the information and an activation function is applied to normalize the data
-    def learn(activation_function : Symbol)
+    def learn(activation_function : Symbol = :sigmoid) : Array(Float64)
       raise NeuralNetRunError.new("Propogation requires a valid activation function.") if ACTIVATION_TYPES.any? { |x| x == activation_function } == false
 
       new_memory = Array(Array(Float64)).new
       @synapses_in.each do |x|
-        new_data = x.propagate
-        new_memory << new_data
+        new_memory << x.propagate # Array(Float64)
       end
+      puts "New mem: #{new_memory}"
       output = new_memory.transpose.map(&.sum)
-
+      puts "Output: #{output}"
       case activation_function
-      when :Tanh
-        n_output = SHAInet.tanh(output)
-      when :Sigmoid
-        n_output = SHAInet.sigmoid(output)
-      when :ReLu
-        n_output = SHAInet.relu(output)
-      when :Leaky_ReLu
-        n_output = SHAInet.lrelu(output, 0.2)
+      when :tanh
+        @memory = output.map { |f| SHAInet.tanh(f) }
+      when :sigmoid
+        @memory = output.map { |f| SHAInet.sigmoid(f) }
+        puts @memory
+        @memory
+      when :relu
+        @memory = output.map { |f| SHAInet.relu(f) }
+      when :l_relu
+        @memory = output.map { |f| SHAInet.l_relu(f, 0.2) }
       else
         raise NeuralNetRunError.new("Propogation requires a valid activation function.")
       end
-      return n_output
+    end
+
+    def inspect
+      pp @n_type
+      pp @memory
+      pp @synapses_in
+      pp @synapses_out
+      pp @output
     end
 
     # def derivative

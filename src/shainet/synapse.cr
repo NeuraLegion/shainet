@@ -1,9 +1,6 @@
 module SHAInet
   class Synapse
-    property weight : Float64
-    property bias : Float64
-    property :source_neuron
-    property :dest_neuron
+    property weight : Float64, bias : Float64, :source_neuron, :dest_neuron
 
     def initialize(@source_neuron : Neuron, @dest_neuron : Neuron)
       @weight = rand(0.0..1.0)
@@ -26,13 +23,16 @@ module SHAInet
       @bias = value
     end
 
-    def propagate
+    def propagate : Array(Float64)
       # Transfer data from source_neuron to dest_neuron using weight & bias values
       new_data = [] of Float64
+      puts "inside Propagate"
       @source_neuron.memory.each do |x|
+        puts "source mem: #{x}"
         value = x*@weight + @bias
         new_data << value
       end
+      puts "After source mem"
 
       case @source_neuron.n_type
       when :memory
@@ -45,8 +45,15 @@ module SHAInet
         end
         return new_memory
       else
-        puts "Other types of neurons are not supported yet!"
+        raise "Other types of neurons are not supported yet!"
       end
+    end
+
+    def inspect
+      pp @weight
+      pp @bias
+      pp @source_neuron
+      pp @dest_neuron
     end
   end
 end

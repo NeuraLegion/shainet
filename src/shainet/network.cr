@@ -1,55 +1,149 @@
 module SHAInet
   class NeuralNet
-    # property :
-    getter :synapses
+    LAYER_TYPES      = [:input, :hidden, :output]
+    CONNECTION_TYPES = [:full, :ind_to_ind, :random]
+    property :input_layers, :output_layers, :hidden_layers, :all_synapses, :error
 
-    def initialize(input_size : Int32, hidden_layers : Array(Int32), output_size : Int32)
-      raise NeuralNetInitalizationError.new("Cannot initialize a network without hidden layers") if hidden_layers.empty?
-      @input_layer = Array(Neuron).new(input_size, Neuron.new)
-      @output_layer = Array(Neuron).new(output_layer, Neuron.new)
+    # First creates an empty shell of the entire network
+
+    # def initialize(input_layers : Int32, hidden_layers : Int32, output_layers : Int32)
+    #   raise NeuralNetInitalizationError.new("Error initializing network, there must be at least one layer from each type") if [input_layers, output_layers, hidden_layers].any? { |x| x <= 0 } == true
+    def initialize # (input_layers : Int32, hidden_layers : Int32, output_layers : Int32)
+      @input_layers = Array(Layer).new
+      @output_layers = Array(Layer).new
       @hidden_layers = Array(Layer).new
-      hidden_layer.each do |l|
-        @hidden_layer << Array(Neuron).new(l, Neuron.new)
+      @all_synapses = Array(Synapse).new
+    end
+
+    # Populate each layer with neurons, must choose the neurons types and memory size per neuron
+    def add_layer(l_type : Symbol, n_type : Symbol, l_size : Int32, memory_size : Int32 = 1)
+      raise NeuralNetInitalizationError.new("Must define correct layer type (:input, :hidden, :output).") if LAYER_TYPES.any? { |x| x == l_type } == false
+      case l_type
+      when :input
+        @input_layers << Layer.new(n_type, l_size, memory_size)
+      when :hidden
+        @hidden_layers << Layer.new(n_type, l_size, memory_size)
+      when :output
+        @output_layers << Layer.new(n_type, l_size, memory_size)
       end
-      @synapses = Array(Synapse).new
     end
 
-    def inspect
-      p @input_layer
-      p @hidden_layer
-      p @output_layer
-      p @synapses
-    end
-
-    def randomize_all_wights
-      @synapses.each &.randomize_weight
-    end
-
+    # Connect all the layers in order (input and output don't connect between themselves): input, hidden, output
     def fully_connect
-      # Fully connect Input to first Hidden layer
-      @input_layer.each do |master_neuron|
-        @hidden_layer.first.each do |slave_neuron|
-          synapse = Synapse.new(master_neuron, slave_neuron, 0.0.to_f64)
-          @synapses << synapse
-        end
-      end
-      # Fully connect Hidden Layers
-      @hidden_layer.each_with_index do |layer, index|
-        break if (index + 1) >= @hidden_layer.size
-        layer.each do |master_neuron|
-          @hidden_layer[index + 1].each do |slave_neuron|
-            synapse = Synapse.new(master_neuron, slave_neuron, 0.0.to_f64)
-            @synapses << synapse
+      # Connect all input layers to the first hidden layer
+      (@input_layers.size - 1).times do |t|
+        @input_layers[t].neurons.each do |neuron1|    # Source neuron
+          @hidden_layers[0].neurons.each do |neuron2| # Destination neuron
+            synapse = Synapse.new(neuron1, neuron2)
+            neuron1.synapses_out << synapse
+            neuron2.synapses_in << synapse
+            @all_synapses << synapse
           end
         end
       end
-      # Fully connect last hidden layer to output layer
-      @hidden_layer.last.each do |master_neuron|
-        @output_layer.each do |slave_neuron|
-          synapse = Synapse.new(master_neuron, slave_neuron, 0.0.to_f64)
-          @synapses << synapse
+
+      # Connect all hidden layer between each other hierarchically
+      (@hidden_layers.size - 2).times do |t|
+        @hidden_layers[t].neurons.each do |neuron1|       # Source neuron
+          @hidden_layers[t + 1].neurons.each do |neuron2| # Destination neuron
+            synapse = Synapse.new(neuron1, neuron2)
+            neuron1.synapses_out << synapse
+            neuron2.synapses_in << synapse
+            @all_synapses << synapse
+          end
         end
       end
+
+      # Connect last hidden layer to all output layers
+      @hidden_layers[-1].neurons.each do |neuron1| # Source neuron
+        (@output_layers.size - 1).times do |t|
+          @output_layers[t].neurons.each do |neuron2| # Destination neuron
+            synapse = Synapse.new(neuron1, neuron2)
+            neuron1.synapses_out << synapse
+            neuron2.synapses_in << synapse
+            @all_synapses << synapse
+          end
+        end
+      end
+    end
+
+    # Connect two specific layers with synapses
+    def connect_ltl(layer1 : Layer, layer2 : Layer, connection_type : Symbol)
+      raise NeuralNetInitalizationError.new("Error initilizing network, must choose correct connection type.") if CONNECTION_TYPES.any? { |x| x == connection_type } == false
+      case connection_type
+      # Connect each neuron from source layer to all neurons in destination layer
+      when :full
+        layer1.each do |neuron1|   # Source neuron
+          layer2.each do |neuron2| # Destination neuron
+            synapse = Synapse.new(neuron1, neuron2)
+            neuron1.synapses_out << synapse
+            neuron2.synapses_in << synapse
+            @all_synapses << synapse
+          end
+        end
+        # Connect each neuron from source layer to neuron with corresponding index in destination layer
+      when :ind_to_ind
+        raise NeuralNetInitalizationError.new("Error initializing network, index to index connection requires layers of same size.") if layer1.size != layer2.size
+        (0..layer1.size).each do |index|
+          synapse = Synapse.new(layer1[index], layer2[index])
+          layer1[index].synapses_out << synapse
+          layer2[index].synapses_in << synapse
+          @all_synapses << synapse
+        end
+
+        # Randomly decide if each neuron from source layer will connect to a neuron from destination layer
+      when :random
+        layer1.each do |neuron1|   # Source neuron
+          layer2.each do |neuron2| # Destination neuron
+            x = rand(0..1)
+            if x <= 0.5 # Currently set to 50% chance, this can be changed at will
+              synapse = Synapse.new(neuron1, neuron2)
+              neuron1.synapses_out << synapse
+              neuron2.synapses_in << synapse
+              @all_synapses << synapse
+            end
+          end
+        end
+      end
+    end
+
+    def evaluate(input : Array(Float64)) : Array(Float64)
+      # raise
+      unless input.size == @input_layers.first.neurons.size
+        puts "Input: #{input.size}"
+        puts "input_layers: #{@input_layers.first.neurons}"
+        raise NeuralNetInitalizationError.new("Error initializing network, input data doesn't fit input layers.")
+      end
+      @input_layers.first.neurons.each_with_index do |neuron, i|
+        neuron.memory = [input[i]]
+      end
+
+      @hidden_layers.each { |l| l.neurons.each &.learn }
+      @output_layers.each { |l| l.neurons.each &.learn }
+      @output_layers.last.neurons.map { |n| n.memory.max }
+    end
+
+    def train(data : Array(Float64), epochs : Int32)
+      asda
+    end
+
+    def randomize_all_weights
+      @all_synapses.each &.randomize_weight
+    end
+
+    def randomize_all_biases
+      @all_synapses.each &.randomize_bias
+    end
+
+    def inspect
+      pp @input_layers
+      puts "--------------------------------"
+      pp @hidden_layers
+      puts "--------------------------------"
+      pp @output_layers
+      puts "--------------------------------"
+      pp @all_synapses
+      puts "--------------------------------"
     end
   end
 end

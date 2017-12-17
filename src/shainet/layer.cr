@@ -1,12 +1,12 @@
 module SHAInet
-  LAYER_TYPES = [:memory, :eraser, :amplifier, :fader, :sensor, :mixed]
-
   class Layer
-    property :neurons, :l_type, :memory_size
+    property :n_type, :neurons, :memory_size
 
-    def initialize(l_size : Int32, @l_type : Symbol, @memory_size : Int32)
-      raise NeuralNetInitalizationError.new("Must define correct layer type, if you're not sure choose :memory as a default") if LAYER_TYPES.any? { |x| x == l_type } == false
-      @neurons = Array(Neuron).new(l_size) { |i| Neuron.new(@l_type, @memory_size) }
+    def initialize(@n_type : Symbol, l_size : Int32, @memory_size : Int32 = 1)
+      @neurons = Array(Neuron).new
+      l_size.times do
+        @neurons << Neuron.new(@n_type, @memory_size)
+      end
     end
 
     # If you don't want neurons to have a blank memory of zeros
@@ -27,11 +27,17 @@ module SHAInet
     end
 
     # If you want to change the type of layer including all neuron types within it
-    def type_change(new_layer_type : Symbol)
-      raise NeuralNetInitalizationError.new("Must define correct layer type, if you're not sure choose :memory as a default") if LAYER_TYPES.any? { |x| x == l_type } == false
-      @neurons.each { |neuron| neuron.n_type = new_layer_type }
-      puts "Layer type chaged from #{@l_type} to #{new_layer_type}"
-      @l_type = new_layer_type
+    def type_change(new_neuron_type : Symbol)
+      raise NeuralNetInitalizationError.new("Must define correct neuron type, if you're not sure choose :memory as a default") if NEURON_TYPES.any? { |x| x == new_neuron_type } == false
+      @neurons.each { |neuron| neuron.n_type = new_neuron_type }
+      puts "Layer type chaged from #{@n_type} to #{new_neuron_type}"
+      @n_type = new_neuron_type
+    end
+
+    def inspect
+      pp @n_type
+      pp @memory_size
+      pp @neurons
     end
   end
 end
