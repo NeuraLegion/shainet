@@ -2,7 +2,7 @@ module SHAInet
   class Layer
     property :n_type, :neurons, :memory_size
 
-    def initialize(@n_type : Symbol, l_size : Int32, @memory_size : Int32 = 1, @logger : Logger)
+    def initialize(@n_type : Symbol, l_size : Int32, @memory_size : Int32 = 1, @logger : Logger = Logger.new(STDOUT))
       @neurons = Array(Neuron).new
       # Populate layer with neurons
       l_size.times do

@@ -1,3 +1,5 @@
+require "logger"
+
 module SHAInet
   class NeuralNet
     LAYER_TYPES      = [:input, :hidden, :output]
@@ -126,10 +128,12 @@ module SHAInet
     end
 
     def randomize_all_weights
+      raise NeuralNetRunError.new("Cannot randomize weights without synapses") if @all_synapses.empty?
       @all_synapses.each &.randomize_weight
     end
 
     def randomize_all_biases
+      raise NeuralNetRunError.new("Cannot randomize bias without synapses") if @all_synapses.empty?
       @all_synapses.each &.randomize_bias
     end
 
