@@ -19,7 +19,7 @@ module SHAInet
     # Allows the neuron to absorbs information from its' own input neurons through the synapses
     # Then, it sums the information and an activation function is applied to normalize the data
     def learn(activation_function : Symbol = :sigmoid) : Array(Float64)
-      raise NeuralNetRunError.new("Propogation requires a valid activation function.") if ACTIVATION_TYPES.any? { |x| x == activation_function } == false
+      raise NeuralNetRunError.new("Propogation requires a valid activation function.") unless ACTIVATION_TYPES.includes?(activation_function)
 
       new_memory = Array(Array(Float64)).new
       @synapses_in.each do |x|

@@ -4,4 +4,7 @@ module SHAInet
 
   class NeuralNetRunError < Exception
   end
+
+  class MathError < Exception
+  end
 end

@@ -26,29 +26,25 @@ module SHAInet
 
   # vector multiplication
   def self.vector_mult(array1 : Array(Float64), array2 : Array(Float64))
-    if array1.size != array2.size
-      puts "Vectors must be the same size to multiply!"
-    else
-      new_vector = [] of Float64
-      (0..array1.size - 1).each do |x|
-        result = array1[x]*array2[x]
-        new_vector << result
-      end
-      return new_vector
+    raise MathError.new("Vectors must be the same size to multiply!") if array1.size != array2.size
+
+    new_vector = [] of Float64
+    (0..array1.size - 1).each do |x|
+      result = array1[x]*array2[x]
+      new_vector << result
     end
+    new_vector
   end
 
   def self.vector_sum(array1 : Array(Float64), array2 : Array(Float64))
-    if array1.size != array2.size
-      puts "Vectors must be the same size to sum!"
-    else
-      new_vector = [] of Float64
-      (0..array1.size - 1).each do |x|
-        result = array1[x] + array2[x]
-        new_vector << result
-      end
-      return new_vector
+    raise MathError.new("Vectors must be the same size to sum!") if array1.size != array2.size
+
+    new_vector = [] of Float64
+    (0..array1.size - 1).each do |x|
+      result = array1[x] + array2[x]
+      new_vector << result
     end
+    new_vector
   end
 
   # translate an array of strings to one-hot vector matrix and hash dictionary

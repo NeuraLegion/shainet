@@ -8,7 +8,7 @@ module SHAInet
 
     # def initialize(input_layers : Int32, hidden_layers : Int32, output_layers : Int32)
     #   raise NeuralNetInitalizationError.new("Error initializing network, there must be at least one layer from each type") if [input_layers, output_layers, hidden_layers].any? { |x| x <= 0 } == true
-    def initialize # (input_layers : Int32, hidden_layers : Int32, output_layers : Int32)
+    def initialize(@logger : Logger = Logger.new(STDOUT))
       @input_layers = Array(Layer).new
       @output_layers = Array(Layer).new
       @hidden_layers = Array(Layer).new
@@ -17,14 +17,16 @@ module SHAInet
 
     # Populate each layer with neurons, must choose the neurons types and memory size per neuron
     def add_layer(l_type : Symbol, n_type : Symbol, l_size : Int32, memory_size : Int32 = 1)
-      raise NeuralNetInitalizationError.new("Must define correct layer type (:input, :hidden, :output).") if LAYER_TYPES.any? { |x| x == l_type } == false
+      layer = Layer.new(n_type, l_size, memory_size, @logger)
       case l_type
       when :input
-        @input_layers << Layer.new(n_type, l_size, memory_size)
+        @input_layers << layer
       when :hidden
-        @hidden_layers << Layer.new(n_type, l_size, memory_size)
+        @hidden_layers << layer
       when :output
-        @output_layers << Layer.new(n_type, l_size, memory_size)
+        @output_layers << layer
+      else
+        raise NeuralNetRunError.new("Must define correct layer type (:input, :hidden, :output).")
       end
     end
 
@@ -108,12 +110,8 @@ module SHAInet
     end
 
     def evaluate(input : Array(Float64)) : Array(Float64)
-      # raise
-      unless input.size == @input_layers.first.neurons.size
-        puts "Input: #{input.size}"
-        puts "input_layers: #{@input_layers.first.neurons}"
-        raise NeuralNetInitalizationError.new("Error initializing network, input data doesn't fit input layers.")
-      end
+      raise NeuralNetRunError.new("Error initializing network, input data doesn't fit input layers.") unless input.size == @input_layers.first.neurons.size
+
       @input_layers.first.neurons.each_with_index do |neuron, i|
         neuron.memory = [input[i]]
       end
@@ -124,7 +122,7 @@ module SHAInet
     end
 
     def train(data : Array(Float64), epochs : Int32)
-      asda
+      # TODO
     end
 
     def randomize_all_weights
@@ -136,14 +134,14 @@ module SHAInet
     end
 
     def inspect
-      pp @input_layers
-      puts "--------------------------------"
-      pp @hidden_layers
-      puts "--------------------------------"
-      pp @output_layers
-      puts "--------------------------------"
-      pp @all_synapses
-      puts "--------------------------------"
+      @logger.info(@input_layers)
+      @logger.info("--------------------------------")
+      @logger.info(@hidden_layers)
+      @logger.info("--------------------------------")
+      @logger.info(@output_layers)
+      @logger.info("--------------------------------")
+      @logger.info(@all_synapses)
+      @logger.info("--------------------------------")
     end
   end
 end
