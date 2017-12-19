@@ -1,12 +1,12 @@
 module SHAInet
   class Layer
-    property :n_type, :neurons, :memory_size
+    property :n_type, :neurons
 
-    def initialize(@n_type : Symbol, l_size : Int32, @memory_size : Int32 = 1, @logger : Logger = Logger.new(STDOUT))
+    def initialize(@n_type : Symbol, l_size : Int32, @logger : Logger = Logger.new(STDOUT))
       @neurons = Array(Neuron).new
       # Populate layer with neurons
       l_size.times do
-        @neurons << Neuron.new(@n_type, @memory_size)
+        @neurons << Neuron.new(@n_types)
       end
     end
 
@@ -16,15 +16,6 @@ module SHAInet
         neuron.memory = Array(Float64).new(memory_size) { |i| rand(-1.0..1.0) }
       end
       @logger.info("Layers seeded with random values")
-    end
-
-    # If you want to change the memory size of all neurons in a layer
-    def memory_change(new_memory_size : Int32)
-      @neurons.each do |neuron|
-        neuron.memory = Array(Float64).new(new_memory_size) { |i| 0.0 }
-      end
-      @logger.info("Memory size changed from #{@memory_size} to #{new_memory_size}")
-      @memory_size = new_memory_size
     end
 
     # If you want to change the type of layer including all neuron types within it

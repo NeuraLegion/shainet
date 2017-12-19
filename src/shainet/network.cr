@@ -1,25 +1,32 @@
 require "logger"
 
 module SHAInet
-  class NeuralNet
+  class Network
     LAYER_TYPES      = [:input, :hidden, :output]
     CONNECTION_TYPES = [:full, :ind_to_ind, :random]
-    property :input_layers, :output_layers, :hidden_layers, :all_synapses, :error
+    COST_FUNCTIONS   = [:mse, :c_ent, :exp, :hel_d, :kld, :gkld, :ita_sai_d]
+    property :input_layers, :output_layers, :hidden_layers, :error_gradient, :all_weights, :all_biases, :weight_gradient, :bias_gradient, :mean_error
 
     # First creates an empty shell of the entire network
 
     # def initialize(input_layers : Int32, hidden_layers : Int32, output_layers : Int32)
     #   raise NeuralNetInitalizationError.new("Error initializing network, there must be at least one layer from each type") if [input_layers, output_layers, hidden_layers].any? { |x| x <= 0 } == true
+
     def initialize(@logger : Logger = Logger.new(STDOUT))
       @input_layers = Array(Layer).new
       @output_layers = Array(Layer).new
       @hidden_layers = Array(Layer).new
-      @all_synapses = Array(Synapse).new
+      @error_gradient = Array(Float64).new  # Array of errors for each neuron of the output layer
+      @all_weights = Array(Float64).new     # Array of all current weights in the network
+      @all_biases = Array(Float64).new      # Array of all current biases in the network
+      @weight_gradient = Array(Float64).new # Array of all individual slopes of weights based on the cost function (dC/dw)
+      @bias_gradient = Array(Float64).new   # Array of all individual slopes of bias based on the cost function (dC/db)
+      @mean_error = Float64.new(1)
     end
 
     # Populate each layer with neurons, must choose the neurons types and memory size per neuron
-    def add_layer(l_type : Symbol, n_type : Symbol, l_size : Int32, memory_size : Int32 = 1)
-      layer = Layer.new(n_type, l_size, memory_size, @logger)
+    def add_layer(l_type : Symbol, l_size : Int32, n_type : Symbol = :memory)
+      layer = Layer.new(n_type, l_size, @logger)
       case l_type
       when :input
         @input_layers << layer
@@ -111,20 +118,79 @@ module SHAInet
       end
     end
 
-    def evaluate(input : Array(Float64)) : Array(Float64)
+    # Run an input throught the network to get an output (weights & biases do not change)
+    def run(input : Array(Float64)) : Array(Float64)
       raise NeuralNetRunError.new("Error initializing network, input data doesn't fit input layers.") unless input.size == @input_layers.first.neurons.size
 
-      @input_layers.first.neurons.each_with_index do |neuron, i|
+      @input_layers.first.neurons.each_with_index do |neuron, i| # Inserts the input information into the input layers
+      # TODO: add support for multiple input layers
         neuron.memory = [input[i]]
       end
 
-      @hidden_layers.each { |l| l.neurons.each &.learn }
-      @output_layers.each { |l| l.neurons.each &.learn }
-      @output_layers.last.neurons.map { |n| n.memory.max }
+      @hidden_layers.each { |l| l.neurons.each &.activate } # Propogate the information through the hidden layers
+      @output_layers.each { |l| l.neurons.each &.activate } # Propogate the information through the output layers
+      @output_layers.last.neurons.map { |n| n.memory }      # Translate the output layer information to an array
+      # TODO: add support for multiple output layers
     end
 
-    def train(data : Array(Float64), epochs : Int32)
-      # TODO
+    # Quantifies how good the network performed for a single input compared to the expected output
+    def evaluate(cost_function : Symbol, expected : Array(Float64), actual : Array(Float64)) : Float64
+      raise NeuralNetRunError.new("Expected and actual output must be of the same dimention.") if expected.size != actual.size
+      raise NeuralNetRunError.new("Must define correct cost function type (:mse, :c_ent, :exp, :hel_d, :kld, :gkld, :ita_sai_d).") if COST_FUNCTIONS.any? { |x| x == cost_function } == false
+
+      case cost_function
+      when :mse
+        expected.size.times do |i| 
+          @error_gradient << squared_cost(expected[i], actual[i]) }
+      when :c_ent
+        expected.size.times { |i| @error_gradient << cross_entropy_cost(expected[i], actual[i]) }
+      when :exp
+        # TODO
+      when :hel_d
+        # TODO
+      when :kld
+        # TODO
+      when :gkld
+        # TODO
+      when :ita_sai_d
+        # TODO
+      end
+    end
+
+    # Input structure: data = [[Input = [] of Float64],[Expected result = [] of Float64]]
+    # cost_function type is one of COST_FUNCTIONS described at the top of the file
+    # epoch/error_threshold are criteria of when to stop the training
+    # learning_rate is set to 0.3 only at the begining but will change dynamically with the total error, can be also changed manually
+    def train(data : Array(Array(Array(Float64))), cost_function : Symbol, epochs : Int32, error_threshold : Float64, learning_rate : Float64 = 0.3)
+      puts "Training started\n----------"
+      epochs.each do |i|
+        all_errors = Array(Float64).new
+        data.size.times do |data_point|
+          expected = data_point[1]                  # Array of expected Float64
+          actual = evaluate(data_point[0])          # Array of float64 recieved as output from network
+          evaluate(cost_function, expected, actual) # Get error gradiant from output layer based on current input
+          @weight_gradient = Array(Float64).new
+          @bias_gradient = Array(Float64).new
+          l = @hidden_layers.size -1
+          while l >= 0
+            l_gradient = [] of Float64
+            @hidden_layers[l].each do |neuron|
+              neuron.error_prop          # Update neuron error based on errors*weights of neurons from the next layer
+              l_gradient << neruon.error # Save error gradient of current leayer in an Array
+
+              @weight_gradient
+            end
+            l -= 1
+          end
+        end
+        error_sum = all_errors.reduce { |acc, i| acc + i } # Sums all errors from last epoch
+        @mean_error = error_sum/(data.size)
+        puts "For epoch #{i}, MSE is #{@mean_error}\n----------"
+      end
+    end
+
+    def train_batch(data : Array(Array(Float64)), epochs : Int32, error_threshold : Float64)
+      # todo
     end
 
     def randomize_all_weights
@@ -133,7 +199,7 @@ module SHAInet
     end
 
     def randomize_all_biases
-      raise NeuralNetRunError.new("Cannot randomize bias without synapses") if @all_synapses.empty?
+      raise NeuralNetRunError.new("Cannot randomize biases without synapses") if @all_synapses.empty?
       @all_synapses.each &.randomize_bias
     end
 

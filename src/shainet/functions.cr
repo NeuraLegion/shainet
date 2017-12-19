@@ -1,14 +1,22 @@
 module SHAInet
   # Activation functions
-  def self.sigmoid(value : Int32 | Float32 | Float64)
+  def self.sigmoid(value : Int32 | Float32 | Float64) # Output range (0..1)
     (1.0/(1.0 + Math.exp(-value))).to_f64
   end
 
-  def self.tanh(value : Int32 | Float32 | Float64)
-    ((1.0 - Math.exp(-2*value))/(1.0 + Math.exp(-2*value))).to_f64
+  def self.bp_sigmoid(value : Int32 | Float32 | Float64) # Output range (-1..1)
+    ((1.0 - Math.exp(-value))/(1.0 + Math.exp(-value))).to_f64
   end
 
-  def self.relu(value : Int32 | Float32 | Float64)
+  def self.log_sigmoid(value : Int32 | Float32 | Float64) # Output range (0..1)
+    ((Math.exp(value))/(1.0 + Math.exp(value))).to_f64
+  end
+
+  def self.tanh(value : Int32 | Float32 | Float64) # Output range (-1..1)
+    ((Math.exp(value)) - Math.exp(-value))/(Math.exp(value)) + Math.exp(-value))).to_f64
+  end
+
+  def self.relu(value : Int32 | Float32 | Float64) # Output range (0..inf)
     if value <= 0
       (0).to_f64
     else
@@ -16,12 +24,23 @@ module SHAInet
     end
   end
 
-  def self.l_relu(value : Int32 | Float32 | Float64, slope : Float64)
+  def self.l_relu(value : Int32 | Float32 | Float64, slope : Float64) # Output range (-inf..inf)
     if value <= 0
-      slope.to_f64*value
+      slope.to_f64*value.to_f64
     else
       value.to_f64
     end
+  end
+
+  # Cost functions for a single point value (slope at that point based on the function)
+  def self.squared_cost(expected : Float64, actual : Float64) : Float64
+    # Cost function = 0.5*(actual - expected)**2
+    return (actual - expected) # Slope at a single point
+  end
+
+  def self.cross_entropy_cost(expected : Float64, actual : Float64) : Float64
+    # Cost function = (-1)*(expected*Math.log((actual), Math::E) + (1 - expected)*Math.log((1 - actual), Math::E))
+    return ((actual - expected)/((1 - actual)*actual)) # Slope at a single point
   end
 
   # vector multiplication
