@@ -1,7 +1,7 @@
 # SHAInet
 
-SHAInet - stands for Super Human Artifical Intelegance 
-is a neural network in pure Crystal
+SHAInet - stands for Super Human Artifical Intelegance network
+a neural network in pure Crystal
 
 ## Installation
 
@@ -42,4 +42,6 @@ TODO: Write usage instructions here
 
 ## Contributors
 
+- [ArtLinkov](https://github.com/ArtLinkov) - creator, maintainer
 - [bararchy](https://github.com/bararchy) - creator, maintainer
+
