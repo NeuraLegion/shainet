@@ -5,7 +5,7 @@ module SHAInet
 
   class Neuron
     property :n_type, :synapses_in, :synapses_out
-    property memory : Float64, error : Float64 ,bias : Float64, 
+    property :memory, :error, :bias
 
     def initialize(@n_type : Symbol)
       raise NeuralNetInitalizationError.new("Must choose currect neuron types, if you're not sure choose :memory as a standard neuron") if NEURON_TYPES.any? { |x| x == @n_type } == false
@@ -13,7 +13,7 @@ module SHAInet
       @synapses_out = [] of Synapse
       @memory = Float64.new(0)
       @error = Float64.new(0)
-      @bias = rand(-1.0..1.0)
+      @bias = rand(-1.0..1.0).to_f64
     end
 
     # This is the forward propogation
@@ -23,8 +23,8 @@ module SHAInet
       raise NeuralNetRunError.new("Propogation requires a valid activation function.") unless ACTIVATION_TYPES.includes?(activation_function)
 
       new_memory = Array(Float64).new
-      @synapses_in.each do |n|            # Claclulate memory from each incoming neuron with applied weights, returns Array(Float64)
-        new_memory << n.propagate_forward 
+      @synapses_in.each do |n| # Claclulate memory from each incoming neuron with applied weights, returns Array(Float64)
+        new_memory << n.propagate_forward
       end
       output = new_memory.reduce { |acc, i| acc + i } # Sum all the information from input neurons, returns Float64
       output += @bias                                 # Add neuron bias (activation threshold)
@@ -51,11 +51,11 @@ module SHAInet
     # Then, it sums the information and an activation function is applied to normalize the data
     def error_prop(activation_function : Symbol = :tanh) : Float64
       new_error = Array(Float64).new
-      @synapses_out.each do |n|            # Claculate error from each target neuron with applied weights, returns Array(Float64)
-        new_error << n.propagate_backwards 
+      @synapses_out.each do |n| # Claculate error from each target neuron with applied weights, returns Array(Float64)
+        new_error << n.propagate_backwards
       end
-      output = new_error.reduce { |acc, i| acc + i }  # Sum all the information from target neurons, returns Float64
-      case activation_function                        # Apply squashing function
+      output = new_error.reduce { |acc, i| acc + i } # Sum all the information from target neurons, returns Float64
+      case activation_function                       # Apply squashing function
       when :tanh
         @error = SHAInet.tanh(output)
       when :sigmoid
@@ -72,14 +72,12 @@ module SHAInet
         raise NeuralNetRunError.new("Propogation requires a valid activation function.")
       end
     end
-    end
 
     def inspect
       pp @n_type
       pp @memory
       pp @synapses_in
       pp @synapses_out
-      pp @output
     end
 
     def randomize_bias
@@ -89,7 +87,6 @@ module SHAInet
     def update_bias(value : Float64)
       @bias = value
     end
-
 
     # def derivative
     #   output * (1 - output)

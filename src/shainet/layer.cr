@@ -6,7 +6,7 @@ module SHAInet
       @neurons = Array(Neuron).new
       # Populate layer with neurons
       l_size.times do
-        @neurons << Neuron.new(@n_types)
+        @neurons << Neuron.new(@n_type)
       end
     end
 

@@ -1,6 +1,6 @@
 require "./spec_helper"
 
-describe SHAInet::NeuralNet do
+describe SHAInet::Network do
   # TODO: Write tests
   # it "Initialize and connect" do
   #   # Initialize network requires Input_layers,hidden_layers, output_layers
@@ -20,19 +20,30 @@ describe SHAInet::NeuralNet do
 
   it "figure out xor" do
     # This is testing to see if it works
-    xor = SHAInet::NeuralNet.new
-    xor.add_layer(:input, :memory, 2)
-    3.times { |x| xor.add_layer(:hidden, :memory, 2) }
-    xor.add_layer(:output, :memory, 1)
+    data_p1 = [1.0, 1.0]
+    data_p1.each { |i| i.to_f64 }
+
+    xor = SHAInet::Network.new
+    xor.add_layer(:input, 2, :memory)
+    2.times { |x| xor.add_layer(:hidden, 3, :memory) }
+    xor.add_layer(:output, 1, :memory)
 
     # xor.hidden_layers.first.random_seed
 
     xor.fully_connect
-    pp xor.hidden_layers.first.neurons
 
-    puts xor.evaluate([1.0, 1.0])
+    pp xor.all_synapses
+    pp xor.biases
+    pp xor.weights
+    pp xor.activations
 
-    pp xor.hidden_layers.first.neurons
+    # xor.run(data_p1)
+
+    # pp xor.activations
+
+    # puts xor.evaluate([1.0, 1.0])
+
+    # p xor.hidden_layers.first.neurons
 
     # 10000.times do
     #   xor.train([0, 0], [0])

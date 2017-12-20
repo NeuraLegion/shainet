@@ -1,4 +1,5 @@
 module SHAInet
+  ##
   # Activation functions
   def self.sigmoid(value : Int32 | Float32 | Float64) # Output range (0..1)
     (1.0/(1.0 + Math.exp(-value))).to_f64
@@ -13,7 +14,7 @@ module SHAInet
   end
 
   def self.tanh(value : Int32 | Float32 | Float64) # Output range (-1..1)
-    ((Math.exp(value)) - Math.exp(-value))/(Math.exp(value)) + Math.exp(-value))).to_f64
+    (((Math.exp(value)) - Math.exp(-value))/(Math.exp(value)) + Math.exp(-value)).to_f64
   end
 
   def self.relu(value : Int32 | Float32 | Float64) # Output range (0..inf)
@@ -32,6 +33,13 @@ module SHAInet
     end
   end
 
+  ##
+  # Derivative of activation functions
+  def self.sigmoid_prime(value : Int32 | Float32 | Float64)
+    sigmoid(value)*(1 - sigmoid(value))
+  end
+
+  ##
   # Cost functions for a single point value (slope at that point based on the function)
   def self.squared_cost(expected : Float64, actual : Float64) : Float64
     # Cost function = 0.5*(actual - expected)**2

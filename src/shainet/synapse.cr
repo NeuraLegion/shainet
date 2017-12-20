@@ -37,7 +37,6 @@ module SHAInet
 
     def inspect
       pp @weight
-      pp @bias
       pp @source_neuron
       pp @dest_neuron
     end
