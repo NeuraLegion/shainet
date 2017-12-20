@@ -20,7 +20,7 @@ describe SHAInet::Network do
 
   it "figure out xor" do
     # This is testing to see if it works
-    data_p1 = [1.0, 1.0]
+    data_p1 = [0.0, 1.0]
     data_p1.each { |i| i.to_f64 }
 
     xor = SHAInet::Network.new
@@ -28,22 +28,24 @@ describe SHAInet::Network do
     2.times { |x| xor.add_layer(:hidden, 3, :memory) }
     xor.add_layer(:output, 1, :memory)
 
-    # xor.hidden_layers.first.random_seed
+    # # Network topology # #
+    #  i   N N
+    # h1  N N N
+    # h2  N N N
+    #  o    N
 
     xor.fully_connect
+    xor.run(data_p1)
 
-    pp xor.all_synapses
-    pp xor.biases
-    pp xor.weights
-    pp xor.activations
+    # input, expected, cost_function, activation_function
+    puts xor.evaluate([1.0, 1.0], [0.0], :mse, :sigmoid)
 
-    # xor.run(data_p1)
-
-    # pp xor.activations
-
-    # puts xor.evaluate([1.0, 1.0])
-
-    # p xor.hidden_layers.first.neurons
+    # pp xor.biases
+    # pp xor.weights
+    puts "Activation matrix is:\n #{xor.activations}"
+    puts "Input sum matrix is:\n #{xor.input_sums}"
+    # puts "Activation matrix is:\n #{xor.activations}"
+    # puts "Activation matrix is:\n #{xor.activations}"
 
     # 10000.times do
     #   xor.train([0, 0], [0])

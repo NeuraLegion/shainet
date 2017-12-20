@@ -16,7 +16,7 @@ module SHAInet
 
     # Transfer memory from source_neuron to dest_neuron while applying weight
     def propagate_forward : Float64
-      new_memory = @source_neuron.memory*@weight
+      new_memory = @source_neuron.activation*@weight
 
       case @source_neuron.n_type
       when :memory

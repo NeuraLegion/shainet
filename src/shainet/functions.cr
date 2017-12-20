@@ -1,6 +1,6 @@
 module SHAInet
-  ##
-  # Activation functions
+  # # Activation functions # #
+
   def self.sigmoid(value : Int32 | Float32 | Float64) # Output range (0..1)
     (1.0/(1.0 + Math.exp(-value))).to_f64
   end
@@ -33,22 +33,56 @@ module SHAInet
     end
   end
 
-  ##
-  # Derivative of activation functions
-  def self.sigmoid_prime(value : Int32 | Float32 | Float64)
+  # # Derivatives of activation functions # #
+
+  def self.sigmoid_prime(value : Float64)
     sigmoid(value)*(1 - sigmoid(value))
   end
 
-  ##
-  # Cost functions for a single point value (slope at that point based on the function)
-  def self.squared_cost(expected : Float64, actual : Float64) : Float64
+  def self.tanh_prime(value : Float64)
+    (1 - tanh(value)**2)
+  end
+
+  # # Cost functions for a single point value (slope at that point based on the function) ##
+
+  def self.quadratic_cost_derivative(expected : Float64, actual : Float64) : Float64
     # Cost function = 0.5*(actual - expected)**2
     return (actual - expected) # Slope at a single point
   end
 
-  def self.cross_entropy_cost(expected : Float64, actual : Float64) : Float64
+  def self.cross_entropy_cost_derivative(expected : Float64, actual : Float64) : Float64
     # Cost function = (-1)*(expected*Math.log((actual), Math::E) + (1 - expected)*Math.log((1 - actual), Math::E))
     return ((actual - expected)/((1 - actual)*actual)) # Slope at a single point
+  end
+
+  # # Linear algebra math # #
+
+  # Matrix multiplication
+  def self.dot_product(matrix1 : Array(Array(Int32 | Float32 | Float64)), matrix2 : Array(Array(Int32 | Float32 | Float64)))
+    if matrix1.all? { |row| row.size == matrix1.first.size } == false
+      raise MathError.new("Matrix1 has rows of different size")
+    elsif matrix2.all? { |row| row.size == matrix2.first.size } == false
+      raise MathError.new("Matrix2 has rows of different size")
+    elsif matrix1.first.size != matrix2.size
+      raise MathError.new("Matrix1 row dimention must equal matrix2 col dimention")
+    end
+    new_matrix = Array(Array(Float64)).new
+    matrix2 = matrix2.transpose
+    matrix1.each do |row|
+      new_row = [] of Float64 | Float32 | Int32
+      matrix2.each do |col|
+        sum = [] of Float64 | Float32 | Int32
+        row.each { |rv| col.each { |cv| sum << rv*cv } }
+        new_row << sum
+      end
+      new_matrix << new_row
+    end
+    return new_matrix
+  end
+
+  # Element-wise multiplications
+  def h_product
+    # TODO
   end
 
   # vector multiplication
@@ -73,6 +107,8 @@ module SHAInet
     end
     new_vector
   end
+
+  # # Data manipulation # #
 
   # translate an array of strings to one-hot vector matrix and hash dictionary
   def self.normalize_stcv(payloads : Array(String))

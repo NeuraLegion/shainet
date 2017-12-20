@@ -5,27 +5,30 @@ module SHAInet
     LAYER_TYPES      = [:input, :hidden, :output]
     CONNECTION_TYPES = [:full, :ind_to_ind, :random]
     COST_FUNCTIONS   = [:mse, :c_ent, :exp, :hel_d, :kld, :gkld, :ita_sai_d]
+
     property :input_layers, :output_layers, :hidden_layers, :all_neurons, :all_synapses
-    property :activations, :biases, :weights, :error_gradient, :weight_gradient, :bias_gradient, :mean_error
+    property :activations, :input_sums, :biases, :weights, :mean_error
+    property :error_signal, :error_gradient, :weight_gradient, :bias_gradient
 
     # First creates an empty shell of the entire network
-
-    # def initialize(input_layers : Int32, hidden_layers : Int32, output_layers : Int32)
-    #   raise NeuralNetInitalizationError.new("Error initializing network, there must be at least one layer from each type") if [input_layers, output_layers, hidden_layers].any? { |x| x <= 0 } == true
 
     def initialize(@logger : Logger = Logger.new(STDOUT))
       @input_layers = Array(Layer).new
       @output_layers = Array(Layer).new
       @hidden_layers = Array(Layer).new
-      @all_neurons = Array(Neuron).new            # Array of all current neurons in the network
-      @all_synapses = Array(Synapse).new          # Array of all current synapses in the network
-      @activations = Array(Array(Float64)).new    # Matrix of activations
-      @biases = Array(Array(Float64)).new         # Matrix of biases
+      @all_neurons = Array(Neuron).new   # Array of all current neurons in the network
+      @all_synapses = Array(Synapse).new # Array of all current synapses in the network
+
+      @activations = Array(Array(Float64)).new    # Matrix of activations (a), vector per layer
+      @input_sums = Array(Array(Float64)).new     # Matrix of input sums (z), vector per layer
+      @biases = Array(Array(Float64)).new         # Matrix of biases (b), vector per layer
       @weights = Array(Array(Array(Float64))).new # Array of weight matrices from each layer
-      @error_gradient = Array(Float64).new        # Array of errors for each neuron of the output layer
-      @weight_gradient = Array(Float64).new       # Array of all individual slopes of weights based on the cost function (dC/dw)
-      @bias_gradient = Array(Float64).new         # Array of all individual slopes of bias based on the cost function (dC/db)
       @mean_error = Float64.new(1)                # Average netwrok error based on all the training so far
+
+      @error_signal = Array(Float64).new    # Array of errors for each neuron of the output layer (deltas)
+      @error_gradient = Array(Float64).new  # Matrix of erross for each neuron in the hidden layers (deltas), vector per layer
+      @weight_gradient = Array(Float64).new # Array of all individual slopes of weights based on the cost function (dC/dw)
+      @bias_gradient = Array(Float64).new   # Array of all individual slopes of bias based on the cost function (dC/db)
     end
 
     # Create and populate a layer with neurons
@@ -56,12 +59,9 @@ module SHAInet
     def fully_connect
       # Connect all input layers to the first hidden layer
       @input_layers.each do |layer|
-        layer.neurons.each do |neuron1| # Source neuron
-        # pp neuron1
+        layer.neurons.each do |neuron1|                  # Source neuron
           @hidden_layers.first.neurons.each do |neuron2| # Destination neuron
-          # pp neuron2
             synapse = Synapse.new(neuron1, neuron2)
-            # p synapse
             neuron1.synapses_out << synapse
             neuron2.synapses_in << synapse
             @all_synapses << synapse # To easily access synapes later
@@ -70,9 +70,9 @@ module SHAInet
       end
 
       # Connect all hidden layer between each other hierarchically
-      (@hidden_layers.size - 2).times do |t|
-        @hidden_layers[t].neurons.each do |neuron1|       # Source neuron
-          @hidden_layers[t + 1].neurons.each do |neuron2| # Destination neuron
+      (0..@hidden_layers.size - 2).each do |l|
+        @hidden_layers[l].neurons.each do |neuron1|       # Source neuron
+          @hidden_layers[l + 1].neurons.each do |neuron2| # Destination neuron
             synapse = Synapse.new(neuron1, neuron2)
             neuron1.synapses_out << synapse
             neuron2.synapses_in << synapse
@@ -83,16 +83,16 @@ module SHAInet
 
       # Connect last hidden layer to all output layers
       @hidden_layers.last.neurons.each do |neuron1| # Source neuron
-        (@output_layers.size - 1).times do |t|
-          @output_layers[t].neurons.each do |neuron2| # Destination neuron
+        @output_layers.each do |layer|
+          layer.neurons.each do |neuron2| # Destination neuron
             synapse = Synapse.new(neuron1, neuron2)
             neuron1.synapses_out << synapse
             neuron2.synapses_in << synapse
             @all_synapses << synapse
-            p synapse.weight
           end
         end
       end
+      @all_synapses.uniq
 
       # Save weights matrix for later
       @hidden_layers.each do |layer|
@@ -161,43 +161,60 @@ module SHAInet
 
       @input_layers.first.neurons.each_with_index do |neuron, i| # Inserts the input information into the input layers
       # TODO: add support for multiple input layers
-        neuron.memory = input[i]
+        neuron.activation = input[i]
       end
 
       @hidden_layers.each do |l| # Propogate the information through the hidden layers
         a_l = [] of Float64
+        z_l = [] of Float64
         l.neurons.each do |neuron|
           neuron.activate(activation_function)
-          a_l << neuron.memory
+          a_l << neuron.activation
+          z_l << neuron.input_sum
         end
         @activations << a_l # save activations vector for each layer
+        @input_sums << z_l  # Save input sum vector for each layer
       end
       @output_layers.each do |l| # Propogate the information through the output layers
         a_l = [] of Float64
+        z_l = [] of Float64
         l.neurons.each do |neuron|
           neuron.activate(activation_function)
-          a_l << neuron.memory
+          a_l << neuron.activation
         end
         @activations << a_l # save activations vector for each layer
+        @input_sums << z_l  # Save input sum vector for each layer
       end
       output = @activations.last
       # TODO: add support for multiple output layers
-      p output
+      puts "For the input of #{input}, the networks output is: #{output}"
       return output
     end
 
     # Quantifies how good the network performed for a single input compared to the expected output
-    def evaluate(cost_function : Symbol, expected : Array(Float64), actual : Array(Float64)) : Float64
-      raise NeuralNetRunError.new("Expected and actual output must be of the same dimention.") if expected.size != actual.size
+    # This function returns the actual output and updates the error gradient for the output layer
+    def evaluate(input : Array(Float64), expected : Array(Float64), cost_function : Symbol, activation_function : Symbol = :sigmoid)
       raise NeuralNetRunError.new("Must define correct cost function type (:mse, :c_ent, :exp, :hel_d, :kld, :gkld, :ita_sai_d).") if COST_FUNCTIONS.any? { |x| x == cost_function } == false
 
+      actual = run(input, activation_function)
+      raise NeuralNetRunError.new("Expected and actual output must be of the same dimention.") if expected.size != actual.size
+
+      @error_signal = Array(Float64).new
       case cost_function
       when :mse
         expected.size.times do |i|
-          @error_gradient << squared_cost(expected[i], actual[i])
+          delta = SHAInet.quadratic_cost_derivative(expected[i], actual[i])*@output_layers.last.neurons[i].sigma_prime
+          # TODO: add support for multiple output layers
+          @error_signal << delta
         end
+        return actual
       when :c_ent
-        expected.size.times { |i| @error_gradient << cross_entropy_cost(expected[i], actual[i]) }
+        expected.size.times do |i|
+          delta = SHAInet.cross_entropy_cost_derivative(expected[i], actual[i])*@output_layers.last.neurons[i].sigma_prime
+          # TODO: add support for multiple output layers
+          @error_signal << delta
+        end
+        return actual
       when :exp
         # TODO
       when :hel_d
@@ -215,27 +232,33 @@ module SHAInet
     # cost_function type is one of COST_FUNCTIONS described at the top of the file
     # epoch/error_threshold are criteria of when to stop the training
     # learning_rate is set to 0.3 only at the begining but will change dynamically with the total error, can be also changed manually
-    def train(data : Array(Array(Array(Float64))), cost_function : Symbol, epochs : Int32, error_threshold : Float64, learning_rate : Float64 = 0.3)
+    def train_batch(data : Array(Array(Array(Float64))), cost_function : Symbol, epochs : Int32, error_threshold : Float64, learning_rate : Float64 = 0.3)
       puts "Training started\n----------"
-      epochs.each do |i|
-        all_errors = Array(Float64).new
-        data.size.times do |data_point|
-          expected = data_point[1]                  # Array of expected Float64
-          actual = evaluate(data_point[0])          # Array of float64 recieved as output from network
-          evaluate(cost_function, expected, actual) # Get error gradiant from output layer based on current input
-          @weight_gradient = Array(Float64).new
-          @bias_gradient = Array(Float64).new
+      epochs.times do |i|
+        all_errors = [] of Float64
+        data.each do |data_point|                                                             # data_point = [input as array, expected output as array]
+          actual = evaluate(data_point[0], data_point[1], cost_function, activation_function) # Get error gradiant from output layer based on current input
+          all_errors << @error_signal.reduce { |acc, i| acc + i }                             # Save error from the last input
+
+          @weight_gradient = [] of Float64 # Reset gradients
+          @bias_gradient = [] of Float64
+
+          # Propogate the errors backwards through the hidden layers
           l = @hidden_layers.size -1
           while l >= 0
-            l_gradient = [] of Float64
+            l_error_gradient = [] of Float64
             @hidden_layers[l].each do |neuron|
-              neuron.error_prop          # Update neuron error based on errors*weights of neurons from the next layer
-              l_gradient << neruon.error # Save error gradient of current leayer in an Array
-
-              @weight_gradient
+              neuron.error_prop                # Update neuron error based on errors*weights of neurons from the next layer
+              l_error_gradient << neruon.error # Save error gradient of current leayer in an Array
             end
+            @error_gradient << l_error_gradient # Save all error signals in a matrix
+            @bias_gradient << l_error_gradient  #  bias gradient is equal to the layer gradient
+            # @weight_gradient << SHAInet::dot_product(l_error_gradient,@activations[l-1].transpose)
             l -= 1
           end
+
+          # Update weights & biases based on the error gradient
+
         end
         error_sum = all_errors.reduce { |acc, i| acc + i } # Sums all errors from last epoch
         @mean_error = error_sum/(data.size)
@@ -246,6 +269,17 @@ module SHAInet
     def train_batch(data : Array(Array(Float64)), epochs : Int32, error_threshold : Float64)
       # todo
     end
+
+    # def update_weights(rate)
+    #   synapses_in.each do |synapse|
+    #     temp_weight = synapse.weight
+    #     synapse.weight += (rate * LEARNING_RATE * error * synapse.source_neuron.output) + (MOMENTUM * (synapse.weight - synapse.prev_weight))
+    #     synapse.prev_weight = temp_weight
+    #   end
+    #   temp_threshold = threshold
+    #   @threshold += (rate * LEARNING_RATE * error * -1) + (MOMENTUM * (threshold - prev_threshold))
+    #   @prev_threshold = temp_threshold
+    # end
 
     def randomize_all_weights
       raise NeuralNetRunError.new("Cannot randomize weights without synapses") if @all_synapses.empty?

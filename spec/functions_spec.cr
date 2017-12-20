@@ -3,13 +3,9 @@ require "./spec_helper"
 describe SHAInet do
   # TODO: Write tests
   it "check functions" do
-    # expected = [1, 0.5]
-    # actual = [0.5, 0.2]
-
-    p SHAInet.linear_distance(expected = 1, actual = 0.5)
-    puts "---"
-    p SHAInet.squared_distance(expected = 1, actual = 0.5)
-    puts "---"
-    p SHAInet.cross_entropy(expected = 1, actual = 0.5)
+    matrix1 = [[1, 1, 1], [2, 2, 2], [3, 3, 3], [4, 4, 4]]
+    matrix2 = [[1, 1, 1, 1], [10, 10, 10, 10]]
+    new_m = SHAInet.dot_product(matrix1, matrix2)
+    p new_m
   end
 end
