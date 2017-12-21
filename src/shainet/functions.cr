@@ -1,4 +1,8 @@
+require "matrix_extend"
+
 module SHAInet
+  include MatrixExtend
+
   # # Activation functions # #
 
   def self.sigmoid(value : Int32 | Float32 | Float64) # Output range (0..1)
