@@ -1,6 +1,6 @@
 require "logger"
 require "matrix_extend"
-require "./shainet/*"
+require "./shainet/**"
 
 # TODO: Write documentation for `Shainet`
 module SHAInet
