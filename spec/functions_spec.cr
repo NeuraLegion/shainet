@@ -13,5 +13,7 @@ describe SHAInet do
     p m1
     p m2
     p new_m
+    # p new_m
+
   end
 end
