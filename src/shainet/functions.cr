@@ -1,23 +1,23 @@
 module SHAInet
   # # Activation functions # #
 
-  def self.sigmoid(value : Int32 | Float32 | Float64) # Output range (0..1)
+  def self.sigmoid(value : GenNum) : Float64 # Output range (0..1)
     (1.0/(1.0 + Math.exp(-value))).to_f64
   end
 
-  def self.bp_sigmoid(value : Int32 | Float32 | Float64) # Output range (-1..1)
+  def self.bp_sigmoid(value : GenNum) : Float64 # Output range (-1..1)
     ((1.0 - Math.exp(-value))/(1.0 + Math.exp(-value))).to_f64
   end
 
-  def self.log_sigmoid(value : Int32 | Float32 | Float64) # Output range (0..1)
+  def self.log_sigmoid(value : GenNum) : Float64 # Output range (0..1)
     ((Math.exp(value))/(1.0 + Math.exp(value))).to_f64
   end
 
-  def self.tanh(value : Int32 | Float32 | Float64) # Output range (-1..1)
+  def self.tanh(value : GenNum) : Float64 # Output range (-1..1)
     (((Math.exp(value)) - Math.exp(-value))/(Math.exp(value)) + Math.exp(-value)).to_f64
   end
 
-  def self.relu(value : Int32 | Float32 | Float64) # Output range (0..inf)
+  def self.relu(value : GenNum) # Output range (0..inf)
     if value <= 0
       (0).to_f64
     else
@@ -25,7 +25,7 @@ module SHAInet
     end
   end
 
-  def self.l_relu(value : Int32 | Float32 | Float64, slope : Float64) # Output range (-inf..inf)
+  def self.l_relu(value : GenNum, slope : Float64) : Float64 # Output range (-inf..inf)
     if value <= 0
       slope.to_f64*value.to_f64
     else
@@ -57,31 +57,20 @@ module SHAInet
 
   # # Linear algebra math # #
 
-  # Matrix multiplication
-  def self.dot_product(matrix1 : Array(Array(Int32 | Float32 | Float64)), matrix2 : Array(Array(Int32 | Float32 | Float64)))
-    if matrix1.all? { |row| row.size == matrix1.first.size } == false
-      raise MathError.new("Matrix1 has rows of different size")
-    elsif matrix2.all? { |row| row.size == matrix2.first.size } == false
-      raise MathError.new("Matrix2 has rows of different size")
-    elsif matrix1.first.size != matrix2.size
-      raise MathError.new("Matrix1 row dimention must equal matrix2 col dimention")
+  # Element-wise multiplications (Hadamard product)
+  def self.h_product(m1 : Matrix, m2 : Matrix)
+    # unless m1 == m2
+    #   raise MathError.new("m1,m2 must be of same dimentions")
+    # end
+    new_metrix = [] of Array(GenNum)
+    cols = m1.data.first.size
+    m1.data.size.times do |row|
+      new_row = [] of GenNum
+      cols.times { |col| new_row << m1.data[row][col]*m2.data[row][col] }
+      new_metrix << new_row
     end
-    new_matrix = Array(Array(Float64)).new
-    matrix1.each do |row|
-      new_row = [] of Float64 | Float32 | Int32
-      matrix2.each do |col|
-        sum = [] of Float64 | Float32 | Int32
-        row.each { |rv| col.each { |cv| sum << rv*cv } }
-        new_row << sum
-      end
-      new_matrix << new_row
-    end
-    return new_matrix
-  end
-
-  # Element-wise multiplications
-  def h_product
-    # TODO
+    puts new_metrix
+    return MatrixExtend::Matrix(GenNum).from(new_metrix)
   end
 
   # vector multiplication

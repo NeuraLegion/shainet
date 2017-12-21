@@ -1,6 +1,2 @@
 require "spec"
-require "../lib/*"
-require "../src/shainet/*"
-# require "matrix_extend"
-# include MatrixExtend
-require "../shainet.cr"
+require "../src/shainet.cr"

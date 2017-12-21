@@ -18,43 +18,58 @@ describe SHAInet::Network do
   #   # nn.hidden_layers.each { |layer| layer.neurons.each { |neuron| puts neuron.synapses_in } }
   # end
 
+  # it "test run & evaluate" do
+  #   p1 = [1.0, 1.0]
+  #   p1.each { |i| i.to_f64 }
+
+  #   nn = SHAInet::Network.new
+  #   nn.add_layer(:input, 2, :memory)
+  #   2.times { |x| nn.add_layer(:hidden, 3, :memory) }
+  #   nn.add_layer(:output, 2, :memory)
+  #   nn.fully_connect
+
+  #   # # Network topology # #
+  #   #  i   N N
+  #   # h1  N N N
+  #   # h2  N N N
+  #   #  o    N
+  #   # # # # # # # # # # # #
+
+  #   nn.run(p1)
+
+  #   # input, expected, cost_function, activation_function
+  #   # puts xor.evaluate([1.0, 1.0], [0.0], :mse, :sigmoid)
+
+  #   puts "-----------"
+  #   pp nn.activations
+  #   pp nn.biases
+  #   pp nn.weights
+  #   pp nn.error_gradient
+  #   pp nn.bias_gradient
+  #   pp nn.weight_gradient
+  # end
+
   it "figure out xor" do
-    # This is testing to see if it works
-    data_p1 = [0.0, 1.0]
-    data_p1.each { |i| i.to_f64 }
+    training_data = [[[0, 0], [0]],
+                     [[1, 0], [1]],
+                     [[0, 1], [1]],
+                     [[1, 1], [0]]]
 
     xor = SHAInet::Network.new
     xor.add_layer(:input, 2, :memory)
     2.times { |x| xor.add_layer(:hidden, 3, :memory) }
-    xor.add_layer(:output, 1, :memory)
-
-    # # Network topology # #
-    #  i   N N
-    # h1  N N N
-    # h2  N N N
-    #  o    N
-
+    xor.add_layer(:output, 2, :memory)
     xor.fully_connect
-    xor.run(data_p1)
 
-    # input, expected, cost_function, activation_function
-    puts xor.evaluate([1.0, 1.0], [0.0], :mse, :sigmoid)
+    # data, cost_function, activation_function, epochs, error_threshold, learning_rate)
+    xor.train_batch(training_data, :mse, :sigmoid, 1, 0.001, 0.3)
 
-    # pp xor.biases
-    # pp xor.weights
-    puts "Activation matrix is:\n #{xor.activations}"
-    puts "Input sum matrix is:\n #{xor.input_sums}"
-    puts "Error signal vector is:\n #{xor.error_signal}"
-    # puts "Activation matrix is:\n #{xor.activations}"
-
-    # 10000.times do
-    #   xor.train([0, 0], [0])
-    #   xor.train([1, 0], [1])
-    #   xor.train([0, 1], [1])
-    #   xor.train([1, 1], [0])
-    # end
-
-    # xor.feed_forward([0, 0])
-    # (xor.current_outputs.first < 0.1 && xor.current_outputs.first > -0.1).should eq(true)
+    puts "-----------"
+    pp nn.activations
+    pp nn.biases
+    pp nn.weights
+    pp nn.error_gradient
+    pp nn.bias_gradient
+    pp nn.weight_gradient
   end
 end
