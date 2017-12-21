@@ -1,4 +1,3 @@
-require "linalg"
 require "logger"
 require "matrix_extend"
 require "./shainet/*"
