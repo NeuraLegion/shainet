@@ -1,7 +1,10 @@
 require "logger"
+require "matrix_extend"
 
 module SHAInet
   class Network
+    include MatrixExtend
+
     LAYER_TYPES      = [:input, :hidden, :output]
     CONNECTION_TYPES = [:full, :ind_to_ind, :random]
     COST_FUNCTIONS   = [:mse, :c_ent, :exp, :hel_d, :kld, :gkld, :ita_sai_d]

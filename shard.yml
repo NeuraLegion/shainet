@@ -2,12 +2,13 @@ name: shainet
 version: 0.1.0
 
 authors:
-  - bararchy <bar.hofesh@safe-t.com>
+  - Bar Hofesh <bar.hofesh@neuralegion.com>
+  - Art Linkov <art.linkov@neuralegion.com>
 
 crystal: 0.24.0+58
 
 license: MIT
 
 dependencies:
-  linalg:
-    github: konovod/linalg
+  matrix_extend:
+    github: Nephos/matrix_extend
