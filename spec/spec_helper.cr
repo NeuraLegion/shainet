@@ -1,5 +1,5 @@
 require "spec"
 require "../lib/*"
 require "../src/shainet/*"
-# require "linalg"
-# include LA
+# require "matrix_extend"
+# include MatrixExtend
