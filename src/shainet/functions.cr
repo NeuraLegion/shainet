@@ -67,7 +67,6 @@ module SHAInet
       raise MathError.new("Matrix1 row dimention must equal matrix2 col dimention")
     end
     new_matrix = Array(Array(Float64)).new
-    matrix2 = matrix2.transpose
     matrix1.each do |row|
       new_row = [] of Float64 | Float32 | Int32
       matrix2.each do |col|

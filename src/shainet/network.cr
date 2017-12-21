@@ -181,6 +181,7 @@ module SHAInet
         l.neurons.each do |neuron|
           neuron.activate(activation_function)
           a_l << neuron.activation
+          z_l << neuron.input_sum
         end
         @activations << a_l # save activations vector for each layer
         @input_sums << z_l  # Save input sum vector for each layer
@@ -251,9 +252,9 @@ module SHAInet
               neuron.error_prop                # Update neuron error based on errors*weights of neurons from the next layer
               l_error_gradient << neruon.error # Save error gradient of current leayer in an Array
             end
-            @error_gradient << l_error_gradient # Save all error signals in a matrix
-            @bias_gradient << l_error_gradient  #  bias gradient is equal to the layer gradient
-            # @weight_gradient << SHAInet::dot_product(l_error_gradient,@activations[l-1].transpose)
+            @error_gradient << l_error_gradient # Save all error signals for each layer in a matrix
+            @bias_gradient << l_error_gradient  # bias gradient is equal to the layer gradient
+            @weight_gradient << SHAInet.dot_product(l_error_gradient, @activations[l - 1].transpose)
             l -= 1
           end
 

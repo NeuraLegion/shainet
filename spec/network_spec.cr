@@ -44,7 +44,7 @@ describe SHAInet::Network do
     # pp xor.weights
     puts "Activation matrix is:\n #{xor.activations}"
     puts "Input sum matrix is:\n #{xor.input_sums}"
-    # puts "Activation matrix is:\n #{xor.activations}"
+    puts "Error signal vector is:\n #{xor.error_signal}"
     # puts "Activation matrix is:\n #{xor.activations}"
 
     # 10000.times do
