@@ -16,7 +16,7 @@ module SHAInet
       @prev_bias = rand(-1.0..1.0).to_f64 # Needed for delta rule
       @activation = Float64.new(0)        # Activation of neuron after squashing function (a)
       @input_sum = Float64.new(0)         # Sum of activations*weights from input neurons (z)
-      @sigma_prime = Float64.new(0)       # derivative of input_sum based on activation function used (s')
+      @sigma_prime = Float64.new(1)       # derivative of input_sum based on activation function used (s')
     end
 
     # This is the forward propogation

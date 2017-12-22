@@ -28,8 +28,8 @@ module SHAInet
       @all_synapses = Array(Synapse).new # Array of all current synapses in the network
       @mean_error = Float64.new(1)       # Average netwrok error based on all the training so far
 
-      @learning_rate = 0.3
-      @momentum = 0.1
+      @learning_rate = 1.0
+      @momentum = 0.3
     end
 
     # Create and populate a layer with neurons
@@ -155,7 +155,7 @@ module SHAInet
       output = @output_layers.last.neurons.map { |neuron| neuron.activation } # return an array of all output neuron activations
       # TODO: add support for multiple output layers
 
-      puts "For the input of #{input}, the networks output is: #{output}"
+      puts "Input => #{input}, networks output => #{output}"
       output
     end
 
@@ -174,9 +174,6 @@ module SHAInet
         expected.size.times do |i|
           neuron = @output_layers.last.neurons[i] # Update error of all neurons in the output layer based on the actual result
           neuron.error = SHAInet.quadratic_cost_derivative(expected[i].to_f64, actual[i].to_f64)*neuron.sigma_prime
-          p SHAInet.quadratic_cost_derivative(expected[i].to_f64, actual[i].to_f64)
-          pp neuron.activation
-          pp neuron.error
           # TODO: add support for multiple output layers
           total_error << neuron.error # Store the output error vector for later
         end
@@ -199,7 +196,6 @@ module SHAInet
         # TODO
       end
       total_error = total_error.reduce { |acc, i| acc + i } # Sum up all the errors from output layer
-      pp total_error.to_f64
       return total_error
     end
 
@@ -216,7 +212,7 @@ module SHAInet
         data.each do |data_point|
           total_error = evaluate(data_point[0], data_point[1], cost_function, activation_function) # Get error gradiant from output layer based on current input
           all_errors << total_error
-          puts "For data point #{data_point} error signal is: #{all_errors}"
+          # puts "For data point #{data_point} error signal is: #{all_errors}"
           # Propogate the errors backwards through the hidden layers
           l = @hidden_layers.size - 1
           while l >= 0
@@ -230,7 +226,7 @@ module SHAInet
         end
 
         # Get an average error for the last epoch
-        error_sum = all_errors.reduce { |acc, i| acc + i }
+        error_sum = all_errors.reduce { |acc, i| ((acc + i)**2) }
         @mean_error = error_sum/(data.size)
         puts "For epoch #{i}, mean error is #{@mean_error}\n----------"
       end
