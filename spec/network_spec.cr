@@ -61,8 +61,8 @@ describe SHAInet::Network do
     xor.add_layer(:output, 2, :memory)
     xor.fully_connect
 
-    # data, cost_function, activation_function, epochs, error_threshold, learning_rate)
-    xor.train_batch(training_data, :mse, :sigmoid, 1, 0.001, 0.3)
+    # data, cost_function, activation_function, epochs, error_threshold, learning_rate, momentum)
+    xor.train(training_data, :mse, :sigmoid, 1, 0.001)
 
     puts "-----------"
     pp nn.activations

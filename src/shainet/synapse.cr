@@ -1,9 +1,11 @@
 module SHAInet
   class Synapse
-    property weight : Float64, :source_neuron, :dest_neuron
+    property weight : Float64, prev_weight : Float64
+    getter source_neuron : Neuron, dest_neuron : Neuron
 
     def initialize(@source_neuron : Neuron, @dest_neuron : Neuron)
-      @weight = rand(0.0..1.0)
+      @weight = rand(0.0..1.0)      # Weight of the synapse
+      @prev_weight = rand(0.0..1.0) # Needed for delta rule
     end
 
     def randomize_weight
@@ -28,11 +30,10 @@ module SHAInet
       end
     end
 
-    # Transfer error & bias from dest_neuron to source_neuron while applying weight
+    # Transfer error from dest_neuron to source_neuron while applying weight and save the synapse gradient
     def propagate_backward : Float64
-      new_error = @dest_neuron.error*@weight
-      # new_bias = @dest_neuron.bias*@weight # ## not sure this is correct
-      return new_error # , new_bias
+      weighted_error = @dest_neuron.error*@weight
+      return weighted_error
     end
 
     def inspect
