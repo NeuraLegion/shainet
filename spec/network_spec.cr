@@ -58,18 +58,12 @@ describe SHAInet::Network do
     xor = SHAInet::Network.new
     xor.add_layer(:input, 2, :memory)
     2.times { |x| xor.add_layer(:hidden, 3, :memory) }
-    xor.add_layer(:output, 2, :memory)
+    xor.add_layer(:output, 1, :memory)
     xor.fully_connect
 
     # data, cost_function, activation_function, epochs, error_threshold, learning_rate, momentum)
-    xor.train(training_data, :mse, :sigmoid, 1, 0.001)
+    xor.train(training_data, :mse, :sigmoid, 5, 0.001)
 
     puts "-----------"
-    pp nn.activations
-    pp nn.biases
-    pp nn.weights
-    pp nn.error_gradient
-    pp nn.bias_gradient
-    pp nn.weight_gradient
   end
 end

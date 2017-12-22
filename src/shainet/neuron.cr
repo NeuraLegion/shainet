@@ -4,8 +4,8 @@ module SHAInet
   ACTIVATION_TYPES = [:tanh, :sigmoid, :bp_sigmoid, :log_sigmoid, :relu, :l_relu]
 
   class Neuron
-    property :n_type, :synapses_in, :synapses_out, :error, :bias, :prev_bias
-    getter :activation, :input_sum, , :sigma_prime
+    property :n_type, :synapses_in, :synapses_out, activation : Float64, error : Float64, bias : Float64, prev_bias : Float64
+    getter :input_sum, :sigma_prime
 
     def initialize(@n_type : Symbol)
       raise NeuralNetInitalizationError.new("Must choose currect neuron types, if you're not sure choose :memory as a standard neuron") if NEURON_TYPES.any? { |x| x == @n_type } == false
@@ -55,7 +55,7 @@ module SHAInet
     def hidden_error_prop(activation_function : Symbol = :tanh) : Float64
       new_errors = [] of Float64
       @synapses_out.each do |synapse| # Calculate weighted error from each target neuron, returns Array(Float64)
-        new_errors << synapse.propagate_backwards
+        new_errors << synapse.propagate_backward
       end
       weighted_error_sum = new_errors.reduce { |acc, i| acc + i } # Sum weighted error from target neurons (instead of using w_matrix*delta), returns Float64
       case activation_function                                    # Take into account the derivative of the squashing function
@@ -64,7 +64,7 @@ module SHAInet
         @error = weighted_error_sum*@sigma_prime      # New error of the neuron
       when :sigmoid
         @sigma_prime = SHAInet.sigmoid_prime(@input_sum)
-        @error = SHAInet.weighted_error_sum*@sigma_prime
+        @error = weighted_error_sum*@sigma_prime
         # when :bp_sigmoid
         #   @error = SHAInet.bp_sigmoid(z)
         # when :log_sigmoid

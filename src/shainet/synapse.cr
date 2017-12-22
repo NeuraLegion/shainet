@@ -4,8 +4,8 @@ module SHAInet
     getter source_neuron : Neuron, dest_neuron : Neuron
 
     def initialize(@source_neuron : Neuron, @dest_neuron : Neuron)
-      @weight = rand(0.0..1.0)      # Weight of the synapse
-      @prev_weight = rand(0.0..1.0) # Needed for delta rule
+      @weight = rand(0.0..1.0).to_f64      # Weight of the synapse
+      @prev_weight = rand(0.0..1.0).to_f64 # Needed for delta rule
     end
 
     def randomize_weight

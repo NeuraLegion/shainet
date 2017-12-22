@@ -9,13 +9,14 @@ module SHAInet
 
     getter :input_layers, :output_layers, :hidden_layers, :all_neurons, :all_synapses, :mean_error
     property learning_rate : Float64, momentum : Float64
+
     # property :activations, :input_sums, :biases, :weights
     # property :error_signal, :error_gradient, :weight_gradient, :bias_gradient
 
-    ## Notes:
-    ## ------------
-    ## There are no matrices in this implementation, instead the gradient values are stored in each neuron/synapse independently.
-    ## When preforming propogation, all the math is done iteratively on each neuron/synapse locally.
+    # # Notes:
+    # # ------------
+    # # There are no matrices in this implementation, instead the gradient values are stored in each neuron/synapse independently.
+    # # When preforming propogation, all the math is done iteratively on each neuron/synapse locally.
 
     # First creates an empty shell of the entire network
 
@@ -27,7 +28,7 @@ module SHAInet
       @all_synapses = Array(Synapse).new # Array of all current synapses in the network
       @mean_error = Float64.new(1)       # Average netwrok error based on all the training so far
 
-      @learning_rate = 0.3 
+      @learning_rate = 0.3
       @momentum = 0.1
     end
 
@@ -138,20 +139,20 @@ module SHAInet
       # Insert the input data into the input layer
       @input_layers.first.neurons.each_with_index do |neuron, i| # Inserts the input information into the input layers
       # TODO: add support for multiple input layers
-        neuron.activation = input[i]
+        neuron.activation = input[i].to_f64
       end
 
-      # Propogate the information through the hidden layers
+      # Propogate the information forward through the hidden layers
       @hidden_layers.each do |l|
-        l.neurons.each do {|neuron| neuron.activate(activation_function)}
+        l.neurons.each { |neuron| neuron.activate(activation_function) }
       end
 
       # Propogate the information through the output layers
       @output_layers.each do |l|
-        l.neurons.each do {|neuron| neuron.activate(activation_function)}
+        l.neurons.each { |neuron| neuron.activate(activation_function) }
       end
 
-      output = @output_layers.last.neurons.map {|neuron| neuron.activation} # return an array of all output neuron activations
+      output = @output_layers.last.neurons.map { |neuron| neuron.activation } # return an array of all output neuron activations
       # TODO: add support for multiple output layers
 
       puts "For the input of #{input}, the networks output is: #{output}"
@@ -172,14 +173,16 @@ module SHAInet
       when :mse
         expected.size.times do |i|
           neuron = @output_layers.last.neurons[i] # Update error of all neurons in the output layer based on the actual result
-          neuron.error = SHAInet.quadratic_cost_derivative(expected[i], actual[i])*neuron.sigma_prime
+          neuron.error = SHAInet.quadratic_cost_derivative(expected[i].to_f64, actual[i].to_f64)*neuron.sigma_prime
+          pp neuron.activation
+          pp neuron.error
           # TODO: add support for multiple output layers
           total_error << neuron.error # Store the output error vector for later
         end
       when :c_ent
         expected.size.times do |i|
           neuron = @output_layers.last.neurons[i] # Update error of all neurons in the output layer based on the actual result
-          neuron.error = SHAInet.cross_entropy_cost_derivative(expected[i], actual[i])*neuron.sigma_prime
+          neuron.error = SHAInet.cross_entropy_cost_derivative(expected[i].to_f64, actual[i].to_f64)*neuron.sigma_prime
           # TODO: add support for multiple output layers
           total_error << neuron.error # Store the output error vector for later
         end
@@ -194,7 +197,8 @@ module SHAInet
       when :ita_sai_d
         # TODO
       end
-      total_error = total_error.reduce {|acc,i| acc + i} # Sum up all the errors from output layer
+      total_error = total_error.reduce { |acc, i| acc + i } # Sum up all the errors from output layer
+      pp total_error.to_f64
       return total_error
     end
 
@@ -202,27 +206,26 @@ module SHAInet
     # cost_function type is one of COST_FUNCTIONS described at the top of the file
     # epoch/error_threshold are criteria of when to stop the training
     # learning_rate is set to 0.3 only at the begining but will change dynamically with the total error, can be also changed manually
-    def train(data : Array(Array(Array(GenNum))), cost_function : Symbol, activation_function : Symbol, epochs : Int32, error_threshold : Float64, @learning_rate, @momentum)
+    def train(data : Array(Array(Array(GenNum))), cost_function : Symbol, activation_function : Symbol, epochs : Int32, error_threshold : Float64)
       puts "Training started\n----------"
       epochs.times do |i|
         all_errors = [] of Float64
-        
+
         # Go over each data point and update the weights/biases based on the specific example
         data.each do |data_point|
           total_error = evaluate(data_point[0], data_point[1], cost_function, activation_function) # Get error gradiant from output layer based on current input
           all_errors << total_error
-
+          puts "For data point #{data_point} error signal is: #{all_errors}"
           # Propogate the errors backwards through the hidden layers
-          l = @hidden_layers.size -1
+          l = @hidden_layers.size - 1
           while l >= 0
             @hidden_layers[l].neurons.each { |neuron| neuron.hidden_error_prop } # Update neuron error based on errors*weights of neurons from the next layer
             l -= 1
           end
 
           # Update all wieghts & biases
-          update_weights(learning_rate,momentum)
-          update_biases(learning_rate,momentum)
-
+          update_weights(learning_rate, momentum)
+          update_biases(learning_rate, momentum)
         end
 
         # Get an average error for the last epoch
@@ -239,7 +242,7 @@ module SHAInet
     # Update weights based on the gradients and delta rule (including momentum)
     def update_weights(learning_rate : Float64, momentum : Float64)
       @all_synapses.each do |synapse|
-        delta_weight = (-1)*learning_rate*(synapse.source_neuron.activation)*(synapse.dest_neuron.error) + momentum*(synapse.weight-synapse.prev_weight)
+        delta_weight = (-1)*learning_rate*(synapse.source_neuron.activation)*(synapse.dest_neuron.error) + momentum*(synapse.weight - synapse.prev_weight)
         synapse.weight += delta_weight
         synapse.prev_weight = synapse.weight
       end
@@ -248,7 +251,7 @@ module SHAInet
     # Update biases based on the gradients and delta rule (including momentum)
     def update_biases(learning_rate : Float64, momentum : Float64)
       @all_neurons.each do |neuron|
-        delta_bias = (-1)*learning_rate*(neuron.error) + momentum*(neuron.bias-neuron.prev_bias)
+        delta_bias = (-1)*learning_rate*(neuron.error) + momentum*(neuron.bias - neuron.prev_bias)
         neuron.bias += delta_bias
         neuron.prev_bias = neuron.bias
       end

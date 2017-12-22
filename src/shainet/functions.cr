@@ -47,12 +47,12 @@ module SHAInet
 
   def self.quadratic_cost_derivative(expected : Float64, actual : Float64) : Float64
     # Cost function = 0.5*(actual - expected)**2
-    return (actual - expected) # Slope at a single point
+    return (actual - expected).to_f64 # Slope at a single point
   end
 
   def self.cross_entropy_cost_derivative(expected : Float64, actual : Float64) : Float64
     # Cost function = (-1)*(expected*Math.log((actual), Math::E) + (1 - expected)*Math.log((1 - actual), Math::E))
-    return ((actual - expected)/((1 - actual)*actual)) # Slope at a single point
+    return ((actual - expected)/((1 - actual)*actual)).to_f64 # Slope at a single point
   end
 
   # # Linear algebra math # #
