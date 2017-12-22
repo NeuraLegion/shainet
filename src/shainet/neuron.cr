@@ -5,7 +5,9 @@ module SHAInet
 
   class Neuron
     property :n_type, :synapses_in, :synapses_out, :error, :bias, :prev_bias
-    getter :activation, :input_sum, , :sigma_prime
+    getter :activation, :input_sum, :sigma_prime
+
+    @prev_bias : Float64
 
     def initialize(@n_type : Symbol)
       raise NeuralNetInitalizationError.new("Must choose currect neuron types, if you're not sure choose :memory as a standard neuron") if NEURON_TYPES.any? { |x| x == @n_type } == false
