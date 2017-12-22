@@ -174,6 +174,7 @@ module SHAInet
         expected.size.times do |i|
           neuron = @output_layers.last.neurons[i] # Update error of all neurons in the output layer based on the actual result
           neuron.error = SHAInet.quadratic_cost_derivative(expected[i].to_f64, actual[i].to_f64)*neuron.sigma_prime
+          p SHAInet.quadratic_cost_derivative(expected[i].to_f64, actual[i].to_f64)
           pp neuron.activation
           pp neuron.error
           # TODO: add support for multiple output layers

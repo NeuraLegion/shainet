@@ -57,7 +57,7 @@ describe SHAInet::Network do
 
     xor = SHAInet::Network.new
     xor.add_layer(:input, 2, :memory)
-    2.times { |x| xor.add_layer(:hidden, 3, :memory) }
+    1.times { |x| xor.add_layer(:hidden, 2, :memory) }
     xor.add_layer(:output, 1, :memory)
     xor.fully_connect
 
