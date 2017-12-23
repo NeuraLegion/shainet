@@ -36,28 +36,37 @@ module SHAInet
   # # Derivatives of activation functions # #
 
   def self.sigmoid_prime(value : Float64)
-    sigmoid(value)*(1 - sigmoid(value))
+    sigmoid(value)*(1.0 - sigmoid(value)).to_f64
   end
 
   def self.tanh_prime(value : Float64)
-    (1 - tanh(value)**2)
+    (1.0 - tanh(value)**2).to_f64
   end
 
-  # # Cost functions for a single point value (slope at that point based on the function) ##
+  # # Cost functions  # #
+
+  def self.quadratic_cost(expected : Float64, actual : Float64) : Float64
+    return (0.5*(actual - expected)**2).to_f64
+  end
+
+  def self.cross_entropy_cost(expected : Float64, actual : Float64) : Float64
+    # Cost function =
+    return ((-1)*(expected*Math.log((actual), Math::E) + (1.0 - expected)*Math.log((1.0 - actual), Math::E))).to_f64
+  end
+
+  # # Cost function derivatives  # #
 
   def self.quadratic_cost_derivative(expected : Float64, actual : Float64) : Float64
-    # Cost function = 0.5*(actual - expected)**2
-    return (actual - expected).to_f64 # Slope at a single point
+    return (actual - expected).to_f64
   end
 
   def self.cross_entropy_cost_derivative(expected : Float64, actual : Float64) : Float64
-    # Cost function = (-1)*(expected*Math.log((actual), Math::E) + (1 - expected)*Math.log((1 - actual), Math::E))
-    return ((actual - expected)/((1 - actual)*actual)).to_f64 # Slope at a single point
+    return ((actual - expected)/((1.0 - actual)*actual)).to_f64
   end
 
   # # Linear algebra math # #
 
-  # Element-wise multiplications (Hadamard product)
+  # Element-wise multiplications (Hadamard product) for Matrix class
   def self.h_product(m1 : Matrix, m2 : Matrix)
     # unless m1 == m2
     #   raise MathError.new("m1,m2 must be of same dimentions")

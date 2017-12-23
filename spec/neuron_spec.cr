@@ -5,8 +5,8 @@ describe SHAInet::Neuron do
   it "check neuron creation" do
     payloads = ["abc", "12345", "!@#"]
 
-    neuron1 = SHAInet::Neuron.new(:memory, 4)
-    neuron2 = SHAInet::Neuron.new(:eraser, 4)
+    neuron1 = SHAInet::Neuron.new(:memory)
+    neuron2 = SHAInet::Neuron.new(:eraser)
 
     pp neuron1
     pp neuron2

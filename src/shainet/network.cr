@@ -175,14 +175,14 @@ module SHAInet
           neuron = @output_layers.last.neurons[i] # Update error of all neurons in the output layer based on the actual result
           neuron.error = SHAInet.quadratic_cost_derivative(expected[i].to_f64, actual[i].to_f64)*neuron.sigma_prime
           # TODO: add support for multiple output layers
-          total_error << neuron.error # Store the output error vector for later
+          total_error << SHAInet.quadratic_cost(expected[i].to_f64, actual[i].to_f64) # Store the output error based on cost function
         end
       when :c_ent
         expected.size.times do |i|
-          neuron = @output_layers.last.neurons[i] # Update error of all neurons in the output layer based on the actual result
+          neuron = @output_layers.last.neurons[i]
           neuron.error = SHAInet.cross_entropy_cost_derivative(expected[i].to_f64, actual[i].to_f64)*neuron.sigma_prime
           # TODO: add support for multiple output layers
-          total_error << neuron.error # Store the output error vector for later
+          total_error << SHAInet.cross_entropy_cost(expected[i].to_f64, actual[i].to_f64)
         end
       when :exp
         # TODO
@@ -203,7 +203,11 @@ module SHAInet
     # cost_function type is one of COST_FUNCTIONS described at the top of the file
     # epoch/error_threshold are criteria of when to stop the training
     # learning_rate is set to 0.3 only at the begining but will change dynamically with the total error, can be also changed manually
-    def train(data : Array(Array(Array(GenNum))), cost_function : Symbol, activation_function : Symbol, epochs : Int32, error_threshold : Float64)
+    def train(data : Array(Array(Array(GenNum))),
+              cost_function : Symbol,
+              activation_function : Symbol,
+              epochs : Int32,
+              error_threshold : Float64)
       puts "Training started\n----------"
       epochs.times do |i|
         all_errors = [] of Float64
@@ -212,7 +216,7 @@ module SHAInet
         data.each do |data_point|
           total_error = evaluate(data_point[0], data_point[1], cost_function, activation_function) # Get error gradiant from output layer based on current input
           all_errors << total_error
-          # puts "For data point #{data_point} error signal is: #{all_errors}"
+
           # Propogate the errors backwards through the hidden layers
           l = @hidden_layers.size - 1
           while l >= 0
@@ -224,9 +228,9 @@ module SHAInet
           update_weights(learning_rate, momentum)
           update_biases(learning_rate, momentum)
         end
-
+        pp all_errors
         # Get an average error for the last epoch
-        error_sum = all_errors.reduce { |acc, i| ((acc + i)**2) }
+        error_sum = all_errors.reduce { |acc, i| acc + i }
         @mean_error = error_sum/(data.size)
         puts "For epoch #{i}, mean error is #{@mean_error}\n----------"
       end

@@ -26,16 +26,18 @@ module SHAInet
       raise NeuralNetRunError.new("Propogation requires a valid activation function.") unless ACTIVATION_TYPES.includes?(activation_function)
 
       new_memory = Array(Float64).new
-      @synapses_in.each do |n| # Claclulate activation from each incoming neuron with applied weights, returns Array(Float64)
-        new_memory << n.propagate_forward
+      @synapses_in.each do |synapse| # Claclulate activation from each incoming neuron with applied weights, returns Array(Float64)
+        new_memory << synapse.propagate_forward
       end
       @input_sum = new_memory.reduce { |acc, i| acc + i } # Sum all the information from input neurons, returns Float64
       @input_sum += @bias                                 # Add neuron bias (activation threshold)
       case activation_function                            # Apply squashing function
       when :tanh
         @activation = SHAInet.tanh(@input_sum)
+        @sigma_prime = SHAInet.tanh_prime(@input_sum) # Activation function derivative
       when :sigmoid
         @activation = SHAInet.sigmoid(@input_sum)
+        @sigma_prime = SHAInet.sigmoid_prime(@input_sum)
       when :bp_sigmoid
         @activation = SHAInet.bp_sigmoid(@input_sum)
       when :log_sigmoid
@@ -52,7 +54,7 @@ module SHAInet
     # This is the backward propogation of the hidden layers
     # Allows the neuron to absorb the error from its' own target neurons through the synapses
     # Then, it sums the information and a derivative of the activation function is applied to normalize the data
-    def hidden_error_prop(activation_function : Symbol = :tanh) : Float64
+    def hidden_error_prop(activation_function : Symbol = :sigmoid) : Float64
       new_errors = [] of Float64
       @synapses_out.each do |synapse| # Calculate weighted error from each target neuron, returns Array(Float64)
         new_errors << synapse.propagate_backward
@@ -60,10 +62,8 @@ module SHAInet
       weighted_error_sum = new_errors.reduce { |acc, i| acc + i } # Sum weighted error from target neurons (instead of using w_matrix*delta), returns Float64
       case activation_function                                    # Take into account the derivative of the squashing function
       when :tanh
-        @sigma_prime = SHAInet.tanh_prime(@input_sum) # Activation function derivative
-        @error = weighted_error_sum*@sigma_prime      # New error of the neuron
+        @error = weighted_error_sum*@sigma_prime # New error of the neuron
       when :sigmoid
-        @sigma_prime = SHAInet.sigmoid_prime(@input_sum)
         @error = weighted_error_sum*@sigma_prime
         # when :bp_sigmoid
         #   @error = SHAInet.bp_sigmoid(z)
