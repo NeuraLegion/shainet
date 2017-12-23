@@ -1,11 +1,12 @@
 module SHAInet
   class Synapse
-    property weight : Float64, prev_weight : Float64
+    property weight : Float64, prev_weight : Float64 # , error : Float64
     getter source_neuron : Neuron, dest_neuron : Neuron
 
     def initialize(@source_neuron : Neuron, @dest_neuron : Neuron)
       @weight = rand(0.0..1.0).to_f64      # Weight of the synapse
-      @prev_weight = rand(0.0..1.0).to_f64 # Needed for delta rule
+      @prev_weight = rand(0.0..1.0).to_f64 # Needed for delta rule improvement (with momentum)
+      # @error = rand(0.0..1.0).to_f64       # Error of the synapse
     end
 
     def randomize_weight

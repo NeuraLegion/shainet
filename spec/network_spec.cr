@@ -66,7 +66,10 @@ describe SHAInet::Network do
 
     puts "-----------"
 
+    xor.run([0, 0])
     xor.run([1, 0])
+    xor.run([0, 1])
+    xor.run([1, 1])
 
     # xor.all_neurons.each_with_index { |n, i| p "Neuron: #{i} => error: #{n.error}" }
     # xor.all_synapses.each_with_index { |s, i| p "synapse: #{i} => weight: #{s.weight}" }
