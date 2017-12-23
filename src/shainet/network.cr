@@ -28,7 +28,7 @@ module SHAInet
       @all_synapses = Array(Synapse).new # Array of all current synapses in the network
       @mean_error = Float64.new(1)       # Average netwrok error based on all the training so far
 
-      @learning_rate = 1.0
+      @learning_rate = 0.7
       @momentum = 0.3
     end
 
@@ -133,7 +133,7 @@ module SHAInet
     end
 
     # Run an input throught the network to get an output (weights & biases do not change)
-    def run(input : Array(GenNum), activation_function : Symbol = :sigmoid) : Array(Float64)
+    def run(input : Array(GenNum), activation_function : Symbol = :sigmoid, stealth : Bool = false) : Array(Float64)
       raise NeuralNetRunError.new("Error initializing network, input data doesn't fit input layers.") unless input.size == @input_layers.first.neurons.size
 
       # Insert the input data into the input layer
@@ -155,7 +155,9 @@ module SHAInet
       output = @output_layers.last.neurons.map { |neuron| neuron.activation } # return an array of all output neuron activations
       # TODO: add support for multiple output layers
 
-      puts "Input => #{input}, networks output => #{output}"
+      unless stealth == true # Hide output report during training
+        puts "Input => #{input}, networks output => #{output}"
+      end
       output
     end
 
@@ -164,7 +166,7 @@ module SHAInet
     def evaluate(input : Array(GenNum), expected : Array(GenNum), cost_function : Symbol, activation_function : Symbol = :sigmoid)
       raise NeuralNetRunError.new("Must define correct cost function type (:mse, :c_ent, :exp, :hel_d, :kld, :gkld, :ita_sai_d).") if COST_FUNCTIONS.any? { |x| x == cost_function } == false
 
-      actual = run(input, activation_function)
+      actual = run(input, activation_function, true)
       raise NeuralNetRunError.new("Expected and actual output must be of the same dimention.") if expected.size != actual.size
 
       # Get the error signal for the final layer, based on the cost function (error signal is stored in the output neurons)
@@ -203,13 +205,57 @@ module SHAInet
     # cost_function type is one of COST_FUNCTIONS described at the top of the file
     # epoch/error_threshold are criteria of when to stop the training
     # learning_rate is set to 0.3 only at the begining but will change dynamically with the total error, can be also changed manually
-    def train(data : Array(Array(Array(GenNum))),
-              cost_function : Symbol,
-              activation_function : Symbol,
-              epochs : Int32,
-              error_threshold : Float64)
+    def train_online(data : Array(Array(Array(GenNum))),
+                     cost_function : Symbol,
+                     activation_function : Symbol,
+                     epochs : Int32,
+                     error_threshold : Float64)
       puts "Training started\n----------"
-      epochs.times do |i|
+
+      e = 0
+      while e <= epochs
+        all_errors = [] of Float64
+
+        # Go over each data point and update the weights/biases based on the specific example
+        data.each do |data_point|
+          total_error = evaluate(data_point[0], data_point[1], cost_function, activation_function) # Get error gradiant from output layer based on current input
+          all_errors << total_error
+
+          # Propogate the errors backwards through the hidden layers
+          l = @hidden_layers.size - 1
+          while l >= 0
+            @hidden_layers[l].neurons.each { |neuron| neuron.hidden_error_prop } # Update neuron error based on errors*weights of neurons from the next layer
+            l -= 1
+          end
+
+          # Update all wieghts & biases
+          update_weights(learning_rate, momentum)
+          update_biases(learning_rate, momentum)
+        end
+        # Get an average error for the last epoch
+        error_sum = all_errors.reduce { |acc, i| acc + i }
+        @mean_error = error_sum/(data.size)
+        if e % 100 == 0
+          # pp all_errors
+          puts "For epoch #{e}, mean error is #{@mean_error}\n----------"
+        end
+        if @mean_error >= error_threshold
+          e += 1
+        else
+          e += epochs
+        end
+      end
+    end
+
+    def train_batch(data : Array(Array(Array(GenNum))),
+                    cost_function : Symbol,
+                    activation_function : Symbol,
+                    epochs : Int32,
+                    error_threshold : Float64)
+      puts "Training started\n----------"
+
+      e = 0
+      while e <= epochs
         all_errors = [] of Float64
 
         # Go over each data point and update the weights/biases based on the specific example
@@ -232,17 +278,18 @@ module SHAInet
         # Get an average error for the last epoch
         error_sum = all_errors.reduce { |acc, i| acc + i }
         @mean_error = error_sum/(data.size)
-        puts "For epoch #{i}, mean error is #{@mean_error}\n----------"
+        puts "For epoch #{e}, mean error is #{@mean_error}\n----------"
+        if @mean_error >= error_threshold
+          e += 1
+        else
+          e += epochs
+        end
       end
-    end
-
-    def train_batch(data : Array(Array(Float64)), epochs : Int32, error_threshold : Float64)
-      # todo
     end
 
     # Update weights based on the gradients and delta rule (including momentum)
     def update_weights(learning_rate : Float64, momentum : Float64)
-      @all_synapses.each do |synapse|
+      @all_synapses.reverse_each do |synapse|
         delta_weight = (-1)*learning_rate*(synapse.source_neuron.activation)*(synapse.dest_neuron.error) + momentum*(synapse.weight - synapse.prev_weight)
         synapse.weight += delta_weight
         synapse.prev_weight = synapse.weight
@@ -251,7 +298,7 @@ module SHAInet
 
     # Update biases based on the gradients and delta rule (including momentum)
     def update_biases(learning_rate : Float64, momentum : Float64)
-      @all_neurons.each do |neuron|
+      @all_neurons.reverse_each do |neuron|
         delta_bias = (-1)*learning_rate*(neuron.error) + momentum*(neuron.bias - neuron.prev_bias)
         neuron.bias += delta_bias
         neuron.prev_bias = neuron.bias

@@ -57,16 +57,18 @@ describe SHAInet::Network do
 
     xor = SHAInet::Network.new
     xor.add_layer(:input, 2, :memory)
-    2.times { |x| xor.add_layer(:hidden, 3, :memory) }
+    1.times { |x| xor.add_layer(:hidden, 2, :memory) }
     xor.add_layer(:output, 1, :memory)
     xor.fully_connect
 
     # data, cost_function, activation_function, epochs, error_threshold, learning_rate, momentum)
-    xor.train(training_data, :mse, :sigmoid, 10, 0.000001)
+    xor.train_online(training_data, :mse, :sigmoid, 10000, 0.000001)
 
     puts "-----------"
 
-    xor.all_neurons.each_with_index { |n, i| p "Neuron: #{i} => error: #{n.error}" }
-    xor.all_synapses.each_with_index { |s, i| p "synapse: #{i} => weight: #{s.weight}" }
+    xor.run([1, 0])
+
+    # xor.all_neurons.each_with_index { |n, i| p "Neuron: #{i} => error: #{n.error}" }
+    # xor.all_synapses.each_with_index { |s, i| p "synapse: #{i} => weight: #{s.weight}" }
   end
 end

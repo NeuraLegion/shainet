@@ -11,9 +11,9 @@ module SHAInet
       raise NeuralNetInitalizationError.new("Must choose currect neuron types, if you're not sure choose :memory as a standard neuron") if NEURON_TYPES.any? { |x| x == @n_type } == false
       @synapses_in = [] of Synapse
       @synapses_out = [] of Synapse
-      @error = Float64.new(0)             # Error of the neuron
+      @error = Float64.new(0)             # Error of the neuron, sometimes refered to as delta
       @bias = rand(-1.0..1.0).to_f64      # Activation threshhold (b)
-      @prev_bias = rand(-1.0..1.0).to_f64 # Needed for delta rule
+      @prev_bias = rand(-1.0..1.0).to_f64 # Needed for delta rule improvement
       @activation = Float64.new(0)        # Activation of neuron after squashing function (a)
       @input_sum = Float64.new(0)         # Sum of activations*weights from input neurons (z)
       @sigma_prime = Float64.new(1)       # derivative of input_sum based on activation function used (s')
