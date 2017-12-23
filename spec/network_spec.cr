@@ -62,7 +62,7 @@ describe SHAInet::Network do
     xor.fully_connect
 
     # data, cost_function, activation_function, epochs, error_threshold, learning_rate, momentum)
-    xor.train_online(training_data, :mse, :sigmoid, 10000, 0.000001)
+    xor.train(training_data, :mse, :sigmoid, 10000, 0.000001)
 
     puts "-----------"
 

@@ -205,11 +205,11 @@ module SHAInet
     # cost_function type is one of COST_FUNCTIONS described at the top of the file
     # epoch/error_threshold are criteria of when to stop the training
     # learning_rate is set to 0.3 only at the begining but will change dynamically with the total error, can be also changed manually
-    def train_online(data : Array(Array(Array(GenNum))),
-                     cost_function : Symbol,
-                     activation_function : Symbol,
-                     epochs : Int32,
-                     error_threshold : Float64)
+    def train(data : Array(Array(Array(GenNum))),
+              cost_function : Symbol,
+              activation_function : Symbol,
+              epochs : Int32,
+              error_threshold : Float64)
       puts "Training started\n----------"
 
       e = 0
