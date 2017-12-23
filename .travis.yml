@@ -1,1 +1,10 @@
 language: crystal
+script: crystal spec
+notifications:
+  email:
+    recipients:
+      - art.linkov@neuralegion.com
+      - bar.hofesh@neuralegion.com
+    on_success: always # default: change
+    on_failure: always # default: always
+
