@@ -89,6 +89,8 @@ module SHAInet
         end
       end
       @all_synapses.uniq
+    rescue e : Exception
+      raise NeuralNetRunError.new("Error fully connecting network: #{e}")
     end
 
     # Connect two specific layers with synapses
@@ -158,6 +160,8 @@ module SHAInet
         @logger.info("Input => #{input}, network output => #{output}")
       end
       output
+    rescue e : Exception
+      raise NeuralNetRunError.new("Error running on layers: #{e}")
     end
 
     # Quantifies how good the network performed for a single input compared to the expected output
@@ -198,6 +202,8 @@ module SHAInet
       end
       total_error = total_error.reduce { |acc, i| acc + i } # Sum up all the errors from output layer
       return total_error
+    rescue e : Exception
+      raise NeuralNetRunError.new("Error in evaluate: #{e}")
     end
 
     # Input structure: data = [[Input = [] of Float64],[Expected result = [] of Float64]]
@@ -217,7 +223,10 @@ module SHAInet
         all_errors = [] of Float64
 
         # Go over each data point and update the weights/biases based on the specific example
-        data.each do |data_point|
+        data.each_with_index do |data_point, i|
+          if data_point.size < 2
+            raise NeuralNetRunError.new("Error in training, dataset index number: #{i} doesn't have output (less then 2 members in array)")
+          end
           total_error = evaluate(data_point[0], data_point[1], cost_function, activation_function) # Get error gradiant from output layer based on current input
           all_errors << total_error
 
@@ -244,6 +253,9 @@ module SHAInet
           e += epochs
         end
       end
+    rescue e : Exception
+      @logger.error("Error in training: #{e} #{e.backtrace}")
+      raise e
     end
 
     # def train_batch(data : Array(Array(Array(GenNum))),
