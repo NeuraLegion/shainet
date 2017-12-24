@@ -1,5 +1,4 @@
 require "logger"
-require "matrix_extend"
 
 module SHAInet
   class Network
