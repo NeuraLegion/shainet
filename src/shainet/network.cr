@@ -138,9 +138,10 @@ module SHAInet
       raise NeuralNetRunError.new("Error input data doesn't fit input layers.") unless input.size == @input_layers.first.neurons.size
 
       # Insert the input data into the input layer
-      @input_layers.first.neurons.each_with_index do |neuron, i| # Inserts the input information into the input layers
-      # TODO: add support for multiple input layers
-        neuron.activation = input[i].to_f64
+      input.each_with_index do |data, i|
+        # Inserts the input information into the input layers
+        # TODO: add support for multiple input layers
+        @input_layers.first.neurons[i].activation = data.to_f64
       end
 
       # Propogate the information forward through the hidden layers
@@ -156,12 +157,12 @@ module SHAInet
       output = @output_layers.last.neurons.map { |neuron| neuron.activation } # return an array of all output neuron activations
       # TODO: add support for multiple output layers
 
-      unless stealth == true # Hide output report during training
+      unless stealth # Hide output report during training
         @logger.info("Input => #{input}, network output => #{output}")
       end
       output
     rescue e : Exception
-      raise NeuralNetRunError.new("Error running on layers: #{e}")
+      raise NeuralNetRunError.new("Error running on layers: #{e} #{e.backtrace}")
     end
 
     # Quantifies how good the network performed for a single input compared to the expected output
