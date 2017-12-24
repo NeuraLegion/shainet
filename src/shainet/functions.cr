@@ -2,24 +2,23 @@ module SHAInet
   # # Activation functions # #
 
   def self.sigmoid(value : GenNum) : Float64 # Output range (0..1)
-    (1.0/(1.0 + Math.log(-value, Math::E))).to_f64
+    (1.0/(1.0 + Math::E**(-value))).to_f64
   end
 
   def self.bp_sigmoid(value : GenNum) : Float64 # Output range (-1..1)
-    ((1.0 - Math.log(-value, Math::E))/(1.0 + Math.log(-value, Math::E))).to_f64
+    ((1.0 - Math::E**(-value))/(1.0 + Math::E**(-value))).to_f64
   end
 
   def self.log_sigmoid(value : GenNum) : Float64 # Output range (0..1)
-    ((Math.log(value, Math::E))/(1.0 + Math.log(value, Math::E))).to_f64
+    ((Math::E**(value))/(1.0 + Math::E**(value))).to_f64
   end
 
   def self.tanh(value : GenNum) : Float64 # Output range (-1..1)
-    ((Math.log(value, Math::E) - Math.log(-value, Math::E))/(Math.log(value, Math::E) + Math.log(-value, Math::E))).to_f64
+    ((Math::E**(value) - Math::E**(-value))/(Math::E**(value) + Math::E**(-value))).to_f64
   end
 
   def self.relu(value : GenNum) # Output range (0..inf)
-    if value <= 0
-      Math.log(-value, Math::E)
+    if value < 0
       (0).to_f64
     else
       value.to_f64
@@ -27,7 +26,7 @@ module SHAInet
   end
 
   def self.l_relu(value : GenNum, slope : Float64 = 0.01) : Float64 # Output range (-inf..inf)
-    if value <= 0
+    if value < 0
       slope.to_f64*value.to_f64
     else
       value.to_f64
