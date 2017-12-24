@@ -1,5 +1,7 @@
 # SHAInet
 
+[![Build Status](https://travis-ci.org/NeuraLegion/shainet.svg?branch=master)](https://travis-ci.org/NeuraLegion/shainet)
+
 SHAInet - stands for Super Human Artificial Intelligence network
 a neural network in pure Crystal
 
