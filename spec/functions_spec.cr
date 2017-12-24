@@ -2,23 +2,27 @@ require "./spec_helper"
 
 describe SHAInet do
   # TODO: Write tests
-  it "check functions" do
-    # matrix1 = [[1, 1, 1], [2, 2, 2], [3, 3, 3], [4, 4, 4]]
-    # matrix2 = [[1, 1, 1, 1], [10, 10, 10, 10]]
-    # new_m = SHAInet.dot_product(matrix1, matrix2)
-    m1 = MatrixExtend::Matrix(Int32).new(3, 3, 1)
-    m2 = MatrixExtend::Matrix(Int32).new(3, 2, 2)
-    m3 = MatrixExtend::Matrix(Int32).new(3, 2, [[10, 10], [100, 100], [1000, 1000]])
-    # m3 = [10, 100, 1000]
-    pp m1.to_a, m2.to_a, m3.to_a
-    m1xm2 = m1*m2
-    pp m1xm2.to_a
-    m1xm2xm3 = SHAInet.h_product(m1xm2, m3)
-    pp m1xm2xm3.to_a
+  it "check sigmoid" do
+    ((0..1).includes?(SHAInet.sigmoid(6))).should eq(true)
+  end
 
-    # def each_line(&b)
-    #   @data.each_with_index { |l, i| yield l, i }
-    #   self
-    # end
+  it "check bp_sigmoid" do
+    ((-1..1).includes?(SHAInet.bp_sigmoid(6))).should eq(true)
+  end
+
+  it "check log_sigmoid" do
+    ((0..1).includes?(SHAInet.log_sigmoid(6))).should eq(true)
+  end
+
+  it "check tanh" do
+    ((-1..1).includes?(SHAInet.tanh(6))).should eq(true)
+  end
+
+  it "check relu" do
+    ((0..Int64::MAX).includes?(SHAInet.relu(6))).should eq(true)
+  end
+
+  it "check l_relu" do
+    ((Int64::MIN..Int64::MAX).includes?(SHAInet.l_relu(6, 0.5))).should eq(true)
   end
 end

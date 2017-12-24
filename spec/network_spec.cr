@@ -1,7 +1,11 @@
 require "./spec_helper"
 
 describe SHAInet::Network do
-  # TODO: Write tests
+  it "Initialize" do
+    nn = SHAInet::Network.new
+    nn.should be_a(SHAInet::Network)
+  end
+
   it "figure out xor" do
     training_data = [[[0, 0], [0]],
                      [[1, 0], [1]],
@@ -16,8 +20,6 @@ describe SHAInet::Network do
 
     # data, cost_function, activation_function, epochs, error_threshold, learning_rate, momentum)
     xor.train(training_data, :mse, :sigmoid, 10000, 0.000001)
-
-    puts "-----------"
 
     (xor.run([0, 0]).first < 0.1).should eq(true)
   end
