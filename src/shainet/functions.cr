@@ -67,22 +67,6 @@ module SHAInet
 
   # # Linear algebra math # #
 
-  # Element-wise multiplications (Hadamard product) for Matrix class
-  def self.h_product(m1 : Matrix, m2 : Matrix)
-    # unless m1 == m2
-    #   raise MathError.new("m1,m2 must be of same dimentions")
-    # end
-    new_metrix = [] of Array(GenNum)
-    cols = m1.data.first.size
-    m1.data.size.times do |row|
-      new_row = [] of GenNum
-      cols.times { |col| new_row << m1.data[row][col]*m2.data[row][col] }
-      new_metrix << new_row
-    end
-    puts new_metrix
-    return MatrixExtend::Matrix(GenNum).from(new_metrix)
-  end
-
   # vector multiplication
   def self.vector_mult(array1 : Array(Float64), array2 : Array(Float64))
     raise MathError.new("Vectors must be the same size to multiply!") if array1.size != array2.size
