@@ -22,6 +22,14 @@ module SHAInet
       arr
     end
 
+    def raw_data
+      arr = Array(Array(Array(Float64))).new
+      @inputs.each_with_index do |i_arr, i|
+        arr << [@inputs[i], @outputs[i]]
+      end
+      arr
+    end
+
     def normalize_min_max
       # Get inputs min-max
       i_max = Array(GenNum).new
