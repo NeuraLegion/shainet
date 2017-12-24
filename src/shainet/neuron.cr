@@ -5,18 +5,23 @@ module SHAInet
 
   class Neuron
     property :n_type, :synapses_in, :synapses_out, activation : Float64, error : Float64, bias : Float64, prev_bias : Float64
+    property current_delta : Float64, prev_delta : Float64
     getter :input_sum, :sigma_prime
 
     def initialize(@n_type : Symbol)
       raise NeuralNetInitalizationError.new("Must choose currect neuron types, if you're not sure choose :memory as a standard neuron") if NEURON_TYPES.any? { |x| x == @n_type } == false
       @synapses_in = [] of Synapse
       @synapses_out = [] of Synapse
+      @activation = Float64.new(0)        # Activation of neuron after squashing function (a)
       @error = Float64.new(0)             # Error of the neuron, sometimes refered to as delta
       @bias = rand(-1.0..1.0).to_f64      # Activation threshhold (b)
-      @prev_bias = rand(-1.0..1.0).to_f64 # Needed for delta rule improvement
-      @activation = Float64.new(0)        # Activation of neuron after squashing function (a)
-      @input_sum = Float64.new(0)         # Sum of activations*weights from input neurons (z)
-      @sigma_prime = Float64.new(1)       # derivative of input_sum based on activation function used (s')
+      @prev_bias = rand(-1.0..1.0).to_f64 # Needed for delta rule improvement using momentum
+
+      @current_delta = 1.0 # Needed for RPROP
+      @prev_delta = 1.0    # Needed for RPROP
+
+      @input_sum = Float64.new(0)   # Sum of activations*weights from input neurons (z)
+      @sigma_prime = Float64.new(1) # derivative of input_sum based on activation function used (s')
     end
 
     # This is the forward propogation

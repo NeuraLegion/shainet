@@ -6,11 +6,12 @@ module SHAInet
     CONNECTION_TYPES = [:full, :ind_to_ind, :random]
     COST_FUNCTIONS   = [:mse, :c_ent, :exp, :hel_d, :kld, :gkld, :ita_sai_d]
 
-    getter :input_layers, :output_layers, :hidden_layers, :all_neurons, :all_synapses, :mean_error
+    getter :input_layers, :output_layers, :hidden_layers, :all_neurons, :all_synapses, :mean_error, :w_gradient, :b_gradient
     property learning_rate : Float64, momentum : Float64
+    property etah_plus : Float64, etah_minus : Float64, delta_max : Float64, delta_min : Float64
 
-    # property :activations, :input_sums, :biases, :weights
-    # property :error_signal, :error_gradient, :weight_gradient, :bias_gradient
+    @w_gradient : Array(Float64)
+    @b_gradient : Array(Float64)
 
     # # Notes:
     # # ------------
@@ -27,8 +28,16 @@ module SHAInet
       @all_synapses = Array(Synapse).new # Array of all current synapses in the network
       @mean_error = Float64.new(1)       # Average netwrok error based on all the training so far
 
-      @learning_rate = 0.7
-      @momentum = 0.3
+      @w_gradient = Array(Float64).new # Needed for batch train
+      @b_gradient = Array(Float64).new # Needed for batch train
+
+      # Parameters for gradient descent
+      @learning_rate = 0.7 # Standard parameter for GD
+      @momentum = 0.5      # Improved GD
+      @etah_plus = 1.2     # For iRPROP+ , how to increase step size
+      @etah_minus = 0.5    # For iRPROP+ , how to decrease step size
+      @delta_max = 50.0    # For iRPROP+ , max step size
+      @delta_min = 0.1     # For iRPROP+ , min step size
     end
 
     # Create and populate a layer with neurons
@@ -39,6 +48,7 @@ module SHAInet
       layer = Layer.new(n_type, l_size, @logger)
       layer.neurons.each { |neuron| @all_neurons << neuron } # To easily access neurons later
 
+      @delta_max = 1 # Max step size
       case l_type
       when :input
         @input_layers << layer
@@ -200,16 +210,13 @@ module SHAInet
       return total_error
     end
 
-    # Input structure: data = [[Input = [] of Float64],[Expected result = [] of Float64]]
-    # cost_function type is one of COST_FUNCTIONS described at the top of the file
-    # epoch/error_threshold are criteria of when to stop the training
-    # learning_rate is set to 0.3 only at the begining but will change dynamically with the total error, can be also changed manually
-    def train(data : Array(Array(Array(GenNum))),
-              cost_function : Symbol,
-              activation_function : Symbol,
-              epochs : Int32,
-              error_threshold : Float64,
-              log_each : Int32 = 100)
+    # Online train, updates weights/biases after each data point (stochastic gradient descent)
+    def train(data : Array(Array(Array(GenNum))), # Input structure: data = [[Input = [] of Float64],[Expected result = [] of Float64]]
+              cost_function : Symbol,             # one of COST_FUNCTIONS described at the top of the file
+              activation_function : Symbol,       # squashing performed on the activations within the network
+              epochs : Int32,                     # a criteria of when to stop the training
+              error_threshold : Float64,          # a criteria of when to stop the training
+              log_each : Int32 = 100)             # determines what is the step for error printout
       @logger.info("Training started")
 
       e = 0
@@ -229,14 +236,14 @@ module SHAInet
           end
 
           # Update all wieghts & biases
-          update_weights
-          update_biases
+          update_weights(batch = false)
+          update_biases(batch = false)
         end
         # Get an average error for the last epoch
         error_sum = all_errors.reduce { |acc, i| acc + i }
         @mean_error = 100*error_sum/(data.size)
         if e % log_each == 0
-          @logger.info("Epoch: #{e}, MSE: #{@mean_error}")
+          @logger.info("Epoch: #{e}, ME: #{@mean_error}")
         end
         if @mean_error >= error_threshold
           e += 1
@@ -246,78 +253,94 @@ module SHAInet
       end
     end
 
-    # def train_batch(data : Array(Array(Array(GenNum))),
-    #                 cost_function : Symbol,
-    #                 activation_function : Symbol,
-    #                 epochs : Int32,
-    #                 error_threshold : Float64)
-    #   puts "Training started\n----------"
+    # Batch train, updates weights/biases using a gradient sum from all data points in the batch (using gradient descent)
+    def train_batch(data : Array(Array(Array(GenNum))), # Input structure: data = [[Input = [] of Float64],[Expected result = [] of Float64]]
+                    cost_function : Symbol,             # one of COST_FUNCTIONS described at the top of the file
+                    activation_function : Symbol,       # squashing performed on the activations within the network
+                    epochs : Int32,                     # a criteria of when to stop the training
+                    error_threshold : Float64,          # a criteria of when to stop the training
+                    log_each : Int32 = 100)             # determines what is the step for error printout
+      @logger.info("Training started")
 
-    #   e = 0
-    #   while e <= epochs
-    #     all_errors = [] of Float64
-    #     batch_w_grad = [] of Array(Float64) # Save gradients from entire batch before updating weights & biases
-    #     batch_b_grad = [] of Array(Float64)
+      e = 0
+      while e <= epochs
+        all_errors = [] of Float64
+        batch_w_grad = [] of Array(Float64) # Save gradients from entire batch before updating weights & biases
+        batch_b_grad = [] of Array(Float64)
 
-    #     # Go over each data point and update the weights/biases based on the specific example
-    #     data.each do |data_point|
-    #       total_error = evaluate(data_point[0], data_point[1], cost_function, activation_function) # Get error gradiant from output layer based on current input
-    #       all_errors << total_error
+        # Go over each data point and collect gradients of weights/biases based on each specific example
+        data.each do |data_point|
+          total_error = evaluate(data_point[0], data_point[1], cost_function, activation_function) # Get error gradiant from output layer based on current input
+          all_errors << total_error
 
-    #       # Propogate the errors backwards through the hidden layers
-    #       l = @hidden_layers.size - 1
-    #       while l >= 0
-    #         @hidden_layers[l].neurons.each { |neuron| neuron.hidden_error_prop } # Update neuron error based on errors*weights of neurons from the next layer
-    #         l -= 1
-    #       end
+          # Propogate the errors backwards through the hidden layers
+          l = @hidden_layers.size - 1
+          while l >= 0
+            @hidden_layers[l].neurons.each { |neuron| neuron.hidden_error_prop } # Update neuron error based on errors*weights of neurons from the next layer
+            l -= 1
+          end
 
-    #       # Save all gradients from each data point for the batch update
-    #       w_grad = [] of Float64
-    #       b_grad = [] of Float64
+          # Save all gradients from each data point for the batch update
+          w_grad = [] of Float64
+          b_grad = [] of Float64
 
-    #       @all_synapses.each { |synapse| w_grad << (synapse.source_neuron.activation)*(synapse.dest_neuron.error) }
-    #       batch_w_grad << w_grad
-    #       @all_neurons.each { |neuron| b_grad << neuron.error }
-    #       batch_b_grad << b_grad
-    #     end
+          @all_synapses.each { |synapse| w_grad << (synapse.source_neuron.activation)*(synapse.dest_neuron.error) }
+          batch_w_grad << w_grad
+          @all_neurons.each { |neuron| b_grad << neuron.error }
+          batch_b_grad << b_grad
+        end
 
-    #     # Sum up gradients into a single array
-    #     batch = batch_w_grad.transpose
-    #     w_grad = [] of Float64
-    #     batch.each { |array| w_grad << array.reduce { |acc, i| acc + i } }
-    #     batch = batch_b_grad.transpose
-    #     b_grad = [] of Float64
-    #     batch.each { |array| b_grad << array.reduce { |acc, i| acc + i } }
+        # Sum up gradients into a single array
+        batch = batch_w_grad.transpose
+        @w_gradient = [] of Float64
+        batch.each { |array| @w_gradient << array.reduce { |acc, i| acc + i } }
+        batch = batch_b_grad.transpose
+        @b_gradient = [] of Float64
+        batch.each { |array| @b_gradient << array.reduce { |acc, i| acc + i } }
 
-    #     # Update all wieghts & biases
-    #     update_weights
-    #     update_biases
+        # Update all wieghts & biases
+        update_weights(batch = true)
+        update_biases(batch = true)
 
-    #     pp all_errors
-    #     # Get an average error for the last epoch
-    #     error_sum = all_errors.reduce { |acc, i| acc + i }
-    #     @mean_error = error_sum/(data.size)
-    #     puts "For epoch #{e}, mean error is #{@mean_error}\n----------"
-    #     if @mean_error >= error_threshold
-    #       e += 1
-    #     else
-    #       e += epochs
-    #     end
-    #   end
-    # end
+        # Get an average error for the last epoch
+        error_sum = all_errors.reduce { |acc, i| acc + i }
+        @mean_error = error_sum/(data.size)
+        if e % log_each == 0
+          @logger.info("Epoch: #{e}, ME: #{@mean_error}")
+        end
+        if @mean_error >= error_threshold
+          e += 1
+        else
+          e += epochs
+        end
+      end
+    end
+
+    # Use
+    def train_rprop
+    end
 
     # Update weights based on the gradients and delta rule (including momentum)
-    def update_weights
-      @all_synapses.reverse_each do |synapse|
-        delta_weight = (-1)*@learning_rate*(synapse.source_neuron.activation)*(synapse.dest_neuron.error) + @momentum*(synapse.weight - synapse.prev_weight)
+    def update_weights(batch : Bool = false)
+      @all_synapses.each_with_index do |synapse, i|
+        if batch == true
+          synapse.gradient = @w_gradient.not_nil![i]
+        else
+          synapse.gradient = (synapse.source_neuron.activation)*(synapse.dest_neuron.error)
+        end
+
+        delta_weight = (-1)*@learning_rate*synapse.gradient + @momentum*(synapse.weight - synapse.prev_weight)
         synapse.weight += delta_weight
         synapse.prev_weight = synapse.weight
       end
     end
 
     # Update biases based on the gradients and delta rule (including momentum)
-    def update_biases
-      @all_neurons.reverse_each do |neuron|
+    def update_biases(batch : Bool = false)
+      @all_neurons.each_with_index do |neuron, i|
+        if batch == true
+          neuron.error = @b_gradient.not_nil![i]
+        end
         delta_bias = (-1)*@learning_rate*(neuron.error) + @momentum*(neuron.bias - neuron.prev_bias)
         neuron.bias += delta_bias
         neuron.prev_bias = neuron.bias

@@ -55,4 +55,33 @@ describe SHAInet::Network do
     puts normalized
     iris.train(normalized.data, :mse, :sigmoid, 10000, 0.000001)
   end
+
+  it "works on iris dataset with batch train" do
+    label = {
+      "setosa"     => [0.to_f64, 0.to_f64, 1.to_f64],
+      "versicolor" => [0.to_f64, 1.to_f64, 0.to_f64],
+      "virginica"  => [1.to_f64, 0.to_f64, 0.to_f64],
+    }
+    iris = SHAInet::Network.new
+    iris.add_layer(:input, 4, :memory)
+    iris.add_layer(:hidden, 5, :memory)
+    iris.add_layer(:hidden, 5, :memory)
+    iris.add_layer(:output, 3, :memory)
+    iris.fully_connect
+
+    outputs = Array(Array(SHAInet::GenNum)).new
+    inputs = Array(Array(SHAInet::GenNum)).new
+    CSV.each_row(File.read(__DIR__ + "/test_data/iris.csv")) do |row|
+      row_arr = Array(Float64).new
+      row[0..-2].each do |num|
+        row_arr << num.to_f64
+      end
+      inputs << row_arr
+      outputs << label[row[-1]]
+    end
+    normalized = SHAInet::TrainingData.new(inputs, outputs)
+    normalized.normalize_min_max
+    puts normalized
+    iris.train_batch(normalized.data, :mse, :sigmoid, 10000, 0.000001)
+  end
 end
