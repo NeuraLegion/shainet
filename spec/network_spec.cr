@@ -40,8 +40,8 @@ describe SHAInet::Network do
     iris.add_layer(:output, 3, :memory)
     iris.fully_connect
 
-    outputs = Array(Array(SHAInet::GenNum)).new
-    inputs = Array(Array(SHAInet::GenNum)).new
+    outputs = Array(Array(Float64)).new
+    inputs = Array(Array(Float64)).new
     CSV.each_row(File.read(__DIR__ + "/test_data/iris.csv")) do |row|
       row_arr = Array(Float64).new
       row[0..-2].each do |num|
