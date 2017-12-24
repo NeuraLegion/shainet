@@ -13,7 +13,7 @@ module SHAInet
     # If you don't want neurons to have a blank memory of zeros
     def random_seed
       @neurons.each do |neuron|
-        neuron.memory = Array(Float64).new(memory_size) { |i| rand(-1.0..1.0) }
+        neuron.activation = rand(-1.0..1.0).to_f64
       end
       @logger.info("Layers seeded with random values")
     end
@@ -28,7 +28,6 @@ module SHAInet
 
     def inspect
       @logger.info(@n_type)
-      @logger.info(@memory_size)
       @logger.info(@neurons)
     end
   end

@@ -1,32 +1,20 @@
 require "./spec_helper"
 
 describe SHAInet::Layer do
-  # TODO: Write tests
-  # it "check layer creation" do
-  #   # Layer creation needs: layer_size, layer_type, memory_size
-  #   memory_layer = SHAInet::Layer.new(4, :memory, 2)
-  #   eraser_layer = SHAInet::Layer.new(4, :eraser, 2)
+  it "Initialize" do
+    layer = SHAInet::Layer.new(:memory, 4)
+    layer.should be_a(SHAInet::Layer)
+  end
 
-  #   pp memory_layer
-  #   pp eraser_layer
-  #   # payloads_v.each { |x| puts x }
-  # end
+  it "randomize seed" do
+    layer = SHAInet::Layer.new(:memory, 4)
+    layer.random_seed
+    (layer.neurons.sample.activation != 0.0).should eq(true)
+  end
 
   it "check layer added functions" do
-    # Layer creation needs: layer_type, layer_size, memory_size
-    layer = SHAInet::Layer.new(:memory, 3)
-    pp layer
-    puts "------------------"
-
-    layer.random_seed
-    pp layer
-    puts "------------------"
-
-    layer.memory_change(2)
-    pp layer
-    puts "------------------"
-
+    layer = SHAInet::Layer.new(:memory, 4)
     layer.type_change(:eraser)
-    pp layer
+    layer.n_type.should eq(:eraser)
   end
 end

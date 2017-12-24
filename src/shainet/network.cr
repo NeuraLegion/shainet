@@ -134,7 +134,7 @@ module SHAInet
 
     # Run an input throught the network to get an output (weights & biases do not change)
     def run(input : Array(GenNum), activation_function : Symbol = :sigmoid, stealth : Bool = false) : Array(Float64)
-      raise NeuralNetRunError.new("Error initializing network, input data doesn't fit input layers.") unless input.size == @input_layers.first.neurons.size
+      raise NeuralNetRunError.new("Error input data doesn't fit input layers.") unless input.size == @input_layers.first.neurons.size
 
       # Insert the input data into the input layer
       @input_layers.first.neurons.each_with_index do |neuron, i| # Inserts the input information into the input layers
@@ -156,7 +156,7 @@ module SHAInet
       # TODO: add support for multiple output layers
 
       unless stealth == true # Hide output report during training
-        puts "Input => #{input}, network output => #{output}"
+        @logger.info("Input => #{input}, network output => #{output}")
       end
       output
     end
@@ -209,8 +209,9 @@ module SHAInet
               cost_function : Symbol,
               activation_function : Symbol,
               epochs : Int32,
-              error_threshold : Float64)
-      puts "Training started\n----------"
+              error_threshold : Float64,
+              log_each : Int32 = 100)
+      @logger.info("Training started")
 
       e = 0
       while e <= epochs
@@ -235,9 +236,8 @@ module SHAInet
         # Get an average error for the last epoch
         error_sum = all_errors.reduce { |acc, i| acc + i }
         @mean_error = 100*error_sum/(data.size)
-        if e % 1000 == 0
-          # pp all_errors
-          puts "For epoch #{e}, mean error is #{@mean_error}\n----------"
+        if e % log_each == 0
+          @logger.info("Epoch: #{e}, MSE: #{@mean_error}")
         end
         if @mean_error >= error_threshold
           e += 1
