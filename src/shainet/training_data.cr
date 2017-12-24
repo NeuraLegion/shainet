@@ -7,7 +7,7 @@ module SHAInet
 
     getter :normalized_outputs, :normalized_inputs
 
-    def initialize(@inputs : Array(Array(GenNum)), @outputs : Array(Array(GenNum)))
+    def initialize(@inputs : Array(Array(Float64)), @outputs : Array(Array(Float64)))
       @normalized_inputs = Array(Array(Float64)).new
       @normalized_outputs = Array(Array(Float64)).new
       @yrange = 1
