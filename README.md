@@ -5,10 +5,10 @@
 
 
 SHAInet - stands for Super Human Artificial Intelligence network
-a neural network in pure Crystal
+a neural network in pure [Crystal](https://crystal-lang.org/)  
 
-The current network is a vanilla NN, which supports backprop and feed-forward.
-It solves XOR and iris dataset which is part of the network specs.  
+At the [Roadmap](https://github.com/NeuraLegion/shainet#development) you can see what we plan to add to the network as the project will progress.  
+
 
 ## Installation
 
@@ -57,6 +57,10 @@ xor.run([0, 0])
   - [ ] Add rprop/irprop+  
   - [ ] Add more activation functions.  
   - [ ] Add more cost functions.  
+  - [ ] Add more optimizers  
+    - [ ] ADAM  
+    - [ ] RMSPROP  
+    - [ ] NADAM  
 
 ### Advanced Features  
   - [ ] Bind and use CUDA (GPU acceleration)  
