@@ -101,13 +101,13 @@ module SHAInet
     end
 
     # Connect two specific layers with synapses
-    def connect_ltl(layer1 : Layer, layer2 : Layer, connection_type : Symbol)
+    def connect_ltl(source : Layer, destination : Layer, connection_type : Symbol)
       raise NeuralNetInitalizationError.new("Error initilizing network, must choose correct connection type.") if CONNECTION_TYPES.any? { |x| x == connection_type } == false
       case connection_type
       # Connect each neuron from source layer to all neurons in destination layer
       when :full
-        layer1.each do |neuron1|   # Source neuron
-          layer2.each do |neuron2| # Destination neuron
+        source.neurons.each do |neuron1|        # Source neuron
+          destination.neurons.each do |neuron2| # Destination neuron
             synapse = Synapse.new(neuron1, neuron2)
             neuron1.synapses_out << synapse
             neuron2.synapses_in << synapse
@@ -116,18 +116,18 @@ module SHAInet
         end
         # Connect each neuron from source layer to neuron with corresponding index in destination layer
       when :ind_to_ind
-        raise NeuralNetInitalizationError.new("Error initializing network, index to index connection requires layers of same size.") if layer1.size != layer2.size
-        (0..layer1.size).each do |index|
-          synapse = Synapse.new(layer1[index], layer2[index])
-          layer1[index].synapses_out << synapse
-          layer2[index].synapses_in << synapse
+        raise NeuralNetInitalizationError.new("Error initializing network, index to index connection requires layers of same size.") if source.neurons.size != destination.neurons.size
+        (0..source.neurons.size).each do |index|
+          synapse = Synapse.new(source.neurons[index], destination.neurons[index])
+          source.neurons[index].synapses_out << synapse
+          destination.neurons[index].synapses_in << synapse
           @all_synapses << synapse
         end
 
         # Randomly decide if each neuron from source layer will connect to a neuron from destination layer
       when :random
-        layer1.each do |neuron1|   # Source neuron
-          layer2.each do |neuron2| # Destination neuron
+        source.neurons.each do |neuron1|        # Source neuron
+          destination.neurons.each do |neuron2| # Destination neuron
             x = rand(0..1)
             if x <= 0.5 # Currently set to 50% chance, this can be changed at will
               synapse = Synapse.new(neuron1, neuron2)
