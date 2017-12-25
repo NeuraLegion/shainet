@@ -4,24 +4,27 @@ module SHAInet
   ACTIVATION_TYPES = [:tanh, :sigmoid, :bp_sigmoid, :log_sigmoid, :relu, :l_relu]
 
   class Neuron
-    property :n_type, :synapses_in, :synapses_out, activation : Float64, error : Float64, bias : Float64, prev_bias : Float64
-    property current_delta : Float64, prev_delta : Float64
+    property :n_type, :synapses_in, :synapses_out, activation : Float64, gradient : Float64, bias : Float64, prev_bias : Float64
     getter :input_sum, :sigma_prime
+    property prev_gradient : Float64, prev_delta : Float64, prev_delta_b : Float64 # current_delta : Float64
 
     def initialize(@n_type : Symbol)
       raise NeuralNetInitalizationError.new("Must choose currect neuron types, if you're not sure choose :memory as a standard neuron") if NEURON_TYPES.any? { |x| x == @n_type } == false
       @synapses_in = [] of Synapse
       @synapses_out = [] of Synapse
-      @activation = Float64.new(0)        # Activation of neuron after squashing function (a)
-      @error = Float64.new(0)             # Error of the neuron, sometimes refered to as delta
-      @bias = rand(-1.0..1.0).to_f64      # Activation threshhold (b)
-      @prev_bias = rand(-1.0..1.0).to_f64 # Needed for delta rule improvement using momentum
-
-      @current_delta = 1.0 # Needed for RPROP
-      @prev_delta = 1.0    # Needed for RPROP
+      @activation = Float64.new(0)    # Activation of neuron after squashing function (a)
+      @gradient = Float64.new(0)      # Error of the neuron, sometimes refered to as delta
+      @bias = rand(-1..1).to_f64      # Activation threshhold (b)
+      @prev_bias = rand(-1..1).to_f64 # Needed for delta rule improvement using momentum
 
       @input_sum = Float64.new(0)   # Sum of activations*weights from input neurons (z)
       @sigma_prime = Float64.new(1) # derivative of input_sum based on activation function used (s')
+
+      # Parameters needed for Rprop
+      # @current_delta = rand(0.0..1.0).to_f64
+      @prev_gradient = rand(-0.1..0.1).to_f64
+      @prev_delta = rand(0.0..0.1).to_f64
+      @prev_delta_b = rand(-0.1..0.1).to_f64
     end
 
     # This is the forward propogation
@@ -67,17 +70,17 @@ module SHAInet
       weighted_error_sum = new_errors.reduce { |acc, i| acc + i } # Sum weighted error from target neurons (instead of using w_matrix*delta), returns Float64
       case activation_function                                    # Take into account the derivative of the squashing function
       when :tanh
-        @error = weighted_error_sum*@sigma_prime # New error of the neuron
+        @gradient = weighted_error_sum*@sigma_prime # New error of the neuron
       when :sigmoid
-        @error = weighted_error_sum*@sigma_prime
+        @gradient = weighted_error_sum*@sigma_prime
         # when :bp_sigmoid
-        #   @error = SHAInet.bp_sigmoid(z)
+        #   @gradient = SHAInet.bp_sigmoid(z)
         # when :log_sigmoid
-        #   @error = SHAInet.log_sigmoid(z)
+        #   @gradient = SHAInet.log_sigmoid(z)
         # when :relu
-        #   @error = SHAInet.relu(z)
+        #   @gradient = SHAInet.relu(z)
         # when :l_relu
-        #   @error = SHAInet.l_relu(z, 0.2) # value of 0.2 is the slope for x<0
+        #   @gradient = SHAInet.l_relu(z, 0.2) # value of 0.2 is the slope for x<0
       else
         raise NeuralNetRunError.new("Propogation requires a valid activation function.")
       end
@@ -86,7 +89,7 @@ module SHAInet
     def inspect
       pp @n_type
       pp @activation
-      pp @error
+      pp @gradient
       pp @sigma_prime
       pp @synapses_in
       pp @synapses_out
