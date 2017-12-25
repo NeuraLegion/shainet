@@ -54,5 +54,7 @@ describe SHAInet::Network do
     normalized.normalize_min_max
     puts normalized
     iris.train(normalized.data, :mse, :sigmoid, 10000, 0.000001)
+    result = iris.run(normalized.normalized_inputs.first)
+    ((result.first < 0.1) && (result[1] < 0.1) && (result.last > 0.9)).should eq(true)
   end
 end
