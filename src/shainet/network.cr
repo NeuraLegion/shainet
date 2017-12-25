@@ -45,7 +45,14 @@ module SHAInet
       when :hidden
         @hidden_layers << layer
       when :output
-        @output_layers << layer
+        if @output_layers.empty?
+          @output_layers << layer
+        else
+          @hidden_layers << @output_layers.first
+          @output_layers.delete(@output_layers.first)
+          @output_layers << layer
+          connect_ltl(@hidden_layers.last, @output_layers.first, :full)
+        end
       else
         raise NeuralNetRunError.new("Must define correct layer type (:input, :hidden, :output).")
       end
