@@ -162,7 +162,7 @@ module SHAInet
       end
       output
     rescue e : Exception
-      raise NeuralNetRunError.new("Error running on layers: #{e} #{e.backtrace}")
+      raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
     end
 
     # Quantifies how good the network performed for a single input compared to the expected output
@@ -255,7 +255,7 @@ module SHAInet
         end
       end
     rescue e : Exception
-      @logger.error("Error in training: #{e} #{e.backtrace}")
+      @logger.error("Error in training: #{e} #{e.inspect_with_backtrace}")
       raise e
     end
 
