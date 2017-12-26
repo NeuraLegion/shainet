@@ -86,6 +86,6 @@ describe SHAInet::Network do
     normalized.normalize_min_max
     iris.train_batch(normalized.data, :rprop, :mse, :sigmoid, 20000, 0.01)
     result = iris.run(normalized.normalized_inputs.first)
-    ((result.first < 0.3) && (result[1] < 0.3) && (result.last > 0.8)).should eq(true)
+    ((result.first < 0.3) && (result[1] < 0.3) && (result.last > 0.7)).should eq(true)
   end
 end
