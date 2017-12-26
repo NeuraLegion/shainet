@@ -91,10 +91,9 @@ iris.run(normalized.normalized_inputs.first)
   - [x] Add sgd,minibatch-update.  
   - [x] Add more activation functions.  
   - [ ] Add more cost functions.  
-  - [ ] Add more gradient optimizers
-    - [x] Add iRprop+    
-    - [ ] ADAM  
-    - [ ] NADAM  
+  - [x] Add more gradient optimizers
+    - [x] Add iRprop+  
+    - [x] ADAM  
 
 ### Advanced Features  
   - [ ] Bind and use CUDA (GPU acceleration)  
