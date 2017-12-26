@@ -7,4 +7,7 @@ module SHAInet
 
   class MathError < Exception
   end
+
+  class NeuralNetTrainError < Exception
+  end
 end

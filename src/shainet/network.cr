@@ -202,8 +202,6 @@ module SHAInet
       raise NeuralNetRunError.new("Must define correct cost function type (:mse, :c_ent, :exp, :hel_d, :kld, :gkld, :ita_sai_d).") if COST_FUNCTIONS.any? { |x| x == cost_function } == false
 
       actual = run(input, activation_function, stealth = true)
-      raise NeuralNetRunError.new("Expected and actual output must be of the same dimention.") if expected.size != actual.size
-
       # Get the error signal for the final layer, based on the cost function (error signal is stored in the output neurons)
       total_error = [] of Float64
       case cost_function
@@ -240,6 +238,30 @@ module SHAInet
       raise NeuralNetRunError.new("Error in evaluate: #{e}")
     end
 
+    def verify_data(data : Array(Array(Array(GenNum))))
+      message = nil
+      if data.sample.size != 2
+        message = "Train data must have two arrays, one for input one for output"
+      end
+      random_input = data.sample.first.size
+      random_output = data.sample.last.size
+      data.each_with_index do |test, i|
+        if (test.first.size != random_input)
+          message = "Input data sizes are inconsistent"
+        end
+        if (test.last.size != random_output)
+          message = "Output data sizes are inconsistent"
+        end
+        unless (test.last.size == @output_layers.first.neurons.size)
+          message = "data at index #{i} is bigger then output neurons size"
+        end
+      end
+      if message
+        @logger.error("#{message}: #{data}")
+        raise NeuralNetTrainError.new(message)
+      end
+    end
+
     # Online train, updates weights/biases after each data point (stochastic gradient descent)
     def train(data : Array(Array(Array(GenNum))), # Input structure: data = [[Input = [] of Float64],[Expected result = [] of Float64]]
               training_type : Symbol,             # Type of training: :sgdm, :rprop, :adam
@@ -248,8 +270,9 @@ module SHAInet
               epochs : Int32,                     # a criteria of when to stop the training
               error_threshold : Float64,          # a criteria of when to stop the training
               log_each : Int32 = 1000)            # determines what is the step for error printout
-      @logger.info("Training started")
 
+      verify_data(data)
+      @logger.info("Training started")
       e = 0
       while e <= epochs
         all_errors = [] of Float64
@@ -306,6 +329,7 @@ module SHAInet
                     error_threshold : Float64,          # a criteria of when to stop the training
                     log_each : Int32 = 1000)            # determines what is the step for error printout
 
+      verify_data(data)
       @logger.info("Training started")
 
       e = 0
