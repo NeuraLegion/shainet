@@ -43,7 +43,7 @@ xor.add_layer(:output, 1, :memory)
 xor.fully_connect
 
 # data, cost_function, activation_function, epochs, error_threshold
-xor.train(training_data, :mse, :sigmoid, 10000, 0.01)
+xor.train(training_data, :sgdm, :mse, :sigmoid, 10000, 0.01)
 
 # Run the trained network
 xor.run([0, 0])
