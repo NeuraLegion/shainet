@@ -66,28 +66,13 @@ module SHAInet
     # This is the backward propogation of the hidden layers
     # Allows the neuron to absorb the error from its' own target neurons through the synapses
     # Then, it sums the information and a derivative of the activation function is applied to normalize the data
-    def hidden_error_prop(activation_function : Symbol = :sigmoid) : Float64
+    def hidden_error_prop : Float64
       new_errors = [] of Float64
       @synapses_out.each do |synapse| # Calculate weighted error from each target neuron, returns Array(Float64)
         new_errors << synapse.propagate_backward
       end
       weighted_error_sum = new_errors.reduce { |acc, i| acc + i } # Sum weighted error from target neurons (instead of using w_matrix*delta), returns Float64
-      case activation_function                                    # Take into account the derivative of the squashing function
-      when :tanh
-        @gradient = weighted_error_sum*@sigma_prime # New error of the neuron
-      when :sigmoid
-        @gradient = weighted_error_sum*@sigma_prime
-        # when :bp_sigmoid
-        #   @gradient = SHAInet.bp_sigmoid(z)
-        # when :log_sigmoid
-        #   @gradient = SHAInet.log_sigmoid(z)
-        # when :relu
-        #   @gradient = SHAInet.relu(z)
-        # when :l_relu
-        #   @gradient = SHAInet.l_relu(z, 0.2) # value of 0.2 is the slope for x<0
-      else
-        raise NeuralNetRunError.new("Propogation requires a valid activation function.")
-      end
+      @gradient = weighted_error_sum*@sigma_prime                 # New error of the neuron
     end
 
     def inspect
