@@ -48,12 +48,16 @@ module SHAInet
         @sigma_prime = SHAInet.sigmoid_prime(@input_sum)
       when :bp_sigmoid
         @activation = SHAInet.bp_sigmoid(@input_sum)
+        @sigma_prime = SHAInet.bp_sigmoid_prime(@input_sum)
       when :log_sigmoid
         @activation = SHAInet.log_sigmoid(@input_sum)
+        @sigma_prime = SHAInet.log_sigmoid_prime(@input_sum)
       when :relu
         @activation = SHAInet.relu(@input_sum)
+        @sigma_prime = SHAInet.relu_prime(@input_sum)
       when :l_relu
-        @activation = SHAInet.l_relu(@input_sum, 0.2) # value of 0.2 is the slope for x<0
+        @activation = SHAInet.l_relu(@input_sum, 0.01) # value of 0.01 is the slope for x<0
+        @sigma_prime = SHAInet.l_relu_prime(@input_sum)
       else
         raise NeuralNetRunError.new("Propogation requires a valid activation function.")
       end
