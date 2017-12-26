@@ -1,8 +1,9 @@
 module SHAInet
   class Synapse
+    getter source_neuron : Neuron, dest_neuron : Neuron
     property weight : Float64, gradient : Float64, prev_weight : Float64
     property prev_gradient : Float64, prev_delta : Float64, prev_delta_w : Float64
-    getter source_neuron : Neuron, dest_neuron : Neuron
+    property m_current : Float64, v_current : Float64, m_prev : Float64, v_prev : Float64
 
     def initialize(@source_neuron : Neuron, @dest_neuron : Neuron)
       @weight = rand(0.0..1.0).to_f64    # Weight of the synapse
@@ -13,6 +14,12 @@ module SHAInet
       @prev_gradient = rand(-0.1..0.1).to_f64
       @prev_delta = 0.1
       @prev_delta_w = 0.1
+
+      # Parameters needed for Adam
+      @m_current = Float64.new(0) # Current moment value
+      @v_current = Float64.new(0) # Current moment**2 value
+      @m_prev = Float64.new(0)    # Previous moment value
+      @v_prev = Float64.new(0)    # Previous moment**2 value
     end
 
     def randomize_weight

@@ -22,6 +22,10 @@ module SHAInet
     property etah_plus : Float64, etah_minus : Float64, delta_max : Float64, delta_min : Float64
     getter prev_total_error : Float64
 
+    # Parameters for Adam
+    property alpha : Float64
+    getter beta1 : Float64, beta2 : Float64, epsilon : Float64, time_step : Int32
+
     # First creates an empty shell of the entire network
     def initialize(@logger : Logger = Logger.new(STDOUT))
       @input_layers = Array(Layer).new
@@ -43,6 +47,12 @@ module SHAInet
       @delta_max = 50.0                         # For iRprop+ , max step size
       @delta_min = 0.1                          # For iRprop+ , min step size
       @prev_total_error = rand(0.0..1.0).to_f64 # For iRprop+ , needed for backtracking
+
+      @alpha = Float64.new(0.001)        # For Adam , step size (recomeneded: only change this hyper parameter when fine-tuning)
+      @beta1 = Float64.new(0.9)          # For Adam , exponential decay rate (not recommended to change value)
+      @beta2 = Float64.new(0.999)        # For Adam , exponential decay rate (not recommended to change value)
+      @epsilon = Float64.new(10**(-8.0)) # For Adam , prevents exploding gradients (not recommended to change value)
+      @time_step = 0                     # For Adam
     end
 
     # Create and populate a layer with neurons
@@ -299,6 +309,7 @@ module SHAInet
       @logger.info("Training started")
 
       e = 0
+      @time_step = 0
       while e <= epochs
         all_errors = [] of Float64
         batch_w_grad = [] of Array(Float64) # Save gradients from entire batch before updating weights & biases
@@ -344,6 +355,7 @@ module SHAInet
         @mean_error = 100*(sqrd_dist_sum.reduce { |acc, i| acc + i })/data.size
 
         # Update all wieghts & biases
+        @time_step += 1 # Based on how many epochs have passed in current training run, needed for Adam
         update_weights(training_type, batch = true)
         update_biases(training_type, batch = true)
 
@@ -404,6 +416,17 @@ module SHAInet
             synapse.weight += delta_weight
             synapse.prev_delta_w = delta_weight
           end
+          # Update weights based on Adaptive moment estimation (Adam)
+        when :adam
+          synapse.m_current = @beta1*synapse.m_prev + (1 - @beta1)*synapse.gradient
+          synapse.v_current = @beta2*synapse.v_prev + (1 - @beta2)*(synapse.gradient)**2
+
+          m_hat = synapse.m_current/(1 - (@beta1)**@time_step)
+          v_hat = synapse.v_current/(1 - (@beta2)**@time_step)
+          synapse.weight -= (@alpha*m_hat)/(v_hat**0.5 + @epsilon)
+
+          synapse.m_prev = synapse.m_current
+          synapse.v_prev = synapse.v_current
         end
       end
     end
@@ -445,6 +468,17 @@ module SHAInet
             neuron.bias += delta_bias
             neuron.prev_delta_b = delta_bias
           end
+          # Update weights based on Adaptive moment estimation (Adam)
+        when :adam
+          neuron.m_current = @beta1*neuron.m_prev + (1 - @beta1)*neuron.gradient
+          neuron.v_current = @beta2*neuron.v_prev + (1 - @beta2)*(neuron.gradient)**2
+
+          m_hat = neuron.m_current/(1 - (@beta1)**@time_step)
+          v_hat = neuron.v_current/(1 - (@beta2)**@time_step)
+          neuron.bias -= (@alpha*m_hat)/(v_hat**0.5 + @epsilon)
+
+          neuron.m_prev = neuron.m_current
+          neuron.v_prev = neuron.v_current
         end
       end
     end
