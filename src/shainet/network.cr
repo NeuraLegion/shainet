@@ -59,7 +59,14 @@ module SHAInet
       when :hidden
         @hidden_layers << layer
       when :output
-        @output_layers << layer
+        if @output_layers.empty?
+          @output_layers << layer
+        else
+          @hidden_layers << @output_layers.first
+          @output_layers.delete(@output_layers.first)
+          @output_layers << layer
+          connect_ltl(@hidden_layers.last, @output_layers.first, :full)
+        end
       else
         raise NeuralNetRunError.new("Must define correct layer type (:input, :hidden, :output).")
       end
@@ -103,16 +110,18 @@ module SHAInet
         end
       end
       @all_synapses.uniq
+    rescue e : Exception
+      raise NeuralNetRunError.new("Error fully connecting network: #{e}")
     end
 
     # Connect two specific layers with synapses
-    def connect_ltl(layer1 : Layer, layer2 : Layer, connection_type : Symbol)
+    def connect_ltl(source : Layer, destination : Layer, connection_type : Symbol)
       raise NeuralNetInitalizationError.new("Error initilizing network, must choose correct connection type.") if CONNECTION_TYPES.any? { |x| x == connection_type } == false
       case connection_type
       # Connect each neuron from source layer to all neurons in destination layer
       when :full
-        layer1.each do |neuron1|   # Source neuron
-          layer2.each do |neuron2| # Destination neuron
+        source.neurons.each do |neuron1|        # Source neuron
+          destination.neurons.each do |neuron2| # Destination neuron
             synapse = Synapse.new(neuron1, neuron2)
             neuron1.synapses_out << synapse
             neuron2.synapses_in << synapse
@@ -121,18 +130,18 @@ module SHAInet
         end
         # Connect each neuron from source layer to neuron with corresponding index in destination layer
       when :ind_to_ind
-        raise NeuralNetInitalizationError.new("Error initializing network, index to index connection requires layers of same size.") if layer1.size != layer2.size
-        (0..layer1.size).each do |index|
-          synapse = Synapse.new(layer1[index], layer2[index])
-          layer1[index].synapses_out << synapse
-          layer2[index].synapses_in << synapse
+        raise NeuralNetInitalizationError.new("Error initializing network, index to index connection requires layers of same size.") if source.neurons.size != destination.neurons.size
+        (0..source.neurons.size).each do |index|
+          synapse = Synapse.new(source.neurons[index], destination.neurons[index])
+          source.neurons[index].synapses_out << synapse
+          destination.neurons[index].synapses_in << synapse
           @all_synapses << synapse
         end
 
         # Randomly decide if each neuron from source layer will connect to a neuron from destination layer
       when :random
-        layer1.each do |neuron1|   # Source neuron
-          layer2.each do |neuron2| # Destination neuron
+        source.neurons.each do |neuron1|        # Source neuron
+          destination.neurons.each do |neuron2| # Destination neuron
             x = rand(0..1)
             if x <= 0.5 # Currently set to 50% chance, this can be changed at will
               synapse = Synapse.new(neuron1, neuron2)
@@ -150,9 +159,10 @@ module SHAInet
       raise NeuralNetRunError.new("Error input data doesn't fit input layers.") unless input.size == @input_layers.first.neurons.size
 
       # Insert the input data into the input layer
-      @input_layers.first.neurons.each_with_index do |neuron, i| # Inserts the input information into the input layers
-      # TODO: add support for multiple input layers
-        neuron.activation = input[i].to_f64
+      input.each_with_index do |data, i|
+        # Inserts the input information into the input layers
+        # TODO: add support for multiple input layers
+        @input_layers.first.neurons[i].activation = data.to_f64
       end
 
       # Propogate the information forward through the hidden layers
@@ -168,10 +178,12 @@ module SHAInet
       output = @output_layers.last.neurons.map { |neuron| neuron.activation } # return an array of all output neuron activations
       # TODO: add support for multiple output layers
 
-      unless stealth == true # Hide output report during training
+      unless stealth # Hide output report during training
         @logger.info("Input => #{input}, network output => #{output}")
       end
       output
+    rescue e : Exception
+      raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
     end
 
     # Quantifies how good the network performed for a single input compared to the expected output
@@ -211,10 +223,11 @@ module SHAInet
       when :ita_sai_d
         # TODO
       end
-      # @logger.info("total_error array: #{total_error}")
+
       total_error = total_error.reduce { |acc, i| acc + i } # Sum up all the errors from output layer
-      # @logger.info("total_error reduce: #{total_error}")
       @total_error = total_error
+    rescue e : Exception
+      raise NeuralNetRunError.new("Error in evaluate: #{e}")
     end
 
     # Online train, updates weights/biases after each data point (stochastic gradient descent)
@@ -235,7 +248,6 @@ module SHAInet
         data.each do |data_point|
           evaluate(data_point[0], data_point[1], cost_function, activation_function) # Update error gradient at the output layer based on current input
           all_errors << @total_error
-
           # Propogate the errors backwards through the hidden layers
           l = @hidden_layers.size - 1
           while l >= 0
@@ -270,6 +282,9 @@ module SHAInet
           e += epochs
         end
       end
+    rescue e : Exception
+      @logger.error("Error in training: #{e} #{e.inspect_with_backtrace}")
+      raise e
     end
 
     # Batch train, updates weights/biases using a gradient sum from all data points in the batch (using gradient descent)

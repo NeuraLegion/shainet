@@ -42,8 +42,8 @@ describe SHAInet::Network do
     iris.add_layer(:output, 3, :memory)
     iris.fully_connect
 
-    outputs = Array(Array(SHAInet::GenNum)).new
-    inputs = Array(Array(SHAInet::GenNum)).new
+    outputs = Array(Array(Float64)).new
+    inputs = Array(Array(Float64)).new
     CSV.each_row(File.read(__DIR__ + "/test_data/iris.csv")) do |row|
       row_arr = Array(Float64).new
       row[0..-2].each do |num|
@@ -72,8 +72,8 @@ describe SHAInet::Network do
     iris.add_layer(:output, 3, :memory)
     iris.fully_connect
 
-    outputs = Array(Array(SHAInet::GenNum)).new
-    inputs = Array(Array(SHAInet::GenNum)).new
+    outputs = Array(Array(Float64)).new
+    inputs = Array(Array(Float64)).new
     CSV.each_row(File.read(__DIR__ + "/test_data/iris.csv")) do |row|
       row_arr = Array(Float64).new
       row[0..-2].each do |num|
@@ -84,9 +84,8 @@ describe SHAInet::Network do
     end
     normalized = SHAInet::TrainingData.new(inputs, outputs)
     normalized.normalize_min_max
-    puts normalized
     iris.train_batch(normalized.data, :rprop, :mse, :sigmoid, 20000, 0.1)
-    iris.run(normalized.normalized_inputs.first)
-    puts "Expected output is: [0,0,1]"
+    result = iris.run(normalized.normalized_inputs.first)
+    ((result.first < 0.1) && (result[1] < 0.1) && (result.last > 0.9)).should eq(true)
   end
 end

@@ -7,7 +7,7 @@ module SHAInet
 
     getter :normalized_outputs, :normalized_inputs
 
-    def initialize(@inputs : Array(Array(GenNum)), @outputs : Array(Array(GenNum)))
+    def initialize(@inputs : Array(Array(Float64)), @outputs : Array(Array(Float64)))
       @normalized_inputs = Array(Array(Float64)).new
       @normalized_outputs = Array(Array(Float64)).new
       @yrange = 1
@@ -18,6 +18,14 @@ module SHAInet
       arr = Array(Array(Array(Float64))).new
       @normalized_inputs.each_with_index do |i_arr, i|
         arr << [@normalized_inputs[i], @normalized_outputs[i]]
+      end
+      arr
+    end
+
+    def raw_data
+      arr = Array(Array(Array(Float64))).new
+      @inputs.each_with_index do |i_arr, i|
+        arr << [@inputs[i], @outputs[i]]
       end
       arr
     end
