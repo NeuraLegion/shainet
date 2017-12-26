@@ -142,4 +142,17 @@ module SHAInet
 
     return input_size, vocabulary_v, payloads_v
   end
+
+  # # Other # #
+
+  # Used in Rprop
+  def self.sign(input : GenNum)
+    if input > 0
+      return +1
+    elsif input < 0
+      return -1
+    else
+      return 0
+    end
+  end
 end
