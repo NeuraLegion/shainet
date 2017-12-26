@@ -35,13 +35,39 @@ module SHAInet
 
   # # Derivatives of activation functions # #
 
-  def self.sigmoid_prime(value : Float64)
+  def self.sigmoid_prime(value : Float64) : Float64
     sigmoid(value)*(1.0 - sigmoid(value)).to_f64
   end
 
-  def self.tanh_prime(value : Float64)
+  def self.bp_sigmoid_prime(value : Float64) : Float64
+    (2*Math::E**(value)/(Math::E**(value) + 1)**2).to_f64
+  end
+
+  def self.log_sigmoid_prime(value : Float64) : Float64
+    (Math::E**(value)/(Math::E**(value) + 1)**2).to_f64
+  end
+
+  def self.tanh_prime(value : Float64) : Float64
     (1.0 - tanh(value)**2).to_f64
   end
+
+  def self.relu_prime(value : GenNum) : Float64
+    if value < 0
+      (0).to_f64
+    else
+      (1).to_f64
+    end
+  end
+
+  def self.l_relu_prime(value : GenNum, slope : Float64 = 0.01) : Float64
+    if value < 0
+      slope
+    else
+      (1).to_f64
+    end
+  end
+
+  ##################################################################
 
   # # Cost functions  # #
 
@@ -54,7 +80,7 @@ module SHAInet
     return ((-1)*(expected*Math.log((actual), Math::E) + (1.0 - expected)*Math.log((1.0 - actual), Math::E))).to_f64
   end
 
-  # # Cost function derivatives  # #
+  # # Derivatives of cost functions # #
 
   def self.quadratic_cost_derivative(expected : Float64, actual : Float64) : Float64
     return (actual - expected).to_f64
@@ -63,6 +89,8 @@ module SHAInet
   def self.cross_entropy_cost_derivative(expected : Float64, actual : Float64) : Float64
     return ((actual - expected)/((1.0 - actual)*actual)).to_f64
   end
+
+  ##################################################################
 
   # # Linear algebra math # #
 
@@ -88,6 +116,8 @@ module SHAInet
     end
     new_vector
   end
+
+  ##################################################################
 
   # # Data manipulation # #
 
@@ -143,6 +173,8 @@ module SHAInet
     return input_size, vocabulary_v, payloads_v
   end
 
+  ##################################################################
+
   # # Other # #
 
   # Used in Rprop
@@ -154,5 +186,9 @@ module SHAInet
     else
       return 0
     end
+  end
+
+  def self.softmax
+    # TODO
   end
 end

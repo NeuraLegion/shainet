@@ -347,12 +347,6 @@ module SHAInet
         update_weights(training_type, batch = true)
         update_biases(training_type, batch = true)
 
-        # # prevent local minimum
-        # if (0.999*@prev_total_error < @total_error < @prev_total_error*1.001) == true
-        #   randomize_all_weights
-        #   randomize_all_biases
-        # end
-
         @prev_total_error = @total_error
 
         if e % log_each == 0
@@ -414,7 +408,7 @@ module SHAInet
       end
     end
 
-    # Update biases based on the gradients and delta rule (including momentum)
+    # Update biases based on the learning type chosen
     def update_biases(learn_type : Symbol, batch : Bool = false)
       @all_neurons.each_with_index do |neuron, i|
         if batch == true
@@ -427,6 +421,8 @@ module SHAInet
           delta_bias = (-1)*@learning_rate*(neuron.gradient) + @momentum*(neuron.bias - neuron.prev_bias)
           neuron.bias += delta_bias
           neuron.prev_bias = neuron.bias
+
+          # Update weights based on Resilient backpropogation (Rprop), using the improved varient iRprop+
         when :rprop
           if neuron.prev_gradient*neuron.gradient > 0
             delta = [@etah_plus*neuron.prev_delta, @delta_max].min
