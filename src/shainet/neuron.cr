@@ -6,7 +6,8 @@ module SHAInet
   class Neuron
     property :n_type, :synapses_in, :synapses_out, activation : Float64, gradient : Float64, bias : Float64, prev_bias : Float64
     getter :input_sum, :sigma_prime
-    property prev_gradient : Float64, prev_delta : Float64, prev_delta_b : Float64 # current_delta : Float64
+    property prev_gradient : Float64, prev_delta : Float64, prev_delta_b : Float64
+    property m_current : Float64, v_current : Float64, m_prev : Float64, v_prev : Float64
 
     def initialize(@n_type : Symbol)
       raise NeuralNetInitalizationError.new("Must choose currect neuron types, if you're not sure choose :memory as a standard neuron") if NEURON_TYPES.any? { |x| x == @n_type } == false
@@ -21,10 +22,15 @@ module SHAInet
       @sigma_prime = Float64.new(1) # derivative of input_sum based on activation function used (s')
 
       # Parameters needed for Rprop
-      # @current_delta = rand(0.0..1.0).to_f64
       @prev_gradient = rand(-0.1..0.1).to_f64
       @prev_delta = rand(0.0..0.1).to_f64
       @prev_delta_b = rand(-0.1..0.1).to_f64
+
+      # Parameters needed for Adam
+      @m_current = Float64.new(0) # Current moment value
+      @v_current = Float64.new(0) # Current moment**2 value
+      @m_prev = Float64.new(0)    # Previous moment value
+      @v_prev = Float64.new(0)    # Previous moment**2 value
     end
 
     # This is the forward propogation
