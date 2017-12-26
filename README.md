@@ -89,10 +89,10 @@ iris.run(normalized.normalized_inputs.first)
 
 ### Basic Features  
   - [x] Add sgd,minibatch-update.  
-  - [x] Add iRprop+  
   - [x] Add more activation functions.  
   - [ ] Add more cost functions.  
-  - [ ] Add more optimizers  
+  - [ ] Add more gradient optimizers
+    - [x] Add iRprop+    
     - [ ] ADAM  
     - [ ] NADAM  
 
