@@ -22,6 +22,7 @@ dependencies:
 
 ## Usage
 
+Standard training on XOR example  
 ```crystal
 require "shainet"
 
@@ -42,24 +43,57 @@ xor.add_layer(:output, 1, :memory)
 # Fully connect the network layers
 xor.fully_connect
 
-# data, cost_function, activation_function, epochs, error_threshold
-xor.train(training_data, :mse, :sigmoid, 10000, 0.01)
+# data, training_type, cost_function, activation_function, epochs, error_threshold (sum of errors), learning_rate, momentum)
+xor.train(training_data, :sgdm, :mse, :sigmoid, 10000, 0.001)
 
 # Run the trained network
 xor.run([0, 0])
 ```
 
 
+Batch training on the iris dataset using irprop
+```crystal
+# Configure label encoding
+label = {
+  "setosa"     => [0.to_f64, 0.to_f64, 1.to_f64],
+  "versicolor" => [0.to_f64, 1.to_f64, 0.to_f64],
+  "virginica"  => [1.to_f64, 0.to_f64, 0.to_f64],
+}
+# Initiate a new network
+iris = SHAInet::Network.new
+iris.add_layer(:input, 4, :memory)
+iris.add_layer(:hidden, 5, :memory)
+iris.add_layer(:output, 3, :memory)
+iris.fully_connect
+
+# load all relevant information from the iris.csv
+outputs = Array(Array(Float64)).new
+inputs = Array(Array(Float64)).new
+CSV.each_row(File.read(__DIR__ + "/test_data/iris.csv")) do |row|
+  row_arr = Array(Float64).new
+  row[0..-2].each do |num|
+    row_arr << num.to_f64
+  end
+  inputs << row_arr
+  outputs << label[row[-1]]
+end
+# Normalize using min_max
+normalized = SHAInet::TrainingData.new(inputs, outputs)
+normalized.normalize_min_max
+# Train using rprop
+iris.train_batch(normalized.data, :rprop, :mse, :sigmoid, 20000, 0.01)
+iris.run(normalized.normalized_inputs.first)
+```
+
 ## Development
 
 ### Basic Features  
-  - [ ] Add sgd,minibatch-update.  
-  - [ ] Add rprop/irprop+  
+  - [x] Add sgd,minibatch-update.  
+  - [x] Add rprop/irprop+  
   - [ ] Add more activation functions.  
   - [ ] Add more cost functions.  
   - [ ] Add more optimizers  
     - [ ] ADAM  
-    - [ ] RMSPROP  
     - [ ] NADAM  
 
 ### Advanced Features  
