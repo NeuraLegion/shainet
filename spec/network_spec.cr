@@ -24,8 +24,8 @@ describe SHAInet::Network do
     xor.add_layer(:output, 1, :memory)
     xor.fully_connect
 
-    # data, training_type, cost_function, activation_function, epochs, error_threshold (sum of errors), learning_rate, momentum)
-    xor.train(training_data, :sgdm, :mse, :sigmoid, 10000, 0.001)
+    # data, training_type, cost_function, activation_function, epochs, error_threshold (MSE %), log each steps
+    xor.train_batch(training_data, :sgdm, :mse, :sigmoid, epochs = 5000, threshold = 0.00001, log = 100)
 
     (xor.run([0, 0]).first < 0.1).should eq(true)
     (xor.run([1, 0]).first > 0.9).should eq(true)
