@@ -36,7 +36,7 @@ module SHAInet
 
       @error_signal = Array(Float64).new # Array of errors for each neuron in the output layers, based on specific input
       @total_error = Float64.new(1)      # Sum of errors from output layer, based on a specific input
-      @mean_error = Float64.new(1)       # MSE of netwrok, based on all errors of output layer fort a specific input
+      @mean_error = Float64.new(1)       # MSE of netwrok, based on all errors of output layer fort a specific input or batch
       @w_gradient = Array(Float64).new   # Needed for batch train
       @b_gradient = Array(Float64).new   # Needed for batch train
 
@@ -288,7 +288,7 @@ module SHAInet
             l -= 1
           end
 
-          # Calculate MSE in %
+          # Calculate MSE
           if @error_signal.size == 1
             error_avg = 0.0
           else
@@ -296,8 +296,8 @@ module SHAInet
           end
           sqrd_dists = [] of Float64
           @error_signal.each { |e| sqrd_dists << (e - error_avg)**2 }
-
-          @mean_error = 100*(sqrd_dists.reduce { |acc, i| acc + i })/@output_layers.last.neurons.size
+          sqr_sum = sqrd_dists.reduce { |acc, i| acc + i }
+          @mean_error = sqr_sum/@output_layers.last.neurons.size
 
           # Update all wieghts & biases
           update_weights(training_type, batch = false)
@@ -307,12 +307,15 @@ module SHAInet
         end
 
         if e % log_each == 0
-          @logger.info("Epoch: #{e}, Total error: #{@total_error}, MSE(%): #{@mean_error}")
+          @logger.info("Epoch: #{e}, Total error: #{@total_error}, MSE: #{@mean_error}")
         end
-        if @mean_error >= error_threshold
+        if @mean_error >= error_threshold && @total_error >= error_threshold
+          e += 1
+        elsif @mean_error <= error_threshold && e < 5
           e += 1
         else
-          @logger.info("Epoch: #{e}, Total error: #{@total_error}, MSE(%): #{@mean_error}")
+          e += 1
+          @logger.info("Epoch: #{e}, Total error: #{@total_error}, MSE: #{@mean_error}")
           e += epochs
         end
       end
@@ -336,6 +339,7 @@ module SHAInet
       e = 0
       @time_step = 0
       while e <= epochs
+        batch_mean = [] of Float64
         all_errors = [] of Float64
         batch_w_grad = [] of Array(Float64) # Save gradients from entire batch before updating weights & biases
         batch_b_grad = [] of Array(Float64)
@@ -344,7 +348,6 @@ module SHAInet
         data.each do |data_point|
           evaluate(data_point[0], data_point[1], cost_function, activation_function) # Get error gradient from output layer based on current input
           all_errors << @total_error
-
           # Propogate the errors backwards through the hidden layers
           l = @hidden_layers.size - 1
           while l >= 0
@@ -360,6 +363,18 @@ module SHAInet
           batch_w_grad << w_grad
           @all_neurons.each { |neuron| b_grad << neuron.gradient }
           batch_b_grad << b_grad
+
+          # Calculate MSE per data point
+          if @error_signal.size == 1
+            error_avg = 0.0
+          else
+            error_avg = @total_error/@output_layers.last.neurons.size
+          end
+          sqrd_dists = [] of Float64
+          @error_signal.each { |e| sqrd_dists << (e - error_avg)**2 }
+
+          @mean_error = (sqrd_dists.reduce { |acc, i| acc + i })/@output_layers.last.neurons.size
+          batch_mean << @mean_error
         end
 
         # Sum up gradients into a single array
@@ -372,16 +387,9 @@ module SHAInet
 
         @total_error = all_errors.reduce { |acc, i| acc + i }
 
-        # Calculate MSE in %
-        if @error_signal.size == 1
-          error_avg = 0.0
-        else
-          error_avg = @total_error/@output_layers.last.neurons.size
-        end
-        sqrd_dists = [] of Float64
-        @error_signal.each { |e| sqrd_dists << (e - error_avg)**2 }
-
-        @mean_error = 100*(sqrd_dists.reduce { |acc, i| acc + i })/@output_layers.last.neurons.size
+        # Calculate MSE per batch
+        batch_mean = (batch_mean.reduce { |acc, i| acc + i })/data.size
+        @mean_error = batch_mean
 
         # Update all wieghts & biases
         @time_step += 1 # Based on how many epochs have passed in current training run, needed for Adam
