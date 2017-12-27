@@ -166,7 +166,7 @@ module SHAInet
 
     # Run an input throught the network to get an output (weights & biases do not change)
     def run(input : Array(GenNum), activation_function : Symbol = :sigmoid, stealth : Bool = false) : Array(Float64)
-      raise NeuralNetRunError.new("Error input data doesn't fit input layers.") unless input.size == @input_layers.first.neurons.size
+      raise NeuralNetRunError.new("Error input data size: #{input.size} doesn't fit input layer size: #{@input_layers.first.neurons.size}.") unless input.size == @input_layers.first.neurons.size
 
       # Insert the input data into the input layer
       input.each_with_index do |data, i|
@@ -253,7 +253,7 @@ module SHAInet
           message = "Output data sizes are inconsistent"
         end
         unless (test.last.size == @output_layers.first.neurons.size)
-          message = "data at index #{i} is bigger then output neurons size"
+          message = "data at index #{i} and size: #{test.last.size} mismatch output layer size"
         end
       end
       if message
