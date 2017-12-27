@@ -335,9 +335,16 @@ module SHAInet
       verify_data(data)
       @logger.info("Training started")
 
-      e = 0
       @time_step = 0
-      while e <= epochs
+      loop do |e|
+        if e % log_each == 0
+          log_summery(e)
+        end
+        if e >= epochs || (error_threshold >= @total_error) && (e > 0)
+          log_summery(e)
+          break
+        end
+
         batch_mean = [] of Float64
         all_errors = [] of Float64
         batch_w_grad = [] of Array(Float64) # Save gradients from entire batch before updating weights & biases
@@ -396,16 +403,6 @@ module SHAInet
         update_biases(training_type, batch = true)
 
         @prev_total_error = @total_error
-
-        if e % log_each == 0
-          @logger.info("Epoch: #{e}, Total error: #{@total_error}, MSE(%): #{@mean_error}")
-        end
-        if @mean_error >= error_threshold
-          e += 1
-        else
-          @logger.info("Epoch: #{e}, Total error: #{@total_error}, MSE(%): #{@mean_error}")
-          e += epochs
-        end
       end
     end
 
