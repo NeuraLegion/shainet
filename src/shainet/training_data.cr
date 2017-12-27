@@ -10,8 +10,9 @@ module SHAInet
     def initialize(@inputs : Array(Array(Float64)), @outputs : Array(Array(Float64)))
       @normalized_inputs = Array(Array(Float64)).new
       @normalized_outputs = Array(Array(Float64)).new
-      @yrange = 1
+      @ymax = 1
       @ymin = 0
+      @yrange = @ymax - @ymin
     end
 
     def data
@@ -61,9 +62,8 @@ module SHAInet
     end
 
     def normalize(x : GenNum, xmin : GenNum, xmax : GenNum) : Float64
-      xrange = xmax - xmin
-      value = (@ymin + (x - xmin) * (@yrange.to_f64 / xrange)).to_f64
-      value
+      value = (@ymin + (x - xmin) * (@yrange.to_f64 / (xmax - xmin))).to_f64
+      value.to_s == "-NaN" ? 0.0 : value # Hackish way to avoid NaN
     end
   end
 end
