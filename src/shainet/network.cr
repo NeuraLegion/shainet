@@ -86,41 +86,20 @@ module SHAInet
     # Connect all the layers in order (input and output don't connect between themselves): input, hidden, output
     def fully_connect
       # Connect all input layers to the first hidden layer
-      @input_layers.each do |layer|
-        layer.neurons.each do |neuron1|                  # Source neuron
-          @hidden_layers.first.neurons.each do |neuron2| # Destination neuron
-            synapse = Synapse.new(neuron1, neuron2)
-            neuron1.synapses_out << synapse
-            neuron2.synapses_in << synapse
-            @all_synapses << synapse # To easily access synapes later
-          end
-        end
+      @input_layers.each do |source|
+        connect_ltl(source, @hidden_layers.first, :full)
       end
 
       # Connect all hidden layer between each other hierarchically
-      (0..@hidden_layers.size - 2).each do |l|
-        @hidden_layers[l].neurons.each do |neuron1|       # Source neuron
-          @hidden_layers[l + 1].neurons.each do |neuron2| # Destination neuron
-            synapse = Synapse.new(neuron1, neuron2)
-            neuron1.synapses_out << synapse
-            neuron2.synapses_in << synapse
-            @all_synapses << synapse
-          end
-        end
+      @hidden_layers.size.times do |index|
+        next if index + 2 > @hidden_layers.size
+        connect_ltl(@hidden_layers[index], @hidden_layers[index + 1], :full)
       end
 
       # Connect last hidden layer to all output layers
-      @hidden_layers.last.neurons.each do |neuron1| # Source neuron
-        @output_layers.each do |layer|
-          layer.neurons.each do |neuron2| # Destination neuron
-            synapse = Synapse.new(neuron1, neuron2)
-            neuron1.synapses_out << synapse
-            neuron2.synapses_in << synapse
-            @all_synapses << synapse
-          end
-        end
+      @output_layers.each do |layer|
+        connect_ltl(@hidden_layers.last, layer, :full)
       end
-      @all_synapses.uniq!
     rescue e : Exception
       raise NeuralNetRunError.new("Error fully connecting network: #{e}")
     end
