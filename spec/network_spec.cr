@@ -34,7 +34,6 @@ describe SHAInet::Network do
     (xor.run([1, 1]).first < 0.1).should eq(true)
   end
 
-
   it "works on iris dataset with cross-entropy cost, no batch" do
     label = {
       "setosa"     => [0.to_f64, 0.to_f64, 1.to_f64],
@@ -127,28 +126,31 @@ describe SHAInet::Network do
     ((result.first < 0.3) && (result[1] < 0.3) && (result.last > 0.9)).should eq(true)
   end
 
-  # it "works on the mnist dataset" do
-  #   mnist = SHAInet::Network.new
-  #   mnist.add_layer(:input, 784, :memory)
-  #   mnist.add_layer(:hidden, 40, :memory)
-  #   mnist.add_layer(:output, 1, :memory)
-  #   mnist.fully_connect
+  it "works on the mnist dataset using adam and batch" do
+    mnist = SHAInet::Network.new
+    mnist.add_layer(:input, 784, :memory)
+    mnist.add_layer(:hidden, 40, :memory)
+    mnist.add_layer(:output, 1, :memory)
+    mnist.fully_connect
 
-  #   outputs = Array(Array(Float64)).new
-  #   inputs = Array(Array(Float64)).new
-  #   CSV.each_row(File.read(__DIR__ + "/test_data/mnist_test.csv")) do |row|
-  #     row_arr = Array(Float64).new
-  #     row[1..-1].each do |num|
-  #       row_arr << num.to_f64
-  #     end
-  #     inputs << row_arr
-  #     outputs << [row[0].to_f64]
-  #   end
-  #   normalized = SHAInet::TrainingData.new(inputs, outputs)
-  #   normalized.normalize_min_max
-  #   mnist.train_batch(normalized.data, :adam, :mse, :sigmoid, 20000, 0.01, 100)
-  #   result = mnist.run(normalized.normalized_inputs.first, :sigmoid, )
-  # end
+    outputs = Array(Array(Float64)).new
+    inputs = Array(Array(Float64)).new
+    CSV.each_row(File.read(__DIR__ + "/test_data/mnist_test.csv")) do |row|
+      row_arr = Array(Float64).new
+      row[1..-1].each do |num|
+        row_arr << num.to_f64
+      end
+      inputs << row_arr
+      outputs << [row[0].to_f64]
+    end
+    normalized = SHAInet::TrainingData.new(inputs[0..10], outputs[0..10])
+    normalized.normalize_min_max
+    outputs = Array(Array(Float64)).new
+    inputs = Array(Array(Float64)).new
+    sleep 5
+    mnist.train_batch(normalized.data, :adam, :mse, :sigmoid, 20000, 0.01, 10)
+    result = mnist.run(normalized.normalized_inputs.first)
+  end
 end
 
 # Remove train data
