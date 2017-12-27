@@ -13,7 +13,7 @@ module SHAInet
 
     # General network parameters
     getter :input_layers, :output_layers, :hidden_layers, :all_neurons, :all_synapses
-    getter :mean_error, total_error : Float64, w_gradient : Array(Float64), b_gradient : Array(Float64)
+    getter error_signal : Array(Float64), total_error : Float64, :mean_error, w_gradient : Array(Float64), b_gradient : Array(Float64)
 
     # Parameters for SGD + Momentum
     property learning_rate : Float64, momentum : Float64
@@ -34,10 +34,11 @@ module SHAInet
       @all_neurons = Array(Neuron).new   # Array of all current neurons in the network
       @all_synapses = Array(Synapse).new # Array of all current synapses in the network
 
-      @mean_error = Float64.new(1)     # Average netwrok error based on all the training so far
-      @total_error = Float64.new(1)    # Sum of errors from output layer, based on a specific input
-      @w_gradient = Array(Float64).new # Needed for batch train
-      @b_gradient = Array(Float64).new # Needed for batch train
+      @error_signal = Array(Float64).new # Array of errors for each neuron in the output layers, based on specific input
+      @total_error = Float64.new(1)      # Sum of errors from output layer, based on a specific input
+      @mean_error = Float64.new(1)       # MSE of netwrok, based on all errors of output layer fort a specific input
+      @w_gradient = Array(Float64).new   # Needed for batch train
+      @b_gradient = Array(Float64).new   # Needed for batch train
 
       @learning_rate = 0.7 # Standard parameter for GD
       @momentum = 0.3      # Improved GD
@@ -202,23 +203,22 @@ module SHAInet
       raise NeuralNetRunError.new("Must define correct cost function type (:mse, :c_ent, :exp, :hel_d, :kld, :gkld, :ita_sai_d).") if COST_FUNCTIONS.any? { |x| x == cost_function } == false
 
       actual = run(input, activation_function, stealth = true)
-      # Get the error signal for the final layer, based on the cost function (error signal is stored in the output neurons)
-      total_error = [] of Float64
+      # Get the error signal for the final layer, based on the cost function (error gradient is stored in the output neurons)
+      @error_signal = [] of Float64
       case cost_function
       when :mse
         (0..expected.size - 1).each do |i|
           neuron = @output_layers.last.neurons[i] # Update error of all neurons in the output layer based on the actual result
           neuron.gradient = SHAInet.quadratic_cost_derivative(expected[i].to_f64, actual[i].to_f64)*neuron.sigma_prime
           # TODO: add support for multiple output layers
-          total_error << SHAInet.quadratic_cost(expected[i].to_f64, actual[i].to_f64) # Store the output error based on cost function
-          # @logger.info("i: #{i}, total_error array: #{total_error}")
+          @error_signal << SHAInet.quadratic_cost(expected[i].to_f64, actual[i].to_f64) # Store the output error based on cost function
         end
       when :c_ent
         (0..expected.size - 1).each do |i|
           neuron = @output_layers.last.neurons[i]
           neuron.gradient = SHAInet.cross_entropy_cost_derivative(expected[i].to_f64, actual[i].to_f64)*neuron.sigma_prime
           # TODO: add support for multiple output layers
-          total_error << SHAInet.cross_entropy_cost(expected[i].to_f64, actual[i].to_f64)
+          @error_signal << SHAInet.cross_entropy_cost(expected[i].to_f64, actual[i].to_f64)
         end
       when :exp
         # TODO
@@ -232,8 +232,9 @@ module SHAInet
         # TODO
       end
 
-      total_error = total_error.reduce { |acc, i| acc + i } # Sum up all the errors from output layer
-      @total_error = total_error
+      @total_error = @error_signal.reduce(0.0) { |acc, i| acc + i } # Sum up all the errors from output layer
+
+
     rescue e : Exception
       raise NeuralNetRunError.new("Error in evaluate: #{e}")
     end
@@ -275,12 +276,11 @@ module SHAInet
       @logger.info("Training started")
       e = 0
       while e <= epochs
-        all_errors = [] of Float64
-
         # Go over each data point and update the weights/biases based on the specific example
         data.each do |data_point|
-          evaluate(data_point[0], data_point[1], cost_function, activation_function) # Update error gradient at the output layer based on current input
-          all_errors << @total_error
+          # Update error signal, error gradient and total error at the output layer based on current input
+          evaluate(data_point[0], data_point[1], cost_function, activation_function)
+
           # Propogate the errors backwards through the hidden layers
           l = @hidden_layers.size - 1
           while l >= 0
@@ -288,14 +288,16 @@ module SHAInet
             l -= 1
           end
 
-          @total_error = all_errors.reduce { |acc, i| acc + i }
-
           # Calculate MSE in %
-          error_avg = @total_error/data.size
-          sqrd_dist_sum = [] of Float64
-          all_errors.each { |e| sqrd_dist_sum << (e - error_avg)**2 }
+          if @error_signal.size == 1
+            error_avg = 0.0
+          else
+            error_avg = @total_error/@output_layers.last.neurons.size
+          end
+          sqrd_dists = [] of Float64
+          @error_signal.each { |e| sqrd_dists << (e - error_avg)**2 }
 
-          @mean_error = 100*(sqrd_dist_sum.reduce { |acc, i| acc + i })/data.size
+          @mean_error = 100*(sqrd_dists.reduce { |acc, i| acc + i })/@output_layers.last.neurons.size
 
           # Update all wieghts & biases
           update_weights(training_type, batch = false)
@@ -305,13 +307,12 @@ module SHAInet
         end
 
         if e % log_each == 0
-          # @logger.info("Epoch: #{e}, error_sum: #{error_sum}")
-          @logger.info("Epoch: #{e}, Total error: #{@total_error}, MSE: #{@mean_error}")
+          @logger.info("Epoch: #{e}, Total error: #{@total_error}, MSE(%): #{@mean_error}")
         end
-        if @total_error >= error_threshold
+        if @mean_error >= error_threshold
           e += 1
         else
-          @logger.info("Epoch: #{e}, Total error: #{@total_error}, MSE: #{@mean_error}")
+          @logger.info("Epoch: #{e}, Total error: #{@total_error}, MSE(%): #{@mean_error}")
           e += epochs
         end
       end
@@ -372,11 +373,15 @@ module SHAInet
         @total_error = all_errors.reduce { |acc, i| acc + i }
 
         # Calculate MSE in %
-        error_avg = @total_error/data.size
-        sqrd_dist_sum = [] of Float64
-        all_errors.each { |e| sqrd_dist_sum << (e - error_avg)**2 }
+        if @error_signal.size == 1
+          error_avg = 0.0
+        else
+          error_avg = @total_error/@output_layers.last.neurons.size
+        end
+        sqrd_dists = [] of Float64
+        @error_signal.each { |e| sqrd_dists << (e - error_avg)**2 }
 
-        @mean_error = 100*(sqrd_dist_sum.reduce { |acc, i| acc + i })/data.size
+        @mean_error = 100*(sqrd_dists.reduce { |acc, i| acc + i })/@output_layers.last.neurons.size
 
         # Update all wieghts & biases
         @time_step += 1 # Based on how many epochs have passed in current training run, needed for Adam
@@ -386,12 +391,12 @@ module SHAInet
         @prev_total_error = @total_error
 
         if e % log_each == 0
-          @logger.info("Epoch: #{e}, Total error: #{@total_error}, MSE: #{@mean_error}")
+          @logger.info("Epoch: #{e}, Total error: #{@total_error}, MSE(%): #{@mean_error}")
         end
-        if @total_error >= error_threshold
+        if @mean_error >= error_threshold
           e += 1
         else
-          @logger.info("Epoch: #{e}, Total error: #{@total_error}, MSE: #{@mean_error}")
+          @logger.info("Epoch: #{e}, Total error: #{@total_error}, MSE(%): #{@mean_error}")
           e += epochs
         end
       end
