@@ -120,7 +120,7 @@ module SHAInet
           end
         end
       end
-      @all_synapses.uniq
+      @all_synapses.uniq!
     rescue e : Exception
       raise NeuralNetRunError.new("Error fully connecting network: #{e}")
     end
@@ -163,6 +163,7 @@ module SHAInet
           end
         end
       end
+      @all_synapses.uniq!
     end
 
     # Run an input throught the network to get an output (weights & biases do not change)
@@ -207,14 +208,14 @@ module SHAInet
       @error_signal = [] of Float64
       case cost_function
       when :mse
-        (0..expected.size - 1).each do |i|
+        expected.size.times do |i|
           neuron = @output_layers.last.neurons[i] # Update error of all neurons in the output layer based on the actual result
           neuron.gradient = SHAInet.quadratic_cost_derivative(expected[i].to_f64, actual[i].to_f64)*neuron.sigma_prime
           # TODO: add support for multiple output layers
           @error_signal << SHAInet.quadratic_cost(expected[i].to_f64, actual[i].to_f64) # Store the output error based on cost function
         end
       when :c_ent
-        (0..expected.size - 1).each do |i|
+        expected.size.times do |i|
           neuron = @output_layers.last.neurons[i]
           neuron.gradient = SHAInet.cross_entropy_cost_derivative(expected[i].to_f64, actual[i].to_f64)*neuron.sigma_prime
           # TODO: add support for multiple output layers
@@ -263,6 +264,10 @@ module SHAInet
       end
     end
 
+    def log_summery(e)
+      @logger.info("Epoch: #{e}, Total error: #{@total_error}, MSE: #{@mean_error}")
+    end
+
     # Online train, updates weights/biases after each data point (stochastic gradient descent)
     def train(data : Array(Array(Array(GenNum))), # Input structure: data = [[Input = [] of Float64],[Expected result = [] of Float64]]
               training_type : Symbol,             # Type of training: :sgdm, :rprop, :adam
@@ -274,8 +279,15 @@ module SHAInet
 
       verify_data(data)
       @logger.info("Training started")
-      e = 0
-      while e <= epochs
+      loop do |e|
+        if e % log_each == 0
+          log_summery(e)
+        end
+        if e >= epochs || (error_threshold >= @total_error) && (e > 0)
+          log_summery(e)
+          break
+        end
+
         # Go over each data point and update the weights/biases based on the specific example
         data.each do |data_point|
           # Update error signal, error gradient and total error at the output layer based on current input
@@ -304,19 +316,6 @@ module SHAInet
           update_biases(training_type, batch = false)
 
           @prev_total_error = @total_error
-        end
-
-        if e % log_each == 0
-          @logger.info("Epoch: #{e}, Total error: #{@total_error}, MSE: #{@mean_error}")
-        end
-        if @mean_error >= error_threshold && @total_error >= error_threshold
-          e += 1
-        elsif @mean_error <= error_threshold && e < 5
-          e += 1
-        else
-          e += 1
-          @logger.info("Epoch: #{e}, Total error: #{@total_error}, MSE: #{@mean_error}")
-          e += epochs
         end
       end
     rescue e : Exception
