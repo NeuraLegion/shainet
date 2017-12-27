@@ -324,8 +324,8 @@ module SHAInet
 
         batch_mean = [] of Float64
         all_errors = [] of Float64
-        batch_w_grad = [] of Array(Float64) # Save gradients from entire batch before updating weights & biases
-        batch_b_grad = [] of Array(Float64)
+        @w_gradient = Array(Float64).new(@all_synapses.size) { 0.0 } # Save gradients from entire batch before updating weights & biases
+        @b_gradient = Array(Float64).new(@all_neurons.size) { 0.0 }
 
         # Go over each data point and collect gradients of weights/biases based on each specific example
         data.each do |data_point|
@@ -336,14 +336,9 @@ module SHAInet
             l.neurons.each { |neuron| neuron.hidden_error_prop } # Update neuron error based on errors*weights of neurons from the next layer
           end
 
-          # Save all gradients from each data point for the batch update
-          w_grad = [] of Float64
-          b_grad = [] of Float64
-
-          @all_synapses.each { |synapse| w_grad << (synapse.source_neuron.activation)*(synapse.dest_neuron.gradient) }
-          batch_w_grad << w_grad
-          @all_neurons.each { |neuron| b_grad << neuron.gradient }
-          batch_b_grad << b_grad
+          # Sum all gradients from each data point for the batch update
+          @all_synapses.each_with_index { |synapse, i| @w_gradient[i] += (synapse.source_neuron.activation)*(synapse.dest_neuron.gradient) }
+          @all_neurons.each_with_index { |neuron, i| @b_gradient[i] += neuron.bias }
 
           # Calculate MSE per data point
           if @error_signal.size == 1
@@ -358,21 +353,13 @@ module SHAInet
           batch_mean << @mean_error
         end
 
-        # Sum up gradients into a single array
-        batch = batch_w_grad.transpose
-        @w_gradient = [] of Float64
-        batch.each { |array| @w_gradient << array.reduce { |acc, i| acc + i } }
-        batch = batch_b_grad.transpose
-        @b_gradient = [] of Float64
-        batch.each { |array| @b_gradient << array.reduce { |acc, i| acc + i } }
-
         @total_error = all_errors.reduce { |acc, i| acc + i }
 
         # Calculate MSE per batch
         batch_mean = (batch_mean.reduce { |acc, i| acc + i })/data.size
         @mean_error = batch_mean
 
-        # Update all wieghts & biases
+        # Update all wieghts & biases for the batch
         @time_step += 1 # Based on how many epochs have passed in current training run, needed for Adam
         update_weights(training_type, batch = true)
         update_biases(training_type, batch = true)
