@@ -273,10 +273,8 @@ module SHAInet
           evaluate(data_point[0], data_point[1], cost_function, activation_function)
 
           # Propogate the errors backwards through the hidden layers
-          l = @hidden_layers.size - 1
-          while l >= 0
-            @hidden_layers[l].neurons.each { |neuron| neuron.hidden_error_prop } # Update neuron error based on errors*weights of neurons from the next layer
-            l -= 1
+          @hidden_layers.each do |l|
+            l.neurons.each { |neuron| neuron.hidden_error_prop } # Update neuron error based on errors*weights of neurons from the next layer
           end
 
           # Calculate MSE
@@ -334,10 +332,8 @@ module SHAInet
           evaluate(data_point[0], data_point[1], cost_function, activation_function) # Get error gradient from output layer based on current input
           all_errors << @total_error
           # Propogate the errors backwards through the hidden layers
-          l = @hidden_layers.size - 1
-          while l >= 0
-            @hidden_layers[l].neurons.each { |neuron| neuron.hidden_error_prop } # Update neuron error based on errors*weights of neurons from the next layer
-            l -= 1
+          @hidden_layers.each do |l|
+            l.neurons.each { |neuron| neuron.hidden_error_prop } # Update neuron error based on errors*weights of neurons from the next layer
           end
 
           # Save all gradients from each data point for the batch update
