@@ -143,7 +143,7 @@ describe SHAInet::Network do
       inputs << row_arr
       outputs << [row[0].to_f64]
     end
-    normalized = SHAInet::TrainingData.new(inputs[0..10], outputs[0..10])
+    normalized = SHAInet::TrainingData.new(inputs, outputs)
     normalized.normalize_min_max
     outputs = Array(Array(Float64)).new
     inputs = Array(Array(Float64)).new
