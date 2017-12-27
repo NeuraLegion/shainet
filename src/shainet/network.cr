@@ -262,7 +262,7 @@ module SHAInet
         if e % log_each == 0
           log_summery(e)
         end
-        if e >= epochs || (error_threshold >= @total_error) && (e > 0)
+        if e >= epochs || (error_threshold >= @mean_error) && (e > 0)
           log_summery(e)
           break
         end
@@ -317,7 +317,7 @@ module SHAInet
         if e % log_each == 0
           log_summery(e)
         end
-        if e >= epochs || (error_threshold >= @total_error) && (e > 0)
+        if e >= epochs || (error_threshold >= @mean_error) && (e > 0)
           log_summery(e)
           break
         end
