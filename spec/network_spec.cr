@@ -10,7 +10,7 @@ describe SHAInet::Network do
     nn.should be_a(SHAInet::Network)
   end
 
-  it "figure out xor" do
+  it "Figure out XOR with SGD + M" do
     training_data = [
       [[0, 0], [0]],
       [[1, 0], [1]],
@@ -23,8 +23,6 @@ describe SHAInet::Network do
     1.times { |x| xor.add_layer(:hidden, 3, :memory) }
     xor.add_layer(:output, 1, :memory)
     xor.fully_connect
-
-    p "Figure our XOR with SGD + M"
     # data, training_type, cost_function, activation_function, epochs, error_threshold (MSE %), log each steps
     xor.train(training_data, :sgdm, :mse, :sigmoid, epochs = 5000, threshold = 0.000001, log = 100)
 
@@ -34,7 +32,7 @@ describe SHAInet::Network do
     (xor.run([1, 1]).first < 0.1).should eq(true)
   end
 
-  it "works on iris dataset with cross-entropy cost, no batch" do
+  it "Figure out iris with SGD + M, using cross-entropy cost (no batch)" do
     label = {
       "setosa"     => [0.to_f64, 0.to_f64, 1.to_f64],
       "versicolor" => [0.to_f64, 1.to_f64, 0.to_f64],
@@ -58,7 +56,6 @@ describe SHAInet::Network do
     end
     normalized = SHAInet::TrainingData.new(inputs, outputs)
     normalized.normalize_min_max
-    p "Figure out iris with SGD + M, using cross-entropy cost (no batch)"
     iris.learning_rate = 0.7
     iris.momentum = 0.6
     iris.train(normalized.data, :sgdm, :c_ent, :sigmoid, epochs = 20000, threshold = 0.000001, log = 1000)
@@ -120,7 +117,6 @@ describe SHAInet::Network do
     end
     normalized = SHAInet::TrainingData.new(inputs, outputs)
     normalized.normalize_min_max
-    p "Figure out iris with Adam and batch"
     iris.train_batch(normalized.data, :adam, :mse, :sigmoid, 20000, 0.00001)
     result = iris.run(normalized.normalized_inputs.first)
     ((result.first < 0.3) && (result[1] < 0.3) && (result.last > 0.9)).should eq(true)
