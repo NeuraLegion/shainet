@@ -312,10 +312,11 @@ module SHAInet
                     mini_batch_size : Int32 | Nil = nil)
       @logger.info("Training started")
       batch_size = mini_batch_size ? mini_batch_size : data.size
+      @time_step = 0
       data.each_slice(batch_size, reuse = false) do |data_slice|
         verify_data(data_slice)
         @logger.info("Working on mini-batch size: #{batch_size}") if mini_batch_size
-        @time_step = 0
+        @time_step += 1 if mini_batch_size # in mini-batch update adam time_step
         loop do |e|
           if e % log_each == 0
             log_summery(e)
@@ -362,7 +363,7 @@ module SHAInet
           @mean_error = batch_mean
 
           # Update all wieghts & biases for the batch
-          @time_step += 1 # Based on how many epochs have passed in current training run, needed for Adam
+          @time_step += 1 unless mini_batch_size # Based on how many epochs have passed in current training run, needed for Adam
           update_weights(training_type, batch = true)
           update_biases(training_type, batch = true)
 

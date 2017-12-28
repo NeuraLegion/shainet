@@ -151,60 +151,60 @@ describe SHAInet::Network do
     ((result.first < 0.3) && (result[1] < 0.3) && (result.last > 0.9)).should eq(true)
   end
 
-  # it "works on the mnist dataset using adam and batch" do
-  #   mnist = SHAInet::Network.new
-  #   mnist.add_layer(:input, 784, :memory)
-  #   mnist.add_layer(:hidden, 20, :memory)
-  #   mnist.add_layer(:hidden, 20, :memory)
-  #   mnist.add_layer(:output, 10, :memory)
-  #   mnist.fully_connect
+  it "works on the mnist dataset using adam and batch" do
+    mnist = SHAInet::Network.new
+    mnist.add_layer(:input, 784, :memory)
+    mnist.add_layer(:hidden, 20, :memory)
+    mnist.add_layer(:hidden, 20, :memory)
+    mnist.add_layer(:output, 10, :memory)
+    mnist.fully_connect
 
-  #   # Lload train data
-  #   outputs = Array(Array(Float64)).new
-  #   inputs = Array(Array(Float64)).new
-  #   CSV.each_row(File.read(__DIR__ + "/test_data/mnist_train.csv")) do |row|
-  #     row_arr = Array(Float64).new
-  #     row[1..-1].each do |num|
-  #       row_arr << num.to_f64
-  #     end
-  #     inputs << row_arr
-  #     a = Array(Float64).new(10, 0.0)
-  #     a[row[0].to_i] = 1.0
-  #     outputs << a
-  #   end
-  #   normalized = SHAInet::TrainingData.new(inputs, outputs)
-  #   normalized.normalize_min_max
-  #   # Train on the data
-  #   mnist.train_batch(normalized.data.shuffle, :rprop, :mse, :sigmoid, 10, 0.0035, 10, 1000)
-  #   mnist.train_batch(normalized.data.shuffle, :adam, :mse, :sigmoid, 20000, 0.0035, 100, 1000)
+    # Lload train data
+    outputs = Array(Array(Float64)).new
+    inputs = Array(Array(Float64)).new
+    CSV.each_row(File.read(__DIR__ + "/test_data/mnist_train.csv")) do |row|
+      row_arr = Array(Float64).new
+      row[1..-1].each do |num|
+        row_arr << num.to_f64
+      end
+      inputs << row_arr
+      a = Array(Float64).new(10, 0.0)
+      a[row[0].to_i] = 1.0
+      outputs << a
+    end
+    normalized = SHAInet::TrainingData.new(inputs, outputs)
+    normalized.normalize_min_max
+    # Train on the data
+    mnist.train_batch(normalized.data.shuffle, :rprop, :mse, :sigmoid, 10, 0.0035, 10, 1000)
+    mnist.train_batch(normalized.data.shuffle, :adam, :mse, :sigmoid, 20000, 0.0035, 100, 1000)
 
-  #   # Load test data
-  #   outputs = Array(Array(Float64)).new
-  #   inputs = Array(Array(Float64)).new
-  #   results = Array(Int32).new
-  #   CSV.each_row(File.read(__DIR__ + "/test_data/mnist_test.csv")) do |row|
-  #     row_arr = Array(Float64).new
-  #     row[1..-1].each do |num|
-  #       row_arr << num.to_f64
-  #     end
-  #     inputs << row_arr
-  #     a = Array(Float64).new(10, 0.0)
-  #     a[row[0].to_i] = 1.0
-  #     outputs << a
-  #   end
-  #   normalized = SHAInet::TrainingData.new(inputs, outputs)
-  #   normalized.normalize_min_max
-  #   # Run on all test data, and see that we are atleast 0.01 far from the right solution
-  #   normalized.normalized_inputs.each_with_index do |test, i|
-  #     result = mnist.run(test, :sigmoid, stealth = true)
-  #     if (result.index(result.max) == normalized.normalized_outputs[i].index(normalized.normalized_outputs[i].max))
-  #       results << 1
-  #     else
-  #       results << 0
-  #     end
-  #   end
-  #   puts "We managed #{results.size / results.sum}% success"
-  # end
+    # Load test data
+    outputs = Array(Array(Float64)).new
+    inputs = Array(Array(Float64)).new
+    results = Array(Int32).new
+    CSV.each_row(File.read(__DIR__ + "/test_data/mnist_test.csv")) do |row|
+      row_arr = Array(Float64).new
+      row[1..-1].each do |num|
+        row_arr << num.to_f64
+      end
+      inputs << row_arr
+      a = Array(Float64).new(10, 0.0)
+      a[row[0].to_i] = 1.0
+      outputs << a
+    end
+    normalized = SHAInet::TrainingData.new(inputs, outputs)
+    normalized.normalize_min_max
+    # Run on all test data, and see that we are atleast 0.01 far from the right solution
+    normalized.normalized_inputs.each_with_index do |test, i|
+      result = mnist.run(test, :sigmoid, stealth = true)
+      if (result.index(result.max) == normalized.normalized_outputs[i].index(normalized.normalized_outputs[i].max))
+        results << 1
+      else
+        results << 0
+      end
+    end
+    puts "We managed #{results.size / results.sum}% success"
+  end
 end
 # Remove train data
 system("cd #{__DIR__}/test_data && rm *.csv")
