@@ -147,18 +147,13 @@ describe SHAInet::Network do
     normalized = SHAInet::TrainingData.new(inputs, outputs)
     normalized.normalize_min_max
     # Train on the data
-    mnist.train_batch(normalized.data, :rprop, :mse, :sigmoid, 10, 0.0001, 10)
-    mnist.train_batch(normalized.data, :adam, :mse, :sigmoid, 20, 0.0001, 10)
-    mnist.train_batch(normalized.data, :rprop, :mse, :sigmoid, 10, 0.0001, 10)
-    mnist.train_batch(normalized.data, :adam, :mse, :sigmoid, 20, 0.0001, 10)
-    mnist.train_batch(normalized.data, :rprop, :mse, :sigmoid, 10, 0.0001, 10)
-    mnist.train_batch(normalized.data, :adam, :mse, :sigmoid, 20000, 0.0001, 10)
+    mnist.train_batch(normalized.data, :rprop, :mse, :sigmoid, 10, 0.01, 10)
+    mnist.train_batch(normalized.data, :adam, :mse, :sigmoid, 20000, 0.01, 10)
 
     # Load test data
     outputs = Array(Array(Float64)).new
     inputs = Array(Array(Float64)).new
     results = Array(Int32).new
-
     CSV.each_row(File.read(__DIR__ + "/test_data/mnist_test.csv")) do |row|
       row_arr = Array(Float64).new
       row[1..-1].each do |num|
@@ -181,6 +176,5 @@ describe SHAInet::Network do
     puts "We managed #{results.size / results.sum}% success"
   end
 end
-
 # Remove train data
 system("cd #{__DIR__}/test_data && rm *.csv")

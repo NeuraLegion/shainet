@@ -312,7 +312,6 @@ module SHAInet
 
       verify_data(data)
       @logger.info("Training started")
-
       @time_step = 0
       loop do |e|
         if e % log_each == 0
@@ -322,7 +321,6 @@ module SHAInet
           log_summery(e)
           break
         end
-
         batch_mean = [] of Float64
         all_errors = [] of Float64
         @w_gradient = Array(Float64).new(@all_synapses.size) { 0.0 } # Save gradients from entire batch before updating weights & biases
