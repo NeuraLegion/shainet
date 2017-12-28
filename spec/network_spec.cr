@@ -40,7 +40,7 @@ describe SHAInet::Network do
     }
     iris = SHAInet::Network.new
     iris.add_layer(:input, 4, :memory)
-    iris.add_layer(:hidden, 5, :memory)
+    iris.add_layer(:hidden, 4, :memory)
     iris.add_layer(:output, 3, :memory)
     iris.fully_connect
 
@@ -71,7 +71,7 @@ describe SHAInet::Network do
     }
     iris = SHAInet::Network.new
     iris.add_layer(:input, 4, :memory)
-    iris.add_layer(:hidden, 5, :memory)
+    iris.add_layer(:hidden, 4, :memory)
     iris.add_layer(:output, 3, :memory)
     iris.fully_connect
 
@@ -101,7 +101,7 @@ describe SHAInet::Network do
     }
     iris = SHAInet::Network.new
     iris.add_layer(:input, 4, :memory)
-    iris.add_layer(:hidden, 5, :memory)
+    iris.add_layer(:hidden, 4, :memory)
     iris.add_layer(:output, 3, :memory)
     iris.fully_connect
 
@@ -125,7 +125,8 @@ describe SHAInet::Network do
   # it "works on the mnist dataset using adam and batch" do
   #   mnist = SHAInet::Network.new
   #   mnist.add_layer(:input, 784, :memory)
-  #   mnist.add_layer(:hidden, 40, :memory)
+  #   mnist.add_layer(:hidden, 20, :memory)
+  #   mnist.add_layer(:hidden, 20, :memory)
   #   mnist.add_layer(:output, 1, :memory)
   #   mnist.fully_connect
 
@@ -169,7 +170,7 @@ describe SHAInet::Network do
   #       results << 0
   #     end
   #   end
-  #   puts "We managed #{results.size / results.sum}% success"
+  #   puts "We managed #{results.sum / results.size}% success"
   # end
 end
 # Remove train data
