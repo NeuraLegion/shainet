@@ -157,6 +157,7 @@ module SHAInet
       end
 
       # Propogate the information forward through the hidden layers
+
       @hidden_layers.each do |l|
         l.neurons.each { |neuron| neuron.activate(activation_function) }
       end

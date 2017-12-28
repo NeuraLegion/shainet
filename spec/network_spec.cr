@@ -133,8 +133,32 @@ describe SHAInet::Network do
     mnist.add_layer(:output, 1, :memory)
     mnist.fully_connect
 
+    # Lload train data
     outputs = Array(Array(Float64)).new
     inputs = Array(Array(Float64)).new
+    CSV.each_row(File.read(__DIR__ + "/test_data/mnist_train.csv")) do |row|
+      row_arr = Array(Float64).new
+      row[1..-1].each do |num|
+        row_arr << num.to_f64
+      end
+      inputs << row_arr
+      outputs << [row[0].to_f64]
+    end
+    normalized = SHAInet::TrainingData.new(inputs, outputs)
+    normalized.normalize_min_max
+    # Train on the data
+    mnist.train_batch(normalized.data, :rprop, :mse, :sigmoid, 10, 0.0001, 10)
+    mnist.train_batch(normalized.data, :adam, :mse, :sigmoid, 20, 0.0001, 10)
+    mnist.train_batch(normalized.data, :rprop, :mse, :sigmoid, 10, 0.0001, 10)
+    mnist.train_batch(normalized.data, :adam, :mse, :sigmoid, 20, 0.0001, 10)
+    mnist.train_batch(normalized.data, :rprop, :mse, :sigmoid, 10, 0.0001, 10)
+    mnist.train_batch(normalized.data, :adam, :mse, :sigmoid, 20000, 0.0001, 10)
+
+    # Load test data
+    outputs = Array(Array(Float64)).new
+    inputs = Array(Array(Float64)).new
+    results = Array(Int32).new
+
     CSV.each_row(File.read(__DIR__ + "/test_data/mnist_test.csv")) do |row|
       row_arr = Array(Float64).new
       row[1..-1].each do |num|
@@ -145,11 +169,16 @@ describe SHAInet::Network do
     end
     normalized = SHAInet::TrainingData.new(inputs, outputs)
     normalized.normalize_min_max
-    outputs = Array(Array(Float64)).new
-    inputs = Array(Array(Float64)).new
-    sleep 5
-    mnist.train_batch(normalized.data, :adam, :mse, :sigmoid, 20000, 0.01, 10)
-    result = mnist.run(normalized.normalized_inputs.first)
+    # Run on all test data, and see that we are atleast 0.01 far from the right solution
+    normalized.normalized_inputs.each_with_index do |test, i|
+      result = mnist.run(test, :sigmoid, stealth = true)
+      if (result.first - normalized.normalized_outputs[i].first).abs <= 0.01
+        results << 1
+      else
+        results << 0
+      end
+    end
+    puts "We managed #{results.size / results.sum}% success"
   end
 end
 
