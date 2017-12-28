@@ -308,62 +308,66 @@ module SHAInet
                     activation_function : Symbol,       # squashing performed on the activations within the network
                     epochs : Int32,                     # a criteria of when to stop the training
                     error_threshold : Float64,          # a criteria of when to stop the training
-                    log_each : Int32 = 1000)            # determines what is the step for error printout
-
-      verify_data(data)
+                    log_each : Int32 = 1000,            # determines what is the step for error printout
+                    mini_batch_size : Int32 | Nil = nil)
       @logger.info("Training started")
-      @time_step = 0
-      loop do |e|
-        if e % log_each == 0
-          log_summery(e)
-        end
-        if e >= epochs || (error_threshold >= @mean_error) && (e > 0)
-          log_summery(e)
-          break
-        end
-        batch_mean = [] of Float64
-        all_errors = [] of Float64
-        @w_gradient = Array(Float64).new(@all_synapses.size) { 0.0 } # Save gradients from entire batch before updating weights & biases
-        @b_gradient = Array(Float64).new(@all_neurons.size) { 0.0 }
+      batch_size = mini_batch_size ? mini_batch_size : data.size
+      data.each_slice(batch_size, reuse = false) do |data_slice|
+        verify_data(data_slice)
+        @logger.info("Working on mini-batch size: #{batch_size}") if mini_batch_size
+        @time_step = 0
+        loop do |e|
+          if e % log_each == 0
+            log_summery(e)
+          end
+          if e >= epochs || (error_threshold >= @mean_error) && (e > 0)
+            log_summery(e)
+            break
+          end
+          batch_mean = [] of Float64
+          all_errors = [] of Float64
+          @w_gradient = Array(Float64).new(@all_synapses.size) { 0.0 } # Save gradients from entire batch before updating weights & biases
+          @b_gradient = Array(Float64).new(@all_neurons.size) { 0.0 }
 
-        # Go over each data point and collect gradients of weights/biases based on each specific example
-        data.each do |data_point|
-          evaluate(data_point[0], data_point[1], cost_function, activation_function) # Get error gradient from output layer based on current input
-          all_errors << @total_error
-          # Propogate the errors backwards through the hidden layers
-          @hidden_layers.each do |l|
-            l.neurons.each { |neuron| neuron.hidden_error_prop } # Update neuron error based on errors*weights of neurons from the next layer
+          # Go over each data point and collect gradients of weights/biases based on each specific example
+          data_slice.each do |data_point|
+            evaluate(data_point[0], data_point[1], cost_function, activation_function) # Get error gradient from output layer based on current input
+            all_errors << @total_error
+            # Propogate the errors backwards through the hidden layers
+            @hidden_layers.each do |l|
+              l.neurons.each { |neuron| neuron.hidden_error_prop } # Update neuron error based on errors*weights of neurons from the next layer
+            end
+
+            # Sum all gradients from each data point for the batch update
+            @all_synapses.each_with_index { |synapse, i| @w_gradient[i] += (synapse.source_neuron.activation)*(synapse.dest_neuron.gradient) }
+            @all_neurons.each_with_index { |neuron, i| @b_gradient[i] += neuron.bias }
+
+            # Calculate MSE per data point
+            if @error_signal.size == 1
+              error_avg = 0.0
+            else
+              error_avg = @total_error/@output_layers.last.neurons.size
+            end
+            sqrd_dists = [] of Float64
+            @error_signal.each { |e| sqrd_dists << (e - error_avg)**2 }
+
+            @mean_error = (sqrd_dists.reduce { |acc, i| acc + i })/@output_layers.last.neurons.size
+            batch_mean << @mean_error
           end
 
-          # Sum all gradients from each data point for the batch update
-          @all_synapses.each_with_index { |synapse, i| @w_gradient[i] += (synapse.source_neuron.activation)*(synapse.dest_neuron.gradient) }
-          @all_neurons.each_with_index { |neuron, i| @b_gradient[i] += neuron.bias }
+          @total_error = all_errors.reduce { |acc, i| acc + i }
 
-          # Calculate MSE per data point
-          if @error_signal.size == 1
-            error_avg = 0.0
-          else
-            error_avg = @total_error/@output_layers.last.neurons.size
-          end
-          sqrd_dists = [] of Float64
-          @error_signal.each { |e| sqrd_dists << (e - error_avg)**2 }
+          # Calculate MSE per batch
+          batch_mean = (batch_mean.reduce { |acc, i| acc + i })/data_slice.size
+          @mean_error = batch_mean
 
-          @mean_error = (sqrd_dists.reduce { |acc, i| acc + i })/@output_layers.last.neurons.size
-          batch_mean << @mean_error
+          # Update all wieghts & biases for the batch
+          @time_step += 1 # Based on how many epochs have passed in current training run, needed for Adam
+          update_weights(training_type, batch = true)
+          update_biases(training_type, batch = true)
+
+          @prev_total_error = @total_error
         end
-
-        @total_error = all_errors.reduce { |acc, i| acc + i }
-
-        # Calculate MSE per batch
-        batch_mean = (batch_mean.reduce { |acc, i| acc + i })/data.size
-        @mean_error = batch_mean
-
-        # Update all wieghts & biases for the batch
-        @time_step += 1 # Based on how many epochs have passed in current training run, needed for Adam
-        update_weights(training_type, batch = true)
-        update_biases(training_type, batch = true)
-
-        @prev_total_error = @total_error
       end
     end
 
