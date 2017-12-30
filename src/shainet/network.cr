@@ -363,6 +363,7 @@ module SHAInet
             batch_mean << @mean_error
           end
 
+          # Total error per batch
           @total_error = all_errors.reduce { |acc, i| acc + i }
 
           # Calculate MSE per batch

@@ -20,19 +20,21 @@ module SHAInet
   end
 
   class Conv_layer
-    property :input, :output, padding : Int32, filters : Array(Array(Array(Neuron)))
+    property :output, padding : Int32, filters : Array(Array(Array(Neuron)))
 
     def initialize(input_volume : Array(Int32), filters_num : Int32, filter_size : Int32, stride : Int32, padding : Int32 = 0)
       unless input_volume.size == 3
         raise CNNInitializationError.new("Input volume must be an array of Int32: [width, height, channels].")
       end
-      @input = Array(Array(Array(Float64))).new(input_volume.last) {
-        Array(Array(Float64)).new(input_volume[1] + 2*padding) { Array(Float64).new(input_volume.first + 2*padding) { 0.0 } }
-      }
 
       @filters = Array(Array(Array(Neuron))).new(filters_num) {
         Array(Array(Neuron)).new(filter_size) { Array(Neuron).new(filter_size) { Neuron.new(:memory) } }
       }
+
+      @output = Array(Array(Array(Float64))).new(filters_num) {
+        Array(Array(Float64)).new(input_volume[0]) { Array(Float64).new(input_volume[1]) { 0.0 } }
+      }
+
       @filter_size = filter_size
       @stride = stride
       @padding = padding
@@ -53,16 +55,32 @@ module SHAInet
       end
 
       # Use each filter to create feature map
-		input.each do |channel|
-		x = 0 + @padding
-		y = 0 + @padding
-	  	filtered_output = Array(Array(Float64)).new
 
-			while (x <= @input.first.first.size + @padding && y <= @input.first.size + @padding) do
-				array1 = channel[x..(x+@filter_size)]
-				array2 = @filters[]
-			end
-      end
+      # @filters.each do |matrix|
+      #  row = 0 + @padding
+      #  col = 0 + @padding
+
+      #  # while
+
+      #  	while (row <= input.first.first.size + @padding && y <= input.first.size + @padding)
+      # 	(row..row + @stride).each do |x|
+      # 		(col..col + @stride).each do |y|
+
+      #   	filtered_output_matrices = Array(Array(Array(Array(GenNum)))).new
+      #   	@filters.each do |filter|
+      #   		output_matrix = Array(Array(GenNum))
+      #   		filtered_rows = Array(Float64).new
+      #   		filter.each_with_index do |row|
+      # 	  		array1 = channel[y+i][x..(x + @filter_size -1)]
+      # 	  		array2 = matrix[i]
+      # 	  		new_array = vector_mult(array1,array2) # + bias
+      # 	  		array_sum = new_array.reduce {|acc,i| acc + i}
+      # 	  		filtered_rows << array_sum
+      # 	  	end
+
+      # 	end
+      # end
+    end
   end
 
   class Relu_layer

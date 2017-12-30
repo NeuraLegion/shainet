@@ -103,7 +103,7 @@ module SHAInet
   # # Linear algebra math # #
 
   # vector multiplication
-  def self.vector_mult(array1 : Array(Float64), array2 : Array(Float64))
+  def self.vector_mult(array1 : Array(GenNum), array2 : Array(GenNum))
     raise MathError.new("Vectors must be the same size to multiply!") if array1.size != array2.size
 
     new_vector = [] of Float64
