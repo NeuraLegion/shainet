@@ -1,8 +1,9 @@
 module SHAInet
   class Layer
     property :n_type, :neurons
+    getter :activation_function
 
-    def initialize(@n_type : Symbol, l_size : Int32, @logger : Logger = Logger.new(STDOUT))
+    def initialize(@n_type : Symbol, l_size : Int32, @activation_function : Symbol = :sigmoid, @logger : Logger = Logger.new(STDOUT))
       @neurons = Array(Neuron).new
       # Populate layer with neurons
       l_size.times do

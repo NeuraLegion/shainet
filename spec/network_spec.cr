@@ -19,12 +19,12 @@ describe SHAInet::Network do
     ]
 
     xor = SHAInet::Network.new
-    xor.add_layer(:input, 2, :memory)
-    1.times { |x| xor.add_layer(:hidden, 3, :memory) }
-    xor.add_layer(:output, 1, :memory)
+    xor.add_layer(:input, 2, :memory, :sigmoid)
+    1.times { |x| xor.add_layer(:hidden, 3, :memory, :sigmoid) }
+    xor.add_layer(:output, 1, :memory, :sigmoid)
     xor.fully_connect
     # data, training_type, cost_function, activation_function, epochs, error_threshold (MSE %), log each steps
-    xor.train(training_data, :sgdm, :mse, :sigmoid, epochs = 5000, threshold = 0.000001, log = 100)
+    xor.train(training_data, :sgdm, :mse, epochs = 5000, threshold = 0.000001, log = 100)
 
     (xor.run([0, 0]).first < 0.1).should eq(true)
     (xor.run([1, 0]).first > 0.9).should eq(true)
@@ -39,9 +39,9 @@ describe SHAInet::Network do
       "virginica"  => [1.to_f64, 0.to_f64, 0.to_f64],
     }
     iris = SHAInet::Network.new
-    iris.add_layer(:input, 4, :memory)
-    iris.add_layer(:hidden, 4, :memory)
-    iris.add_layer(:output, 3, :memory)
+    iris.add_layer(:input, 4, :memory, :sigmoid)
+    iris.add_layer(:hidden, 4, :memory, :sigmoid)
+    iris.add_layer(:output, 3, :memory, :sigmoid)
     iris.fully_connect
 
     outputs = Array(Array(Float64)).new
@@ -58,7 +58,7 @@ describe SHAInet::Network do
     normalized.normalize_min_max
     iris.learning_rate = 0.7
     iris.momentum = 0.6
-    iris.train(normalized.data.shuffle, :sgdm, :c_ent, :sigmoid, epochs = 20000, threshold = 0.000001, log = 1000)
+    iris.train(normalized.data.shuffle, :sgdm, :c_ent, epochs = 20000, threshold = 0.000001, log = 1000)
     result = iris.run(normalized.normalized_inputs.first)
     ((result.first < 0.3) && (result[1] < 0.3) && (result.last > 0.7)).should eq(true)
   end
@@ -70,9 +70,9 @@ describe SHAInet::Network do
       "virginica"  => [1.to_f64, 0.to_f64, 0.to_f64],
     }
     iris = SHAInet::Network.new
-    iris.add_layer(:input, 4, :memory)
-    iris.add_layer(:hidden, 4, :memory)
-    iris.add_layer(:output, 3, :memory)
+    iris.add_layer(:input, 4, :memory, :sigmoid)
+    iris.add_layer(:hidden, 4, :memory, :sigmoid)
+    iris.add_layer(:output, 3, :memory, :sigmoid)
     iris.fully_connect
 
     outputs = Array(Array(Float64)).new
@@ -88,7 +88,7 @@ describe SHAInet::Network do
     normalized = SHAInet::TrainingData.new(inputs, outputs)
     normalized.normalize_min_max
     p "Figure out iris with iRprop+ (batch)"
-    iris.train_batch(normalized.data.shuffle, :rprop, :mse, :sigmoid, 5000, 0.00001)
+    iris.train_batch(normalized.data.shuffle, :rprop, :mse, 5000, 0.00001)
     result = iris.run(normalized.normalized_inputs.first)
     ((result.first < 0.3) && (result[1] < 0.3) && (result.last > 0.7)).should eq(true)
   end
@@ -100,9 +100,9 @@ describe SHAInet::Network do
       "virginica"  => [1.to_f64, 0.to_f64, 0.to_f64],
     }
     iris = SHAInet::Network.new
-    iris.add_layer(:input, 4, :memory)
-    iris.add_layer(:hidden, 4, :memory)
-    iris.add_layer(:output, 3, :memory)
+    iris.add_layer(:input, 4, :memory, :sigmoid)
+    iris.add_layer(:hidden, 4, :memory, :sigmoid)
+    iris.add_layer(:output, 3, :memory, :sigmoid)
     iris.fully_connect
 
     outputs = Array(Array(Float64)).new
@@ -117,7 +117,7 @@ describe SHAInet::Network do
     end
     normalized = SHAInet::TrainingData.new(inputs, outputs)
     normalized.normalize_min_max
-    iris.train_batch(normalized.data.shuffle, :adam, :mse, :sigmoid, 20000, 0.00001)
+    iris.train_batch(normalized.data.shuffle, :adam, :mse, 20000, 0.00001)
     result = iris.run(normalized.normalized_inputs.first)
     ((result.first < 0.3) && (result[1] < 0.3) && (result.last > 0.9)).should eq(true)
   end
@@ -129,9 +129,9 @@ describe SHAInet::Network do
       "virginica"  => [1.to_f64, 0.to_f64, 0.to_f64],
     }
     iris = SHAInet::Network.new
-    iris.add_layer(:input, 4, :memory)
-    iris.add_layer(:hidden, 4, :memory)
-    iris.add_layer(:output, 3, :memory)
+    iris.add_layer(:input, 4, :memory, :sigmoid)
+    iris.add_layer(:hidden, 4, :memory, :sigmoid)
+    iris.add_layer(:output, 3, :memory, :sigmoid)
     iris.fully_connect
 
     outputs = Array(Array(Float64)).new
@@ -146,17 +146,17 @@ describe SHAInet::Network do
     end
     normalized = SHAInet::TrainingData.new(inputs, outputs)
     normalized.normalize_min_max
-    iris.train_batch(normalized.data.shuffle, :adam, :mse, :sigmoid, 20000, 0.00001, 1000, 50)
+    iris.train_batch(normalized.data.shuffle, :adam, :mse, 20000, 0.00001, 1000, 50)
     result = iris.run(normalized.normalized_inputs.first)
     ((result.first < 0.3) && (result[1] < 0.3) && (result.last > 0.9)).should eq(true)
   end
 
   # it "works on the mnist dataset using adam and batch" do
   #   mnist = SHAInet::Network.new
-  #   mnist.add_layer(:input, 784, :memory)
-  #   mnist.add_layer(:hidden, 20, :memory)
-  #   mnist.add_layer(:hidden, 20, :memory)
-  #   mnist.add_layer(:output, 10, :memory)
+  #   mnist.add_layer(:input, 784, :memory, :sigmoid)
+  #   mnist.add_layer(:hidden, 300, :memory, :sigmoid)
+  #   mnist.add_layer(:hidden, 100, :memory, :relu)
+  #   mnist.add_layer(:output, 10, :memory, :sigmoid)
   #   mnist.fully_connect
 
   #   # Lload train data
@@ -175,8 +175,8 @@ describe SHAInet::Network do
   #   normalized = SHAInet::TrainingData.new(inputs, outputs)
   #   normalized.normalize_min_max
   #   # Train on the data
-  #   mnist.train_batch(normalized.data.shuffle, :rprop, :mse, :sigmoid, 10, 0.0035, 10, 1000)
-  #   mnist.train_batch(normalized.data.shuffle, :adam, :mse, :sigmoid, 20000, 0.0035, 100, 1000)
+  #   mnist.train_batch(normalized.data.shuffle, :adam, :mse, 100, 0.0035, 10, 10000)
+  #   # mnist.train_batch(normalized.data.shuffle, :adam, :mse, 20000, 0.0035, 100, 1000)
 
   #   # Load test data
   #   outputs = Array(Array(Float64)).new
@@ -196,14 +196,14 @@ describe SHAInet::Network do
   #   normalized.normalize_min_max
   #   # Run on all test data, and see that we are atleast 0.01 far from the right solution
   #   normalized.normalized_inputs.each_with_index do |test, i|
-  #     result = mnist.run(test, :sigmoid, stealth = true)
+  #     result = mnist.run(test, stealth = true)
   #     if (result.index(result.max) == normalized.normalized_outputs[i].index(normalized.normalized_outputs[i].max))
   #       results << 1
   #     else
   #       results << 0
   #     end
   #   end
-  #   puts "We managed #{results.size / results.sum}% success"
+  #   puts "We managed #{results.sum} out of #{results.size} total"
   # end
 end
 # Remove train data

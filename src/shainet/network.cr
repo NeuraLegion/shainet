@@ -60,8 +60,8 @@ module SHAInet
     # l_type is: :input, :hidden or :output
     # l_size = how many neurons in the layer
     # n_type = advanced option for different neuron types
-    def add_layer(l_type : Symbol, l_size : Int32, n_type : Symbol = :memory)
-      layer = Layer.new(n_type, l_size, @logger)
+    def add_layer(l_type : Symbol, l_size : Int32, n_type : Symbol = :memory, activation_function : Symbol = :sigmoid)
+      layer = Layer.new(n_type, l_size, activation_function, @logger)
       layer.neurons.each { |neuron| @all_neurons << neuron } # To easily access neurons later
 
       case l_type
@@ -146,7 +146,7 @@ module SHAInet
     end
 
     # Run an input throught the network to get an output (weights & biases do not change)
-    def run(input : Array(GenNum), activation_function : Symbol = :sigmoid, stealth : Bool = false) : Array(Float64)
+    def run(input : Array(GenNum), stealth : Bool = false) : Array(Float64)
       raise NeuralNetRunError.new("Error input data size: #{input.size} doesn't fit input layer size: #{@input_layers.first.neurons.size}.") unless input.size == @input_layers.first.neurons.size
 
       # Insert the input data into the input layer
@@ -159,12 +159,12 @@ module SHAInet
       # Propogate the information forward through the hidden layers
 
       @hidden_layers.each do |l|
-        l.neurons.each { |neuron| neuron.activate(activation_function) }
+        l.neurons.each { |neuron| neuron.activate(l.activation_function) }
       end
 
       # Propogate the information through the output layers
       @output_layers.each do |l|
-        l.neurons.each { |neuron| neuron.activate(activation_function) }
+        l.neurons.each { |neuron| neuron.activate(l.activation_function) }
       end
 
       output = @output_layers.last.neurons.map { |neuron| neuron.activation } # return an array of all output neuron activations
@@ -180,10 +180,10 @@ module SHAInet
 
     # Quantifies how good the network performed for a single input compared to the expected output
     # This function returns the actual output and updates the error gradient for the output layer
-    def evaluate(input : Array(GenNum), expected : Array(GenNum), cost_function : Symbol, activation_function : Symbol = :sigmoid)
+    def evaluate(input : Array(GenNum), expected : Array(GenNum), cost_function : Symbol)
       raise NeuralNetRunError.new("Must define correct cost function type (:mse, :c_ent, :exp, :hel_d, :kld, :gkld, :ita_sai_d).") if COST_FUNCTIONS.any? { |x| x == cost_function } == false
 
-      actual = run(input, activation_function, stealth = true)
+      actual = run(input, stealth = true)
       # Get the error signal for the final layer, based on the cost function (error gradient is stored in the output neurons)
       @error_signal = [] of Float64
       case cost_function
@@ -252,7 +252,6 @@ module SHAInet
     def train(data : Array(Array(Array(GenNum))), # Input structure: data = [[Input = [] of Float64],[Expected result = [] of Float64]]
               training_type : Symbol,             # Type of training: :sgdm, :rprop, :adam
               cost_function : Symbol,             # one of COST_FUNCTIONS described at the top of the file
-              activation_function : Symbol,       # squashing performed on the activations within the network
               epochs : Int32,                     # a criteria of when to stop the training
               error_threshold : Float64,          # a criteria of when to stop the training
               log_each : Int32 = 1000)            # determines what is the step for error printout
@@ -271,7 +270,7 @@ module SHAInet
         # Go over each data point and update the weights/biases based on the specific example
         data.each do |data_point|
           # Update error signal, error gradient and total error at the output layer based on current input
-          evaluate(data_point[0], data_point[1], cost_function, activation_function)
+          evaluate(data_point[0], data_point[1], cost_function)
 
           # Propogate the errors backwards through the hidden layers
           @hidden_layers.each do |l|
@@ -305,7 +304,6 @@ module SHAInet
     def train_batch(data : Array(Array(Array(GenNum))), # Input structure: data = [[Input = [] of Float64],[Expected result = [] of Float64]]
                     training_type : Symbol,             # Type of training: :sgdm, :rprop, :adam
                     cost_function : Symbol,             # one of COST_FUNCTIONS described at the top of the file
-                    activation_function : Symbol,       # squashing performed on the activations within the network
                     epochs : Int32,                     # a criteria of when to stop the training
                     error_threshold : Float64,          # a criteria of when to stop the training
                     log_each : Int32 = 1000,            # determines what is the step for error printout
@@ -332,7 +330,7 @@ module SHAInet
 
           # Go over each data point and collect gradients of weights/biases based on each specific example
           data_slice.each do |data_point|
-            evaluate(data_point[0], data_point[1], cost_function, activation_function) # Get error gradient from output layer based on current input
+            evaluate(data_point[0], data_point[1], cost_function) # Get error gradient from output layer based on current input
             all_errors << @total_error
             # Propogate the errors backwards through the hidden layers
             @hidden_layers.each do |l|

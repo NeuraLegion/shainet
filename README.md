@@ -35,23 +35,23 @@ training_data = [
 # Initialize a new network
 xor = SHAInet::Network.new
 # Add a new layer of the input type with 2 neurons and classic neuron type (memory)
-xor.add_layer(:input, 2, :memory)
+xor.add_layer(:input, 2, :memory, :sigmoid)
 # Add a new layer of the hidden type with 2 neurons and classic neuron type (memory)
-xor.add_layer(:hidden, 2, :memory)
+xor.add_layer(:hidden, 2, :memory, :sigmoid)
 # Add a new layer of the output type with 1 neurons and classic neuron type (memory)
-xor.add_layer(:output, 1, :memory)
+xor.add_layer(:output, 1, :memory, :sigmoid)
 # Fully connect the network layers
 xor.fully_connect
 
 # data, training_type, cost_function, activation_function, epochs, error_threshold (sum of errors), learning_rate, momentum)
-xor.train(training_data, :sgdm, :mse, :sigmoid, 10000, 0.001)
+xor.train(training_data, :sgdm, :mse, 10000, 0.001)
 
 # Run the trained network
 xor.run([0, 0])
 ```
 
 
-Batch training on the iris dataset using irprop
+Batch training on the iris dataset using adam
 ```crystal
 # Configure label encoding
 label = {
@@ -61,9 +61,9 @@ label = {
 }
 # Initiate a new network
 iris = SHAInet::Network.new
-iris.add_layer(:input, 4, :memory)
-iris.add_layer(:hidden, 5, :memory)
-iris.add_layer(:output, 3, :memory)
+iris.add_layer(:input, 4, :memory, :sigmoid)
+iris.add_layer(:hidden, 5, :memory, :sigmoid)
+iris.add_layer(:output, 3, :memory, :sigmoid)
 iris.fully_connect
 
 # load all relevant information from the iris.csv
@@ -81,7 +81,7 @@ end
 normalized = SHAInet::TrainingData.new(inputs, outputs)
 normalized.normalize_min_max
 # Train using rprop
-iris.train_batch(normalized.data, :rprop, :mse, :sigmoid, 20000, 0.01)
+iris.train_batch(normalized.data, :adam, :mse, 20000, 0.01)
 iris.run(normalized.normalized_inputs.first)
 ```
 
