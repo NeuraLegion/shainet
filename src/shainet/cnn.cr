@@ -14,8 +14,42 @@ module SHAInet
       # fc(output = classes)- single vector that clasifies, fully conneted to previous layer
     end
 
-    def filter_layer(input : Array(Array(GenNum)), filters : Int32, window_size : Int32)
-      output = [] of Array(Float64)
+    def pad(input : Array(Array(Array(GenNum))), padding : Int32)
+      if padding < 1
+        raise CNNInitializationError.new("Padding value must be Int32 > 0")
+      end
+      input.each do |channel|
+        channel.each do |row|
+          padding.times { row << 0.0 }
+          padding.times { row.insert(0, 0.0) }
+        end
+        padding_row = Array(Float64).new(channel.first.size) { 0.0 }
+        padding.times { channel << padding_row }
+        padding.times { channel.insert(0, padding_row) }
+      end
+      return input
+    end
+
+    def receptive_field_split(input : Array(Array(Array(GenNum))), filter_size : Int32, stride : Int32)
+      vision_windows = Array(Layer).new
+
+      x = y = 0
+    end
+  end
+
+  class Input_layer
+    def initialize(input_volume : Array(Int32))
+      unless input_volume.size == 3
+        raise CNNInitializationError.new("Input volume must be an array of Int32: [width, height, channels].")
+      end
+
+      unless input_volume[0].size == input_volume[1].size
+        raise CNNInitializationError.new("Width and height of input must be of the same size.")
+      end
+
+      @channels = Array(Array(Array(Neuron))).new(input_volume[2]) {
+        Array(Array(Neuron)).new(input_volume[0]) { Array(Neuron).new(input_volume[1]) { Neuron.new(:memory) } }
+      }
     end
   end
 
@@ -41,19 +75,6 @@ module SHAInet
     end
 
     def convolve(input : Array(Array(Array(GenNum))))
-      # Add padding to input matrices
-      if @padding != 0
-        input.each do |channel|
-          channel.each do |row|
-            @padding.times { row << 0.0 }
-            @padding.times { row.insert(0, 0.0) }
-          end
-          padding_row = Array(Float64).new(channel.first.size) { 0.0 }
-          @padding.times { channel << padding_row }
-          @padding.times { channel.insert(0, padding_row) }
-        end
-      end
-
       # Use each filter to create feature map
 
       # @filters.each do |matrix|
