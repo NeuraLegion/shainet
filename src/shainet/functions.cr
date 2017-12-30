@@ -87,7 +87,15 @@ module SHAInet
   end
 
   def self.cross_entropy_cost_derivative(expected : Float64, actual : Float64) : Float64
-    return ((actual - expected)/((1.0 - actual)*actual)).to_f64
+    if actual == expected == 0.0 || actual == expected == 1.0
+      a = 0.0
+    elsif actual == 0.0 && expected != 0.0
+      a = -1.0
+    else
+      a = ((actual - expected)/((1.0 - actual)*actual)).to_f64
+    end
+    # puts a
+    return a
   end
 
   ##################################################################

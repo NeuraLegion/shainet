@@ -11,7 +11,7 @@ module SHAInet
       @prev_weight = Float64.new(0)      # Needed for delta rule improvement (with momentum)
 
       # Parameters needed for Rprop
-      @prev_gradient = rand(-0.1..0.1).to_f64
+      @prev_gradient = 0.0
       @prev_delta = 0.1
       @prev_delta_w = 0.1
 
