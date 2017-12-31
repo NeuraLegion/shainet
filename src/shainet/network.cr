@@ -337,6 +337,7 @@ module SHAInet
       data.each_slice(batch_size, reuse = false) do |data_slice|
         verify_data(data_slice)
         @logger.info("Working on mini-batch size: #{batch_size}") if mini_batch_size
+        clean_dead_neurons
         @time_step += 1 if mini_batch_size # in mini-batch update adam time_step
         loop do |e|
           if e % log_each == 0

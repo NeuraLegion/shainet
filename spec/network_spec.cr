@@ -154,8 +154,8 @@ describe SHAInet::Network do
   # it "works on the mnist dataset using adam and batch" do
   #   mnist = SHAInet::Network.new
   #   mnist.add_layer(:input, 784, :memory, :sigmoid)
-  #   mnist.add_layer(:hidden, 300, :memory, :relu)
-  #   mnist.add_layer(:hidden, 100, :memory, :relu)
+  #   mnist.add_layer(:hidden, 300, :memory, :sigmoid)
+  #   mnist.add_layer(:hidden, 100, :memory, :sigmoid)
   #   mnist.add_layer(:output, 10, :memory, :sigmoid)
   #   mnist.fully_connect
 
@@ -175,7 +175,7 @@ describe SHAInet::Network do
   #   normalized = SHAInet::TrainingData.new(inputs, outputs)
   #   normalized.normalize_min_max
   #   # Train on the data
-  #   mnist.train_batch(normalized.data.shuffle, :adam, :mse, 100, 0.0035, 10, 10000)
+  #   mnist.train_batch(normalized.data.shuffle, :adam, :mse, 100, 0.0035, 10, 150)
   #   # mnist.train_batch(normalized.data.shuffle, :adam, :mse, 20000, 0.0035, 100, 1000)
 
   #   # Load test data
