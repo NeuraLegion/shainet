@@ -1,16 +1,18 @@
+require "uuid"
+
 module SHAInet
   # Each type of neuron uses and propogates data differently
   NEURON_TYPES     = [:memory, :eraser, :amplifier, :fader, :sensor]
   ACTIVATION_TYPES = [:tanh, :sigmoid, :bp_sigmoid, :log_sigmoid, :relu, :l_relu]
 
   class Neuron
-    property :n_type, :synapses_in, :synapses_out, activation : Float64, gradient : Float64, bias : Float64, prev_bias : Float64
-    getter :input_sum, :sigma_prime
+    property :synapses_in, :synapses_out, :n_type, activation : Float64, gradient : Float64, bias : Float64, prev_bias : Float64
+    getter :input_sum, :sigma_prime, :id
     property prev_gradient : Float64, prev_delta : Float64, prev_delta_b : Float64
     property m_current : Float64, v_current : Float64, m_prev : Float64, v_prev : Float64
 
-    def initialize(@n_type : Symbol)
-      raise NeuralNetInitalizationError.new("Must choose currect neuron types, if you're not sure choose :memory as a standard neuron") if NEURON_TYPES.any? { |x| x == @n_type } == false
+    def initialize(@n_type : Symbol, @id : String = UUID.random.to_s)
+      raise NeuralNetInitalizationError.new("Must choose currect neuron types, if you're not sure choose :memory as a standard neuron") unless NEURON_TYPES.includes?(@n_type)
       @synapses_in = [] of Synapse
       @synapses_out = [] of Synapse
       @activation = Float64.new(0)    # Activation of neuron after squashing function (a)
