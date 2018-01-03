@@ -1,16 +1,17 @@
+require "uuid"
+
 module SHAInet
   # Each type of neuron uses and propogates data differently
-  NEURON_TYPES     = [:memory, :eraser, :amplifier, :fader, :sensor]
-  ACTIVATION_TYPES = [:tanh, :sigmoid, :bp_sigmoid, :log_sigmoid, :relu, :l_relu]
+  NEURON_TYPES = ["memory", "eraser", "amplifier", "fader", "sensor"]
 
   class Neuron
-    property :n_type, :synapses_in, :synapses_out, activation : Float64, gradient : Float64, bias : Float64, prev_bias : Float64
-    getter :input_sum, :sigma_prime
+    property :synapses_in, :synapses_out, :n_type, activation : Float64, gradient : Float64, bias : Float64, prev_bias : Float64
+    getter :input_sum, :sigma_prime, :id
     property prev_gradient : Float64, prev_delta : Float64, prev_delta_b : Float64
     property m_current : Float64, v_current : Float64, m_prev : Float64, v_prev : Float64
 
-    def initialize(@n_type : Symbol)
-      raise NeuralNetInitalizationError.new("Must choose currect neuron types, if you're not sure choose :memory as a standard neuron") if NEURON_TYPES.any? { |x| x == @n_type } == false
+    def initialize(@n_type : String, @id : String = UUID.random.to_s)
+      raise NeuralNetInitalizationError.new("Must choose currect neuron types, if you're not sure choose :memory as a standard neuron") unless NEURON_TYPES.includes?(@n_type)
       @synapses_in = [] of Synapse
       @synapses_out = [] of Synapse
       @activation = Float64.new(0)    # Activation of neuron after squashing function (a)
@@ -36,37 +37,14 @@ module SHAInet
     # This is the forward propogation
     # Allows the neuron to absorb the activation from its' own input neurons through the synapses
     # Then, it sums the information and an activation function is applied to normalize the data
-    def activate(activation_function : Symbol = :sigmoid) : Float64
-      raise NeuralNetRunError.new("Propogation requires a valid activation function.") unless ACTIVATION_TYPES.includes?(activation_function)
-
+    def activate(activation_function : Proc(GenNum, Array(Float64)) = SHAInet.sigmoid) : Float64
       new_memory = Array(Float64).new
       @synapses_in.each do |synapse| # Claclulate activation from each incoming neuron with applied weights, returns Array(Float64)
         new_memory << synapse.propagate_forward
       end
       @input_sum = new_memory.reduce { |acc, i| acc + i } # Sum all the information from input neurons, returns Float64
       @input_sum += @bias                                 # Add neuron bias (activation threshold)
-      case activation_function                            # Apply squashing function
-      when :tanh
-        @activation = SHAInet.tanh(@input_sum)
-        @sigma_prime = SHAInet.tanh_prime(@input_sum) # Activation function derivative
-      when :sigmoid
-        @activation = SHAInet.sigmoid(@input_sum)
-        @sigma_prime = SHAInet.sigmoid_prime(@input_sum)
-      when :bp_sigmoid
-        @activation = SHAInet.bp_sigmoid(@input_sum)
-        @sigma_prime = SHAInet.bp_sigmoid_prime(@input_sum)
-      when :log_sigmoid
-        @activation = SHAInet.log_sigmoid(@input_sum)
-        @sigma_prime = SHAInet.log_sigmoid_prime(@input_sum)
-      when :relu
-        @activation = SHAInet.relu(@input_sum)
-        @sigma_prime = SHAInet.relu_prime(@input_sum)
-      when :l_relu
-        @activation = SHAInet.l_relu(@input_sum, 0.01) # value of 0.01 is the slope for x<0
-        @sigma_prime = SHAInet.l_relu_prime(@input_sum)
-      else
-        raise NeuralNetRunError.new("Propogation requires a valid activation function.")
-      end
+      @activation, @sigma_prime = activation_function.call(@input_sum)
     end
 
     # This is the backward propogation of the hidden layers

@@ -8,3 +8,7 @@ authors:
 crystal: 0.24.0+58
 
 license: MIT
+
+dependencies:
+  cannon:
+    github: Papierkorb/cannon

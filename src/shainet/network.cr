@@ -1,4 +1,5 @@
 require "logger"
+require "json"
 
 module SHAInet
   class Network
@@ -59,7 +60,7 @@ module SHAInet
     # l_type is: :input, :hidden or :output
     # l_size = how many neurons in the layer
     # n_type = advanced option for different neuron types
-    def add_layer(l_type : Symbol, l_size : Int32, n_type : Symbol = :memory, activation_function : Symbol = :sigmoid)
+    def add_layer(l_type : Symbol, l_size : Int32, n_type : String = "memory", activation_function : Proc(GenNum, Array(Float64)) = SHAInet.sigmoid)
       layer = Layer.new(n_type, l_size, activation_function, @logger)
       layer.neurons.each { |neuron| @all_neurons << neuron } # To easily access neurons later
 
@@ -104,6 +105,16 @@ module SHAInet
         end
       end
       @logger.info("Cleaned #{current_neuron_number - @all_neurons.size} dead neurons")
+    end
+
+    def verify_net_before_train
+      if @input_layers.empty?
+        raise NeuralNetRunError.new("No input layers defined")
+      elsif @hidden_layers.empty?
+        raise NeuralNetRunError.new("Need atleast one hidden layer")
+      elsif @output_layers.empty?
+        raise NeuralNetRunError.new("No output layers defined")
+      end
     end
 
     # Connect all the layers in order (input and output don't connect between themselves): input, hidden, output
@@ -170,6 +181,7 @@ module SHAInet
 
     # Run an input throught the network to get an output (weights & biases do not change)
     def run(input : Array(GenNum), stealth : Bool = false) : Array(Float64)
+      verify_net_before_train
       raise NeuralNetRunError.new("Error input data size: #{input.size} doesn't fit input layer size: #{@input_layers.first.neurons.size}.") unless input.size == @input_layers.first.neurons.size
 
       # Insert the input data into the input layer
@@ -511,6 +523,100 @@ module SHAInet
     def randomize_all_biases
       raise NeuralNetRunError.new("Cannot randomize biases without synapses") if @all_synapses.empty?
       @all_neurons.each &.randomize_bias
+    end
+
+    def save_to_file(file_path : String)
+      dump_network = Array(Hash(String, String | Array(Hash(String, Array(Hash(String, String | Float64)) | Float64 | String | String)))).new
+
+      [@input_layers, @output_layers, @hidden_layers].flatten.each do |layer|
+        dump_layer = Hash(String, String | Array(Hash(String, Array(Hash(String, String | Float64)) | Float64 | String | String))).new
+        dump_neurons = Array(Hash(String, Array(Hash(String, String | Float64)) | Float64 | String | String)).new
+        layer.neurons.each do |neuron|
+          n = Hash(String, Array(Hash(String, String | Float64)) | Float64 | String | String).new
+          n["id"] = neuron.id
+          n["bias"] = neuron.bias
+          n["n_type"] = neuron.n_type.to_s
+          n["synapses_in"] = Array(Hash(String, String | Float64)).new
+          n["synapses_out"] = Array(Hash(String, String | Float64)).new
+          neuron.synapses_in.each do |s|
+            s_h = Hash(String, String | Float64).new
+            s_h["source"] = s.source_neuron.id
+            s_h["destination"] = s.dest_neuron.id
+            s_h["weight"] = s.weight
+            n["synapses_in"].as(Array(Hash(String, String | Float64))) << s_h
+          end
+          neuron.synapses_out.each do |s|
+            s_h = Hash(String, String | Float64).new
+            s_h["source"] = s.source_neuron.id
+            s_h["destination"] = s.dest_neuron.id
+            s_h["weight"] = s.weight
+            n["synapses_out"].as(Array(Hash(String, String | Float64))) << s_h
+          end
+          dump_neurons << n
+        end
+
+        l_type = ""
+        if @input_layers.includes?(layer)
+          l_type = "input"
+        elsif @hidden_layers.includes?(layer)
+          l_type = "hidden"
+        else
+          l_type = "output"
+        end
+
+        dump_layer["l_type"] = l_type
+        dump_layer["neurons"] = dump_neurons
+        dump_layer["activation_function"] = layer.activation_function.to_s
+        dump_network << dump_layer
+      end
+      File.write(file_path, {"layers" => dump_network}.to_json)
+      @logger.info("Network saved to: #{file_path}")
+    end
+
+    def load_from_file(file_path : String)
+      net = NetDump.from_json(File.read(file_path))
+      net.layers.each do |layer|
+        l = Layer.new("memory", 0)
+        layer.neurons.each do |neuron|
+          n = Neuron.new(neuron.n_type, neuron.id)
+          n.bias = neuron.bias
+          l.neurons << n
+          @all_neurons << n
+        end
+        case layer.l_type
+        when "input"
+          @input_layers << l
+        when "output"
+          @output_layers << l
+        when "hidden"
+          @hidden_layers << l
+        end
+      end
+      net.layers.flatten.each do |layer|
+        layer.neurons.each do |n|
+          n.synapses_in.each do |s|
+            source = @all_neurons.find { |i| i.id == s.source }
+            destination = @all_neurons.find { |i| i.id == s.destination }
+            next unless source && destination
+            _s = Synapse.new(source, destination)
+            _s.weight = s.weight
+            source.synapses_out << _s
+            destination.synapses_in << _s
+            @all_synapses << _s
+          end
+          n.synapses_out.each do |s|
+            source = @all_neurons.find { |i| i.id == s.source }
+            destination = @all_neurons.find { |i| i.id == s.destination }
+            next unless source && destination
+            _s = Synapse.new(source, destination)
+            _s.weight = s.weight
+            source.synapses_in << _s
+            destination.synapses_out << _s
+            @all_synapses << _s
+          end
+        end
+      end
+      @logger.info("Network loaded from: #{file_path}")
     end
 
     def inspect
