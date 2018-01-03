@@ -534,7 +534,7 @@ module SHAInet
         layer.neurons.each do |neuron|
           n = Hash(String, Array(Hash(String, String | Float64)) | Float64 | String | String).new
           n["id"] = neuron.id
-          n["activation"] = neuron.activation
+          n["bias"] = neuron.bias
           n["n_type"] = neuron.n_type.to_s
           n["synapses_in"] = Array(Hash(String, String | Float64)).new
           n["synapses_out"] = Array(Hash(String, String | Float64)).new
@@ -579,7 +579,7 @@ module SHAInet
         l = Layer.new("memory", 0)
         layer.neurons.each do |neuron|
           n = Neuron.new(neuron.n_type, neuron.id)
-          n.activation = neuron.activation
+          n.bias = neuron.bias
           l.neurons << n
           @all_neurons << n
         end

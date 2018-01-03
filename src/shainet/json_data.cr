@@ -18,7 +18,7 @@ module SHAInet
   class NeuronDump
     JSON.mapping({
       id:           String,
-      activation:   Float64,
+      bias:         Float64,
       n_type:       String,
       synapses_in:  Array(SynapseDump),
       synapses_out: Array(SynapseDump),
