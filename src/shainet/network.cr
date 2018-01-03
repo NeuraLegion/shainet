@@ -60,7 +60,7 @@ module SHAInet
     # l_type is: :input, :hidden or :output
     # l_size = how many neurons in the layer
     # n_type = advanced option for different neuron types
-    def add_layer(l_type : Symbol, l_size : Int32, n_type : Symbol = :memory, activation_function : Symbol = :sigmoid)
+    def add_layer(l_type : Symbol, l_size : Int32, n_type : Symbol = :memory, activation_function : Proc(GenNum, Float64) = SHAInet.sigmoid)
       layer = Layer.new(n_type, l_size, activation_function, @logger)
       layer.neurons.each { |neuron| @all_neurons << neuron } # To easily access neurons later
 
@@ -105,6 +105,16 @@ module SHAInet
         end
       end
       @logger.info("Cleaned #{current_neuron_number - @all_neurons.size} dead neurons")
+    end
+
+    def verify_net_before_train
+      if @input_layers.empty?
+        raise NeuralNetRunError.new("No input layers defined")
+      elsif @hidden_layers.empty?
+        raise NeuralNetRunError.new("Need atleast one hidden layer")
+      elsif @output_layers.empty?
+        raise NeuralNetRunError.new("No output layers defined")
+      end
     end
 
     # Connect all the layers in order (input and output don't connect between themselves): input, hidden, output
@@ -171,6 +181,7 @@ module SHAInet
 
     # Run an input throught the network to get an output (weights & biases do not change)
     def run(input : Array(GenNum), stealth : Bool = false) : Array(Float64)
+      verify_net_before_train
       raise NeuralNetRunError.new("Error input data size: #{input.size} doesn't fit input layer size: #{@input_layers.first.neurons.size}.") unless input.size == @input_layers.first.neurons.size
 
       # Insert the input data into the input layer
@@ -561,12 +572,11 @@ module SHAInet
       File.write(file_path, {"layers" => dump_network}.to_json)
     end
 
-    # def load_from_file(file_path : String)
-    #   net = NetDump.from_json(File.read(file_path))
-    #   net.layers.each do |layer|
-
-    #   end
-    # end
+    def load_from_file(file_path : String)
+      net = NetDump.from_json(File.read(file_path))
+      net.layers.each do |layer|
+      end
+    end
 
     def inspect
       @logger.info(@input_layers)

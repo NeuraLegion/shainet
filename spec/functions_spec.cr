@@ -23,6 +23,6 @@ describe SHAInet do
   end
 
   it "check l_relu" do
-    ((Int64::MIN..Int64::MAX).includes?(SHAInet.l_relu.call(0.5, 0.5))).should eq(true)
+    ((Int64::MIN..Int64::MAX).includes?(SHAInet.l_relu.call(0.5))).should eq(true)
   end
 end

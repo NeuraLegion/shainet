@@ -2,8 +2,7 @@ require "uuid"
 
 module SHAInet
   # Each type of neuron uses and propogates data differently
-  NEURON_TYPES     = [:memory, :eraser, :amplifier, :fader, :sensor]
-  ACTIVATION_TYPES = [:tanh, :sigmoid, :bp_sigmoid, :log_sigmoid, :relu, :l_relu]
+  NEURON_TYPES = [:memory, :eraser, :amplifier, :fader, :sensor]
 
   class Neuron
     property :synapses_in, :synapses_out, :n_type, activation : Float64, gradient : Float64, bias : Float64, prev_bias : Float64
@@ -39,8 +38,6 @@ module SHAInet
     # Allows the neuron to absorb the activation from its' own input neurons through the synapses
     # Then, it sums the information and an activation function is applied to normalize the data
     def activate(activation_function : Proc(GenNum, Float64) = SHAInet.sigmoid) : Float64
-      raise NeuralNetRunError.new("Propogation requires a valid activation function.") unless ACTIVATION_TYPES.includes?(activation_function)
-
       new_memory = Array(Float64).new
       @synapses_in.each do |synapse| # Claclulate activation from each incoming neuron with applied weights, returns Array(Float64)
         new_memory << synapse.propagate_forward
@@ -48,6 +45,7 @@ module SHAInet
       @input_sum = new_memory.reduce { |acc, i| acc + i } # Sum all the information from input neurons, returns Float64
       @input_sum += @bias                                 # Add neuron bias (activation threshold)
       @activation = activation_function.call(@input_sum)
+      @sigma_prime = SHAInet.sigmoid_prime.call(@input_sum)
     end
 
     # This is the backward propogation of the hidden layers
