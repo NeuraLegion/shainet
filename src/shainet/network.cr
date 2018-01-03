@@ -33,7 +33,6 @@ module SHAInet
       @hidden_layers = Array(Layer).new
       @all_neurons = Array(Neuron).new   # Array of all current neurons in the network
       @all_synapses = Array(Synapse).new # Array of all current synapses in the network
-
       @error_signal = Array(Float64).new # Array of errors for each neuron in the output layers, based on specific input
       @total_error = Float64.new(1)      # Sum of errors from output layer, based on a specific input
       @mean_error = Float64.new(1)       # MSE of netwrok, based on all errors of output layer fort a specific input or batch
@@ -81,6 +80,30 @@ module SHAInet
       else
         raise NeuralNetRunError.new("Must define correct layer type (:input, :hidden, :output).")
       end
+    end
+
+    def clean_dead_neurons
+      current_neuron_number = @all_neurons.size
+      @hidden_layers.each do |h_l|
+        h_l.neurons.each do |neuron|
+          kill = false
+          if neuron.bias == 0
+            neuron.synapses_in.each do |s|
+              if s.weight == 0
+                kill = true
+              end
+            end
+          end
+          if kill
+            # Kill neuron and all connected synapses
+            neuron.synapses_in.each { |s| @all_synapses.delete(s) }
+            neuron.synapses_out.each { |s| @all_synapses.delete(s) }
+            @all_neurons.delete(neuron)
+            h_l.neurons.delete(neuron)
+          end
+        end
+      end
+      @logger.info("Cleaned #{current_neuron_number - @all_neurons.size} dead neurons")
     end
 
     # Connect all the layers in order (input and output don't connect between themselves): input, hidden, output
