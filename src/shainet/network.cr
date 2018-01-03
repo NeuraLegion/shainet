@@ -60,7 +60,7 @@ module SHAInet
     # l_type is: :input, :hidden or :output
     # l_size = how many neurons in the layer
     # n_type = advanced option for different neuron types
-    def add_layer(l_type : Symbol, l_size : Int32, n_type : Symbol = :memory, activation_function : Proc(GenNum, Array(Float64)) = SHAInet.sigmoid)
+    def add_layer(l_type : Symbol, l_size : Int32, n_type : String = "memory", activation_function : Proc(GenNum, Array(Float64)) = SHAInet.sigmoid)
       layer = Layer.new(n_type, l_size, activation_function, @logger)
       layer.neurons.each { |neuron| @all_neurons << neuron } # To easily access neurons later
 
@@ -575,6 +575,45 @@ module SHAInet
     def load_from_file(file_path : String)
       net = NetDump.from_json(File.read(file_path))
       net.layers.each do |layer|
+        l = Layer.new("memory", 0)
+        layer.neurons.each do |neuron|
+          n = Neuron.new(neuron.n_type, neuron.id)
+          n.activation = neuron.activation
+          l.neurons << n
+          @all_neurons << n
+        end
+        case layer.l_type
+        when "input"
+          @input_layers << l
+        when "output"
+          @output_layers << l
+        when "hidden"
+          @hidden_layers << l
+        end
+      end
+      net.layers.flatten.each do |layer|
+        layer.neurons.each do |n|
+          n.synapses_in.each do |s|
+            source = @all_neurons.find { |i| i.id == s.source }
+            destination = @all_neurons.find { |i| i.id == s.destination }
+            next unless source && destination
+            _s = Synapse.new(source, destination)
+            _s.weight = s.weight
+            source.synapses_out << _s
+            destination.synapses_in << _s
+            @all_synapses << _s
+          end
+          n.synapses_out.each do |s|
+            source = @all_neurons.find { |i| i.id == s.source }
+            destination = @all_neurons.find { |i| i.id == s.destination }
+            next unless source && destination
+            _s = Synapse.new(source, destination)
+            _s.weight = s.weight
+            source.synapses_in << _s
+            destination.synapses_out << _s
+            @all_synapses << _s
+          end
+        end
       end
     end
 
