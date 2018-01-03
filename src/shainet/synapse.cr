@@ -1,6 +1,6 @@
 module SHAInet
   class Synapse
-    getter source_neuron : Neuron, dest_neuron : Neuron
+    property source_neuron : Neuron, dest_neuron : Neuron
     property weight : Float64, gradient : Float64, prev_weight : Float64
     property prev_gradient : Float64, prev_delta : Float64, prev_delta_w : Float64
     property m_current : Float64, v_current : Float64, m_prev : Float64, v_prev : Float64

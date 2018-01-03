@@ -102,7 +102,7 @@ module SHAInet
 
   # # Linear algebra math # #
 
-  # vector multiplication
+  # vector elment-by-element multiplication
   def self.vector_mult(array1 : Array(GenNum), array2 : Array(GenNum))
     raise MathError.new("Vectors must be the same size to multiply!") if array1.size != array2.size
 
@@ -114,6 +114,7 @@ module SHAInet
     new_vector
   end
 
+  # vector elment-by-element multiplication
   def self.vector_sum(array1 : Array(Float64), array2 : Array(Float64))
     raise MathError.new("Vectors must be the same size to sum!") if array1.size != array2.size
 
@@ -123,6 +124,20 @@ module SHAInet
       new_vector << result
     end
     new_vector
+  end
+
+  def self.dot_product(m1 : Array(Array(GenNum)), m2 : Array(Array(GenNum)))
+    out_matrix = [] of Array(Float64)
+    m2 = m2.transpose
+    m1.each do |v1|
+      new_row = [] of Float64
+      m2.each do |v2|
+        new_vector = vector_mult(v1, v2)
+        new_row << new_vector.reduce { |acc, i| acc + i }
+      end
+      out_matrix << new_row
+    end
+    out_matrix
   end
 
   ##################################################################
