@@ -1,9 +1,13 @@
 require "logger"
 
 module SHAInet
-  class CNN
+  alias CNN_layer = Conv_layer | Relu_layer | Max_pool_layer | FC_layer
+
+  class CNN < Network
     def initialize
-      @layers = [] of Layer
+      @input_layers = Array(CNN_input_layer).new
+      @hidden_layers = Array(CNN_layer).new
+      @output_layers = Array(Layer).new
 
       # # layer types:
       # input(width, height ,channels = RGB)
@@ -37,7 +41,13 @@ module SHAInet
     end
   end
 
-  class Input_layer
+  class CNN_neuron < Neuron
+  end
+
+  class CNN_synapse < Synapse
+  end
+
+  class CNN_input_layer
     def initialize(input_volume : Array(Int32))
       unless input_volume.size == 3
         raise CNNInitializationError.new("Input volume must be an array of Int32: [width, height, channels].")
@@ -54,53 +64,33 @@ module SHAInet
   end
 
   class Conv_layer
-    property :output, padding : Int32, filters : Array(Array(Array(Neuron)))
+  end
 
-    def initialize(input_volume : Array(Int32), filters_num : Int32, filter_size : Int32, stride : Int32, padding : Int32 = 0)
-      unless input_volume.size == 3
-        raise CNNInitializationError.new("Input volume must be an array of Int32: [width, height, channels].")
-      end
+  class Receptive_field
+    property window_loacation : Array(Float64), synapses : Array(Array(CNN_synapse)), bias : Float64
+    property :source_neurons, :target_neuron
+    getter :window_size
 
-      @filters = Array(Array(Array(Neuron))).new(filters_num) {
-        Array(Array(Neuron)).new(filter_size) { Array(Neuron).new(filter_size) { Neuron.new(:memory) } }
-      }
+    def initialize(@window_size : Int32)
+      @window_loacation = [0, 0]
+      @synapses = Array(Array(CNN_synapse)).new(@window_size) { Array(CNN_synapse).new(@window_size) { CNN_synapse.new } }
+      @bias = rand(-1..1).to_f64
 
-      @output = Array(Array(Array(Float64))).new(filters_num) {
-        Array(Array(Float64)).new(input_volume[0]) { Array(Float64).new(input_volume[1]) { 0.0 } }
-      }
-
-      @filter_size = filter_size
-      @stride = stride
-      @padding = padding
+      @source_neurons = nil
+      @target_neuron = nil
     end
 
-    def convolve(input : Array(Array(Array(GenNum))))
-      # Use each filter to create feature map
+    def prpogate_forward(input_matrix : Array(Array(Neuron)), window_loacation : Array(Float64), target_neuron : CNN_neuron)
+      weighted_sum = Float64.new(0)
+      @synapses.size.each do |row|
+        row.size.each do |col|
+          weighted_sum += input_matrix[window_loacation[0] + row].activaton*@synapses[row][col].weight
+        end
+      end
+      target_neuron.activation = weighted_sum + @bias
+    end
 
-      # @filters.each do |matrix|
-      #  row = 0 + @padding
-      #  col = 0 + @padding
-
-      #  # while
-
-      #  	while (row <= input.first.first.size + @padding && y <= input.first.size + @padding)
-      # 	(row..row + @stride).each do |x|
-      # 		(col..col + @stride).each do |y|
-
-      #   	filtered_output_matrices = Array(Array(Array(Array(GenNum)))).new
-      #   	@filters.each do |filter|
-      #   		output_matrix = Array(Array(GenNum))
-      #   		filtered_rows = Array(Float64).new
-      #   		filter.each_with_index do |row|
-      # 	  		array1 = channel[y+i][x..(x + @filter_size -1)]
-      # 	  		array2 = matrix[i]
-      # 	  		new_array = vector_mult(array1,array2) # + bias
-      # 	  		array_sum = new_array.reduce {|acc,i| acc + i}
-      # 	  		filtered_rows << array_sum
-      # 	  	end
-
-      # 	end
-      # end
+    def prpogate_backward
     end
   end
 
@@ -112,4 +102,54 @@ module SHAInet
 
   class Drop_out_layer
   end
+
+  class FC_layer
+  end
+end
+
+def initialize(input_volume : Array(Int32), filters_num : Int32, filter_size : Int32, stride : Int32, padding : Int32 = 0)
+  unless input_volume.size == 3
+    raise CNNInitializationError.new("Input volume must be an array of Int32: [width, height, channels].")
+  end
+
+  @filters = Array(Array(Array(Neuron))).new(filters_num) {
+    Array(Array(Neuron)).new(filter_size) { Array(Neuron).new(filter_size) { Neuron.new(:memory) } }
+  }
+
+  @output = Array(Array(Array(Float64))).new(filters_num) {
+    Array(Array(Float64)).new(input_volume[0]) { Array(Float64).new(input_volume[1]) { 0.0 } }
+  }
+
+  @filter_size = filter_size
+  @stride = stride
+  @padding = padding
+end
+
+def convolve(input : Array(Array(Array(GenNum))))
+  # Use each filter to create feature map
+
+  # @filters.each do |matrix|
+  #  row = 0 + @padding
+  #  col = 0 + @padding
+
+  #  # while
+
+  #  	while (row <= input.first.first.size + @padding && y <= input.first.size + @padding)
+  # 	(row..row + @stride).each do |x|
+  # 		(col..col + @stride).each do |y|
+
+  #   	filtered_output_matrices = Array(Array(Array(Array(GenNum)))).new
+  #   	@filters.each do |filter|
+  #   		output_matrix = Array(Array(GenNum))
+  #   		filtered_rows = Array(Float64).new
+  #   		filter.each_with_index do |row|
+  # 	  		array1 = channel[y+i][x..(x + @filter_size -1)]
+  # 	  		array2 = matrix[i]
+  # 	  		new_array = vector_mult(array1,array2) # + bias
+  # 	  		array_sum = new_array.reduce {|acc,i| acc + i}
+  # 	  		filtered_rows << array_sum
+  # 	  	end
+
+  # 	end
+  # end
 end
