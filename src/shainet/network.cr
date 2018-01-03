@@ -570,6 +570,7 @@ module SHAInet
         dump_network << dump_layer
       end
       File.write(file_path, {"layers" => dump_network}.to_json)
+      @logger.info("Network saved to: #{file_path}")
     end
 
     def load_from_file(file_path : String)
@@ -615,6 +616,7 @@ module SHAInet
           end
         end
       end
+      @logger.info("Network loaded from: #{file_path}")
     end
 
     def inspect
