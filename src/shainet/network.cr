@@ -60,7 +60,7 @@ module SHAInet
     # l_type is: :input, :hidden or :output
     # l_size = how many neurons in the layer
     # n_type = advanced option for different neuron types
-    def add_layer(l_type : Symbol, l_size : Int32, n_type : Symbol = :memory, activation_function : Proc(GenNum, Float64) = SHAInet.sigmoid)
+    def add_layer(l_type : Symbol, l_size : Int32, n_type : Symbol = :memory, activation_function : Proc(GenNum, Array(Float64)) = SHAInet.sigmoid)
       layer = Layer.new(n_type, l_size, activation_function, @logger)
       layer.neurons.each { |neuron| @all_neurons << neuron } # To easily access neurons later
 

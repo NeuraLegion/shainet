@@ -37,15 +37,14 @@ module SHAInet
     # This is the forward propogation
     # Allows the neuron to absorb the activation from its' own input neurons through the synapses
     # Then, it sums the information and an activation function is applied to normalize the data
-    def activate(activation_function : Proc(GenNum, Float64) = SHAInet.sigmoid) : Float64
+    def activate(activation_function : Proc(GenNum, Array(Float64)) = SHAInet.sigmoid) : Float64
       new_memory = Array(Float64).new
       @synapses_in.each do |synapse| # Claclulate activation from each incoming neuron with applied weights, returns Array(Float64)
         new_memory << synapse.propagate_forward
       end
       @input_sum = new_memory.reduce { |acc, i| acc + i } # Sum all the information from input neurons, returns Float64
       @input_sum += @bias                                 # Add neuron bias (activation threshold)
-      @activation = activation_function.call(@input_sum)
-      @sigma_prime = SHAInet.sigmoid_prime.call(@input_sum)
+      @activation, @sigma_prime = activation_function.call(@input_sum)
     end
 
     # This is the backward propogation of the hidden layers
