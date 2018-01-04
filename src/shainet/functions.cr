@@ -1,23 +1,50 @@
 module SHAInet
+  # As Procs
+
+  def self.sigmoid : Proc(GenNum, Array(Float64)) # Output range (0..1)
+    ->(value : GenNum) { [_sigmoid(value), _sigmoid_prime(value)] }
+  end
+
+  def self.bp_sigmoid : Proc(GenNum, Array(Float64)) # Output range (-1..1)
+    ->(value : GenNum) { [_bp_sigmoid(value), _bp_sigmoid_prime(value)] }
+  end
+
+  def self.log_sigmoid : Proc(GenNum, Array(Float64)) # Output range (0..1)
+    ->(value : GenNum) { [_log_sigmoid(value), _log_sigmoid_prime(value)] }
+  end
+
+  def self.tanh : Proc(GenNum, Array(Float64)) # Output range (-1..1)
+    ->(value : GenNum) { [_tanh(value), _tanh_prime(value)] }
+  end
+
+  def self.relu : Proc(GenNum, Array(Float64)) # Output range (0..inf)
+    ->(value : GenNum) { [_relu(value), _relu_prime(value)] }
+  end
+
+  def self.l_relu : Proc(GenNum, Array(Float64)) # Output range (-inf..inf)
+    # (value : GenNum, slope : Float64 = 0.01) : Float64
+    ->(value : GenNum) { [_l_relu(value), _l_relu_prime(value)] }
+  end
+
   # # Activation functions # #
 
-  def self.sigmoid(value : GenNum) : Float64 # Output range (0..1)
+  def self._sigmoid(value : GenNum) : Float64 # Output range (0..1)
     (1.0/(1.0 + Math::E**(-value))).to_f64
   end
 
-  def self.bp_sigmoid(value : GenNum) : Float64 # Output range (-1..1)
+  def self._bp_sigmoid(value : GenNum) : Float64 # Output range (-1..1)
     ((1.0 - Math::E**(-value))/(1.0 + Math::E**(-value))).to_f64
   end
 
-  def self.log_sigmoid(value : GenNum) : Float64 # Output range (0..1)
+  def self._log_sigmoid(value : GenNum) : Float64 # Output range (0..1)
     ((Math::E**(value))/(1.0 + Math::E**(value))).to_f64
   end
 
-  def self.tanh(value : GenNum) : Float64 # Output range (-1..1)
+  def self._tanh(value : GenNum) : Float64 # Output range (-1..1)
     ((Math::E**(value) - Math::E**(-value))/(Math::E**(value) + Math::E**(-value))).to_f64
   end
 
-  def self.relu(value : GenNum) # Output range (0..inf)
+  def self._relu(value : GenNum) # Output range (0..inf)
     if value < 0
       (0).to_f64
     else
@@ -25,7 +52,7 @@ module SHAInet
     end
   end
 
-  def self.l_relu(value : GenNum, slope : Float64 = 0.01) : Float64 # Output range (-inf..inf)
+  def self._l_relu(value : GenNum, slope : Float64 = 0.01) : Float64 # Output range (-inf..inf)
     if value < 0
       slope.to_f64*value.to_f64
     else
@@ -35,23 +62,23 @@ module SHAInet
 
   # # Derivatives of activation functions # #
 
-  def self.sigmoid_prime(value : Float64) : Float64
-    sigmoid(value)*(1.0 - sigmoid(value)).to_f64
+  def self._sigmoid_prime(value : GenNum) : Float64
+    _sigmoid(value)*(1.0 - _sigmoid(value)).to_f64
   end
 
-  def self.bp_sigmoid_prime(value : Float64) : Float64
+  def self._bp_sigmoid_prime(value : GenNum) : Float64
     (2*Math::E**(value)/(Math::E**(value) + 1)**2).to_f64
   end
 
-  def self.log_sigmoid_prime(value : Float64) : Float64
+  def self._log_sigmoid_prime(value : GenNum) : Float64
     (Math::E**(value)/(Math::E**(value) + 1)**2).to_f64
   end
 
-  def self.tanh_prime(value : Float64) : Float64
-    (1.0 - tanh(value)**2).to_f64
+  def self._tanh_prime(value : GenNum) : Float64
+    (1.0 - _tanh(value)**2).to_f64
   end
 
-  def self.relu_prime(value : GenNum) : Float64
+  def self._relu_prime(value : GenNum) : Float64
     if value < 0
       (0).to_f64
     else
@@ -59,7 +86,7 @@ module SHAInet
     end
   end
 
-  def self.l_relu_prime(value : GenNum, slope : Float64 = 0.01) : Float64
+  def self._l_relu_prime(value : GenNum, slope : Float64 = 0.01) : Float64
     if value < 0
       slope
     else

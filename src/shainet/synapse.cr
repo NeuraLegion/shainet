@@ -35,9 +35,9 @@ module SHAInet
       new_memory = @source_neuron.activation*@weight
 
       case @source_neuron.n_type
-      when :memory
+      when "memory"
         return new_memory
-      when :eraser
+      when "eraser"
         return (-1)*new_memory
       else
         raise "Other types of neurons are not supported yet!"
