@@ -12,9 +12,9 @@ describe SHAInet::Network do
 
   it "saves_to_file" do
     nn = SHAInet::Network.new
-    nn.add_layer(:input, 2, "memory", SHAInet.sigmoid)
-    nn.add_layer(:output, 2, "memory", SHAInet.sigmoid)
-    nn.add_layer(:hidden, 2, "memory", SHAInet.sigmoid)
+    nn.add_layer(:input, 2, :memory, SHAInet.sigmoid)
+    nn.add_layer(:output, 2, :memory, SHAInet.sigmoid)
+    nn.add_layer(:hidden, 2, :memory, SHAInet.sigmoid)
     nn.fully_connect
     nn.save_to_file("./my_net.nn")
     File.exists?("./my_net.nn").should eq(true)
@@ -35,12 +35,33 @@ describe SHAInet::Network do
     ]
 
     xor = SHAInet::Network.new
-    xor.add_layer(:input, 2, "memory", SHAInet.sigmoid)
-    1.times { |x| xor.add_layer(:hidden, 3, "memory", SHAInet.sigmoid) }
-    xor.add_layer(:output, 1, "memory", SHAInet.sigmoid)
+    xor.add_layer(:input, 2, :memory, SHAInet.sigmoid)
+    1.times { |x| xor.add_layer(:hidden, 3, :memory, SHAInet.sigmoid) }
+    xor.add_layer(:output, 1, :memory, SHAInet.sigmoid)
     xor.fully_connect
     # data, training_type, cost_function, activation_function, epochs, error_threshold (MSE %), log each steps
     xor.train(training_data, :sgdm, :mse, epochs = 5000, threshold = 0.000001, log = 100)
+
+    (xor.run([0, 0]).first < 0.1).should eq(true)
+    (xor.run([1, 0]).first > 0.9).should eq(true)
+    (xor.run([0, 1]).first > 0.9).should eq(true)
+    (xor.run([1, 1]).first < 0.1).should eq(true)
+  end
+
+  it "Supports both Symbols or Strings as input params" do
+    training_data = [
+      [[0, 0], [0]],
+      [[1, 0], [1]],
+      [[0, 1], [1]],
+      [[1, 1], [0]],
+    ]
+
+    xor = SHAInet::Network.new
+    xor.add_layer("input", 2, "memory", SHAInet.sigmoid)
+    1.times { |x| xor.add_layer("hidden", 3, "memory", SHAInet.sigmoid) }
+    xor.add_layer("output", 1, "memory", SHAInet.sigmoid)
+    xor.fully_connect
+    xor.train(training_data, "sgdm", "mse", epochs = 5000, threshold = 0.000001, log = 100)
 
     (xor.run([0, 0]).first < 0.1).should eq(true)
     (xor.run([1, 0]).first > 0.9).should eq(true)
@@ -55,9 +76,9 @@ describe SHAInet::Network do
       "virginica"  => [1.to_f64, 0.to_f64, 0.to_f64],
     }
     iris = SHAInet::Network.new
-    iris.add_layer(:input, 4, "memory", SHAInet.sigmoid)
-    iris.add_layer(:hidden, 4, "memory", SHAInet.sigmoid)
-    iris.add_layer(:output, 3, "memory", SHAInet.sigmoid)
+    iris.add_layer(:input, 4, :memory, SHAInet.sigmoid)
+    iris.add_layer(:hidden, 4, :memory, SHAInet.sigmoid)
+    iris.add_layer(:output, 3, :memory, SHAInet.sigmoid)
     iris.fully_connect
 
     outputs = Array(Array(Float64)).new
@@ -86,9 +107,9 @@ describe SHAInet::Network do
       "virginica"  => [1.to_f64, 0.to_f64, 0.to_f64],
     }
     iris = SHAInet::Network.new
-    iris.add_layer(:input, 4, "memory", SHAInet.sigmoid)
-    iris.add_layer(:hidden, 4, "memory", SHAInet.sigmoid)
-    iris.add_layer(:output, 3, "memory", SHAInet.sigmoid)
+    iris.add_layer(:input, 4, :memory, SHAInet.sigmoid)
+    iris.add_layer(:hidden, 4, :memory, SHAInet.sigmoid)
+    iris.add_layer(:output, 3, :memory, SHAInet.sigmoid)
     iris.fully_connect
 
     outputs = Array(Array(Float64)).new
@@ -116,9 +137,9 @@ describe SHAInet::Network do
       "virginica"  => [1.to_f64, 0.to_f64, 0.to_f64],
     }
     iris = SHAInet::Network.new
-    iris.add_layer(:input, 4, "memory", SHAInet.sigmoid)
-    iris.add_layer(:hidden, 4, "memory", SHAInet.sigmoid)
-    iris.add_layer(:output, 3, "memory", SHAInet.sigmoid)
+    iris.add_layer(:input, 4, :memory, SHAInet.sigmoid)
+    iris.add_layer(:hidden, 4, :memory, SHAInet.sigmoid)
+    iris.add_layer(:output, 3, :memory, SHAInet.sigmoid)
     iris.fully_connect
 
     outputs = Array(Array(Float64)).new
@@ -145,9 +166,9 @@ describe SHAInet::Network do
       "virginica"  => [1.to_f64, 0.to_f64, 0.to_f64],
     }
     iris = SHAInet::Network.new
-    iris.add_layer(:input, 4, "memory", SHAInet.sigmoid)
-    iris.add_layer(:hidden, 4, "memory", SHAInet.sigmoid)
-    iris.add_layer(:output, 3, "memory", SHAInet.sigmoid)
+    iris.add_layer(:input, 4, :memory, SHAInet.sigmoid)
+    iris.add_layer(:hidden, 4, :memory, SHAInet.sigmoid)
+    iris.add_layer(:output, 3, :memory, SHAInet.sigmoid)
     iris.fully_connect
 
     outputs = Array(Array(Float64)).new
@@ -174,9 +195,9 @@ describe SHAInet::Network do
       "virginica"  => [1.to_f64, 0.to_f64, 0.to_f64],
     }
     iris = SHAInet::Network.new
-    iris.add_layer(:input, 4, "memory", SHAInet.sigmoid)
-    iris.add_layer(:hidden, 4, "memory", SHAInet.sigmoid)
-    iris.add_layer(:output, 3, "memory", SHAInet.sigmoid)
+    iris.add_layer(:input, 4, :memory, SHAInet.sigmoid)
+    iris.add_layer(:hidden, 4, :memory, SHAInet.sigmoid)
+    iris.add_layer(:output, 3, :memory, SHAInet.sigmoid)
     iris.fully_connect
 
     outputs = Array(Array(Float64)).new

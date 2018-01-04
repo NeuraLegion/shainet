@@ -35,11 +35,11 @@ training_data = [
 # Initialize a new network
 xor = SHAInet::Network.new
 # Add a new layer of the input type with 2 neurons and classic neuron type (memory)
-xor.add_layer(:input, 2, "memory", SHAInet.sigmoid)
+xor.add_layer(:input, 2, :memory, SHAInet.sigmoid)
 # Add a new layer of the hidden type with 2 neurons and classic neuron type (memory)
-xor.add_layer(:hidden, 2, "memory", SHAInet.sigmoid)
+xor.add_layer(:hidden, 2, :memory, SHAInet.sigmoid)
 # Add a new layer of the output type with 1 neurons and classic neuron type (memory)
-xor.add_layer(:output, 1, "memory", SHAInet.sigmoid)
+xor.add_layer(:output, 1, :memory, SHAInet.sigmoid)
 # Fully connect the network layers
 xor.fully_connect
 
@@ -61,9 +61,9 @@ label = {
 }
 # Initiate a new network
 iris = SHAInet::Network.new
-iris.add_layer(:input, 4, "memory", SHAInet.sigmoid)
-iris.add_layer(:hidden, 5, "memory", SHAInet.sigmoid)
-iris.add_layer(:output, 3, "memory", SHAInet.sigmoid)
+iris.add_layer(:input, 4, :memory, SHAInet.sigmoid)
+iris.add_layer(:hidden, 5, :memory, SHAInet.sigmoid)
+iris.add_layer(:output, 3, :memory, SHAInet.sigmoid)
 iris.fully_connect
 
 # load all relevant information from the iris.csv
