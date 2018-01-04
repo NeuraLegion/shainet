@@ -422,9 +422,6 @@ module SHAInet
           synapse.weight += delta_weight
           synapse.prev_weight = synapse.weight
 
-          synapse.weight += delta_weight
-          synapse.prev_weight = synapse.weight
-
           # Update weights based on Resilient backpropogation (Rprop), using the improved varient iRprop+
         when :rprop
           if synapse.prev_gradient*synapse.gradient > 0
