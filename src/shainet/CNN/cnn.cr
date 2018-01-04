@@ -68,7 +68,7 @@ module SHAInet
 
       @neurons = Array(Array(Array(Neuron))).new(input_volume[2]) {
         Array(Array(Neuron)).new(input_volume[0]) {
-          Array(Neuron).new(input_volume[1]) { Neuron.new(:memory) }
+          Array(Neuron).new(input_volume[1]) { Neuron.new("memory") }
         }
       }
 
@@ -114,7 +114,7 @@ module SHAInet
       if @padding == 0
         return input_data
       else
-        blank_neuron = Neuron.new(:memory)
+        blank_neuron = Neuron.new("memory")
         padded_data = input_data
         padded_data.each do |channel|
           channel.each do |row|
@@ -163,7 +163,7 @@ module SHAInet
     getter neurons : Array(Array(Neuron)), receptive_field : Receptive_field
 
     def initialize(input_surface : Array(Int32), window_size : Int32)
-      @neurons = Array(Array(Neuron)).new(input_surface[1]) { Array(Neuron).new(input_surface[0]) { Neuron.new(:memory) } }
+      @neurons = Array(Array(Neuron)).new(input_surface[1]) { Array(Neuron).new(input_surface[0]) { Neuron.new("memory") } }
       @receptive_field = Receptive_field.new(window_size)
     end
   end
