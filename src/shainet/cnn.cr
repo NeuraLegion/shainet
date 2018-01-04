@@ -140,9 +140,9 @@ module SHAInet
         @filters.each do |filter|
           input_x = input_y = output_x = output_y = 0
 
+          # Zoom in on a small window out of the data matrix and update
           until input_y == (padded_data[channel].size - @stride - 1)
             until input_x == (padded_data[channel][input_y].size - @stride - 1)
-              # Zoom in on a small window out of the data matrix
               window = padded_data[channel][input_y..(input_y + @window_size - 1)].map { |m| m[input_x..(input_x + @window_size - 1)] }
               @output[channel][output_y][output_x] = filter.receptive_field.prpogate_forward(window, filter.neurons[output_y][output_x])
               puts "row: #{input_y} col: #{input_x} window: #{window.each { |r| puts r }}"
