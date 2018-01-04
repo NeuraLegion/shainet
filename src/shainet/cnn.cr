@@ -50,8 +50,6 @@ module SHAInet
           #   @hidden_layers[l].activate(@hidden_layers[l - 1])
         end
       end
-
-      pp @hidden_layers.last.output
     end
   end
 
@@ -91,60 +89,71 @@ module SHAInet
                    @window_size : Int32,
                    @stride : Int32,
                    @padding : Int32 = 0)
+      raise CNNInitializationError.new("Padding value must be Int32 >= 0") if @padding < 0
+
       unless input_volume.size == 3
         raise CNNInitializationError.new("Input volume must be an array of Int32: [width, height, channels].")
       end
 
-      unless ((input_volume[0] - @window_size + 2*@padding)/@stride + 1).class == Int32
+      output_surface = ((input_volume[0] - @window_size + 2*@padding)/@stride + 1)
+
+      unless output_surface.class == Int32
         raise CNNInitializationError.new("Output volume must be a whole number, change: window size or stride or padding")
       end
 
       @filters = Array(Filter).new(filters_num) { Filter.new([input_volume[0], input_volume[1]], window_size) }
 
       @output = Array(Array(Array(Float64))).new(filters_num) {
-        Array(Array(Float64)).new(input_volume[0]) {
-          Array(Float64).new(input_volume[1]) { 0.0 }
+        Array(Array(Float64)).new(output_surface) {
+          Array(Float64).new(output_surface) { 0.0 }
         }
       }
     end
 
-    def pad(input_data : Array(Array(Array(Neuron))), padding : Int32 = @padding)
-      if padding < 0
-        raise CNNInitializationError.new("Padding value must be Int32 >= 0")
-      elsif padding = 0
+    def pad(input_data : Array(Array(Array(Neuron))))
+      if @padding == 0
         return input_data
       else
         blank_neuron = Neuron.new(:memory)
-        input_data.each do |channel|
+        padded_data = input_data
+        padded_data.each do |channel|
           channel.each do |row|
-            padding.times { row << blank_neuron }
-            padding.times { row.insert(0, blank_neuron) }
+            @padding.times { row << blank_neuron }
+            @padding.times { row.insert(0, blank_neuron) }
           end
           padding_row = Array(Neuron).new(channel.first.size) { blank_neuron }
-          padding.times { channel << padding_row }
-          padding.times { channel.insert(0, padding_row) }
+          @padding.times { channel << padding_row }
+          @padding.times { channel.insert(0, padding_row) }
         end
+        return padded_data
       end
-      return input_data
     end
 
     # Use each filter to create feature map
     def activate(input_layer : CNN_input_layer | CNN_layer)
       padded_data = pad(input_layer.neurons)
 
+      # padded_data = [[[0, 0, 0, 0, 0], [0, 1, 1, 1, 0], [0, 1, 1, 1, 0], [0, 1, 1, 1, 0], [0, 0, 0, 0, 0]],
+      #                [[0, 0, 0, 0, 0], [0, 2, 2, 2, 0], [0, 2, 2, 2, 0], [0, 2, 2, 2, 0], [0, 0, 0, 0, 0]]]
+
       padded_data.size.times do |channel|
         @filters.each do |filter|
-          x = 0
-          y = 0
-          filter.neurons.each_with_index do |row, r|
-            row.each_with_index do |col, c|
-              # Zoom in on a small window out of the matrix
-              window = padded_data[channel][y..y + @window_size - 1].map { |m| m[x..x + @window_size - 1] }
-              @output[channel][r][c] = filter.receptive_field.prpogate_forward(window, filter.neurons[r][c])
-              x += @stride
+          input_x = input_y = output_x = output_y = 0
+
+          until input_y == (padded_data[channel].size - @stride - 1)
+            until input_x == (padded_data[channel][input_y].size - @stride - 1)
+              # Zoom in on a small window out of the data matrix
+              window = padded_data[channel][input_y..(input_y + @window_size - 1)].map { |m| m[input_x..(input_x + @window_size - 1)] }
+              @output[channel][output_y][output_x] = filter.receptive_field.prpogate_forward(window, filter.neurons[output_y][output_x])
+              puts "row: #{input_y} col: #{input_x} window: #{window.each { |r| puts r }}"
+              input_x += @stride
+              output_x += 1
             end
-            y += @stride
+            input_x = output_x = 0
+            input_y += @stride
+            output_y += 1
           end
+          puts "-------------"
         end
       end
     end
@@ -161,11 +170,10 @@ module SHAInet
 
   # This is somewhat similar to a synapse
   class Receptive_field
-    property weights : Array(Array(Float64)), bias : Float64 # , window_loacation : Array(Float64)
+    property weights : Array(Array(Float64)), bias : Float64
     getter :window_size
 
     def initialize(@window_size : Int32)
-      # @window_loacation = [0, 0]
       @weights = Array(Array(Float64)).new(@window_size) { Array(Float64).new(@window_size) { rand(0.0..1.0).to_f64 } }
       @bias = rand(-1..1).to_f64
     end
@@ -174,7 +182,7 @@ module SHAInet
     def prpogate_forward(input_window : Array(Array(Neuron)), target_neuron : Neuron)
       weighted_sum = Float64.new(0)
       @weights.size.times do |row|
-        row.times do |col|
+        @weights.size.times do |col|
           weighted_sum += input_window[row][col].activation*@weights[row][col]
         end
       end
