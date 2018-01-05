@@ -153,6 +153,7 @@ module SHAInet
     new_vector
   end
 
+  # Matrix dot product
   def self.dot_product(m1 : Array(Array(GenNum)), m2 : Array(Array(GenNum)))
     out_matrix = [] of Array(Float64)
     m2 = m2.transpose

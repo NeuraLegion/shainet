@@ -11,7 +11,7 @@ module SHAInet
     property m_current : Float64, v_current : Float64, m_prev : Float64, v_prev : Float64
 
     def initialize(@n_type : String, @id : String = UUID.random.to_s)
-      raise NeuralNetInitalizationError.new("Must choose currect neuron types, if you're not sure choose :memory as a standard neuron") unless NEURON_TYPES.includes?(@n_type)
+      raise NeuralNetInitalizationError.new("Must choose currect neuron types, if you're not sure choose 'memory' as a standard neuron") unless NEURON_TYPES.includes?(@n_type)
       @synapses_in = [] of Synapse
       @synapses_out = [] of Synapse
       @activation = Float64.new(0)    # Activation of neuron after squashing function (a)
