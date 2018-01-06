@@ -25,9 +25,9 @@ describe SHAInet::Network do
     xor2 = SHAInet::Network.new
     xor2.load_from_file("./xor.nn")
 
-    xor.run([0, 0]).first.should eq(xor2.run([0, 0]).first)
-    xor.run([1, 0]).first.should eq(xor2.run([1, 0]).first)
-    xor.run([0, 1]).first.should eq(xor2.run([0, 1]).first)
-    xor.run([1, 1]).first.should eq(xor2.run([1, 1]).first)
+    xor.run([0, 0]).first.to_f32.should eq xor2.run([0, 0]).first.to_f32
+    xor.run([1, 0]).first.to_f32.should eq xor2.run([1, 0]).first.to_f32
+    xor.run([0, 1]).first.to_f32.should eq xor2.run([0, 1]).first.to_f32
+    xor.run([1, 1]).first.to_f32.should eq xor2.run([1, 1]).first.to_f32
   end
 end
