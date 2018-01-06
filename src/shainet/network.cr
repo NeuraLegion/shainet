@@ -589,7 +589,7 @@ module SHAInet
           @hidden_layers << l
         end
       end
-      net.layers.flatten.each do |layer|
+      net.layers.each do |layer|
         layer.neurons.each do |n|
           n.synapses_in.each do |s|
             source = @all_neurons.find { |i| i.id == s.source }
@@ -597,8 +597,9 @@ module SHAInet
             next unless source && destination
             _s = Synapse.new(source, destination)
             _s.weight = s.weight
-            source.synapses_out << _s
-            destination.synapses_in << _s
+            neuron = @all_neurons.find { |i| i.id == n.id }
+            next unless neuron
+            neuron.not_nil!.synapses_in << _s
             @all_synapses << _s
           end
           n.synapses_out.each do |s|
@@ -607,8 +608,9 @@ module SHAInet
             next unless source && destination
             _s = Synapse.new(source, destination)
             _s.weight = s.weight
-            source.synapses_in << _s
-            destination.synapses_out << _s
+            neuron = @all_neurons.find { |i| i.id == n.id }
+            next unless neuron
+            neuron.not_nil!.synapses_out << _s
             @all_synapses << _s
           end
         end
