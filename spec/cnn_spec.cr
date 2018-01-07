@@ -25,24 +25,26 @@ describe SHAInet::CNN do
     ]
     cnn = SHAInet::CNN.new
     # Input layer needs: volume = [width, height, channels]
-    cnn.add_l_input(volume = [7, 7, 2])
+    cnn.add_input(volume = [7, 7, 2])
     # Conv layer needs: input_volume, filters_num, window_size, stride, padding
-    cnn.add_l_conv(volume = [7, 7, 2], filters = 1, window_size = 3, stride = 1, padding = 1)
+    cnn.add_conv(volume = [7, 7, 2], filters = 1, window_size = 3, stride = 1, padding = 1)
 
-    cnn.hidden_layers.first.output.each_with_index do |channel, j|
-      channel.each_with_index do |x, i|
-        if i % channel.size == 0
-          puts "Channel #{j}:"
-          puts x
-        else
-          puts x
-        end
-      end
-    end
+    # cnn.layers.each { |l| p l.class }
+
+    # cnn.layers.last.output.each_with_index { |channel, i| puts "#Channel #{i}: #{channel}" }
+    # #_with_index do |channel, j|
+    #   channel.each_with_index do |x, i|
+    #     if i % channel.size == 0
+    #       puts "Channel #{j}:"
+    #       puts x
+    #     else
+    #       puts x
+    #     end
+    #   end
+    # end
 
     # prints filter weights
-    puts "Weights:"
-    cnn.hidden_layers.first.filters.first.receptive_field.weights.each { |w| puts w }
+    # cnn.layers.each { |layer| layer.inspect("weights") }
 
     cnn.run(data)
 

@@ -239,7 +239,12 @@ module SHAInet
     end
   end
 
-  def self.softmax
-    # TODO
+  def self.softmax(array : Array(GenNum)) : Float64
+    out_array = Array(Float64).new(array.size) { 0.0 }
+    exp_sum = array.reduce { |acc, i| acc + Math::E**i }
+    i = 0
+    until x == (array.size - 1)
+      log_a = Math.log(Math::E**array[i] / exp_sum )
+    end
   end
 end

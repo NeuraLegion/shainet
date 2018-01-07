@@ -2,7 +2,7 @@ require "logger"
 
 module SHAInet
   class Relu_layer
-    getter @input_data : Array(Array(Array(Float64))), l_relu_slope : Float64, output : Array(Array(Array(Float64)))
+    getter input_data : Array(Array(Array(Float64))), l_relu_slope : Float64, output : Array(Array(Array(Float64)))
 
     # Add slope to initialize as leaky relu
     def initialize(input_layer : CNN_layer, @l_relu_slope : Float64 = 0.0)
@@ -26,6 +26,15 @@ module SHAInet
             end
           end
         end
+      end
+    end
+
+    def inspect(what : String)
+      case what
+      when "weights"
+        puts "input layer has no wights"
+      when "bias"
+      when "neurons"
       end
     end
   end

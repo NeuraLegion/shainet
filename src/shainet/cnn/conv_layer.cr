@@ -1,7 +1,7 @@
 require "logger"
 
 module SHAInet
-  class Conv_layer
+  class CNV_layer
     getter filters : Array(Filter), window_size : Int32, stride : Int32, padding : Int32, output : Array(Array(Array(Float64)))
 
     def initialize(input_volume : Array(Int32),
@@ -51,29 +51,53 @@ module SHAInet
 
     # Use each filter to create feature map
     def activate(input_layer : CNN_input_layer | CNN_layer)
-      padded_data = pad(input_layer.neurons)
-
-      # padded_data = [[[0, 0, 0, 0, 0], [0, 1, 1, 1, 0], [0, 1, 1, 1, 0], [0, 1, 1, 1, 0], [0, 0, 0, 0, 0]],
-      #                [[0, 0, 0, 0, 0], [0, 2, 2, 2, 0], [0, 2, 2, 2, 0], [0, 2, 2, 2, 0], [0, 0, 0, 0, 0]]]
+      padded_data = pad(input_layer.as(CNN_input_layer).neurons)
 
       padded_data.size.times do |channel|
         @filters.each do |filter|
           input_x = input_y = output_x = output_y = 0
 
           # Zoom in on a small window out of the data matrix and update
-          until input_y == (padded_data[channel].size - @stride - 1)
-            until input_x == (padded_data[channel][input_y].size - @stride - 1)
+          loop do
+            # # TODO ##
+            # # Fix breaking logic in loop
+            loop do
+              break if output_x == @output.first.first.size
               window = padded_data[channel][input_y..(input_y + @window_size - 1)].map { |m| m[input_x..(input_x + @window_size - 1)] }
-              @output[channel][output_y][output_x] = filter.receptive_field.prpogate_forward(window, filter.neurons[output_y][output_x])
-              puts "row: #{input_y} col: #{input_x} window: #{window.each { |r| puts r }}"
+              @output[channel][output_y][output_x] = filter.receptive_field.prpogate_forward(window, filter.neurons[output_y][output_x]) rescue break
+              puts "row: #{input_y} col: #{input_x} window: #{window.each { |r| puts r.map { |n| n.activation } }}"
               input_x += @stride
               output_x += 1
             end
             input_x = output_x = 0
             input_y += @stride
             output_y += 1
+            break if output_y == @output.first.size
           end
+
           puts "-------------"
+        end
+      end
+    rescue e : Exception
+      puts "#{e.message}, #{e.inspect_with_backtrace}"
+    end
+
+    def inspect(what : String)
+      case what
+      when "weights"
+        filters.each_with_index do |filter, i|
+          puts "Filter #{i}, weights:"
+          p filter.receptive_field.weights
+        end
+      when "bias"
+        filters.each_with_index do |filter, i|
+          puts "Filter #{i}, bias:"
+          p filter.receptive_field.bias
+        end
+      when "neurons"
+        filters.each_with_index do |filter, i|
+          puts "Filter #{i}, neurons:"
+          p filter.neurons
         end
       end
     end
