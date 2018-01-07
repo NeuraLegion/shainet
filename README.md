@@ -122,5 +122,5 @@ iris.run(normalized.normalized_inputs.first)
 
 - [ArtLinkov](https://github.com/ArtLinkov) - creator, maintainer
 - [bararchy](https://github.com/bararchy) - creator, maintainer
-- [drujensen](https://github.com/drujensen) - contributer
+- [drujensen](https://github.com/drujensen) - contributor
 
