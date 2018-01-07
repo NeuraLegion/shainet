@@ -8,9 +8,9 @@ module SHAInet
     # # There are no matrices in this implementation, instead the gradient values are stored in each neuron/synapse independently.
     # # When preforming propogation, all the math is done iteratively on each neuron/synapse locally.
 
-    LAYER_TYPES      = [:input, :hidden, :output]
-    CONNECTION_TYPES = [:full, :ind_to_ind, :random]
-    COST_FUNCTIONS   = [:mse, :c_ent, :exp, :hel_d, :kld, :gkld, :ita_sai_d]
+    LAYER_TYPES      = ["input", "hidden", "output"]
+    CONNECTION_TYPES = ["full", "ind_to_ind", "random"]
+    COST_FUNCTIONS   = ["mse", "c_ent", "exp", "hel_d", "kld", "gkld", "ita_sai_d"]
 
     # General network parameters
     getter :input_layers, :output_layers, :hidden_layers, :all_neurons, :all_synapses
@@ -60,16 +60,16 @@ module SHAInet
     # l_type is: :input, :hidden or :output
     # l_size = how many neurons in the layer
     # n_type = advanced option for different neuron types
-    def add_layer(l_type : Symbol, l_size : Int32, n_type : String = "memory", activation_function : Proc(GenNum, Array(Float64)) = SHAInet.sigmoid)
-      layer = Layer.new(n_type, l_size, activation_function, @logger)
+    def add_layer(l_type : Symbol | String, l_size : Int32, n_type : Symbol | String = "memory", activation_function : Proc(GenNum, Array(Float64)) = SHAInet.sigmoid)
+      layer = Layer.new(n_type.to_s, l_size, activation_function, @logger)
       layer.neurons.each { |neuron| @all_neurons << neuron } # To easily access neurons later
 
-      case l_type
-      when :input
+      case l_type.to_s
+      when "input"
         @input_layers << layer
-      when :hidden
+      when "hidden"
         @hidden_layers << layer
-      when :output
+      when "output"
         if @output_layers.empty?
           @output_layers << layer
         else
@@ -139,11 +139,11 @@ module SHAInet
     end
 
     # Connect two specific layers with synapses
-    def connect_ltl(source : Layer, destination : Layer, connection_type : Symbol)
-      raise NeuralNetInitalizationError.new("Error initilizing network, must choose correct connection type.") if CONNECTION_TYPES.any? { |x| x == connection_type } == false
-      case connection_type
+    def connect_ltl(source : Layer, destination : Layer, connection_type : Symbol | String)
+      raise NeuralNetInitalizationError.new("Error initilizing network, must choose correct connection type.") if CONNECTION_TYPES.any? { |x| x == connection_type.to_s } == false
+      case connection_type.to_s
       # Connect each neuron from source layer to all neurons in destination layer
-      when :full
+      when "full"
         source.neurons.each do |neuron1|        # Source neuron
           destination.neurons.each do |neuron2| # Destination neuron
             synapse = Synapse.new(neuron1, neuron2)
@@ -153,7 +153,7 @@ module SHAInet
           end
         end
         # Connect each neuron from source layer to neuron with corresponding index in destination layer
-      when :ind_to_ind
+      when "ind_to_ind"
         raise NeuralNetInitalizationError.new("Error initializing network, index to index connection requires layers of same size.") if source.neurons.size != destination.neurons.size
         (0..source.neurons.size).each do |index|
           synapse = Synapse.new(source.neurons[index], destination.neurons[index])
@@ -163,7 +163,7 @@ module SHAInet
         end
 
         # Randomly decide if each neuron from source layer will connect to a neuron from destination layer
-      when :random
+      when "random"
         source.neurons.each do |neuron1|        # Source neuron
           destination.neurons.each do |neuron2| # Destination neuron
             x = rand(0..1)
@@ -215,36 +215,36 @@ module SHAInet
 
     # Quantifies how good the network performed for a single input compared to the expected output
     # This function returns the actual output and updates the error gradient for the output layer
-    def evaluate(input : Array(GenNum), expected : Array(GenNum), cost_function : Symbol)
-      raise NeuralNetRunError.new("Must define correct cost function type (:mse, :c_ent, :exp, :hel_d, :kld, :gkld, :ita_sai_d).") if COST_FUNCTIONS.any? { |x| x == cost_function } == false
+    def evaluate(input : Array(GenNum), expected : Array(GenNum), cost_function : Symbol | String)
+      raise NeuralNetRunError.new("Must define correct cost function type (:mse, :c_ent, :exp, :hel_d, :kld, :gkld, :ita_sai_d).") if COST_FUNCTIONS.any? { |x| x == cost_function.to_s } == false
 
       actual = run(input, stealth = true)
       # Get the error signal for the final layer, based on the cost function (error gradient is stored in the output neurons)
       @error_signal = [] of Float64
-      case cost_function
-      when :mse
+      case cost_function.to_s
+      when "mse"
         expected.size.times do |i|
           neuron = @output_layers.last.neurons[i] # Update error of all neurons in the output layer based on the actual result
           neuron.gradient = SHAInet.quadratic_cost_derivative(expected[i].to_f64, actual[i].to_f64)*neuron.sigma_prime
           # TODO: add support for multiple output layers
           @error_signal << SHAInet.quadratic_cost(expected[i].to_f64, actual[i].to_f64) # Store the output error based on cost function
         end
-      when :c_ent
+      when "c_ent"
         expected.size.times do |i|
           neuron = @output_layers.last.neurons[i]
           neuron.gradient = SHAInet.cross_entropy_cost_derivative(expected[i].to_f64, actual[i].to_f64)*neuron.sigma_prime
           # TODO: add support for multiple output layers
           @error_signal << SHAInet.cross_entropy_cost(expected[i].to_f64, actual[i].to_f64)
         end
-      when :exp
+      when "exp"
         # TODO
-      when :hel_d
+      when "hel_d"
         # TODO
-      when :kld
+      when "kld"
         # TODO
-      when :gkld
+      when "gkld"
         # TODO
-      when :ita_sai_d
+      when "ita_sai_d"
         # TODO
       end
 
@@ -285,8 +285,8 @@ module SHAInet
 
     # Online train, updates weights/biases after each data point (stochastic gradient descent)
     def train(data : Array(Array(Array(GenNum))), # Input structure: data = [[Input = [] of Float64],[Expected result = [] of Float64]]
-              training_type : Symbol,             # Type of training: :sgdm, :rprop, :adam
-              cost_function : Symbol,             # one of COST_FUNCTIONS described at the top of the file
+              training_type : Symbol | String,    # Type of training: :sgdm, :rprop, :adam
+              cost_function : Symbol | String,    # one of COST_FUNCTIONS described at the top of the file
               epochs : Int32,                     # a criteria of when to stop the training
               error_threshold : Float64,          # a criteria of when to stop the training
               log_each : Int32 = 1000)            # determines what is the step for error printout
@@ -337,8 +337,8 @@ module SHAInet
 
     # Batch train, updates weights/biases using a gradient sum from all data points in the batch (using gradient descent)
     def train_batch(data : Array(Array(Array(GenNum))), # Input structure: data = [[Input = [] of Float64],[Expected result = [] of Float64]]
-                    training_type : Symbol,             # Type of training: :sgdm, :rprop, :adam
-                    cost_function : Symbol,             # one of COST_FUNCTIONS described at the top of the file
+                    training_type : Symbol | String,    # Type of training: :sgdm, :rprop, :adam
+                    cost_function : Symbol | String,    # one of COST_FUNCTIONS described at the top of the file
                     epochs : Int32,                     # a criteria of when to stop the training
                     error_threshold : Float64,          # a criteria of when to stop the training
                     log_each : Int32 = 1000,            # determines what is the step for error printout
@@ -414,7 +414,7 @@ module SHAInet
     end
 
     # Update weights based on the learning type chosen
-    def update_weights(learn_type : Symbol, batch : Bool = false)
+    def update_weights(learn_type : Symbol | String, batch : Bool = false)
       @all_synapses.each_with_index do |synapse, i|
         # Get current gradient
         if batch == true
@@ -423,16 +423,16 @@ module SHAInet
           synapse.gradient = (synapse.source_neuron.activation)*(synapse.dest_neuron.gradient)
         end
 
-        case learn_type
+        case learn_type.to_s
         # Update weights based on the gradients and delta rule (including momentum)
-        when :sgdm
+        when "sgdm"
           delta_weight = (-1)*@learning_rate*synapse.gradient + @momentum*(synapse.weight - synapse.prev_weight)
           synapse.weight += delta_weight
           synapse.prev_weight = synapse.weight
 
           # Update weights based on Resilient backpropogation (Rprop), using the improved varient iRprop+
-        when :rprop
-          if synapse.prev_gradient*synapse.gradient > 0.0
+        when "rprop"
+          if synapse.prev_gradient*synapse.gradient > 0
             delta = [@etah_plus*synapse.prev_delta, @delta_max].min
             delta_weight = (-1)*SHAInet.sign(synapse.gradient)*delta
 
@@ -455,7 +455,7 @@ module SHAInet
             synapse.prev_delta_w = delta_weight
           end
           # Update weights based on Adaptive moment estimation (Adam)
-        when :adam
+        when "adam"
           synapse.m_current = @beta1*synapse.m_prev + (1 - @beta1)*synapse.gradient
           synapse.v_current = @beta2*synapse.v_prev + (1 - @beta2)*(synapse.gradient)**2
 
@@ -470,22 +470,22 @@ module SHAInet
     end
 
     # Update biases based on the learning type chosen
-    def update_biases(learn_type : Symbol, batch : Bool = false)
+    def update_biases(learn_type : Symbol | String, batch : Bool = false)
       @all_neurons.each_with_index do |neuron, i|
         if batch == true
           neuron.gradient = @b_gradient.not_nil![i]
         end
 
-        case learn_type
+        case learn_type.to_s
         # Update biases based on the gradients and delta rule (including momentum)
-        when :sgdm
+        when "sgdm"
           delta_bias = (-1)*@learning_rate*(neuron.gradient) + @momentum*(neuron.bias - neuron.prev_bias)
           neuron.bias += delta_bias
           neuron.prev_bias = neuron.bias
 
           # Update weights based on Resilient backpropogation (Rprop), using the improved varient iRprop+
-        when :rprop
-          if neuron.prev_gradient*neuron.gradient > 0.0
+        when "rprop"
+          if neuron.prev_gradient*neuron.gradient > 0
             delta = [@etah_plus*neuron.prev_delta, @delta_max].min
             delta_bias = (-1)*SHAInet.sign(neuron.gradient)*delta
 
@@ -508,7 +508,7 @@ module SHAInet
             neuron.prev_delta_b = delta_bias
           end
           # Update weights based on Adaptive moment estimation (Adam)
-        when :adam
+        when "adam"
           neuron.m_current = @beta1*neuron.m_prev + (1 - @beta1)*neuron.gradient
           neuron.v_current = @beta2*neuron.v_prev + (1 - @beta2)*(neuron.gradient)**2
 
@@ -599,7 +599,7 @@ module SHAInet
           @hidden_layers << l
         end
       end
-      net.layers.flatten.each do |layer|
+      net.layers.each do |layer|
         layer.neurons.each do |n|
           n.synapses_in.each do |s|
             source = @all_neurons.find { |i| i.id == s.source }
@@ -607,8 +607,9 @@ module SHAInet
             next unless source && destination
             _s = Synapse.new(source, destination)
             _s.weight = s.weight
-            source.synapses_out << _s
-            destination.synapses_in << _s
+            neuron = @all_neurons.find { |i| i.id == n.id }
+            next unless neuron
+            neuron.not_nil!.synapses_in << _s
             @all_synapses << _s
           end
           n.synapses_out.each do |s|
@@ -617,8 +618,9 @@ module SHAInet
             next unless source && destination
             _s = Synapse.new(source, destination)
             _s.weight = s.weight
-            source.synapses_in << _s
-            destination.synapses_out << _s
+            neuron = @all_neurons.find { |i| i.id == n.id }
+            next unless neuron
+            neuron.not_nil!.synapses_out << _s
             @all_synapses << _s
           end
         end
