@@ -73,7 +73,6 @@ module SHAInet
         if @output_layers.empty?
           @output_layers << layer
         else
-          @hidden_layers << @output_layers.first
           @output_layers.delete(@output_layers.first)
           @output_layers << layer
           connect_ltl(@hidden_layers.last, @output_layers.first, :full)
