@@ -1,6 +1,10 @@
 module SHAInet
   # As Procs
 
+  def self.none : Proc(GenNum, Array(Float64)) # Output range -inf..inf)
+    ->(value : GenNum) { [value, 1] }
+  end
+
   def self.sigmoid : Proc(GenNum, Array(Float64)) # Output range (0..1)
     ->(value : GenNum) { [_sigmoid(value), _sigmoid_prime(value)] }
   end
@@ -60,6 +64,18 @@ module SHAInet
     end
   end
 
+  def self.softmax(array : Array(GenNum)) : Float64
+    out_array = Array(Float64).new(array.size) { 0.0 }
+    m = array.max
+    exp_sum = array.reduce { |acc, i| acc + Math::E**(i - m) }
+    i = 0
+    until i == (array.size - 1)
+      a = Math::E**(array[i] - m - Math.log(exp_sum))
+      out_array << a
+    end
+    return out_array
+  end
+
   # # Derivatives of activation functions # #
 
   def self._sigmoid_prime(value : GenNum) : Float64
@@ -103,8 +119,13 @@ module SHAInet
   end
 
   def self.cross_entropy_cost(expected : Float64, actual : Float64) : Float64
-    # Cost function =
-    return ((-1)*(expected*Math.log((actual), Math::E) + (1.0 - expected)*Math.log((1.0 - actual), Math::E))).to_f64
+    raise MathError.new("Cross entropy cost is not implemented fully yet, please use quadratic cost for now.")
+    # a = ((-1)*((expected*Math.log((actual), Math::E) + (1.0 - expected)*Math.log((1.0 - actual), Math::E))**2)**0.5).to_f64
+    # if a.to_s.match(/(-NaN|NaN|Infinity)/i)
+    #   return 0.0
+    # else
+    #   return a
+    # end
   end
 
   # # Derivatives of cost functions # #
@@ -236,15 +257,6 @@ module SHAInet
       return -1
     else
       return 0
-    end
-  end
-
-  def self.softmax(array : Array(GenNum)) : Float64
-    out_array = Array(Float64).new(array.size) { 0.0 }
-    exp_sum = array.reduce { |acc, i| acc + Math::E**i }
-    i = 0
-    until x == (array.size - 1)
-      log_a = Math.log(Math::E**array[i] / exp_sum )
     end
   end
 end

@@ -25,4 +25,8 @@ describe SHAInet do
   it "check l_relu" do
     ((Int64::MIN..Int64::MAX).includes?(SHAInet.l_relu.call(0.5).first)).should eq(true)
   end
+
+  it "check cross entropy" do
+    puts SHAInet.cross_entropy_cost(0.0, 1.0)
+  end
 end

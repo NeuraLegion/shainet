@@ -1,7 +1,9 @@
 require "logger"
+require "./**"
 
 module SHAInet
-  alias CNN_layer = CNN_input_layer | CNV_layer # | Relu_layer | MP_layer | FC_layer | SF_layer # | DO_layer
+  alias CNNLayer = InputLayer | ReluLayer | MaxPoolLayer | FullyConnectedLayer | DropoutLayer
+  alias CNNLayerClass = InputLayer.class | ReluLayer.class | MaxPoolLayer.class | FullyConnectedLayer.class | DropoutLayer.class
 
   # # layer types:
   # input(width, height ,channels = RGB)
@@ -12,30 +14,37 @@ module SHAInet
   # fc(output = classes)- single vector that clasifies, fully conneted to previous layer
 
   class CNN
-    # getter :input_layers, :hidden_layers, :output_layers # , padding : Int32
     getter :layers
 
     def initialize
-      @layers = Array(CNN_layer).new
-      # @input_layers = Array(CNN_input_layer).new
-      # @hidden_layers = Array(CNN_layer).new
-      # @output_layers = Array(Layer).new
+      @layers = Array(CNNLayer | ConvLayer).new
     end
 
     def add_input(input_volume : Array(Int32))
-      @layers << CNN_input_layer.new(input_volume)
+      @layers << InputLayer.new(input_volume)
     end
 
-    def add_conv(input_volume : Array(Int32),
-                 filters_num : Int32,
-                 window_size : Int32,
-                 stride : Int32,
+    def add_conv(filters_num : Int32 = 1,
+                 window_size : Int32 = 1,
+                 stride : Int32 = 1,
                  padding : Int32 = 0)
-      @layers << CNV_layer.new(input_volume, filters_num, window_size, stride, padding)
+      @layers << ConvLayer.new(@layers.last, filters_num, window_size, stride, padding)
     end
 
-    def add_relu(prev_layer = @layers.last, l_relu_slope = 0.0)
-      @layers << Relu_layer.new(prev_layer, l_relu_slope)
+    def add_relu(l_relu_slope = 0.0)
+      @layers << ReluLayer.new(@layers.last, l_relu_slope)
+    end
+
+    def add_maxpool(pool : Int32, stride : Int32)
+      @layers << MaxPoolLayer.new(@layers.last, pool, stride)
+    end
+
+    def add_fconnect(l_size : Int32, activation_function : Proc(GenNum, Array(Float64)) = SHAInet.sigmoid)
+      @layers << FullyConnectedLayer.new(@layers.last, l_size, activation_function)
+    end
+
+    def add_dropout(drop_percent : Int32 = 5)
+      @layers << DropoutLayer.new(@layers.last, drop_percent)
     end
 
     def run(input_data : Array(Array(Array(GenNum))))
