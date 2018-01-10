@@ -3,7 +3,6 @@ require "./**"
 
 module SHAInet
   alias CNNLayer = InputLayer | ReluLayer | MaxPoolLayer | FullyConnectedLayer | DropoutLayer
-  alias CNNLayerClass = InputLayer.class | ReluLayer.class | MaxPoolLayer.class | FullyConnectedLayer.class | DropoutLayer.class
 
   # # layer types:
   # input(width, height ,channels = RGB)
@@ -39,8 +38,8 @@ module SHAInet
       @layers << MaxPoolLayer.new(@layers.last, pool, stride)
     end
 
-    def add_fconnect(l_size : Int32, activation_function : Proc(GenNum, Array(Float64)) = SHAInet.sigmoid)
-      @layers << FullyConnectedLayer.new(@layers.last, l_size, activation_function)
+    def add_fconnect(l_size : Int32, softmax = false, activation_function : Proc(GenNum, Array(Float64)) = SHAInet.sigmoid)
+      @layers << FullyConnectedLayer.new(@layers.last, l_size, softmax = false, activation_function)
     end
 
     def add_dropout(drop_percent : Int32 = 5)
@@ -48,19 +47,17 @@ module SHAInet
     end
 
     def run(input_data : Array(Array(Array(GenNum))))
-      # Activate all hidden layers one by one
-      @layers.each_with_index do |l, i|
-        if l.is_a?(CNN_input_layer)
-          l.as(CNN_input_layer).activate(input_data)
+      # Activate all layers one by one
+      @layers.each_with_index do |layer, i|
+        if layer.is_a?(InputLayer)
+          layer.as(InputLayer).activate(input_data) # activation of input layer
         else
-          unless l.is_a?(CNN_input_layer)
-            l.activate(@layers[i - 1])
-          end
+          layer.activate # activate the rest of the layers
         end
       end
-
       # Get the result from the output layer
-      @layers.last.output
+      puts "Network output:"
+      puts @layers.last.as(FullyConnectedLayer).output
     end
   end
 end

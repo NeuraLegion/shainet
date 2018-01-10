@@ -2,12 +2,16 @@ require "logger"
 
 module SHAInet
   class FullyConnectedLayer
-    getter input_data : Array(Array(Array(Array(Neuron)))) | Array(Filter), filters : Array(Array(Array(Array(Neuron)))), :all_neurons, :all_synapses
+    getter input_data : Array(Array(Array(Array(Neuron)))) | Array(Filter), filters : Array(Array(Array(Array(Neuron))))
+    getter output : Array(Float64), :all_neurons, :all_synapses
+    @softmax : Bool
 
+    #################################################
     # # This part is for dealing with conv layers # #
 
     def initialize(input_layer : ConvLayer,
                    l_size : Int32,
+                   @softmax : Bool = false,
                    @activation_function : Proc(GenNum, Array(Float64)) = SHAInet.sigmoid,
                    @logger : Logger = Logger.new(STDOUT))
       #
@@ -26,6 +30,7 @@ module SHAInet
         }
       }
 
+      @output = Array(Float64).new(l_size) { 0.0 }
       @all_neurons = Array(Neuron).new
       @all_synapses = Array(Synapse).new
 
@@ -46,10 +51,12 @@ module SHAInet
       @input_data = input_layer.filters
     end
 
+    #######################################################################
     # # This part is for dealing with all layers other than conv layers # #
 
     def initialize(input_layer : CNNLayer,
                    l_size : Int32,
+                   @softmax : Bool = false,
                    @activation_function : Proc(GenNum, Array(Float64)) = SHAInet.sigmoid,
                    @logger : Logger = Logger.new(STDOUT))
       #
@@ -68,6 +75,7 @@ module SHAInet
         }
       }
 
+      @output = Array(Float64).new(l_size) { 0.0 }
       @all_neurons = Array(Neuron).new
       @all_synapses = Array(Synapse).new
 
@@ -89,23 +97,27 @@ module SHAInet
     end
 
     def activate
-      if @activation_function == SHAInet.softmax
+      if @softmax == true
+        sf_activations = [] of Float64
         @filters.first.first.each do |row|
           activations = [] of Float64
           # Calculate the softmax values based on entire row
           row.each do |neuron|
             neuron.activate(@activation_function = SHAInet.none)
             activations << neuron.activation
-            sf_activations = softmax(activations)
+            sf_activations = SHAInet.softmax(activations)
           end
           # Update the neuron activations to fit the softmax values
           row.each_with_index do |neuron, i|
             neuron.activation = sf_activations[i]
           end
         end
-        return sf_activations
+        @output = sf_activations
       else
-        @filters.first.first.each { |neuron| neuron.activate(@activation_function) }
+        @filters.first.first.first.each_with_index do |neuron, i|
+          neuron.activate(@activation_function)
+          @output[i] = neuron.activation
+        end
       end
     end
 

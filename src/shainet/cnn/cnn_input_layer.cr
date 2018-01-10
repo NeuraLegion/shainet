@@ -49,7 +49,7 @@ module SHAInet
         puts "input layer has no bias"
       when "activations"
         @filters.first.each_with_index do |channel, ch|
-          puts "Channel: #{ch}, neuron activationions are:"
+          puts "Channel: #{ch}, neuron activations are:"
           channel.each do |row|
             puts "#{row.map { |n| n.activation }}"
           end

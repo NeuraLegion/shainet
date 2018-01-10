@@ -30,13 +30,25 @@ module SHAInet
     end
 
     # Takes a small window from the input data (CxHxW) to preform feed forward
+    # Propagate forward from CNNLayer
     def prpogate_forward(input_window : Array(Array(Array(Neuron))), target_neuron : Neuron)
       weighted_sum = Float64.new(0)
-      @weights.size.times do |channel|
-        @weights[channel].size.times do |row|
-          @weights[channel][row].size.times do |col|
-            weighted_sum += input_window[channel][row][col].activation*@weights[row][col]
+      @weights.each_with_index do |_c, channel|
+        @weights[channel].each_with_index do |_r, row|
+          @weights[channel][row].each_with_index do |_c, col|
+            weighted_sum += input_window[channel][row][col].activation * @weights[channel][row][col]
           end
+        end
+      end
+      target_neuron.activation = weighted_sum + @bias
+    end
+
+    # Propagate forward from ConvLayer
+    def prpogate_forward(input_window : Array(Array(Neuron)), target_neuron : Neuron)
+      weighted_sum = Float64.new(0)
+      @weights.first.size.times do |row|
+        @weights.first[row].size.times do |col|
+          weighted_sum += input_window[row][col].activation*@weights.first[row][col]
         end
       end
       target_neuron.activation = weighted_sum + @bias
@@ -78,13 +90,15 @@ module SHAInet
     end
 
     # Adds padding to all Filters of input data
-    def _pad(input_data : (Array(Filter)))
+    def _pad(input_layer : ConvLayer)
+      input_data = input_layer.filters # Array of filter class
+
       if @padding == 0
         return input_data
       else
         blank_neuron = Neuron.new("memory")
         blank_neuron.activation = 0.0
-        padded_data = input_data
+        padded_data = input_data.dup
 
         padded_data.each do |filter|
           # Add padding at the sides
@@ -101,40 +115,65 @@ module SHAInet
       end
     end
 
-    def _convolve(@input_layer : ConvLayer)
-      padded_data = pad(@input_layer.filters) # Array of filter class
+    def _convolve(input_layer : ConvLayer)
+      padded_data = _pad(input_layer) # Array of filter class
 
       @filters.size.times do |self_filter|
+        puts "Filter: #{self_filter}"
         # Zoom in on a small window out of the input data volume and update each neuron of the filter
         padded_data.size.times do |filter|
           input_x = input_y = output_x = output_y = 0
-          while input_y < padded_data.first.size   # First array in padded_data is a channel
-            while input_x < padded_data.first.size # Assumes x = y (row = col)
+
+          # while input_y <= (padded_data.first.neurons.size - @stride - 1)   # First array in padded_data is a channel
+          #   while input_x <= (padded_data.first.neurons.size - @stride - 1) # Assumes x = y (row = col)
+          #     window = padded_data[filter].neurons[input_y..(input_y + @window_size - 1)].map { |n| n[input_x..(input_x + @window_size - 1)] }
+          #     target_neuron = @filters[self_filter].neurons[output_y][output_x]
+          #     @filters[self_filter].receptive_field.prpogate_forward(window, target_neuron)
+
+          #     input_x += @stride
+          #     output_x += 1
+          #   end
+          #   input_x = output_x = 0
+          #   input_y += @stride
+          #   output_y += 1
+          #   puts "-------------"
+          # end
+
+          loop do
+            # # TODO ##
+            # # Fix breaking logic in loop
+            loop do
+              break if output_x == padded_data.first.neurons.size # break out of x
               window = padded_data[filter].neurons[input_y..(input_y + @window_size - 1)].map { |n| n[input_x..(input_x + @window_size - 1)] }
-              target_neuron = @filters[self_filter].neurons[output_y][output_x]
-              @filters[self_filter].receptive_field.prpogate_forward(window, target_neuron)
+              target_neuron = @filters[self_filter].neurons[output_y][output_x] rescue break
 
-              puts "row: #{input_y} col: #{input_x}"
-              window.each_with_index do |ch, i|
-                puts " Filter: #{i},  window:"
-                ch.each { |r| puts r.map { |n| n.activation } }
-              end
-
-              input_x += @stride
-              output_x += 1
+              # puts "----------------------------"
+              # puts "row: #{input_y} col: #{input_x}"
+              # puts "Input window:"
+              # window.each { |row| puts "#{row.map { |n| n.activation }}" }
             end
-            input_x = output_x = 0
-            input_y += @stride
-            output_y += 1
-            puts "-------------"
+            # puts "----"
+            # puts "Weights:"
+            # @filters[filter].receptive_field.weights.each_with_index do |ch, i|
+            #   puts "Channel: #{i}"
+            #   ch.each { |row| puts "#{row.map { |w| w }}" }
+            # end
+            # puts "----"
+
+            input_x += @stride
+            output_x += 1
           end
+          input_x = output_x = 0
+          input_y += @stride
+          output_y += 1
+          break if output_y == padded_data.first.neurons.size
         end
       end
     end
 
     # Use each filter to create feature maps for the input data
-    def _activate(@input_layer : ConvLayer)
-      convolve(@input_layer)
+    def _activate(input_layer : ConvLayer)
+      _convolve(@input_layer)
     end
 
     #######################################################################
@@ -167,7 +206,8 @@ module SHAInet
     end
 
     # Adds padding to all channels of input data
-    def _pad(input_data : Array(Array(Array(Neuron))))
+    def _pad(input_layer : CNNLayer, print : Bool)
+      input_data = input_layer.filters.first.dup # Array of all channels
       if @padding == 0
         return input_data
       else
@@ -183,31 +223,68 @@ module SHAInet
             @padding.times { row.insert(0, blank_neuron) }
           end
           # Add padding at the top/bottom
-          padding_row = Array(Neuron).new(padded_data.first.size) { blank_neuron }
+          padding_row = Array(Neuron).new(padded_data.first.first.size) { blank_neuron }
           @padding.times { padded_data[channel] << padding_row }
           @padding.times { padded_data[channel].insert(0, padding_row) }
+        end
+        if print == true
+          padded_data.each_with_index do |channel, ch|
+            puts "padded_data:"
+            puts "Channel: #{ch}"
+            channel.each do |row|
+              puts "#{row.map { |n| n.activation }}"
+            end
+          end
         end
         return padded_data
       end
     end
 
-    def _convolve(@input_layer : CNNLayer)
-      padded_data = pad(@input_layer.filters.first) # Array of all channels
+    def _convolve(input_layer : CNNLayer)
+      padded_data = _pad(input_layer, print = false) # Array of all channels
 
       @filters.size.times do |filter|
         # Zoom in on a small window out of the input data volume and update each neuron of the filter
         input_x = input_y = output_x = output_y = 0
-        while input_y < padded_data.first.size   # First array in padded_data is a channel
-          while input_x < padded_data.first.size # Assumes x = y (row = col)
-            window = padded_data.map { |channel| channel[input_y..(input_y + @window_size - 1)].map { |n| n[input_x..(input_x + @window_size - 1)] } }
-            target_neuron = @Filters[filter].neurons[output_y][output_x]
-            @filters[filter].receptive_field.prpogate_forward(window, target_neuron)
+        # while input_y <= (padded_data.first.first.size - @stride - 1)         # First array in padded_data is a channel
+        #   while input_x <= (padded_data.first.first.size - @stride - 1) # Assumes x = y (row = col)
+        #     window = padded_data.map { |channel| channel[input_y..(input_y + @window_size - 1)].map { |n| n[input_x..(input_x + @window_size - 1)] } }
+        #     target_neuron = @filters[filter].neurons[output_y][output_x]
 
-            puts "row: #{input_y} col: #{input_x}"
-            window.each_with_index do |ch, i|
-              puts " Channel: #{i},  window:"
-              ch.each { |r| puts r.map { |n| n.activation } }
-            end
+        #     puts "----------------------------"
+        #     puts "row: #{input_y} col: #{input_x}"
+        #     puts "Input window:"
+        #     window.each_with_index do |ch, i|
+        #       puts " Channel: #{i}"
+        #       ch.each { |r| puts r.map { |n| n.activation } }
+        #     end
+        #     puts "----"
+        #     puts "Weights:"
+        #     @filters[filter].receptive_field.weights.each_with_index do |ch, i|
+        #       puts "Channel: #{i}"
+        #       ch.each { |row| puts "#{row.map { |w| w }}" }
+        #     end
+        #     puts "----"
+
+        #     @filters[filter].receptive_field.prpogate_forward(window, target_neuron)
+
+        #     input_x += @stride
+        #     output_x += 1
+        #   end
+        #   input_x = output_x = 0
+        #   input_y += @stride
+        #   output_y += 1
+        #   puts "-------------"
+        # end
+
+        loop do
+          # # TODO ##
+          # # Fix breaking logic in loop
+          break if output_y == padded_data.first.size # Break out of y
+          loop do
+            break if output_x == padded_data.first.first.size # Break out of x
+            window = padded_data.map { |channel| channel[input_y..(input_y + @window_size - 1)].map { |n| n[input_x..(input_x + @window_size - 1)] } }
+            target_neuron = @filters[filter].neurons[output_y][output_x] rescue break
 
             input_x += @stride
             output_x += 1
@@ -215,28 +292,17 @@ module SHAInet
           input_x = output_x = 0
           input_y += @stride
           output_y += 1
-          puts "-------------"
         end
       end
     end
 
     # Use each filter to create feature maps for the input data
-    def _activate(@input_layer : CNNLayer)
-      convolve(@input_layer)
+    def _activate(input_layer : CNNLayer)
+      _convolve(@input_layer)
     end
 
     #########################
     # # General functions # #
-
-    # Preforms different padding operation based on input layer
-    def pad(input_data : Array(Array(Array(Neuron))) | Array(Array(Neuron)))
-      _pad(@layer_type, input_data)
-    end
-
-    # Preforms different convolution based on input layer
-    def convolve
-      _convolve(@input_layer)
-    end
 
     # Calls different activaton based on previous layer type
     def activate

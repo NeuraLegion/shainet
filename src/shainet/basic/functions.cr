@@ -2,7 +2,7 @@ module SHAInet
   # As Procs
 
   def self.none : Proc(GenNum, Array(Float64)) # Output range -inf..inf)
-    ->(value : GenNum) { [value, 1] }
+    ->(value : GenNum) { [value.to_f64, 1.0.to_f64] }
   end
 
   def self.sigmoid : Proc(GenNum, Array(Float64)) # Output range (0..1)
@@ -64,7 +64,7 @@ module SHAInet
     end
   end
 
-  def self.softmax(array : Array(GenNum)) : Float64
+  def self.softmax(array : Array(GenNum)) : Array(Float64)
     out_array = Array(Float64).new(array.size) { 0.0 }
     m = array.max
     exp_sum = array.reduce { |acc, i| acc + Math::E**(i - m) }

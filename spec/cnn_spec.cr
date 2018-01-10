@@ -27,26 +27,24 @@ describe SHAInet::CNN do
 
     # Input layer params: volume = [width, height, channels]
     cnn.add_input(volume = [7, 7, 2])
-    cnn.layers.last.inspect("activations")
+    cnn.layers.each { |layer| layer.inspect("activations") }
+
     # Conv layer params: filters_num, window_size (one dimentional, i.e 2 = 2x2 window), stride, padding
     cnn.add_conv(filters = 1, window_size = 3, stride = 1, padding = 1)
-    cnn.layers.last.inspect("activations")
-    cnn.layers.last.inspect("weights")
+
     # Relu layer params: slope (default is set to 0.0, change for leaky relu)
     cnn.add_relu
-    cnn.layers.last.inspect("activations")
+
     # Pool layer params: pool size (one dimentional, i.e 2 = 2x2 pool), stride
-    cnn.add_maxpool(pool = 2, stride = 1)
-    cnn.layers.last.inspect("activations")
+    cnn.add_maxpool(pool = 2, stride = 2)
+
     # Fully conncet layer params: l_size, activation_function (default is SHAInet.sigmoid, use SHAInet.softmax when a softmax layer is needed)
     cnn.add_fconnect(10)
-    cnn.add_fconnect(5, SHAInet.softmax)
-    # cnn.layers.each { |l| p l.class }
-
-    # prints filter weights
-    # cnn.layers.each { |layer| layer.inspect("weights") }
+    cnn.add_fconnect(5, softmax = true)
 
     cnn.run(data)
+    cnn.layers.each { |layer| layer.inspect("activations") }
+    # cnn.layers.first.inspect("activations")
 
     # cnn.hidden_layers.first.output.each_with_index do |channel, j|
     #   channel.each_with_index do |x, i|
