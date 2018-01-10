@@ -118,55 +118,24 @@ module SHAInet
     def _convolve(input_layer : ConvLayer)
       padded_data = _pad(input_layer) # Array of filter class
 
-      @filters.size.times do |self_filter|
+      @filters.each_with_index do |_f, self_filter|
         puts "Filter: #{self_filter}"
         # Zoom in on a small window out of the input data volume and update each neuron of the filter
         padded_data.size.times do |filter|
           input_x = input_y = output_x = output_y = 0
 
-          # while input_y <= (padded_data.first.neurons.size - @stride - 1)   # First array in padded_data is a channel
-          #   while input_x <= (padded_data.first.neurons.size - @stride - 1) # Assumes x = y (row = col)
-          #     window = padded_data[filter].neurons[input_y..(input_y + @window_size - 1)].map { |n| n[input_x..(input_x + @window_size - 1)] }
-          #     target_neuron = @filters[self_filter].neurons[output_y][output_x]
-          #     @filters[self_filter].receptive_field.prpogate_forward(window, target_neuron)
-
-          #     input_x += @stride
-          #     output_x += 1
-          #   end
-          #   input_x = output_x = 0
-          #   input_y += @stride
-          #   output_y += 1
-          #   puts "-------------"
-          # end
-
-          loop do
-            # # TODO ##
-            # # Fix breaking logic in loop
-            loop do
-              break if output_x == padded_data.first.neurons.size # break out of x
+          while input_y < (padded_data.first.neurons.size - @window_size + @stride)         # Break out of y
+            while input_x < (padded_data.first.neurons.first.size - @window_size + @stride) # Break out of x (assumes x = y)
               window = padded_data[filter].neurons[input_y..(input_y + @window_size - 1)].map { |n| n[input_x..(input_x + @window_size - 1)] }
-              target_neuron = @filters[self_filter].neurons[output_y][output_x] rescue break
-
-              # puts "----------------------------"
-              # puts "row: #{input_y} col: #{input_x}"
-              # puts "Input window:"
-              # window.each { |row| puts "#{row.map { |n| n.activation }}" }
+              target_neuron = @filters[self_filter].neurons[output_y][output_x]
+              @filters[self_filter].receptive_field.prpogate_forward(window, target_neuron)
+              input_x += @stride
+              output_x += 1
             end
-            # puts "----"
-            # puts "Weights:"
-            # @filters[filter].receptive_field.weights.each_with_index do |ch, i|
-            #   puts "Channel: #{i}"
-            #   ch.each { |row| puts "#{row.map { |w| w }}" }
-            # end
-            # puts "----"
-
-            input_x += @stride
-            output_x += 1
+            input_x = output_x = 0
+            input_y += @stride
+            output_y += 1
           end
-          input_x = output_x = 0
-          input_y += @stride
-          output_y += 1
-          break if output_y == padded_data.first.neurons.size
         end
       end
     end
@@ -197,8 +166,8 @@ module SHAInet
       @input_layer = input_layer
 
       # This is a calculation to make sure the input volume matches a correct desired output volume
-      output_surface = ((width - @window_size + 2*@padding)/@stride + 1)
-      unless output_surface.class == Int32
+      output_surface = ((width.to_f64 - @window_size.to_f64 + 2*@padding.to_f64)/@stride.to_f64 + 1).to_f64
+      unless output_surface.to_i == output_surface
         raise CNNInitializationError.new("Output volume must be a whole number, change: window size or stride or padding")
       end
 
@@ -228,13 +197,13 @@ module SHAInet
           @padding.times { padded_data[channel].insert(0, padding_row) }
         end
         if print == true
-          padded_data.each_with_index do |channel, ch|
-            puts "padded_data:"
-            puts "Channel: #{ch}"
-            channel.each do |row|
-              puts "#{row.map { |n| n.activation }}"
-            end
-          end
+          # padded_data.each_with_index do |channel, ch|
+          #   puts "padded_data:"
+          #   puts "Channel: #{ch}"
+          #   channel.each do |row|
+          #     puts "#{row.map { |n| n.activation }}"
+          #   end
+          # end
         end
         return padded_data
       end
@@ -243,49 +212,15 @@ module SHAInet
     def _convolve(input_layer : CNNLayer)
       padded_data = _pad(input_layer, print = false) # Array of all channels
 
-      @filters.size.times do |filter|
+      @filters.each_with_index do |_f, self_filter|
         # Zoom in on a small window out of the input data volume and update each neuron of the filter
         input_x = input_y = output_x = output_y = 0
-        # while input_y <= (padded_data.first.first.size - @stride - 1)         # First array in padded_data is a channel
-        #   while input_x <= (padded_data.first.first.size - @stride - 1) # Assumes x = y (row = col)
-        #     window = padded_data.map { |channel| channel[input_y..(input_y + @window_size - 1)].map { |n| n[input_x..(input_x + @window_size - 1)] } }
-        #     target_neuron = @filters[filter].neurons[output_y][output_x]
 
-        #     puts "----------------------------"
-        #     puts "row: #{input_y} col: #{input_x}"
-        #     puts "Input window:"
-        #     window.each_with_index do |ch, i|
-        #       puts " Channel: #{i}"
-        #       ch.each { |r| puts r.map { |n| n.activation } }
-        #     end
-        #     puts "----"
-        #     puts "Weights:"
-        #     @filters[filter].receptive_field.weights.each_with_index do |ch, i|
-        #       puts "Channel: #{i}"
-        #       ch.each { |row| puts "#{row.map { |w| w }}" }
-        #     end
-        #     puts "----"
-
-        #     @filters[filter].receptive_field.prpogate_forward(window, target_neuron)
-
-        #     input_x += @stride
-        #     output_x += 1
-        #   end
-        #   input_x = output_x = 0
-        #   input_y += @stride
-        #   output_y += 1
-        #   puts "-------------"
-        # end
-
-        loop do
-          # # TODO ##
-          # # Fix breaking logic in loop
-          break if output_y == padded_data.first.size # Break out of y
-          loop do
-            break if output_x == padded_data.first.first.size # Break out of x
+        while input_y < (padded_data.first.size - @window_size + @stride)         # Break out of y
+          while input_x < (padded_data.first.first.size - @window_size + @stride) # Break out of x (assumes x = y)
             window = padded_data.map { |channel| channel[input_y..(input_y + @window_size - 1)].map { |n| n[input_x..(input_x + @window_size - 1)] } }
-            target_neuron = @filters[filter].neurons[output_y][output_x] rescue break
-
+            target_neuron = @filters[self_filter].neurons[output_y][output_x]
+            @filters[self_filter].receptive_field.prpogate_forward(window, target_neuron)
             input_x += @stride
             output_x += 1
           end

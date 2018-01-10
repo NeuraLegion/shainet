@@ -36,26 +36,16 @@ describe SHAInet::CNN do
     cnn.add_relu
 
     # Pool layer params: pool size (one dimentional, i.e 2 = 2x2 pool), stride
-    cnn.add_maxpool(pool = 2, stride = 2)
+    cnn.add_maxpool(pool = 2, stride = 1)
 
     # Fully conncet layer params: l_size, activation_function (default is SHAInet.sigmoid, use SHAInet.softmax when a softmax layer is needed)
     cnn.add_fconnect(10)
     cnn.add_fconnect(5, softmax = true)
 
-    cnn.run(data)
+    cnn.run(data, stealth = false)
+    puts "############################"
     cnn.layers.each { |layer| layer.inspect("activations") }
-    # cnn.layers.first.inspect("activations")
-
-    # cnn.hidden_layers.first.output.each_with_index do |channel, j|
-    #   channel.each_with_index do |x, i|
-    #     if i % channel.size == 0
-    #       puts "Channel #{j}:"
-    #       puts x
-    #     else
-    #       puts x
-    #     end
-    #   end
-    # end
+    puts cnn.layers.last.as(SHAInet::FullyConnectedLayer).output.sum
     #
   end
   #

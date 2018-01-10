@@ -4,14 +4,6 @@ require "./**"
 module SHAInet
   alias CNNLayer = InputLayer | ReluLayer | MaxPoolLayer | FullyConnectedLayer | DropoutLayer
 
-  # # layer types:
-  # input(width, height ,channels = RGB)
-  # conv(width, height ,filters = features)
-  # relu - same volume as previous
-  # pool(width, height ,filters = features) - reduces the width and height, usually max pool
-  # dropout - randomly make some neurons activaton at 0 to force new pathways
-  # fc(output = classes)- single vector that clasifies, fully conneted to previous layer
-
   class CNN
     getter :layers
 
@@ -46,7 +38,11 @@ module SHAInet
       @layers << DropoutLayer.new(@layers.last, drop_percent)
     end
 
-    def run(input_data : Array(Array(Array(GenNum))))
+    def run(input_data : Array(Array(Array(GenNum))), stealth : Bool = false)
+      if stealth == false
+        puts "############################"
+        puts "Starting run..."
+      end
       # Activate all layers one by one
       @layers.each_with_index do |layer, i|
         if layer.is_a?(InputLayer)
@@ -58,6 +54,8 @@ module SHAInet
       # Get the result from the output layer
       puts "Network output:"
       puts @layers.last.as(FullyConnectedLayer).output
+      puts "Finished run."
+      puts "############################"
     end
   end
 end

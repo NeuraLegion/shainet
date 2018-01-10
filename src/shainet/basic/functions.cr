@@ -64,6 +64,7 @@ module SHAInet
     end
   end
 
+  # This is actually a log softmax, most useful for NNs
   def self.softmax(array : Array(GenNum)) : Array(Float64)
     out_array = Array(Float64).new(array.size) { 0.0 }
     m = array.max
