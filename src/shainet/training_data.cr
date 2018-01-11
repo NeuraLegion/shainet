@@ -61,7 +61,8 @@ module SHAInet
 
     def normalize(x : GenNum, xmin : GenNum, xmax : GenNum) : Float64
       value = (@ymin + (x - xmin) * (@yrange.to_f64 / (xmax - xmin))).to_f64
-      value.to_s == "-NaN" ? 0.0 : value # Hackish way to avoid NaN
+      return 0.0 if value.nan?
+      value
     end
   end
 end
