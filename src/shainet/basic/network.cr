@@ -21,7 +21,7 @@ module SHAInet
 
     # Parameters for Rprop
     property etah_plus : Float64, etah_minus : Float64, delta_max : Float64, delta_min : Float64
-    getter prev_total_error : Float64
+    getter prev_mean_error : Float64
 
     # Parameters for Adam
     property alpha : Float64
@@ -36,24 +36,24 @@ module SHAInet
       @all_synapses = Array(Synapse).new # Array of all current synapses in the network
       @error_signal = Array(Float64).new # Array of errors for each neuron in the output layers, based on specific input
       @total_error = Float64.new(1)      # Sum of errors from output layer, based on a specific input
-      @mean_error = Float64.new(1)       # MSE of netwrok, based on all errors of output layer fort a specific input or batch
+      @mean_error = Float64.new(1)       # MSE of netwrok, based on all errors of output layer for a specific input or batch
       @w_gradient = Array(Float64).new   # Needed for batch train
       @b_gradient = Array(Float64).new   # Needed for batch train
 
       @learning_rate = 0.7 # Standard parameter for GD
       @momentum = 0.3      # Improved GD
 
-      @etah_plus = 1.2                          # For iRprop+ , how to increase step size
-      @etah_minus = 0.5                         # For iRprop+ , how to decrease step size
-      @delta_max = 50.0                         # For iRprop+ , max step size
-      @delta_min = 0.1                          # For iRprop+ , min step size
-      @prev_total_error = rand(0.0..1.0).to_f64 # For iRprop+ , needed for backtracking
+      @etah_plus = 1.2                           # For iRprop+ , how to increase step size
+      @etah_minus = 0.5                          # For iRprop+ , how to decrease step size
+      @delta_max = 50.0                          # For iRprop+ , max step size
+      @delta_min = 0.1                           # For iRprop+ , min step size
+      @prev_mean_error = rand(0.001..1.0).to_f64 # For iRprop+ , needed for backtracking
 
-      @alpha = Float64.new(0.001)        # For Adam , step size (recomeneded: only change this hyper parameter when fine-tuning)
-      @beta1 = Float64.new(0.9)          # For Adam , exponential decay rate (not recommended to change value)
-      @beta2 = Float64.new(0.999)        # For Adam , exponential decay rate (not recommended to change value)
-      @epsilon = Float64.new(10**(-8.0)) # For Adam , prevents exploding gradients (not recommended to change value)
-      @time_step = 0                     # For Adam
+      @alpha = 0.001        # For Adam , step size (recomeneded: only change this hyper parameter when fine-tuning)
+      @beta1 = 0.9          # For Adam , exponential decay rate (not recommended to change value)
+      @beta2 = 0.999        # For Adam , exponential decay rate (not recommended to change value)
+      @epsilon = 10**(-8.0) # For Adam , prevents exploding gradients (not recommended to change value)
+      @time_step = 0        # For Adam
     end
 
     # Create and populate a layer with neurons
@@ -278,7 +278,7 @@ module SHAInet
       end
     end
 
-    def log_summery(e)
+    def log_summary(e)
       @logger.info("Epoch: #{e}, Total error: #{@total_error}, MSE: #{@mean_error}")
     end
 
@@ -294,10 +294,10 @@ module SHAInet
       @logger.info("Training started")
       loop do |e|
         if e % log_each == 0
-          log_summery(e)
+          log_summary(e)
         end
         if e >= epochs || (error_threshold >= @mean_error) && (e > 0)
-          log_summery(e)
+          log_summary(e)
           break
         end
 
@@ -307,7 +307,7 @@ module SHAInet
           evaluate(data_point[0], data_point[1], cost_function)
 
           # Propogate the errors backwards through the hidden layers
-          @hidden_layers.each do |l|
+          @hidden_layers.reverse_each do |l|
             l.neurons.each { |neuron| neuron.hidden_error_prop } # Update neuron error based on errors*weights of neurons from the next layer
           end
 
@@ -326,7 +326,7 @@ module SHAInet
           update_weights(training_type, batch = false)
           update_biases(training_type, batch = false)
 
-          @prev_total_error = @total_error
+          @prev_mean_error = @mean_error
         end
       end
     rescue e : Exception
@@ -351,12 +351,19 @@ module SHAInet
         @time_step += 1 if mini_batch_size # in mini-batch update adam time_step
         loop do |e|
           if e % log_each == 0
-            log_summery(e)
+            log_summary(e)
+            # @all_neurons.each { |s| puts s.gradient }
           end
-          if e >= epochs || (error_threshold >= @mean_error) && (e > 0)
-            log_summery(e)
+          if e >= epochs || (error_threshold >= @mean_error) && (e > 1)
+            log_summary(e)
             break
           end
+          if (@mean_error/@prev_mean_error <= 0.1) && (e > 1)
+            @logger.info("Reached optimum, error does not change anymore")
+            log_summary(e)
+            break
+          end
+
           batch_mean = [] of Float64
           all_errors = [] of Float64
           @w_gradient = Array(Float64).new(@all_synapses.size) { 0.0 } # Save gradients from entire batch before updating weights & biases
@@ -367,7 +374,7 @@ module SHAInet
             evaluate(data_point[0], data_point[1], cost_function) # Get error gradient from output layer based on current input
             all_errors << @total_error
             # Propogate the errors backwards through the hidden layers
-            @hidden_layers.each do |l|
+            @hidden_layers.reverse_each do |l|
               l.neurons.each { |neuron| neuron.hidden_error_prop } # Update neuron error based on errors*weights of neurons from the next layer
             end
 
@@ -388,6 +395,7 @@ module SHAInet
             batch_mean << @mean_error
           end
 
+          # Total error per batch
           @total_error = all_errors.reduce { |acc, i| acc + i }
 
           # Calculate MSE per batch
@@ -399,7 +407,7 @@ module SHAInet
           update_weights(training_type, batch = true)
           update_biases(training_type, batch = true)
 
-          @prev_total_error = @total_error
+          @prev_mean_error = @mean_error
         end
       end
     end
@@ -431,17 +439,18 @@ module SHAInet
             synapse.prev_weight = synapse.weight
             synapse.prev_delta = delta
             synapse.prev_delta_w = delta_weight
-          elsif synapse.prev_gradient*synapse.gradient < 0
+          elsif synapse.prev_gradient*synapse.gradient < 0.0
             delta = [@etah_minus*synapse.prev_delta, @delta_min].max
 
-            synapse.weight -= synapse.prev_delta_w if @total_error > @prev_total_error
+            synapse.weight -= synapse.prev_delta_w if @mean_error >= @prev_mean_error
 
             synapse.prev_gradient = 0.0
             synapse.prev_delta = delta
-          elsif synapse.prev_gradient*synapse.gradient == 0
+          elsif synapse.prev_gradient*synapse.gradient == 0.0
             delta_weight = (-1)*SHAInet.sign(synapse.gradient)*synapse.prev_delta
 
             synapse.weight += delta_weight
+            synapse.prev_delta = @delta_min
             synapse.prev_delta_w = delta_weight
           end
           # Update weights based on Adaptive moment estimation (Adam)
@@ -483,17 +492,18 @@ module SHAInet
             neuron.prev_bias = neuron.bias
             neuron.prev_delta = delta
             neuron.prev_delta_b = delta_bias
-          elsif neuron.prev_gradient*neuron.gradient < 0
+          elsif neuron.prev_gradient*neuron.gradient < 0.0
             delta = [@etah_minus*neuron.prev_delta, @delta_min].max
 
-            neuron.bias -= neuron.prev_delta_b if @total_error > @prev_total_error
+            neuron.bias -= neuron.prev_delta_b if @mean_error >= @prev_mean_error
 
             neuron.prev_gradient = 0.0
             neuron.prev_delta = delta
-          elsif neuron.prev_gradient*neuron.gradient == 0
-            delta_bias = (-1)*SHAInet.sign(neuron.gradient)*neuron.prev_delta
+          elsif neuron.prev_gradient*neuron.gradient == 0.0
+            delta_bias = (-1)*SHAInet.sign(neuron.gradient)*@delta_min*neuron.prev_delta
 
             neuron.bias += delta_bias
+            neuron.prev_delta = @delta_min
             neuron.prev_delta_b = delta_bias
           end
           # Update weights based on Adaptive moment estimation (Adam)

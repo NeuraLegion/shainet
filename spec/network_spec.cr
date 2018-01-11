@@ -27,6 +27,8 @@ describe SHAInet::Network do
   end
 
   it "Figure out XOR with SGD + M" do
+    puts "---"
+    puts "Figure out XOR SGD + momentum (train, mse, sigmoid)"
     training_data = [
       [[0, 0], [0]],
       [[1, 0], [1]],
@@ -35,9 +37,10 @@ describe SHAInet::Network do
     ]
 
     xor = SHAInet::Network.new
-    xor.add_layer(:input, 2, :memory, SHAInet.sigmoid)
-    1.times { |x| xor.add_layer(:hidden, 3, :memory, SHAInet.sigmoid) }
-    xor.add_layer(:output, 1, :memory, SHAInet.sigmoid)
+
+    xor.add_layer(:input, 2, "memory", SHAInet.sigmoid)
+    1.times { |x| xor.add_layer(:hidden, 3, "memory", SHAInet.sigmoid) }
+    xor.add_layer(:output, 1, "memory", SHAInet.sigmoid)
     xor.fully_connect
     # data, training_type, cost_function, activation_function, epochs, error_threshold (MSE %), log each steps
     xor.train(training_data, :sgdm, :mse, epochs = 5000, threshold = 0.000001, log = 100)
@@ -49,6 +52,8 @@ describe SHAInet::Network do
   end
 
   it "Supports both Symbols or Strings as input params" do
+    puts "---"
+    puts "Supports both Symbols or Strings as input params (sgdm, train, mse, sigmoid)"
     training_data = [
       [[0, 0], [0]],
       [[1, 0], [1]],
@@ -70,6 +75,8 @@ describe SHAInet::Network do
   end
 
   it "Figure out iris with SGD + M, using cross-entropy cost (no batch)" do
+    puts "---"
+    puts "Figure out iris with SGD + momentum (train, mse, sigmoid)"
     label = {
       "setosa"     => [0.to_f64, 0.to_f64, 1.to_f64],
       "versicolor" => [0.to_f64, 1.to_f64, 0.to_f64],
@@ -95,12 +102,14 @@ describe SHAInet::Network do
     normalized.normalize_min_max
     iris.learning_rate = 0.7
     iris.momentum = 0.6
-    iris.train(normalized.data.shuffle, :sgdm, :c_ent, epochs = 20000, threshold = 0.000001, log = 1000)
+    iris.train(normalized.data.shuffle, :sgdm, :mse, epochs = 20000, threshold = 0.0001, log = 1000)
     result = iris.run(normalized.normalized_inputs.first)
     ((result.first < 0.3) && (result[1] < 0.3) && (result.last > 0.7)).should eq(true)
   end
 
-  it "works on iris dataset with batch train with Rprop" do
+  it "works on iris dataset with batch train with Rprop (batch)" do
+    puts "---"
+    puts "works on iris dataset with Rprop (batch_train, mse, sigmoid)"
     label = {
       "setosa"     => [0.to_f64, 0.to_f64, 1.to_f64],
       "versicolor" => [0.to_f64, 1.to_f64, 0.to_f64],
@@ -124,13 +133,15 @@ describe SHAInet::Network do
     end
     normalized = SHAInet::TrainingData.new(inputs, outputs)
     normalized.normalize_min_max
-    p "Figure out iris with iRprop+ (batch)"
+
     iris.train_batch(normalized.data.shuffle, :rprop, :mse, 5000, 0.00001)
     result = iris.run(normalized.normalized_inputs.first)
     ((result.first < 0.3) && (result[1] < 0.3) && (result.last > 0.7)).should eq(true)
   end
 
   it "works on iris dataset with batch train with Adam (batch)" do
+    puts "---"
+    puts "works on iris dataset with Adam (batch_train, mse, sigmoid)"
     label = {
       "setosa"     => [0.to_f64, 0.to_f64, 1.to_f64],
       "versicolor" => [0.to_f64, 1.to_f64, 0.to_f64],
@@ -160,6 +171,8 @@ describe SHAInet::Network do
   end
 
   it "works on iris dataset with mini-batch train with Adam (mini-batch)" do
+    puts "---"
+    puts "works on iris dataset with Adam (mini-batch_train, mse, sigmoid)"
     label = {
       "setosa"     => [0.to_f64, 0.to_f64, 1.to_f64],
       "versicolor" => [0.to_f64, 1.to_f64, 0.to_f64],
@@ -183,12 +196,13 @@ describe SHAInet::Network do
     end
     normalized = SHAInet::TrainingData.new(inputs, outputs)
     normalized.normalize_min_max
-    iris.train_batch(normalized.data.shuffle, :adam, :mse, 20000, 0.00001, 1000, 50)
+    iris.train_batch(normalized.data.shuffle, :adam, :mse, 5000, 0.00001, 1000, 50)
     result = iris.run(normalized.normalized_inputs.first)
     ((result.first < 0.3) && (result[1] < 0.3) && (result.last > 0.9)).should eq(true)
   end
 
   it "trains , saves, loads, runs" do
+    puts "train, save, loads and run works (Adam, mini-batch_train, mse, sigmoid)"
     label = {
       "setosa"     => [0.to_f64, 0.to_f64, 1.to_f64],
       "versicolor" => [0.to_f64, 1.to_f64, 0.to_f64],
@@ -212,7 +226,7 @@ describe SHAInet::Network do
     end
     normalized = SHAInet::TrainingData.new(inputs, outputs)
     normalized.normalize_min_max
-    iris.train_batch(normalized.data.shuffle, :adam, :mse, 20000, 0.00001, 1000, 50)
+    iris.train_batch(normalized.data.shuffle, :adam, :mse, 5000, 0.00001, 1000, 50)
 
     iris.save_to_file("./my_net.nn")
     nn = SHAInet::Network.new

@@ -1,6 +1,6 @@
 module SHAInet
   class Synapse
-    getter source_neuron : Neuron, dest_neuron : Neuron
+    property source_neuron : Neuron, dest_neuron : Neuron
     property weight : Float64, gradient : Float64, prev_weight : Float64
     property prev_gradient : Float64, prev_delta : Float64, prev_delta_w : Float64
     property m_current : Float64, v_current : Float64, m_prev : Float64, v_prev : Float64
@@ -11,7 +11,7 @@ module SHAInet
       @prev_weight = Float64.new(0)      # Needed for delta rule improvement (with momentum)
 
       # Parameters needed for Rprop
-      @prev_gradient = rand(-0.1..0.1).to_f64
+      @prev_gradient = 0.0
       @prev_delta = 0.1
       @prev_delta_w = 0.1
 
