@@ -35,14 +35,12 @@ module SHAInet
       # Get inputs min-max
       i_max = Array(GenNum).new
       i_min = Array(GenNum).new
-      @inputs.transpose.each { |a| i_max << a.max }
-      @inputs.transpose.each { |a| i_min << a.min }
+      @inputs.transpose.each { |a| i_max << a.max; i_min << a.min }
 
       # Get outputs min-max
       o_max = Array(GenNum).new
       o_min = Array(GenNum).new
-      @outputs.transpose.each { |a| o_max << a.max }
-      @outputs.transpose.each { |a| o_min << a.min }
+      @outputs.transpose.each { |a| o_max << a.max; o_min << a.min }
 
       @inputs.each do |row|
         row_array = Array(Float64).new
