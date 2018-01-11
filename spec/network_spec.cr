@@ -237,12 +237,12 @@ describe SHAInet::Network do
 
   # it "works on the mnist dataset using adam and batch" do
   #   mnist = SHAInet::Network.new
-  #   mnist.add_layer(:input, 784, "memory", :sigmoid)
-  #   mnist.add_layer(:hidden, 100, "memory", :sigmoid)
-  #   mnist.add_layer(:hidden, 40, :eraser, :sigmoid)
-  #   mnist.add_layer(:hidden, 40, "memory", :sigmoid)
-  #   mnist.add_layer(:hidden, 100, "memory", :sigmoid)
-  #   mnist.add_layer(:output, 10, "memory", :sigmoid)
+  #   mnist.add_layer(:input, 784, "memory", SHAInet.sigmoid)
+  #   mnist.add_layer(:hidden, 100, "memory", SHAInet.sigmoid)
+  #   mnist.add_layer(:hidden, 40, "eraser", SHAInet.sigmoid)
+  #   mnist.add_layer(:hidden, 40, "memory", SHAInet.sigmoid)
+  #   mnist.add_layer(:hidden, 100, "memory", SHAInet.sigmoid)
+  #   mnist.add_layer(:output, 10, "memory", SHAInet.sigmoid)
 
   #   # Input to first hidden
   #   mnist.connect_ltl(mnist.input_layers.first, mnist.hidden_layers.first, :full)
