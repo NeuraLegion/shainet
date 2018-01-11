@@ -6,7 +6,7 @@ module SHAInet
 
   class Neuron
     property :synapses_in, :synapses_out, :n_type, activation : Float64, gradient : Float64, bias : Float64, prev_bias : Float64
-    getter :input_sum, :sigma_prime, :id
+    property :input_sum, :sigma_prime, :id
     property prev_gradient : Float64, prev_delta : Float64, prev_delta_b : Float64
     property m_current : Float64, v_current : Float64, m_prev : Float64, v_prev : Float64
 
@@ -57,6 +57,29 @@ module SHAInet
       end
       weighted_error_sum = new_errors.reduce { |acc, i| acc + i } # Sum weighted error from target neurons (instead of using w_matrix*delta), returns Float64
       @gradient = weighted_error_sum*@sigma_prime                 # New error of the neuron
+    end
+
+    def clone
+      neuron_old = self
+      neuron_new = Neuron.new(neuron_old.n_type)
+
+      neuron_new.synapses_in = neuron_old.synapses_in
+      neuron_new.synapses_out = neuron_old.synapses_out
+      neuron_new.activation = neuron_old.activation
+      neuron_new.gradient = neuron_old.gradient
+      neuron_new.bias = neuron_old.bias
+      neuron_new.prev_bias = neuron_old.prev_bias
+      neuron_new.input_sum = neuron_old.input_sum
+      neuron_new.sigma_prime = neuron_old.sigma_prime
+      neuron_new.prev_gradient = neuron_old.prev_gradient
+      neuron_new.prev_delta = neuron_old.prev_delta
+      neuron_new.prev_delta_b = neuron_old.prev_delta_b
+      neuron_new.m_current = neuron_old.m_current
+      neuron_new.v_current = neuron_old.v_current
+      neuron_new.m_prev = neuron_old.m_prev
+      neuron_new.v_prev = neuron_old.v_prev
+
+      return neuron_new
     end
 
     def inspect

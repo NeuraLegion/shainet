@@ -3,30 +3,49 @@ require "logger"
 module SHAInet
   # In conv layers a filter is a separate unit within the layer, with special parameters
   class Filter
-    getter neurons : Array(Array(Neuron)), receptive_field : ReceptiveField
+    getter input_surface : Array(Int32), window_size : Int32
+    property neurons : Array(Array(Neuron)), receptive_field : ReceptiveField
 
-    def initialize(input_surface : Array(Int32), # expecting [width, height, channels]
-                   window_size : Int32)
+    def initialize(@input_surface : Array(Int32), # expecting [width, height, channels]
+                   @window_size : Int32)
       #
       @neurons = Array(Array(Neuron)).new(input_surface[1]) {
         Array(Neuron).new(input_surface[0]) { Neuron.new("memory") }
       }
       @receptive_field = ReceptiveField.new(window_size, input_surface[2])
     end
+
+    def clone
+      filter_old = self
+      filter_new = Filter.new(filter_old.input_surface, filter_old.window_size)
+
+      filter_new.neurons = filter_old.neurons.clone
+      filter_new.receptive_field = filter_old.receptive_field.clone
+      return filter_new
+    end
   end
 
   # This is somewhat similar to a synapse
   class ReceptiveField
     property weights : Array(Array(Array(Float64))), bias : Float64
-    getter :window_size
+    getter window_size : Int32, channels : Int32
 
-    def initialize(@window_size : Int32, channels : Int32)
+    def initialize(@window_size : Int32, @channels : Int32)
       @weights = Array(Array(Array(Float64))).new(channels) {
         Array(Array(Float64)).new(@window_size) {
           Array(Float64).new(@window_size) { rand(0.0..1.0).to_f64 }
         }
       }
       @bias = rand(-1..1).to_f64
+    end
+
+    def clone
+      rf_old = self
+      rf_new = ReceptiveField.new(rf_old.window_size, rf_old.channels)
+      rf_new.weights = rf_old.weights
+      rf_new.bias = rf_old.bias
+
+      return rf_new
     end
 
     # Takes a small window from the input data (CxHxW) to preform feed forward
@@ -91,7 +110,7 @@ module SHAInet
 
     # Adds padding to all Filters of input data
     def _pad(input_layer : ConvLayer)
-      input_data = input_layer.filters # Array of filter class
+      input_data = input_layer.filters.clone # Array of filter class
 
       if @padding == 0
         return input_data
@@ -176,7 +195,7 @@ module SHAInet
 
     # Adds padding to all channels of input data
     def _pad(input_layer : CNNLayer, print : Bool)
-      input_data = input_layer.filters.first.dup # Array of all channels
+      input_data = input_layer.filters.first.clone # Array of all channels
       if @padding == 0
         return input_data
       else
@@ -197,13 +216,13 @@ module SHAInet
           @padding.times { padded_data[channel].insert(0, padding_row) }
         end
         if print == true
-          # padded_data.each_with_index do |channel, ch|
-          #   puts "padded_data:"
-          #   puts "Channel: #{ch}"
-          #   channel.each do |row|
-          #     puts "#{row.map { |n| n.activation }}"
-          #   end
-          # end
+          padded_data.each_with_index do |channel, ch|
+            puts "padded_data:"
+            puts "Channel: #{ch}"
+            channel.each do |row|
+              puts "#{row.map { |n| n.activation }}"
+            end
+          end
         end
         return padded_data
       end
