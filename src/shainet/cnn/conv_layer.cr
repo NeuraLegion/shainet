@@ -77,16 +77,19 @@ module SHAInet
     end
   end
 
+  # #########################################################################################################
+
   class ConvLayer
-    getter input_layer : CNNLayer | ConvLayer, filters : Array(Filter), window_size : Int32, stride : Int32, padding : Int32
+    getter filters : Array(Filter), window_size : Int32, stride : Int32, padding : Int32, prev_layer : CNNLayer | ConvLayer
+    property next_layer : CNNLayer | ConvLayer | DummyLayer
 
     #################################################
     # # This part is for dealing with conv layers # #
 
-    def initialize(input_layer : ConvLayer,
-                   filters_num : Int32,
-                   @window_size : Int32,
-                   @stride : Int32,
+    def initialize(prev_layer : ConvLayer,
+                   filters_num : Int32 = 1,
+                   @window_size : Int32 = 1,
+                   @stride : Int32 = 1,
                    @padding : Int32 = 0,
                    @logger : Logger = Logger.new(STDOUT))
       #
@@ -95,9 +98,9 @@ module SHAInet
       raise CNNInitializationError.new("Window size value must be Int32 >= 1") if @window_size < 1
       raise CNNInitializationError.new("Stride value must be Int32 >= 1") if @stride < 1
 
-      channels = 1                                            # In conv layers channels is always 1, but have may multiple filters
-      width = height = input_layer.filters.first.neurons.size # Assumes row == height
-      @input_layer = input_layer
+      channels = 1                                           # In conv layers channels is always 1, but have may multiple filters
+      width = height = prev_layer.filters.first.neurons.size # Assumes row == height
+      @prev_layer = prev_layer
 
       # This is a calculation to make sure the input volume matches a correct desired output volume
       output_surface = ((width - @window_size + 2*@padding)/@stride + 1)
@@ -106,11 +109,13 @@ module SHAInet
       end
 
       @filters = Array(Filter).new(filters_num) { Filter.new([width, height, channels], @window_size) }
+      @next_layer = DummyLayer.new
+      @prev_layer.next_layer = self
     end
 
     # Adds padding to all Filters of input data
-    def _pad(input_layer : ConvLayer)
-      input_data = input_layer.filters.clone # Array of filter class
+    def _pad(prev_layer : ConvLayer)
+      input_data = prev_layer.filters.clone # Array of filter class
 
       if @padding == 0
         return input_data
@@ -134,8 +139,8 @@ module SHAInet
       end
     end
 
-    def _convolve(input_layer : ConvLayer)
-      padded_data = _pad(input_layer) # Array of filter class
+    def _convolve(prev_layer : ConvLayer)
+      padded_data = _pad(prev_layer) # Array of filter class
 
       @filters.each_with_index do |_f, self_filter|
         puts "Filter: #{self_filter}"
@@ -160,17 +165,17 @@ module SHAInet
     end
 
     # Use each filter to create feature maps for the input data
-    def _activate(input_layer : ConvLayer)
-      _convolve(@input_layer)
+    def _activate(prev_layer : ConvLayer)
+      _convolve(@prev_layer)
     end
 
     #######################################################################
     # # This part is for dealing with all layers other than conv layers # #
 
-    def initialize(input_layer : CNNLayer,
-                   filters_num : Int32,
-                   @window_size : Int32,
-                   @stride : Int32,
+    def initialize(prev_layer : CNNLayer,
+                   filters_num : Int32 = 1,
+                   @window_size : Int32 = 1,
+                   @stride : Int32 = 1,
                    @padding : Int32 = 0,
                    @logger : Logger = Logger.new(STDOUT))
       #
@@ -180,9 +185,9 @@ module SHAInet
       raise CNNInitializationError.new("Stride value must be Int32 >= 1") if @stride < 1
 
       # In other layers filters is always 1, but may have multiple channels
-      channels = input_layer.filters.first.size
-      width = height = input_layer.filters.first.first.size # Assumes row == height
-      @input_layer = input_layer
+      channels = prev_layer.filters.size
+      width = height = prev_layer.filters.first.first.size # Assumes row == height
+      @prev_layer = prev_layer
 
       # This is a calculation to make sure the input volume matches a correct desired output volume
       output_surface = ((width.to_f64 - @window_size.to_f64 + 2*@padding.to_f64)/@stride.to_f64 + 1).to_f64
@@ -191,11 +196,13 @@ module SHAInet
       end
 
       @filters = Array(Filter).new(filters_num) { Filter.new([width, height, channels], @window_size) }
+      @next_layer = DummyLayer.new
+      @prev_layer.next_layer = self
     end
 
     # Adds padding to all channels of input data
-    def _pad(input_layer : CNNLayer, print : Bool)
-      input_data = input_layer.filters.first.clone # Array of all channels
+    def _pad(prev_layer : CNNLayer, print : Bool)
+      input_data = prev_layer.filters.first.clone # Array of all channels
       if @padding == 0
         return input_data
       else
@@ -228,8 +235,8 @@ module SHAInet
       end
     end
 
-    def _convolve(input_layer : CNNLayer)
-      padded_data = _pad(input_layer, print = false) # Array of all channels
+    def _convolve(prev_layer : CNNLayer)
+      padded_data = _pad(prev_layer, print = false) # Array of all channels
 
       @filters.each_with_index do |_f, self_filter|
         # Zoom in on a small window out of the input data volume and update each neuron of the filter
@@ -251,8 +258,8 @@ module SHAInet
     end
 
     # Use each filter to create feature maps for the input data
-    def _activate(input_layer : CNNLayer)
-      _convolve(@input_layer)
+    def _activate(prev_layer : CNNLayer)
+      _convolve(@prev_layer)
     end
 
     #########################
@@ -260,22 +267,71 @@ module SHAInet
 
     # Calls different activaton based on previous layer type
     def activate
-      _activate(@input_layer)
+      _activate(@prev_layer)
+    end
+
+    def error_prop
+      _error_prop(@next_layer)
+    end
+
+    def _error_prop(next_layer : MaxPoolLayer)
+      @filters.each_with_index do |_f, filter|
+        _f.each_with_index do |_ch, channel|
+          input_x = input_y = output_x = output_y = 0
+
+          while input_y < (@filters[filter][channel].size - @pool + @stride)   # Break out of y
+            while input_x < (@filters[filter][channel].size - @pool + @stride) # Break out of x (assumes x = y)
+              pool_neuron = next_layer.filters[filter][channel][output_y][output_x]
+
+              # Only propagate error to the neurons that were chosen during the max pool
+              @filters[filter][channel][input_y..(input_y + @pool - 1)].each do |row|
+                row[input_x..(input_x + @pool - 1)].each do |neuron|
+                  if neuron.activation == pool_neuron.activation
+                    neuron.gradient = pool_neuron.gradient
+                  end
+                end
+              end
+
+              input_x += @stride
+              output_x += 1
+            end
+            input_x = output_x = 0
+            input_y += @stride
+            output_y += 1
+          end
+        end
+      end
+    end
+
+    def _error_prop(next_layer : ReluLayer | DropoutLayer)
+      @filters.each_with_index do |filter, fi|
+        filter.each_with_index do |channel, ch|
+          channel.each_with_index do |row, r|
+            row.each_with_index do |neuron, n|
+              neuron.gradient = next_layer.filters[fi][ch][r][n].gradient
+            end
+          end
+        end
+      end
+    end
+
+    def _error_prop(next_layer : DummyLayer)
+      # Do nothing because this is the last layer in the network
     end
 
     def inspect(what : String)
       puts "Conv layer:"
       case what
       when "weights"
-        filters.each_with_index do |filter, i|
+        @filters.each_with_index do |filter, i|
           puts "Filter #{i}, weights:"
           filter.receptive_field.weights.each_with_index do |channel, j|
             puts "Channel: #{j}"
-            channel.each { |row| puts "#{row.map { |w| }}" }
+            channel.each { |row| puts "#{row.map { |synapse| synapse.weight }}" }
           end
         end
       when "bias"
-        filters.each_with_index { |filter, i| puts "Filter #{i}, bias:#{filter.receptive_field.bias}" }
+        @filters.each_with_index { |filter, i| puts "Filter #{i}, bias:#{filter.receptive_field.bias}" }
       when "activations"
         @filters.each_with_index do |filter, i|
           puts "Filter #{i}, activations:"

@@ -3,6 +3,7 @@ require "logger"
 module SHAInet
   class InputLayer
     getter :filters, :output
+    property next_layer : CNNLayer | ConvLayer | DummyLayer
 
     def initialize(input_volume : Array(Int32), @logger : Logger = Logger.new(STDOUT))
       unless input_volume.size == 3
@@ -26,6 +27,8 @@ module SHAInet
           }
         }
       }
+
+      @next_layer = DummyLayer.new
     end
 
     def activate(input_data : Array(Array(Array(GenNum))))

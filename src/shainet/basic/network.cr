@@ -36,7 +36,7 @@ module SHAInet
       @all_synapses = Array(Synapse).new # Array of all current synapses in the network
       @error_signal = Array(Float64).new # Array of errors for each neuron in the output layers, based on specific input
       @total_error = Float64.new(1)      # Sum of errors from output layer, based on a specific input
-      @mean_error = Float64.new(1)       # MSE of netwrok, based on all errors of output layer fort a specific input or batch
+      @mean_error = Float64.new(1)       # MSE of netwrok, based on all errors of output layer for a specific input or batch
       @w_gradient = Array(Float64).new   # Needed for batch train
       @b_gradient = Array(Float64).new   # Needed for batch train
 
@@ -279,7 +279,7 @@ module SHAInet
       end
     end
 
-    def log_summery(e)
+    def log_summary(e)
       @logger.info("Epoch: #{e}, Total error: #{@total_error}, MSE: #{@mean_error}")
     end
 
@@ -295,10 +295,10 @@ module SHAInet
       @logger.info("Training started")
       loop do |e|
         if e % log_each == 0
-          log_summery(e)
+          log_summary(e)
         end
         if e >= epochs || (error_threshold >= @mean_error) && (e > 0)
-          log_summery(e)
+          log_summary(e)
           break
         end
 
@@ -308,7 +308,7 @@ module SHAInet
           evaluate(data_point[0], data_point[1], cost_function)
 
           # Propogate the errors backwards through the hidden layers
-          @hidden_layers.each do |l|
+          @hidden_layers.reverse_each do |l|
             l.neurons.each { |neuron| neuron.hidden_error_prop } # Update neuron error based on errors*weights of neurons from the next layer
           end
 
@@ -352,16 +352,16 @@ module SHAInet
         @time_step += 1 if mini_batch_size # in mini-batch update adam time_step
         loop do |e|
           if e % log_each == 0
-            log_summery(e)
+            log_summary(e)
             # @all_neurons.each { |s| puts s.gradient }
           end
           if e >= epochs || (error_threshold >= @mean_error) && (e > 1)
-            log_summery(e)
+            log_summary(e)
             break
           end
           if (@mean_error/@prev_mean_error <= 0.1) && (e > 1)
             @logger.info("Reached optimum, error does not change anymore")
-            log_summery(e)
+            log_summary(e)
             break
           end
 
@@ -375,7 +375,7 @@ module SHAInet
             evaluate(data_point[0], data_point[1], cost_function) # Get error gradient from output layer based on current input
             all_errors << @total_error
             # Propogate the errors backwards through the hidden layers
-            @hidden_layers.each do |l|
+            @hidden_layers.reverse_each do |l|
               l.neurons.each { |neuron| neuron.hidden_error_prop } # Update neuron error based on errors*weights of neurons from the next layer
             end
 
