@@ -17,8 +17,9 @@ module SHAInet
                    @logger : Logger = Logger.new(STDOUT))
       #
 
+      # since this is similar to a classic layer, we store all neurons in a single array
       filters = channels = height = 1
-      width = l_size # since this is similar to a classic layer, we store all neurons in a single array
+      width = l_size
 
       # Channel data is stored within the filters array, this is needed for smooth work with all other layers.
       @filters = Array(Array(Array(Array(Neuron)))).new(filters) {
@@ -62,8 +63,9 @@ module SHAInet
                    @logger : Logger = Logger.new(STDOUT))
       #
 
+      # since this is similar to a classic layer, we store all neurons in a single array
       filters = channels = height = 1
-      width = l_size # since this is similar to a classic layer, we store all neurons in a single array
+      width = l_size
 
       # Channel data is stored within the filters array, this is needed for smooth work with all other layers.
       @filters = Array(Array(Array(Array(Neuron)))).new(filters) {

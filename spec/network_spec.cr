@@ -202,6 +202,7 @@ describe SHAInet::Network do
   end
 
   it "trains , saves, loads, runs" do
+    puts "---"
     puts "train, save, loads and run works (Adam, mini-batch_train, mse, sigmoid)"
     label = {
       "setosa"     => [0.to_f64, 0.to_f64, 1.to_f64],

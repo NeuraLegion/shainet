@@ -9,8 +9,8 @@ module SHAInet
 
   class CNN
     # General network parameters
-    getter :layers # , :all_neurons, :all_synapses
-    getter error_signal : Array(Float64), total_error : Float64, :mean_error, w_gradient : Array(Float64), b_gradient : Array(Float64)
+    getter layers : Array(CNNLayer | ConvLayer) # , :all_neurons, :all_synapses
+    getter error_signal : Array(Float64), total_error : Float64, mean_error : Float64, w_gradient : Array(Float64), b_gradient : Array(Float64)
 
     # Parameters for SGD + Momentum
     property learning_rate : Float64, momentum : Float64

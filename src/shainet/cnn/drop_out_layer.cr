@@ -2,7 +2,7 @@ require "logger"
 
 module SHAInet
   class DropoutLayer
-    getter filters : Array(Array(Array(Array(Neuron)))) | Array(Filter), drop_percent : Int32, prev_layer : CNNLayer | ConvLayer
+    getter filters : Array(Array(Array(Array(Neuron)))), drop_percent : Int32, prev_layer : CNNLayer | ConvLayer
     property next_layer : CNNLayer | ConvLayer | DummyLayer
 
     # Calls different activaton based on previous layer type
@@ -17,7 +17,20 @@ module SHAInet
     def initialize(prev_layer : ConvLayer, @drop_percent : Int32 = 5, @logger : Logger = Logger.new(STDOUT))
       raise CNNInitializationError.new("Drop percent must be Int of 0-100") unless (0..100).includes?(@drop_percent)
 
-      @filters = prev_layer.filters.clone
+      filters = prev_layer.filters.size
+      channels = 1
+      width = height = prev_layer.filters.first.neurons.size # Assumes row == height
+
+      # Channel data is stored within the filters array
+      # This is because after convolution each filter has different feature maps
+      @filters = Array(Array(Array(Array(Neuron)))).new(filters) {
+        Array(Array(Array(Neuron))).new(channels) {
+          Array(Array(Neuron)).new(height) {
+            Array(Neuron).new(width) { Neuron.new("memory") }
+          }
+        }
+      }
+
       @prev_layer = prev_layer
       @next_layer = DummyLayer.new
       @prev_layer.next_layer = self
@@ -25,13 +38,14 @@ module SHAInet
 
     # Randomly select and deactivate a percentage of the neurons from the previous layer
     def _activate(prev_layer : ConvLayer)
-      @filters = prev_layer.filters.clone
-      @filters.each do |filter|
-        filter.neurons.each do |row|
-          row.each do |neuron|
+      @filters.size.times do |filter|
+        @filters[filter][0].size.times do |row| # Conv layers may have multiple filters, but only one channel
+          @filters[filter][0][row].size.times do |neuron|
             x = rand(0..100)
             if x <= @drop_percent
-              neuron.activation = 0.0
+              @filters[filter][0][row][neuron].activation = 0.0
+            else
+              @filters[filter][0][row][neuron].activation = prev_layer[filter][0][row][neuron].activation
             end
           end
         end
@@ -41,7 +55,7 @@ module SHAInet
     #######################################################################
     # # This part is for dealing with all layers other than conv layers # #
 
-    # Drop percent is an Int, i.e 5 is 5%
+    # Drop percent is an Integer, i.e 5 is 5%
     def initialize(prev_layer : CNNLayer, @drop_percent : Int32, @logger : Logger = Logger.new(STDOUT))
       raise CNNInitializationError.new("Drop percent must be Int of 0-100") unless (0..100).includes?(@drop_percent)
 
@@ -51,14 +65,18 @@ module SHAInet
       @prev_layer.next_layer = self
     end
 
+    # Randomly select and deactivate a percentage of the neurons from the previous layer
     def _activate(prev_layer : CNNLayer)
-      @filters = prev_layer.filters.clone
-      @filters.first.each do |channel|
-        channel.each do |row|
-          row.each do |neuron|
-            x = rand(0..100)
-            if x <= @drop_percent
-              neuron.activation = 0.0
+      @filters.size.times do |filter|
+        @filters[filter][channel].size.times do |channel|
+          @filters[filter][channel].size.times do |row|
+            @filters[filter][channel][row].size.times do |neuron|
+              x = rand(0..100)
+              if x <= @drop_percent
+                @filters[filter][channel][row][neuron].activation = 0.0
+              else
+                @filters[filter][channel][row][neuron].activation = prev_layer[filter][channel][row][neuron].activation
+              end
             end
           end
         end

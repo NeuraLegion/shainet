@@ -16,12 +16,10 @@ module SHAInet
     # Add slope to initialize as leaky relu
     def initialize(prev_layer : ConvLayer, @l_relu_slope : Float64 = 0.0, @logger : Logger = Logger.new(STDOUT))
       # In conv layers channels is always 1, but have may multiple filters
-      channels = 1
       filters = prev_layer.filters.size
-
+      channels = 1
       # neurons are contained in Layer class
       width = height = prev_layer.filters.first.neurons.size # Assumes row == height
-      @prev_layer = prev_layer
 
       # Channel data is stored within the filters array
       # This is because after convolution each filter has different feature maps
@@ -33,21 +31,19 @@ module SHAInet
         }
       }
 
+      @prev_layer = prev_layer
       @next_layer = DummyLayer.new
       @prev_layer.next_layer = self
     end
 
     def _activate(prev_layer : ConvLayer)
-      input_data = prev_layer.filters
-
-      # In conv layers channels is always 1, but have may multiple filters
-      input_data.size.times do |filter|
-        input_data[filter].neurons.size.times do |row|
-          input_data[filter].neurons[row].size.times do |col|
+      @filters.size.times do |filter|
+        @filters[filter][0].size.times do |row| # Conv layers may have multiple filters, but only one channel
+          @filters[filter][0][row].size.times do |neuron|
             if @l_relu_slope == 0.0
-              @filters[filter][0][row][col].activation = SHAInet._relu(input_data[filter].neurons[row][col].activation)
+              @filters[filter][0][row][neuron].activation = SHAInet._relu(prev_layer.filters[filter].neurons[row][neuron].activation)
             else
-              @filters[filter][0][row][col].activation = SHAInet._l_relu(input_data[filter].neurons[row][col].activation)
+              @filters[filter][0][row][neuron].activation = SHAInet._l_relu(prev_layer.filters[filter].neurons[row][neuron].activation)
             end
           end
         end
@@ -59,37 +55,36 @@ module SHAInet
 
     def initialize(prev_layer : CNNLayer, @l_relu_slope : Float64 = 0.0, @logger : Logger = Logger.new(STDOUT))
       # In other layers filters is always 1, but may have multiple channels
-      channels = prev_layer.filters.first.size
-      filters = 1
-      # Neurons are contained in Multi-Array
-      width = height = prev_layer.filters.first.first.size # Assumes row == height
+      # channels = prev_layer.filters.first.size
+      # filters = 1
+      # # Neurons are contained in Multi-Array
+      # width = height = prev_layer.filters.first.first.size # Assumes row == height
+
+      # # Channel data is stored within the filters array
+      # # This is because after convolution each filter has different feature maps
+      # @filters = Array(Array(Array(Array(Neuron)))).new(filters) {
+      #   Array(Array(Array(Neuron))).new(channels) {
+      #     Array(Array(Neuron)).new(height) {
+      #       Array(Neuron).new(width) { Neuron.new("memory") }
+      #     }
+      #   }
+      # }
+      @filters = prev_layer.filters.clone
+
       @prev_layer = prev_layer
-
-      # Channel data is stored within the filters array
-      # This is because after convolution each filter has different feature maps
-      @filters = Array(Array(Array(Array(Neuron)))).new(filters) {
-        Array(Array(Array(Neuron))).new(channels) {
-          Array(Array(Neuron)).new(height) {
-            Array(Neuron).new(width) { Neuron.new("memory") }
-          }
-        }
-      }
-
       @next_layer = DummyLayer.new
       @prev_layer.next_layer = self
     end
 
     def _activate(prev_layer : CNNLayer)
-      input_data = prev_layer.filters
-
-      input_data.size.times do |filter|
-        input_data[filter].size.times do |channel|
-          input_data[filter][channel].size.times do |row|
-            input_data[filter][channel][row].size.times do |col|
+      @filters.size.times do |filter|
+        @filters[filter][channel].size.times do |channel|
+          @filters[filter][channel].size.times do |row| # Conv layers may have multiple filters, but only one channel
+            @filters[filter][channel][row].size.times do |neuron|
               if @l_relu_slope == 0.0
-                @filters[filter][channel][row][col].activation = SHAInet._relu(input_data[filter][channel][row][col].activation)
+                @filters[filter][channel][row][neuron].activation = SHAInet._relu(prev_layer.filters[filter][channel][row][neuron].activation)
               else
-                @filters[filter][channel][row][col].activation = SHAInet._l_relu(input_data[filter][channel][row][col].activation)
+                @filters[filter][channel][row][neuron].activation = SHAInet._l_relu(prev_layer.filters[filter][channel][row][neuron].activation)
               end
             end
           end

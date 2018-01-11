@@ -77,7 +77,7 @@ module SHAInet
     end
   end
 
-  # #########################################################################################################
+  # #######################################################################################################################3 #
 
   class ConvLayer
     getter filters : Array(Filter), window_size : Int32, stride : Int32, padding : Int32, prev_layer : CNNLayer | ConvLayer
@@ -100,7 +100,6 @@ module SHAInet
 
       channels = 1                                           # In conv layers channels is always 1, but have may multiple filters
       width = height = prev_layer.filters.first.neurons.size # Assumes row == height
-      @prev_layer = prev_layer
 
       # This is a calculation to make sure the input volume matches a correct desired output volume
       output_surface = ((width - @window_size + 2*@padding)/@stride + 1)
@@ -109,8 +108,9 @@ module SHAInet
       end
 
       @filters = Array(Filter).new(filters_num) { Filter.new([width, height, channels], @window_size) }
+      @prev_layer = prev_layer
       @next_layer = DummyLayer.new
-      @prev_layer.next_layer = self
+      prev_layer.next_layer = self
     end
 
     # Adds padding to all Filters of input data
@@ -187,7 +187,6 @@ module SHAInet
       # In other layers filters is always 1, but may have multiple channels
       channels = prev_layer.filters.size
       width = height = prev_layer.filters.first.first.size # Assumes row == height
-      @prev_layer = prev_layer
 
       # This is a calculation to make sure the input volume matches a correct desired output volume
       output_surface = ((width.to_f64 - @window_size.to_f64 + 2*@padding.to_f64)/@stride.to_f64 + 1).to_f64
@@ -195,9 +194,10 @@ module SHAInet
         raise CNNInitializationError.new("Output volume must be a whole number, change: window size or stride or padding")
       end
 
+      @prev_layer = prev_layer
       @filters = Array(Filter).new(filters_num) { Filter.new([width, height, channels], @window_size) }
       @next_layer = DummyLayer.new
-      @prev_layer.next_layer = self
+      prev_layer.next_layer = self
     end
 
     # Adds padding to all channels of input data
