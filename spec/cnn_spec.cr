@@ -46,13 +46,13 @@ describe SHAInet::CNN do
 
     # Run the network with a single input
     cnn.run(img_data, stealth = true)
-    cnn.layers.each { |layer| layer.inspect("activations") }
-    # cnn.layers.each { |layer| puts "#{layer.class} => #{layer.next_layer.to_s}" }
 
     cnn.evaluate(img_data, expected_output, :mse)
+
+    cnn.layers.each { |layer| layer.inspect("activations") }
     puts "-----"
-    puts "Network output = #{cnn.layers.last.as(SHAInet::FullyConnectedLayer | SHAInet::SoftmaxLayer).output}"
-    puts "Error signal is: #{cnn.error_signal}"
+    puts "Network output:\n#{cnn.layers.last.as(SHAInet::FullyConnectedLayer | SHAInet::SoftmaxLayer).output}\n"
+    puts "Error signal is:\n#{cnn.error_signal}"
 
     puts "-----"
     # cnn.train(training_data, training_type = :sgdm, cost = :mse, epochs = 5000, threshold = 0.000001, log_each = 100)

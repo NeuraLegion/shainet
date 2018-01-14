@@ -98,16 +98,16 @@ module SHAInet
       raise CNNInitializationError.new("Window size value must be Int32 >= 1") if @window_size < 1
       raise CNNInitializationError.new("Stride value must be Int32 >= 1") if @stride < 1
 
-      channels = 1                                           # In conv layers channels is always 1, but have may multiple filters
-      width = height = prev_layer.filters.first.neurons.size # Assumes row == height
+      channels = 1                                  # In conv layers channels is always 1, but have may multiple filters
+      width = prev_layer.filters.first.neurons.size # Assumes row == height
 
       # This is a calculation to make sure the input volume matches a correct desired output volume
-      output_surface = ((width - @window_size + 2*@padding)/@stride + 1)
-      unless output_surface.class == Int32
+      output_width = ((width - @window_size + 2*@padding)/@stride + 1)
+      unless output_width.to_i == output_width
         raise CNNInitializationError.new("Output volume must be a whole number, change: window size or stride or padding")
       end
 
-      @filters = Array(Filter).new(filters_num) { Filter.new([width, height, channels], @window_size) }
+      @filters = Array(Filter).new(filters_num) { Filter.new([output_width.to_i, output_width.to_i, channels], @window_size) }
       @prev_layer = prev_layer
       @next_layer = DummyLayer.new
       prev_layer.next_layer = self
@@ -186,24 +186,25 @@ module SHAInet
 
       # In other layers filters is always 1, but may have multiple channels
       channels = prev_layer.filters.size
-      width = height = prev_layer.filters.first.first.size # Assumes row == height
+      width = prev_layer.filters.first.first.size # Assumes row == height
 
       # This is a calculation to make sure the input volume matches a correct desired output volume
-      output_surface = ((width.to_f64 - @window_size.to_f64 + 2*@padding.to_f64)/@stride.to_f64 + 1).to_f64
-      unless output_surface.to_i == output_surface
+      output_width = ((width.to_f64 - @window_size.to_f64 + 2*@padding.to_f64)/@stride.to_f64 + 1).to_f64
+      unless output_width.to_i == output_width
         raise CNNInitializationError.new("Output volume must be a whole number, change: window size or stride or padding")
       end
 
+      @filters = Array(Filter).new(filters_num) { Filter.new([output_width.to_i, output_width.to_i, channels], @window_size) }
+
       @prev_layer = prev_layer
-      @filters = Array(Filter).new(filters_num) { Filter.new([width, height, channels], @window_size) }
       @next_layer = DummyLayer.new
-      prev_layer.next_layer = self_filter
+      prev_layer.next_layer = self
     end
 
     # Adds padding to all channels of input data
-    def _pad(prev_layer : CNNLayer, print : Bool)
+    def _pad(prev_layer : CNNLayer, padding : Int32, print : Bool = false)
       input_data = prev_layer.filters.first.clone # Array of all channels
-      if @padding == 0
+      if padding == 0
         return input_data
       else
         blank_neuron = Neuron.new("memory")
@@ -214,13 +215,13 @@ module SHAInet
         padded_data.size.times do |channel|
           # Add padding at the sides
           padded_data[channel].each do |row|
-            @padding.times { row << blank_neuron }
-            @padding.times { row.insert(0, blank_neuron) }
+            padding.times { row << blank_neuron }
+            padding.times { row.insert(0, blank_neuron) }
           end
           # Add padding at the top/bottom
           padding_row = Array(Neuron).new(padded_data.first.first.size) { blank_neuron }
-          @padding.times { padded_data[channel] << padding_row }
-          @padding.times { padded_data[channel].insert(0, padding_row) }
+          padding.times { padded_data[channel] << padding_row }
+          padding.times { padded_data[channel].insert(0, padding_row) }
         end
         if print == true
           padded_data.each_with_index do |channel, ch|
@@ -236,7 +237,7 @@ module SHAInet
     end
 
     def _convolve(prev_layer : CNNLayer)
-      padded_data = _pad(prev_layer, print = false) # Array of all channels
+      padded_data = _pad(prev_layer, @padding, print = false) # Array of all channels
 
       @filters.each_with_index do |_f, self_filter|
         # Zoom in on a small window out of the input data volume and update each neuron of the filter
@@ -272,6 +273,38 @@ module SHAInet
 
     def error_prop
       _error_prop(@next_layer)
+    end
+
+    def _error_prop(next_layer : ConvLayer)
+      # ################################################################################# #
+      # TODO: Need to change this implementation to more object oriented with CnnSynapses #
+      # ################################################################################# #
+
+      # Recreate the window of the next layer backwards
+      window_size = next_layer.window_size
+      stride = next_layer.stride
+      padding = next_layer.padding
+      filters = next_layer.filters
+
+      padded_data = _pad(self, padding) # Array of all channels
+
+      filters.each_with_index do |_f, self_filter|
+        # Zoom in on a small window out of the input data volume and update each neuron of the filter
+        input_x = input_y = output_x = output_y = 0
+
+        while input_y < (padded_data.first.size - window_size + stride)         # Break out of y
+          while input_x < (padded_data.first.first.size - window_size + stride) # Break out of x (assumes x = y)
+            window = padded_data.map { |channel| channel[input_y..(input_y + window_size - 1)].map { |n| n[input_x..(input_x + window_size - 1)] } }
+            target_neuron = @filters[self_filter].neurons[output_y][output_x]
+            filters[self_filter].receptive_field.prpogate_backward(window, target_neuron)
+            input_x += stride
+            output_x += 1
+          end
+          input_x = output_x = 0
+          input_y += stride
+          output_y += 1
+        end
+      end
     end
 
     def _error_prop(next_layer : ReluLayer | DropoutLayer)
