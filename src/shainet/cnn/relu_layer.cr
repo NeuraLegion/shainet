@@ -2,7 +2,7 @@ require "logger"
 
 module SHAInet
   class ReluLayer
-    getter filters : Array(Array(Array(Array(Neuron)))) | Array(Filter), l_relu_slope : Float64, prev_layer : CNNLayer | ConvLayer
+    getter filters : Array(Array(Array(Array(Neuron)))), l_relu_slope : Float64, prev_layer : CNNLayer | ConvLayer
     property next_layer : CNNLayer | ConvLayer | DummyLayer
 
     # Calls different activaton based on previous layer type
@@ -14,7 +14,7 @@ module SHAInet
     # # This part is for dealing with conv layers # #
 
     # Add slope to initialize as leaky relu
-    def initialize(prev_layer : ConvLayer, @l_relu_slope : Float64 = 0.0, @logger : Logger = Logger.new(STDOUT))
+    def initialize(prev_layer : ConvLayer, @l_relu_slope : Float64, @logger : Logger = Logger.new(STDOUT))
       # In conv layers channels is always 1, but have may multiple filters
       filters = prev_layer.filters.size
       channels = 1
@@ -55,21 +55,22 @@ module SHAInet
 
     def initialize(prev_layer : CNNLayer, @l_relu_slope : Float64 = 0.0, @logger : Logger = Logger.new(STDOUT))
       # In other layers filters is always 1, but may have multiple channels
-      # channels = prev_layer.filters.first.size
-      # filters = 1
-      # # Neurons are contained in Multi-Array
-      # width = height = prev_layer.filters.first.first.size # Assumes row == height
+      channels = prev_layer.filters.first.size
+      filters = 1
+      # Neurons are contained in Multi-Array
+      height = prev_layer.filters.first.first.size
+      width = prev_layer.filters.first.first.first.size
 
-      # # Channel data is stored within the filters array
-      # # This is because after convolution each filter has different feature maps
-      # @filters = Array(Array(Array(Array(Neuron)))).new(filters) {
-      #   Array(Array(Array(Neuron))).new(channels) {
-      #     Array(Array(Neuron)).new(height) {
-      #       Array(Neuron).new(width) { Neuron.new("memory") }
-      #     }
-      #   }
-      # }
-      @filters = prev_layer.filters.clone
+      # Channel data is stored within the filters array
+      # This is because after convolution each filter has different feature maps
+      @filters = Array(Array(Array(Array(Neuron)))).new(filters) {
+        Array(Array(Array(Neuron))).new(channels) {
+          Array(Array(Neuron)).new(height) {
+            Array(Neuron).new(width) { Neuron.new("memory") }
+          }
+        }
+      }
+      # @filters = prev_layer.filters.clone
 
       @prev_layer = prev_layer
       @next_layer = DummyLayer.new
@@ -78,7 +79,7 @@ module SHAInet
 
     def _activate(prev_layer : CNNLayer)
       @filters.size.times do |filter|
-        @filters[filter][channel].size.times do |channel|
+        @filters[filter].size.times do |channel|
           @filters[filter][channel].size.times do |row| # Conv layers may have multiple filters, but only one channel
             @filters[filter][channel][row].size.times do |neuron|
               if @l_relu_slope == 0.0
@@ -96,9 +97,21 @@ module SHAInet
       _error_prop(@next_layer)
     end
 
+    def _error_prop(next_layer : ReluLayer | DropoutLayer)
+      @filters.size.times do |filter|
+        @filters[filter].size.times do |channel|
+          @filters[filter][channel].size.times do |row|
+            @filters[filter][channel][row].size.times do |neuron|
+              @filters[filter][channel][row][neuron].gradient = next_layer.filters[filter][channel][row][neuron].gradient
+            end
+          end
+        end
+      end
+    end
+
     def _error_prop(next_layer : MaxPoolLayer)
-      @filters.each_with_index do |_f, filter|
-        _f.each_with_index do |_ch, channel|
+      @filters.size.times do |filter|
+        @filters[filter].size.times do |channel|
           input_x = input_y = output_x = output_y = 0
 
           while input_y < (@filters[filter][channel].size - @pool + @stride)   # Break out of y
@@ -125,13 +138,11 @@ module SHAInet
       end
     end
 
-    def _error_prop(next_layer : ReluLayer | DropoutLayer)
-      @filters.each_with_index do |filter, fi|
-        filter.each_with_index do |channel, ch|
-          channel.each_with_index do |row, r|
-            row.each_with_index do |neuron, n|
-              neuron.gradient = next_layer.filters[fi][ch][r][n].gradient
-            end
+    def _error_prop(next_layer : FullyConnectedLayer)
+      @filters.each do |filter|
+        filter.each do |channel|
+          channel.each do |row|
+            row.each { |neuron| neuron.hidden_error_prop }
           end
         end
       end

@@ -2,7 +2,7 @@ require "logger"
 
 module SHAInet
   class MaxPoolLayer
-    getter filters : Array(Array(Array(Array(Neuron)))) | Array(Filter), pool : Int32, prev_layer : CNNLayer | ConvLayer
+    getter filters : Array(Array(Array(Array(Neuron)))), pool : Int32, prev_layer : CNNLayer | ConvLayer
     property next_layer : CNNLayer | ConvLayer | DummyLayer
 
     # Calls different activaton based on previous layer type
@@ -69,7 +69,6 @@ module SHAInet
     def initialize(@prev_layer : CNNLayer, @pool : Int32, @stride : Int32, @logger : Logger = Logger.new(STDOUT))
       prev_w = prev_layer.filters.first.first.size # Assumes row == height
       new_w = ((prev_w.to_f64 - @pool.to_f64)/@stride.to_f64 + 1).to_f64
-      puts "new width: #{new_w}"
       raise CNNInitializationError.new("Max pool layer parameters are incorrect") unless new_w.to_i == new_w
 
       filters = 1
@@ -113,9 +112,21 @@ module SHAInet
       _error_prop(@next_layer)
     end
 
+    def _error_prop(next_layer : ReluLayer | DropoutLayer)
+      @filters.size.times do |filter|
+        @filters[filter].size.times do |channel|
+          @filters[filter][channel].size.times do |row|
+            @filters[filter][channel][row].size.times do |neuron|
+              @filters[filter][channel][row][neuron].gradient = next_layer.filters[filter][channel][row][neuron].gradient
+            end
+          end
+        end
+      end
+    end
+
     def _error_prop(next_layer : MaxPoolLayer)
-      @filters.each_with_index do |_f, filter|
-        _f.each_with_index do |_ch, channel|
+      @filters.size.times do |filter|
+        @filters[filter].size.times do |channel|
           input_x = input_y = output_x = output_y = 0
 
           while input_y < (@filters[filter][channel].size - @pool + @stride)   # Break out of y
@@ -147,18 +158,6 @@ module SHAInet
         filter.each do |channel|
           channel.each do |row|
             row.each { |neuron| neuron.hidden_error_prop }
-          end
-        end
-      end
-    end
-
-    def _error_prop(next_layer : ReluLayer | DropoutLayer)
-      @filters.each_with_index do |filter, fi|
-        filter.each_with_index do |channel, ch|
-          channel.each_with_index do |row, r|
-            row.each_with_index do |neuron, n|
-              neuron.gradient = next_layer.filters[fi][ch][r][n].gradient
-            end
           end
         end
       end

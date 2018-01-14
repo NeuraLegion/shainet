@@ -197,7 +197,7 @@ module SHAInet
       @prev_layer = prev_layer
       @filters = Array(Filter).new(filters_num) { Filter.new([width, height, channels], @window_size) }
       @next_layer = DummyLayer.new
-      prev_layer.next_layer = self
+      prev_layer.next_layer = self_filter
     end
 
     # Adds padding to all channels of input data
@@ -274,9 +274,21 @@ module SHAInet
       _error_prop(@next_layer)
     end
 
+    def _error_prop(next_layer : ReluLayer | DropoutLayer)
+      @filters.size.times do |filter|
+        @filters[filter].size.times do |channel|
+          @filters[filter][channel].size.times do |row|
+            @filters[filter][channel][row].size.times do |neuron|
+              @filters[filter][channel][row][neuron].gradient = next_layer.filters[filter][channel][row][neuron].gradient
+            end
+          end
+        end
+      end
+    end
+
     def _error_prop(next_layer : MaxPoolLayer)
-      @filters.each_with_index do |_f, filter|
-        _f.each_with_index do |_ch, channel|
+      @filters.size.times do |filter|
+        @filters[filter].size.times do |channel|
           input_x = input_y = output_x = output_y = 0
 
           while input_y < (@filters[filter][channel].size - @pool + @stride)   # Break out of y
@@ -303,13 +315,11 @@ module SHAInet
       end
     end
 
-    def _error_prop(next_layer : ReluLayer | DropoutLayer)
-      @filters.each_with_index do |filter, fi|
-        filter.each_with_index do |channel, ch|
-          channel.each_with_index do |row, r|
-            row.each_with_index do |neuron, n|
-              neuron.gradient = next_layer.filters[fi][ch][r][n].gradient
-            end
+    def _error_prop(next_layer : FullyConnectedLayer)
+      @filters.each do |filter|
+        filter.each do |channel|
+          channel.each do |row|
+            row.each { |neuron| neuron.hidden_error_prop }
           end
         end
       end
@@ -327,7 +337,7 @@ module SHAInet
           puts "Filter #{i}, weights:"
           filter.receptive_field.weights.each_with_index do |channel, j|
             puts "Channel: #{j}"
-            channel.each { |row| puts "#{row.map { |synapse| synapse.weight }}" }
+            channel.each { |row| puts "#{row.map { |w| w }}" }
           end
         end
       when "bias"

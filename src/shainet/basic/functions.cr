@@ -64,16 +64,29 @@ module SHAInet
     end
   end
 
-  # This is actually a log softmax, most useful for NNs
   def self.softmax(array : Array(GenNum)) : Array(Float64)
     out_array = Array(Float64).new(array.size) { 0.0 }
+    exp_sum = Float64.new(0.0)
+    array.each { |value| exp_sum += Math::E**(value) }
+    array.size.times { |i| out_array[i] = (Math::E**array[i])/exp_sum }
+    return out_array
+  end
+
+  # The input array in this case has to be the output array of the softmax function
+  def self.softmax_prime(array : Array(GenNum)) : Array(Float64)
+    out_array = Array(Float64).new(array.size) { 0.0 }
+    array.each_with_index { |value, i| out_array[i] = array[i]*(1 - array[i]) }
+    return out_array
+  end
+
+  # Not working yet, do not use
+  def self.log_softmax(array : Array(GenNum)) : Array(Float64)
+    out_array = Array(Float64).new(array.size) { 0.0 }
     m = array.max
-    exp_sum = array.reduce { |acc, i| acc + Math::E**(i - m) }
-    i = 0
-    until i == (array.size - 1)
-      a = Math::E**(array[i] - m - Math.log(exp_sum))
-      out_array << a
-    end
+    exp_sum = Float64.new(0.0)
+    array.each { |value| exp_sum += Math::E**(value - m) }
+
+    array.size.times { |i| out_array[i] = (Math::E**(array[i] - m - Math.log(exp_sum, 10))) }
     return out_array
   end
 

@@ -63,8 +63,12 @@ module SHAInet
       neuron_old = self
       neuron_new = Neuron.new(neuron_old.n_type)
 
-      neuron_new.synapses_in = neuron_old.synapses_in
-      neuron_new.synapses_out = neuron_old.synapses_out
+      neuron_new.synapses_in = neuron_old.synapses_in.clone
+      neuron_new.synapses_in.each { |synapse| synapse.dest_neuron = neuron_new }
+
+      neuron_new.synapses_out = neuron_old.synapses_out.clone
+      neuron_new.synapses_out.each { |synapse| synapse.source_neuron = neuron_new }
+
       neuron_new.activation = neuron_old.activation
       neuron_new.gradient = neuron_old.gradient
       neuron_new.bias = neuron_old.bias

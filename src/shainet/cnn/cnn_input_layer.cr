@@ -37,10 +37,13 @@ module SHAInet
         input_data[channel].size.times do |row|
           input_data[channel][row].size.times do |col|
             @filters.first[channel][row][col].activation = input_data[channel][row][col]
-            # TODO: Add multiple input layer support
           end
         end
       end
+    end
+
+    def error_prop
+      # Do nothing as this is the input layer and it has no error
     end
 
     def inspect(what : String)
