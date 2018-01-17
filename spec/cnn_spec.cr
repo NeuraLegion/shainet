@@ -36,7 +36,7 @@ describe SHAInet::CNN do
     cnn.add_maxpool(pool = 2, stride = 1)
     cnn.add_fconnect(l_size = 10, SHAInet.sigmoid)
     cnn.add_dropout(drop_percent = 10)
-    cnn.add_fconnect(l_size = 5, SHAInet.sigmoid)
+    cnn.add_fconnect(l_size = 5, SHAInet.none)
     cnn.add_softmax
     # Input layer params: volume = [width, height, channels]
     # Conv layer params: filters_num, window_size (one dimentional, i.e 2 = 2x2 window), stride, padding
@@ -50,7 +50,10 @@ describe SHAInet::CNN do
 
     cnn.evaluate(img_data, expected_output, :mse)
 
-    # cnn.layers.each_with_index { |layer, i| puts "Layer #{i}:", layer.inspect("activations") }
+    cnn.layers.each_with_index do |layer, i|
+      puts "Layer #{i} - #{layer.class}:"
+      layer.inspect("activations")
+    end
     # puts "################################\n"
     # cnn.layers.each_with_index { |layer, i| puts "Layer #{i}:", layer.inspect("weights") }
     # puts "-----"

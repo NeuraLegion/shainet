@@ -116,14 +116,14 @@ module SHAInet
       case cost_function.to_s
       when "mse"
         expected_output.size.times do |i|
-          neuron = @layers.last.as(FullyConnectedLayer | SoftmaxLayer).filters[0][0][0][i] # Update error of all neurons in the output layer based on the actual result
+          neuron = @layers.last.as(FullyConnectedLayer | SoftmaxLayer).filters.first.neurons.first[i] # Update error of all neurons in the output layer based on the actual result
           neuron.gradient = SHAInet.quadratic_cost_derivative(expected_output[i].to_f64, actual[i].to_f64)*neuron.sigma_prime
           @error_signal << SHAInet.quadratic_cost(expected_output[i].to_f64, actual[i].to_f64) # Store the output error based on cost function
           # .as(FullyConnectedLayer | MaxPoolLayer)
         end
       when "c_ent"
         expected_output.size.times do |i|
-          neuron = @layers.last.as(FullyConnectedLayer | SoftmaxLayer).filters[0][0][0][i]
+          neuron = @layers.last.as(FullyConnectedLayer | SoftmaxLayer).filters.first.neurons.first[i]
           neuron.gradient = SHAInet.cross_entropy_cost_derivative(expected_output[i].to_f64, actual[i].to_f64)*neuron.sigma_prime
           # TODO: add support for multiple output layers
           @error_signal << SHAInet.cross_entropy_cost(expected_output[i].to_f64, actual[i].to_f64)

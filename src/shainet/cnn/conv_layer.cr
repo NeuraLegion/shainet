@@ -2,8 +2,8 @@ require "logger"
 
 module SHAInet
   class ConvLayer
-    getter filters : Array(Filter), window_size : Int32, stride : Int32, padding : Int32, activation_function : Proc(GenNum, Array(Float64))
-    property next_layer : CNNLayer | ConvLayer | DummyLayer, prev_layer : CNNLayer | ConvLayer
+    getter prev_layer : CNNLayer | ConvLayer, filters : Array(Filter)
+    getter window_size : Int32, stride : Int32, padding : Int32, activation_function : Proc(GenNum, Array(Float64))
 
     #################################################
     # # This part is for dealing with conv layers # #
@@ -31,8 +31,6 @@ module SHAInet
       end
 
       @filters = Array(Filter).new(filters_num) { Filter.new([output_width.to_i, output_width.to_i, filters], @padding, @window_size, @stride, @activation_function) }
-      @next_layer = DummyLayer.new
-      @prev_layer.next_layer = self
     end
 
     #######################################################################
@@ -82,67 +80,66 @@ module SHAInet
       end
     end
 
-    def error_prop
-      _error_prop(@next_layer)
-    end
+    # def error_prop
+    #   _error_prop(@next_layer)
+    # end
 
-    def _error_prop(next_layer : ConvLayer)
-      @filters.each do |filter|
-        filter.propagate_backward(next_layer) # , activation_function)
-      end
-    end
+    # def _error_prop(next_layer : ConvLayer)
+    #   @filters.each do |filter|
+    #     filter.propagate_backward(next_layer) # , activation_function)
+    #   end
+    # end
 
-    def _error_prop(next_layer : ReluLayer | DropoutLayer)
-      @filters.size.times do |filter|
-        @filters[filter].neurons.size.times do |row|
-          @filters[filter].neurons[row].size.times do |neuron|
-            @filters[filter].neurons[row][neuron].gradient = next_layer.filters[filter][0][row][neuron].gradient
-          end
-        end
-      end
-    end
+    # def _error_prop(next_layer : ReluLayer | DropoutLayer)
+    #   @filters.size.times do |filter|
+    #     @filters[filter].neurons.size.times do |row|
+    #       @filters[filter].neurons[row].size.times do |neuron|
+    #         @filters[filter].neurons[row][neuron].gradient = next_layer.filters[filter][0][row][neuron].gradient
+    #       end
+    #     end
+    #   end
+    # end
 
-    def _error_prop(next_layer : MaxPoolLayer)
-      @filters.size.times do |filter|
-        input_x = input_y = output_x = output_y = 0
+    # def _error_prop(next_layer : MaxPoolLayer)
+    #   @filters.size.times do |filter|
+    #     input_x = input_y = output_x = output_y = 0
 
-        while input_y < (@filters[filter].neurons.size - next_layer.pool + next_layer.stride)   # Break out of y
-          while input_x < (@filters[filter].neurons.size - next_layer.pool + next_layer.stride) # Break out of x (assumes x = y)
-            pool_neuron = next_layer.filters[filter][0][output_y][output_x]
+    #     while input_y < (@filters[filter].neurons.size - next_layer.pool + next_layer.stride)   # Break out of y
+    #       while input_x < (@filters[filter].neurons.size - next_layer.pool + next_layer.stride) # Break out of x (assumes x = y)
+    #         pool_neuron = next_layer.filters[filter][0][output_y][output_x]
 
-            # Only propagate error to the neurons that were chosen during the max pool
-            @filters[filter].neurons[input_y..(input_y + next_layer.pool - 1)].each do |row|
-              row[input_x..(input_x + next_layer.pool - 1)].each do |neuron|
-                if neuron.activation == pool_neuron.activation
-                  neuron.gradient = pool_neuron.gradient
-                end
-              end
+    #         # Only propagate error to the neurons that were chosen during the max pool
+    #         @filters[filter].neurons[input_y..(input_y + next_layer.pool - 1)].each do |row|
+    #           row[input_x..(input_x + next_layer.pool - 1)].each do |neuron|
+    #             if neuron.activation == pool_neuron.activation
+    #               neuron.gradient = pool_neuron.gradient
+    #             end
+    #           end
 
-              input_x += next_layer.stride
-              output_x += 1
-            end
-            input_x = output_x = 0
-            input_y += next_layer.stride
-            output_y += 1
-          end
-        end
-      end
-    end
+    #           input_x += next_layer.stride
+    #           output_x += 1
+    #         end
+    #         input_x = output_x = 0
+    #         input_y += next_layer.stride
+    #         output_y += 1
+    #       end
+    #     end
+    #   end
+    # end
 
-    def _error_prop(next_layer : FullyConnectedLayer)
-      @filters.each do |filter|
-        filter.neurons.each do |row|
-          row.each { |neuron| neuron.hidden_error_prop }
-        end
-      end
-    end
+    # def _error_prop(next_layer : FullyConnectedLayer)
+    #   @filters.each do |filter|
+    #     filter.neurons.each do |row|
+    #       row.each { |neuron| neuron.hidden_error_prop }
+    #     end
+    #   end
+    # end
 
-    def _error_prop(next_layer : InputLayer | SoftmaxLayer | DummyLayer)
-      # Do nothing
-    end
+    # def _error_prop(next_layer : InputLayer | SoftmaxLayer | DummyLayer)
+    #   # Do nothing
+    # end
 
     def inspect(what : String)
-      puts "Conv layer:"
       case what
       when "weights"
         @filters.each_with_index do |filter, i|
@@ -156,13 +153,15 @@ module SHAInet
       when "bias"
         @filters.each_with_index { |filter, i| puts "Filter #{i}, bias:#{filter.bias.round(4)}" }
       when "activations"
-        @filters.each_with_index do |filter, i|
+        @filters.each_with_index do |filter, f|
           puts "---"
-          puts "Filter #{i}, activations:"
-          filter.neurons.each { |row| puts "#{row.map { |n| n.activation.round(4) }}" }
+          puts "Filter: #{f}, neuron activations are:"
+          filter.neurons.each do |row|
+            puts "#{row.map { |n| n.activation.round(4) }}"
+          end
         end
       end
-      puts "------------"
+      puts "------------------------------------------------"
     end
   end
 end

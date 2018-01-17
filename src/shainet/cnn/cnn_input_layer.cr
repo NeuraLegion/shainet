@@ -15,7 +15,7 @@ module SHAInet
       end
 
       # Channel data is stored within the Filter class, this is needed for smooth work with all other layers.
-      channels = input_volume[2] # filters == chanels
+      channels = input_volume[2] # filters == channels
       width = input_volume[0]
       height = input_volume[1]
 
@@ -88,21 +88,21 @@ module SHAInet
     end
 
     def inspect(what : String)
-      puts "Input layer:"
       case what
       when "weights"
         puts "input layer has no weights"
       when "bias"
         puts "input layer has no bias"
       when "activations"
-        @filters.first.each_with_index do |channel, ch|
-          puts "Channel: #{ch}, neuron activations are:"
-          channel.each do |row|
+        @filters.each_with_index do |filter, f|
+          puts "---"
+          puts "Channel: #{f}, neuron activations are:"
+          filter.neurons.each do |row|
             puts "#{row.map { |n| n.activation.round(4) }}"
           end
         end
       end
-      puts "------------"
+      puts "------------------------------------------------"
     end
   end
 end
