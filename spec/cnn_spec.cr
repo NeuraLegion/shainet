@@ -23,14 +23,15 @@ describe SHAInet::CNN do
        [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
        [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]],
     ]
-    expected_output = [0, 0, 0, 0, 1]
+    expected_output = [0.0, 0.0, 0.0, 0.0, 1.0]
 
-    training_data = [img_data, expected_output]
+    training_data = [[img_data, expected_output]]
 
     cnn = SHAInet::CNN.new
 
     cnn.add_input(volume = [7, 7, 2])
-    cnn.add_conv(filters = 1, window_size = 3, stride = 1, padding = 1)
+    cnn.add_conv(filters = 2, window_size = 3, stride = 1, padding = 1, activation_function = SHAInet.none)
+    cnn.add_conv(filters = 2, window_size = 3, stride = 1, padding = 1, activation_function = SHAInet.sigmoid)
     cnn.add_relu
     cnn.add_maxpool(pool = 2, stride = 1)
     cnn.add_fconnect(l_size = 10, SHAInet.sigmoid)
@@ -49,13 +50,15 @@ describe SHAInet::CNN do
 
     cnn.evaluate(img_data, expected_output, :mse)
 
-    cnn.layers.each { |layer| layer.inspect("activations") }
-    puts "-----"
+    # cnn.layers.each_with_index { |layer, i| puts "Layer #{i}:", layer.inspect("activations") }
+    # puts "################################\n"
+    # cnn.layers.each_with_index { |layer, i| puts "Layer #{i}:", layer.inspect("weights") }
+    # puts "-----"
     puts "Network output:\n#{cnn.layers.last.as(SHAInet::FullyConnectedLayer | SHAInet::SoftmaxLayer).output}\n"
     puts "Error signal is:\n#{cnn.error_signal}"
 
     puts "-----"
-    # cnn.train(training_data, training_type = :sgdm, cost = :mse, epochs = 5000, threshold = 0.000001, log_each = 100)
+    # cnn.train(training_data, training_type = :sgdm, cost = :mse, epochs = 1, threshold = 0.000001, log_each = 1)
 
     #
   end

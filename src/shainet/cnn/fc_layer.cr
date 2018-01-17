@@ -131,9 +131,9 @@ module SHAInet
 
     def _error_prop(next_layer : SoftmaxLayer)
       @filters[0][0][0].size.times do |neuron|
-        @filters[0][0][0][neuron].activation = @next_layer.filters[0][0][0][neuron].activation
-        @filters[0][0][0][neuron].sigma_prime = @next_layer.filters[0][0][0][neuron].sigma_prime
-        @filters[0][0][0][neuron].gradient = @next_layer.filters[0][0][0][neuron].gradient
+        @filters[0][0][0][neuron].activation = @next_layer.as(SoftmaxLayer).filters[0][0][0][neuron].activation
+        @filters[0][0][0][neuron].sigma_prime = @next_layer.as(SoftmaxLayer).filters[0][0][0][neuron].sigma_prime
+        @filters[0][0][0][neuron].gradient = @next_layer.as(SoftmaxLayer).filters[0][0][0][neuron].gradient
       end
     end
 
@@ -149,41 +149,41 @@ module SHAInet
       end
     end
 
-    def _error_prop(next_layer : MaxPoolLayer)
-      @filters.size.times do |filter|
-        @filters[filter].size.times do |channel|
-          input_x = input_y = output_x = output_y = 0
+    # def _error_prop(next_layer : MaxPoolLayer)
+    #   @filters.size.times do |filter|
+    #     @filters[filter].size.times do |channel|
+    #       input_x = input_y = output_x = output_y = 0
 
-          while input_y < (@filters[filter][channel].size - @pool + @stride)   # Break out of y
-            while input_x < (@filters[filter][channel].size - @pool + @stride) # Break out of x (assumes x = y)
-              pool_neuron = next_layer.filters[filter][channel][output_y][output_x]
+    #       while input_y < (@filters[filter][channel].size - @pool + @stride)   # Break out of y
+    #         while input_x < (@filters[filter][channel].size - @pool + @stride) # Break out of x (assumes x = y)
+    #           pool_neuron = next_layer.filters[filter][channel][output_y][output_x]
 
-              # Only propagate error to the neurons that were chosen during the max pool
-              @filters[filter][channel][input_y..(input_y + @pool - 1)].each do |row|
-                row[input_x..(input_x + @pool - 1)].each do |neuron|
-                  if neuron.activation == pool_neuron.activation
-                    neuron.gradient = pool_neuron.gradient
-                  end
-                end
-              end
+    #           # Only propagate error to the neurons that were chosen during the max pool
+    #           @filters[filter][channel][input_y..(input_y + @pool - 1)].each do |row|
+    #             row[input_x..(input_x + @pool - 1)].each do |neuron|
+    #               if neuron.activation == pool_neuron.activation
+    #                 neuron.gradient = pool_neuron.gradient
+    #               end
+    #             end
+    #           end
 
-              input_x += @stride
-              output_x += 1
-            end
-            input_x = output_x = 0
-            input_y += @stride
-            output_y += 1
-          end
-        end
-      end
-    end
+    #           input_x += @stride
+    #           output_x += 1
+    #         end
+    #         input_x = output_x = 0
+    #         input_y += @stride
+    #         output_y += 1
+    #       end
+    #     end
+    #   end
+    # end
 
     def _error_prop(next_layer : FullyConnectedLayer)
       @filters.first.first.first.each { |neuron| neuron.hidden_error_prop }
     end
 
-    def _error_prop(next_layer : DummyLayer)
-      # Do nothing because this is the last layer in the network
+    def _error_prop(next_layer : InputLayer | DummyLayer | ConvLayer | MaxPoolLayer)
+      # Do nothing
     end
 
     def inspect(what : String)
@@ -192,12 +192,12 @@ module SHAInet
       when "weights"
         @filters.first.first.first.each_with_index do |neuron, i|
           puts "Neuron: #{i}, incoming weights:"
-          puts "#{neuron.synapses_in.map { |synapse| synapse.weight }}"
+          puts "#{neuron.synapses_in.map { |synapse| synapse.weight.round(4) }}"
         end
       when "bias"
-        @filters.first.first.first.each_with_index { |neuron, i| puts "Neuron: #{i}, bias: #{neuron.bias}" }
+        @filters.first.first.first.each_with_index { |neuron, i| puts "Neuron: #{i}, bias: #{neuron.bias.round(4)}" }
       when "activations"
-        @filters.first.first.each { |row| puts "#{row.map { |n| n.activation }}" }
+        @filters.first.first.each { |row| puts "Neuron activations are:\n#{row.map { |n| n.activation.round(4) }}" }
       end
       puts "------------"
     end

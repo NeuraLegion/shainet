@@ -2,7 +2,7 @@ require "logger"
 
 module SHAInet
   class MaxPoolLayer
-    getter filters : Array(Array(Array(Array(Neuron)))), pool : Int32, prev_layer : CNNLayer | ConvLayer
+    getter filters : Array(Array(Array(Array(Neuron)))), pool : Int32, stride : Int32, prev_layer : CNNLayer | ConvLayer
     property next_layer : CNNLayer | ConvLayer | DummyLayer
 
     # Calls different activaton based on previous layer type
@@ -163,15 +163,15 @@ module SHAInet
       end
     end
 
-    def _error_prop(next_layer : DummyLayer)
-      # Do nothing because this is the last layer in the network
+    def _error_prop(next_layer : InputLayer | SoftmaxLayer | DummyLayer | ConvLayer)
+      # Do nothing
     end
 
     def inspect(what : String)
       puts "Maxpool layer:"
       case what
       when "weights"
-        puts "Maxpool layer has no wights"
+        puts "Maxpool layer has no weights"
       when "bias"
         puts "Maxpool layer has no bias"
       when "activations"
@@ -180,7 +180,7 @@ module SHAInet
           filter.each_with_index do |channel, ch|
             puts "Channel: #{ch}, neuron activations are:"
             channel.each do |row|
-              puts "#{row.map { |n| n.activation }}"
+              puts "#{row.map { |n| n.activation.round(4) }}"
             end
           end
         end

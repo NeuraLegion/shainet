@@ -23,8 +23,10 @@ module SHAInet
     property alpha : Float64
     getter beta1 : Float64, beta2 : Float64, epsilon : Float64, time_step : Int32
 
-    def initialize
+    def initialize(@logger : Logger = Logger.new(STDOUT))
       @layers = Array(CNNLayer | ConvLayer).new
+      # @all_neurons = Array(Neuron).new
+      # @all_synapses = Array(Synapse | CnnSynapse).new
 
       @error_signal = Array(Float64).new # Array of errors for each neuron in the output layer, based on specific input
       @total_error = Float64.new(1)      # Sum of errors from output layer, based on a specific input
@@ -55,7 +57,8 @@ module SHAInet
     def add_conv(filters_num : Int32,
                  window_size : Int32,
                  stride : Int32,
-                 padding : Int32)
+                 padding : Int32,
+                 activation_function : Proc(GenNum, Array(Float64)) = SHAInet.none)
       @layers << ConvLayer.new(@layers.last, filters_num, window_size, stride, padding)
     end
 
@@ -145,12 +148,12 @@ module SHAInet
     end
 
     # Online train, updates weights/biases after each data point (stochastic gradient descent)
-    def train(data : Array(Array(Array(Array(GenNum)))), # Input structure: data = [[Input = Array(Array(Array(GenNum)))],[Expected result = Array(GenNum)]]
-              training_type : Symbol | String,           # Type of training: :sgdm, :rprop, :adam
-              cost_function : Symbol | String,           # one of COST_FUNCTIONS described at the top of the file
-              epochs : Int32,                            # a criteria of when to stop the training
-              error_threshold : Float64,                 # a criteria of when to stop the training
-              log_each : Int32 = 1000)                   # determines what is the step for error printout
+    def train(data : Array(Array(Array(Array(Array(Float64))) | Array(Float64))), # Input structure: data = [[Input = Array(Array(Array(GenNum)))],[Expected result = Array(GenNum)]]
+              training_type : Symbol | String,                                    # Type of training: :sgdm, :rprop, :adam
+              cost_function : Symbol | String,                                    # one of COST_FUNCTIONS described at the top of the file
+              epochs : Int32,                                                     # a criteria of when to stop the training
+              error_threshold : Float64,                                          # a criteria of when to stop the training
+              log_each : Int32 = 1000)                                            # determines what is the step for error printout
 
       # verify_data(data)
       @logger.info("Training started")
@@ -166,7 +169,7 @@ module SHAInet
         # Go over each data point and update the weights/biases based on the specific example
         data.each do |data_point|
           # Update error signal, error gradient and total error at the output layer based on current input
-          evaluate(data_point[0], data_point[1], cost_function)
+          evaluate(data_point[0].as(Array(Array(Array(Float64)))), data_point[1].as(Array(Float64)), cost_function)
 
           # Propogate the errors backwards through the hidden layers
           @layers.reverse_each do |layer|
@@ -177,12 +180,12 @@ module SHAInet
           if @error_signal.size == 1
             error_avg = 0.0
           else
-            error_avg = @total_error/@layers.last.as(FullyConnectedLayer).output.size
+            error_avg = @total_error/@layers.last.as(FullyConnectedLayer | SoftmaxLayer).output.size
           end
           sqrd_dists = [] of Float64
           @error_signal.each { |e| sqrd_dists << (e - error_avg)**2 }
           sqr_sum = sqrd_dists.reduce { |acc, i| acc + i }
-          @mean_error = sqr_sum/@layers.last.as(FullyConnectedLayer).output.size
+          @mean_error = sqr_sum/@layers.last.as(FullyConnectedLayer | SoftmaxLayer).output.size
 
           # Update all wieghts & biases
           # update_weights(training_type, batch = false)
@@ -194,6 +197,124 @@ module SHAInet
     rescue e : Exception
       @logger.error("Error in training: #{e} #{e.inspect_with_backtrace}")
       raise e
+    end
+
+    def update_weights
+    end
+
+    # Update weights based on the learning type chosen and layer type
+    def update_weights(learn_type : Symbol | String, batch : Bool = false)
+      @layers.each do |layer|
+      end
+      @all_synapses.each_with_index do |synapse, i|
+        # Get current gradient
+        if batch == true
+          synapse.gradient = @w_gradient.not_nil![i]
+        else
+          synapse.gradient = (synapse.source_neuron.activation)*(synapse.dest_neuron.gradient)
+        end
+
+        case learn_type.to_s
+        # Update weights based on the gradients and delta rule (including momentum)
+        when "sgdm"
+          delta_weight = (-1)*@learning_rate*synapse.gradient + @momentum*(synapse.weight - synapse.prev_weight)
+          synapse.weight += delta_weight
+          synapse.prev_weight = synapse.weight
+
+          # Update weights based on Resilient backpropogation (Rprop), using the improved varient iRprop+
+        when "rprop"
+          if synapse.prev_gradient*synapse.gradient > 0
+            delta = [@etah_plus*synapse.prev_delta, @delta_max].min
+            delta_weight = (-1)*SHAInet.sign(synapse.gradient)*delta
+
+            synapse.weight += delta_weight
+            synapse.prev_weight = synapse.weight
+            synapse.prev_delta = delta
+            synapse.prev_delta_w = delta_weight
+          elsif synapse.prev_gradient*synapse.gradient < 0.0
+            delta = [@etah_minus*synapse.prev_delta, @delta_min].max
+
+            synapse.weight -= synapse.prev_delta_w if @mean_error >= @prev_mean_error
+
+            synapse.prev_gradient = 0.0
+            synapse.prev_delta = delta
+          elsif synapse.prev_gradient*synapse.gradient == 0.0
+            delta_weight = (-1)*SHAInet.sign(synapse.gradient)*synapse.prev_delta
+
+            synapse.weight += delta_weight
+            synapse.prev_delta = @delta_min
+            synapse.prev_delta_w = delta_weight
+          end
+          # Update weights based on Adaptive moment estimation (Adam)
+        when "adam"
+          synapse.m_current = @beta1*synapse.m_prev + (1 - @beta1)*synapse.gradient
+          synapse.v_current = @beta2*synapse.v_prev + (1 - @beta2)*(synapse.gradient)**2
+
+          m_hat = synapse.m_current/(1 - (@beta1)**@time_step)
+          v_hat = synapse.v_current/(1 - (@beta2)**@time_step)
+          synapse.weight -= (@alpha*m_hat)/(v_hat**0.5 + @epsilon)
+
+          synapse.m_prev = synapse.m_current
+          synapse.v_prev = synapse.v_current
+        end
+      end
+    end
+
+    # Update biases based on the learning type chosen
+    def update_biases(learn_type : Symbol | String, batch : Bool = false)
+      @all_neurons.each_with_index do |neuron, i|
+        if batch == true
+          neuron.gradient = @b_gradient.not_nil![i]
+        end
+
+        case learn_type.to_s
+        # Update biases based on the gradients and delta rule (including momentum)
+        when "sgdm"
+          delta_bias = (-1)*@learning_rate*(neuron.gradient) + @momentum*(neuron.bias - neuron.prev_bias)
+          neuron.bias += delta_bias
+          neuron.prev_bias = neuron.bias
+
+          # Update weights based on Resilient backpropogation (Rprop), using the improved varient iRprop+
+        when "rprop"
+          if neuron.prev_gradient*neuron.gradient > 0
+            delta = [@etah_plus*neuron.prev_delta, @delta_max].min
+            delta_bias = (-1)*SHAInet.sign(neuron.gradient)*delta
+
+            neuron.bias += delta_bias
+            neuron.prev_bias = neuron.bias
+            neuron.prev_delta = delta
+            neuron.prev_delta_b = delta_bias
+          elsif neuron.prev_gradient*neuron.gradient < 0.0
+            delta = [@etah_minus*neuron.prev_delta, @delta_min].max
+
+            neuron.bias -= neuron.prev_delta_b if @mean_error >= @prev_mean_error
+
+            neuron.prev_gradient = 0.0
+            neuron.prev_delta = delta
+          elsif neuron.prev_gradient*neuron.gradient == 0.0
+            delta_bias = (-1)*SHAInet.sign(neuron.gradient)*@delta_min*neuron.prev_delta
+
+            neuron.bias += delta_bias
+            neuron.prev_delta = @delta_min
+            neuron.prev_delta_b = delta_bias
+          end
+          # Update weights based on Adaptive moment estimation (Adam)
+        when "adam"
+          neuron.m_current = @beta1*neuron.m_prev + (1 - @beta1)*neuron.gradient
+          neuron.v_current = @beta2*neuron.v_prev + (1 - @beta2)*(neuron.gradient)**2
+
+          m_hat = neuron.m_current/(1 - (@beta1)**@time_step)
+          v_hat = neuron.v_current/(1 - (@beta2)**@time_step)
+          neuron.bias -= (@alpha*m_hat)/(v_hat**0.5 + @epsilon)
+
+          neuron.m_prev = neuron.m_current
+          neuron.v_prev = neuron.v_current
+        end
+      end
+    end
+
+    def log_summary(e)
+      @logger.info("Epoch: #{e}, Total error: #{@total_error}, MSE: #{@mean_error}")
     end
   end
 

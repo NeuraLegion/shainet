@@ -114,24 +114,24 @@ module SHAInet
         @filters[filter].size.times do |channel|
           input_x = input_y = output_x = output_y = 0
 
-          while input_y < (@filters[filter][channel].size - @pool + @stride)   # Break out of y
-            while input_x < (@filters[filter][channel].size - @pool + @stride) # Break out of x (assumes x = y)
+          while input_y < (@filters[filter][channel].size - next_layer.pool + next_layer.stride)   # Break out of y
+            while input_x < (@filters[filter][channel].size - next_layer.pool + next_layer.stride) # Break out of x (assumes x = y)
               pool_neuron = next_layer.filters[filter][channel][output_y][output_x]
 
               # Only propagate error to the neurons that were chosen during the max pool
-              @filters[filter][channel][input_y..(input_y + @pool - 1)].each do |row|
-                row[input_x..(input_x + @pool - 1)].each do |neuron|
+              @filters[filter][channel][input_y..(input_y + next_layer.pool - 1)].each do |row|
+                row[input_x..(input_x + next_layer.pool - 1)].each do |neuron|
                   if neuron.activation == pool_neuron.activation
                     neuron.gradient = pool_neuron.gradient
                   end
                 end
               end
 
-              input_x += @stride
+              input_x += next_layer.stride
               output_x += 1
             end
             input_x = output_x = 0
-            input_y += @stride
+            input_y += next_layer.stride
             output_y += 1
           end
         end
@@ -148,15 +148,15 @@ module SHAInet
       end
     end
 
-    def _error_prop(next_layer : DummyLayer)
-      # Do nothing because this is the last layer in the network
+    def _error_prop(next_layer : InputLayer | SoftmaxLayer | DummyLayer | ConvLayer)
+      # Do nothing
     end
 
     def inspect(what : String)
       puts "ReLu layer:"
       case what
       when "weights"
-        puts "ReLu layer has no wights"
+        puts "ReLu layer has no weights"
       when "bias"
         puts "ReLu layer has no bias"
       when "activations"
@@ -165,7 +165,7 @@ module SHAInet
           filter.each_with_index do |channel, ch|
             puts "Channel: #{ch}, neuron activations are:"
             channel.each do |row|
-              puts "#{row.map { |n| n.activation }}"
+              puts "#{row.map { |n| n.activation.round(4) }}"
             end
           end
         end

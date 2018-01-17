@@ -9,6 +9,9 @@ module SHAInet
     # @softmax : Bool
 
     def initialize(@prev_layer : CNNLayer, @logger : Logger = Logger.new(STDOUT))
+      unless @prev_layer.is_a?(SHAInet::FullyConnectedLayer)
+        raise CNNInitializationError.new("Softmax layer can only follow a fully connected layer")
+      end
       @filters = @prev_layer.filters.clone
       @output = Array(Float64).new(@filters[0][0][0].size) { Float64.new(0) }
       @all_neurons = Array(Neuron).new
@@ -46,7 +49,7 @@ module SHAInet
       when "bias"
         puts "Softmax layer has no weights"
       when "activations"
-        @filters.first.first.each { |row| puts "#{row.map { |n| n.activation }}" }
+        @filters.first.first.each { |row| puts "#{row.map { |n| n.activation.round(4) }}" }
       end
       puts "------------"
     end
