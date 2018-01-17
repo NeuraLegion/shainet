@@ -2,7 +2,7 @@ require "logger"
 
 module SHAInet
   class InputLayer
-    getter :filters, :output
+    getter filters : Array(Filter)
     property next_layer : CNNLayer | ConvLayer | DummyLayer
 
     def initialize(input_volume : Array(Int32), @logger : Logger = Logger.new(STDOUT))
@@ -14,19 +14,12 @@ module SHAInet
         raise CNNInitializationError.new("Width and height of input must be of the same size.")
       end
 
-      filters = 1 # In this case there is only one filter, since it is the input layer
-      channels = input_volume[2]
+      # Channel data is stored within the Filter class, this is needed for smooth work with all other layers.
+      channels = input_volume[2] # filters == chanels
       width = input_volume[0]
       height = input_volume[1]
 
-      # Channel data is stored within the filters array, this is needed for smooth work with all other layers.
-      @filters = Array(Array(Array(Array(Neuron)))).new(filters) {
-        Array(Array(Array(Neuron))).new(channels) {
-          Array(Array(Neuron)).new(height) {
-            Array(Neuron).new(width) { Neuron.new("memory") }
-          }
-        }
-      }
+      @filters = Array(Filter).new(channels) { Filter.new([width, height, 1]) }
 
       @next_layer = DummyLayer.new
     end
@@ -36,7 +29,7 @@ module SHAInet
       input_data.size.times do |channel|
         input_data[channel].size.times do |row|
           input_data[channel][row].size.times do |col|
-            @filters.first[channel][row][col].activation = input_data[channel][row][col].to_f64
+            @filters[channel].neurons[row][col].activation = input_data[channel][row][col].to_f64
           end
         end
       end

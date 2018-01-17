@@ -8,7 +8,7 @@ module SHAInet
     #################################################
     # # This part is for dealing with conv layers # #
 
-    def initialize(prev_layer : ConvLayer,
+    def initialize(@prev_layer : ConvLayer | CNNLayer,
                    filters_num : Int32 = 1,
                    @window_size : Int32 = 1,
                    @stride : Int32 = 1,
@@ -21,53 +21,52 @@ module SHAInet
       raise CNNInitializationError.new("Window size value must be Int32 >= 1") if @window_size < 1
       raise CNNInitializationError.new("Stride value must be Int32 >= 1") if @stride < 1
 
-      filters = prev_layer.filters.size             # In conv layers channels are replaced by the feature maps form the filters
-      width = prev_layer.filters.first.neurons.size # Assumes row == height
+      filters = @prev_layer.filters.size             # In conv layers channels are replaced by the feature maps,stored in the Filter class
+      width = @prev_layer.filters.first.neurons.size # Assumes row == height
 
       # This is a calculation to make sure the input volume matches a correct desired output volume
       output_width = ((width - @window_size + 2*@padding)/@stride + 1)
       unless output_width.to_i == output_width
-        raise CNNInitializationError.new("Output volume must be a whole number, change: window size or stride or padding")
+        raise CNNInitializationError.new("Output volume must be a whole number, change: window size, stride and/or padding")
       end
 
       @filters = Array(Filter).new(filters_num) { Filter.new([output_width.to_i, output_width.to_i, filters], @padding, @window_size, @stride, @activation_function) }
-      @prev_layer = prev_layer
       @next_layer = DummyLayer.new
-      prev_layer.next_layer = self
+      @prev_layer.next_layer = self
     end
 
     #######################################################################
     # # This part is for dealing with all layers other than conv layers # #
 
-    def initialize(prev_layer : CNNLayer,
-                   filters_num : Int32 = 1,
-                   @window_size : Int32 = 1,
-                   @stride : Int32 = 1,
-                   @padding : Int32 = 0,
-                   @activation_function : Proc(GenNum, Array(Float64)) = SHAInet.none,
-                   @logger : Logger = Logger.new(STDOUT))
-      #
-      raise CNNInitializationError.new("ConvLayer must have at least one filter") if filters_num < 1
-      raise CNNInitializationError.new("Padding value must be Int32 >= 0") if @padding < 0
-      raise CNNInitializationError.new("Window size value must be Int32 >= 1") if @window_size < 1
-      raise CNNInitializationError.new("Stride value must be Int32 >= 1") if @stride < 1
+    # def initialize(prev_layer : CNNLayer,
+    #                filters_num : Int32 = 1,
+    #                @window_size : Int32 = 1,
+    #                @stride : Int32 = 1,
+    #                @padding : Int32 = 0,
+    #                @activation_function : Proc(GenNum, Array(Float64)) = SHAInet.none,
+    #                @logger : Logger = Logger.new(STDOUT))
+    #   #
+    #   raise CNNInitializationError.new("ConvLayer must have at least one filter") if filters_num < 1
+    #   raise CNNInitializationError.new("Padding value must be Int32 >= 0") if @padding < 0
+    #   raise CNNInitializationError.new("Window size value must be Int32 >= 1") if @window_size < 1
+    #   raise CNNInitializationError.new("Stride value must be Int32 >= 1") if @stride < 1
 
-      # In other layers filters is always 1, but may have multiple channels
-      channels = prev_layer.filters.first.size
-      width = prev_layer.filters.first.first.size # Assumes row == height
+    #   # In other layers filters is always 1, but may have multiple channels
+    #   channels = prev_layer.filters.first.size
+    #   width = prev_layer.filters.first.first.size # Assumes row == height
 
-      # This is a calculation to make sure the input volume matches a correct desired output volume
-      output_width = ((width.to_f64 - @window_size.to_f64 + 2*@padding.to_f64)/@stride.to_f64 + 1).to_f64
-      unless output_width.to_i == output_width
-        raise CNNInitializationError.new("Output volume must be a whole number, change: window size or stride or padding")
-      end
+    #   # This is a calculation to make sure the input volume matches a correct desired output volume
+    #   output_width = ((width.to_f64 - @window_size.to_f64 + 2*@padding.to_f64)/@stride.to_f64 + 1).to_f64
+    #   unless output_width.to_i == output_width
+    #     raise CNNInitializationError.new("Output volume must be a whole number, change: window size or stride or padding")
+    #   end
 
-      @filters = Array(Filter).new(filters_num) { Filter.new([output_width.to_i, output_width.to_i, channels], @padding, @window_size, @stride, @activation_function) }
+    #   @filters = Array(Filter).new(filters_num) { Filter.new([output_width.to_i, output_width.to_i, channels], @padding, @window_size, @stride, @activation_function) }
 
-      @prev_layer = prev_layer
-      @next_layer = DummyLayer.new
-      prev_layer.next_layer = self
-    end
+    #   @prev_layer = prev_layer
+    #   @next_layer = DummyLayer.new
+    #   prev_layer.next_layer = self
+    # end
 
     #########################
     # # General functions # #

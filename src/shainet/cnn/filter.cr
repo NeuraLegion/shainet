@@ -1,152 +1,15 @@
 require "logger"
 
 module SHAInet
-  # In conv layers a filter is a separate unit within the layer, with special parameters
-  # class Filter
-  #   getter input_surface : Array(Int32), window_size : Int32
-  #   property neurons : Array(Array(Neuron)), receptive_field : ReceptiveField
-
-  #   def initialize(@input_surface : Array(Int32), # expecting [width, height, channels]
-  #                  @window_size : Int32)
-  #     #
-  #     @neurons = Array(Array(Neuron)).new(input_surface[1]) {
-  #       Array(Neuron).new(input_surface[0]) { Neuron.new("memory") }
-  #     }
-  #     @receptive_field = ReceptiveField.new(window_size, input_surface[2])
-  #   end
-
-  #   # Takes a small window from the input data (CxHxW), and connects the neurons using CnnSynapse
-  #   # When previous layer is CNNLayer
-  #   def connect(input_window : Array(Array(Array(Neuron))), target_neuron : Neuron)
-  #     @synapses.size.times do |channel|
-  #       @synapses[channel].size.times do |row|
-  #         @synapses[channel][row].size.times do |col|
-  #           @synapses[channel][row][col].neuron_pairs << [input_window[channel][row][col], target_neuron]
-  #         end
-  #       end
-  #     end
-  #   end
-
-  #   # Takes a small window from the input data (CxHxW), and connects the neurons using CnnSynapse
-  #   # When previous layer is ConvLayer
-  #   def connect(input_window : Array(Array(Neuron)), target_neuron : Neuron)
-  #     @synapses.size.times do |channel|
-  #       @synapses[channel].size.times do |row|
-  #         @synapses[channel][row].size.times do |col|
-  #           @synapses[channel][row][col].neuron_pairs << [input_window[row][col], target_neuron]
-  #         end
-  #       end
-  #     end
-  #   end
-
-  #   # Propagate the activations from previous layer the the filter via the receptive field
-  #   def propagate_forward
-  #     @neurons.each do |row|
-  #       row.each do |neuron|
-  #         input_sum = Float64.new(0)
-  #         neuron.synapses_in each do |synapse| # Here we use CnnSynapses
-  #           input_sum += synapse.propagate_forward
-  #         end
-  #         neuron.input_sum = input_sum
-  #       end
-  #     end
-  #   end
-
-  #   def clone
-  #     filter_old = self
-  #     filter_new = Filter.new(filter_old.input_surface, filter_old.window_size)
-
-  #     filter_new.neurons = filter_old.neurons.clone
-  #     filter_new.receptive_field = filter_old.receptive_field.clone
-  #     return filter_new
-  #   end
-  # end
-
-  # # ########################################################################################################## #
-
-  # # This is somewhat similar to a synapse
-  # class ReceptiveField
-  #   property weights : Array(Array(Array(Float64))), bias : Float64
-  #   getter window_size : Int32, channels : Int32
-
-  #   def initialize(@window_size : Int32, @channels : Int32)
-  #     @weights = Array(Array(Array(Float64))).new(channels) {
-  #       Array(Array(Float64)).new(@window_size) {
-  #         Array(Float64).new(@window_size) { rand(0.0..1.0).to_f64 }
-  #       }
-  #     }
-  #     @bias = rand(-1..1).to_f64
-  #   end
-
-  #   # Takes a small window from the input data (CxHxW) to preform feed forward
-  #   # Propagate forward from CNNLayer
-  #   def prpogate_forward(input_window : Array(Array(Array(Neuron))), target_neuron : Neuron)
-  #     weighted_sum = Float64.new(0)
-  #     @weights.size.times do |channel|
-  #       @weights[channel].size.times do |row|
-  #         @weights[channel][row].size.times do |col|
-  #           weighted_sum += input_window[channel][row][col].activation * @weights[channel][row][col]
-  #         end
-  #       end
-  #     end
-  #     target_neuron.activation = weighted_sum + @bias
-  #   end
-
-  #   # Propagate forward from ConvLayer
-  #   def prpogate_forward(input_window : Array(Array(Neuron)), target_neuron : Neuron)
-  #     weighted_sum = Float64.new(0)
-  #     @weights.first.size.times do |row|
-  #       @weights.first[row].size.times do |col|
-  #         weighted_sum += input_window[row][col].activation*@weights.first[row][col]
-  #       end
-  #     end
-  #     target_neuron.activation = weighted_sum + @bias
-  #   end
-
-  # # Propagate forward from CNNLayer
-  # def propagate_backward(window : Array(Array(Array(Neuron))), target_neuron : Neuron)
-  #   @weights.size.times do |channel|
-  #     @weights[channel].size.times do |row|
-  #       @weights[channel][row].size.times do |col|
-  #         window[channel][row][col].gradient = target_neuron.gradient*@weights[channel][row][col]
-  #       end
-  #     end
-  #   end
-  # end
-
-  # # Propagate forward from ConvLayer
-  # def propagate_backward(window : Array(Array(Neuron)), target_neuron : Neuron)
-  #   @weights[0][0].size.times do |row|
-  #     @weights.[0][0][row].size.times do |col|
-  #       weighted_sum += input_window[row][col].activation*@weights.first[row][col]
-  #     end
-  #   end
-  #   target_neuron.activation = weighted_sum + @bias
-  # end
-
-  #   def clone
-  #     rf_old = self
-  #     rf_new = ReceptiveField.new(rf_old.window_size, rf_old.channels)
-  #     rf_new.weights = rf_old.weights
-  #     rf_new.bias = rf_old.bias
-
-  #     return rf_new
-  #   end
-  # end
-
-  # # #####################################################################
-  # # #####################################################################
-  # # Bellow is a better object oriented implementation - work in progress
-
   class Filter
     getter input_surface : Array(Int32), window_size : Int32, stride : Int32, padding : Int32, activation_function : Proc(GenNum, Array(Float64))
     property neurons : Array(Array(Neuron)), synapses : Array(Array(Array(CnnSynapse))), bias : Float64
 
     def initialize(@input_surface : Array(Int32), # expecting [width, height, channels]
-                   @padding : Int32,
-                   @window_size : Int32,
-                   @stride : Int32,
-                   @activation_function : Proc(GenNum, Array(Float64)))
+                   @padding : Int32 = 0,
+                   @window_size : Int32 = 1,
+                   @stride : Int32 = 1,
+                   @activation_function : Proc(GenNum, Array(Float64)) = SHAInet.none)
       #
       @neurons = Array(Array(Neuron)).new(input_surface[1]) {
         Array(Neuron).new(input_surface[0]) { Neuron.new("memory") }
