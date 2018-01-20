@@ -55,23 +55,22 @@ describe SHAInet::CNN do
     #   layer.inspect("activations")
     # end
 
-    cnn.layers.each_with_index do |layer, i|
-      puts "Layer #{i} - #{layer.class}:"
-      layer.inspect("gradients")
-    end
-
-    puts "################################\n"
     # cnn.layers.each_with_index { |layer, i| puts "Layer #{i}:", layer.inspect("weights") }
     # puts "-----"
-    # puts "Network output:\n#{cnn.layers.last.as(SHAInet::FullyConnectedLayer | SHAInet::SoftmaxLayer).output}\n"
-    # puts "Error signal is:\n#{cnn.error_signal}"
+    puts "Network output:\n#{cnn.layers.last.as(SHAInet::FullyConnectedLayer | SHAInet::SoftmaxLayer).output}\n"
+    puts "Error signal is:\n#{cnn.error_signal}"
 
     # puts "-----"
-    cnn.train(training_data, training_type = :sgdm, cost = :mse, epochs = 1000, threshold = 0.000001, log_each = 100)
-    cnn.layers.each_with_index do |layer, i|
-      puts "Layer #{i} - #{layer.class}:"
-      layer.inspect("gradients")
-    end
+    cnn.train(training_data, training_type = :sgdm, cost = :mse, epochs = 20000, threshold = 0.000001, log_each = 1000)
+
+    puts "################################\n"
+    puts "Network output:\n#{cnn.layers.last.as(SHAInet::FullyConnectedLayer | SHAInet::SoftmaxLayer).output}\n"
+    puts "Error signal is:\n#{cnn.error_signal}"
+
+    # cnn.layers.each_with_index do |layer, i|
+    #   puts "Layer #{i} - #{layer.class}:"
+    #   layer.inspect("gradients")
+    # end
 
     #
   end

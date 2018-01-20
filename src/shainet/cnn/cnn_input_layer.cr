@@ -3,7 +3,6 @@ require "logger"
 module SHAInet
   class InputLayer
     getter filters : Array(Filter)
-    property next_layer : CNNLayer | ConvLayer | DummyLayer
 
     def initialize(input_volume : Array(Int32), @logger : Logger = Logger.new(STDOUT))
       unless input_volume.size == 3
