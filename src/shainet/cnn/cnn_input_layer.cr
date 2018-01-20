@@ -101,6 +101,8 @@ module SHAInet
             puts "#{row.map { |n| n.activation.round(4) }}"
           end
         end
+      when "gradients"
+        puts "input layer has no gradients"
       end
       puts "------------------------------------------------"
     end

@@ -31,13 +31,13 @@ describe SHAInet::CNN do
 
     cnn.add_input(volume = [7, 7, 2])
     cnn.add_conv(filters = 2, window_size = 3, stride = 1, padding = 1, activation_function = SHAInet.none)
-    cnn.add_conv(filters = 2, window_size = 3, stride = 1, padding = 1, activation_function = SHAInet.sigmoid)
-    cnn.add_relu
-    cnn.add_maxpool(pool = 2, stride = 1)
-    cnn.add_fconnect(l_size = 10, SHAInet.sigmoid)
-    cnn.add_dropout(drop_percent = 10)
-    cnn.add_fconnect(l_size = 5, SHAInet.none)
-    cnn.add_softmax
+    # cnn.add_conv(filters = 2, window_size = 3, stride = 1, padding = 1, activation_function = SHAInet.sigmoid)
+    # cnn.add_relu
+    # cnn.add_maxpool(pool = 2, stride = 1)
+    # cnn.add_fconnect(l_size = 10, SHAInet.sigmoid)
+    # cnn.add_dropout(drop_percent = 10)
+    # cnn.add_fconnect(l_size = 5, SHAInet.none)
+    # cnn.add_softmax
     # Input layer params: volume = [width, height, channels]
     # Conv layer params: filters_num, window_size (one dimentional, i.e 2 = 2x2 window), stride, padding
     # Relu layer params: slope (default is set to 0.0, change for leaky relu)
@@ -48,7 +48,7 @@ describe SHAInet::CNN do
     # Run the network with a single input
     cnn.run(img_data, stealth = true)
 
-    cnn.evaluate(img_data, expected_output, :mse)
+    # cnn.evaluate(img_data, expected_output, :mse)
 
     cnn.layers.each_with_index do |layer, i|
       puts "Layer #{i} - #{layer.class}:"
@@ -57,10 +57,10 @@ describe SHAInet::CNN do
     # puts "################################\n"
     # cnn.layers.each_with_index { |layer, i| puts "Layer #{i}:", layer.inspect("weights") }
     # puts "-----"
-    puts "Network output:\n#{cnn.layers.last.as(SHAInet::FullyConnectedLayer | SHAInet::SoftmaxLayer).output}\n"
-    puts "Error signal is:\n#{cnn.error_signal}"
+    # puts "Network output:\n#{cnn.layers.last.as(SHAInet::FullyConnectedLayer | SHAInet::SoftmaxLayer).output}\n"
+    # puts "Error signal is:\n#{cnn.error_signal}"
 
-    puts "-----"
+    # puts "-----"
     # cnn.train(training_data, training_type = :sgdm, cost = :mse, epochs = 1, threshold = 0.000001, log_each = 1)
 
     #

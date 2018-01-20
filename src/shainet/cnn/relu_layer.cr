@@ -52,6 +52,14 @@ module SHAInet
             puts "#{row.map { |n| n.activation.round(4) }}"
           end
         end
+      when "gradients"
+        @filters.each_with_index do |filter, f|
+          puts "---"
+          puts "Filter: #{f}, neuron gradients are:"
+          filter.neurons.each do |row|
+            puts "#{row.map { |n| n.gradient.round(4) }}"
+          end
+        end
       end
       puts "------------------------------------------------"
     end
