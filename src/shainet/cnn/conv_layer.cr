@@ -39,7 +39,7 @@ module SHAInet
     end
 
     def error_prop
-      @filters.reverse_each { |filter| filter.propagate_backward(@prev_layer) }
+      @filters.each { |filter| filter.propagate_backward(@prev_layer) }
     end
 
     # def error_prop

@@ -44,9 +44,9 @@ module SHAInet
     end
 
     def error_prop
-      @filters.size.times do |filter|
-        @filters[filter].neurons.size.times do |row|
-          @filters[filter].neurons[row].size.times do |neuron|
+      @prev_layer.filters.size.times do |filter|
+        @prev_layer.filters[filter].neurons.size.times do |row|
+          @prev_layer.filters[filter].neurons[row].size.times do |neuron|
             @prev_layer.filters[filter].neurons[row][neuron].hidden_error_prop
           end
         end

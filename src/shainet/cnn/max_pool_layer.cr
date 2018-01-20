@@ -47,7 +47,7 @@ module SHAInet
 
         while input_y < (@prev_layer.filters[filter].neurons.size - @pool + @stride)         # Break out of y
           while input_x < (@prev_layer.filters[filter].neurons.first.size - @pool + @stride) # Break out of x
-            window = @prev_layer.filters[filter].neurons[input_y..(input_y + @pool - 1)].map { |row| row[input_x..(input_x + @pool - 1)].map { |neuron| neuron.activation } }
+            window = @prev_layer.filters[filter].neurons[input_y..(input_y + @pool - 1)].map { |row| row[input_x..(input_x + @pool - 1)] }
             pool_neuron = @filters[filter].neurons[output_y][output_x] # Neuron from this layer
 
             # Only propagate error to the neurons that were chosen during the max pool

@@ -24,101 +24,8 @@ module SHAInet
       @bias = rand(-1..1).to_f64
       @blank_neuron = Neuron.new("memory") # This is needed for padding
       @blank_neuron.activation = 0.0
-      @blank_neuron.gradient = 0.0
+      @blank_neuron.gradient = 1.0
     end
-
-    # Adds padding to all Filters of input data
-    def _pad(filters : Array(Filter), padding : Int32)
-      input_data = filters.clone # Array of filter class
-      padded_data = Array(Array(Array(Neuron))).new
-
-      if padding == 0
-        input_data.each { |filter| padded_data << filter.neurons.clone }
-      else
-        blank_neuron = Neuron.new("memory")
-        blank_neuron.activation = 0.0
-
-        input_data.each do |filter|
-          # Add padding at the sides
-          filter.neurons.each do |row|
-            padding.times { row << blank_neuron }
-            padding.times { row.insert(0, blank_neuron) }
-          end
-          # Add padding at the top/bottom
-          padding_row = Array(Neuron).new(filter.neurons.first.size) { blank_neuron }
-          padding.times { filter.neurons << padding_row }
-          padding.times { filter.neurons.insert(0, padding_row) }
-          padded_data << filter.neurons
-        end
-      end
-      return padded_data
-    end
-
-    # Adds padding to all channels of input data
-    def _pad(filters : Array(Array(Array(Array(Neuron)))), padding : Int32)
-      input_data = filters.first.clone # Array of all channels
-      if padding == 0
-        return input_data
-      else
-        blank_neuron = Neuron.new("memory")
-        blank_neuron.activation = 0.0
-        padded_data = input_data
-
-        # Go over each channel and add padding
-        padded_data.size.times do |channel|
-          # Add padding at the sides
-          padded_data[channel].each do |row|
-            padding.times { row << blank_neuron }
-            padding.times { row.insert(0, blank_neuron) }
-          end
-          # Add padding at the top/bottom
-          padding_row = Array(Neuron).new(padded_data.first.first.size) { blank_neuron }
-          padding.times { padded_data[channel] << padding_row }
-          padding.times { padded_data[channel].insert(0, padding_row) }
-        end
-        return padded_data
-      end
-    end
-
-    # def propagate_forward(input_layer : ConvLayer | CNNLayer)
-    #   padded_data = _pad(input_layer.filters, @padding) # Array of all channels or all filters
-
-    #   # Starting locations
-    #   input_x = input_y = output_x = output_y = 0
-
-    #   # Takes a small window from the input data (Channel/Filter x Width x Height) to preform feed forward
-    #   # Slides the window over the input data volume and updates each neuron of the filter
-    #   # The window depth is the number of all channels/filters (depending on previous layer)
-    #   while input_y < (padded_data.first.size - @window_size + @stride)         # Break out of y
-    #     while input_x < (padded_data.first.first.size - @window_size + @stride) # Break out of x
-    #       window = padded_data.map { |channel| channel[input_y..(input_y + @window_size - 1)].map { |row| row[input_x..(input_x + @window_size - 1)] } }
-    #       target_neuron = @neurons[output_y][output_x]
-
-    #       # Gather the weighted activations from the entire window
-    #       input_sum = Float64.new(0)
-    #       @synapses.size.times do |channel|
-    #         @synapses[channel].size.times do |row|
-    #           @synapses[channel][row].size.times do |col| # Synapses are CnnSynpase in this case
-    #           # Save the weighted activations from previous layer
-    #             input_sum += @synapses[channel][row][col].weight*window[channel][row][col].activation
-    #           end
-    #         end
-    #       end
-
-    #       # Add bias and apply activation function
-    #       target_neuron.input_sum = input_sum + @bias
-    #       target_neuron.activation, target_neuron.sigma_prime = @activation_function.call(target_neuron.input_sum)
-
-    #       # Go to next window horizontaly
-    #       input_x += @stride
-    #       output_x += 1
-    #     end
-    #     # Go to next window verticaly
-    #     input_x = output_x = 0
-    #     input_y += @stride
-    #     output_y += 1
-    #   end
-    # end
 
     def propagate_forward(input_layer : ConvLayer | CNNLayer)
       # Starting locations
@@ -135,117 +42,38 @@ module SHAInet
           window = Array(Array(Array(Neuron))).new
 
           input_layer.filters.size.times do |channel|
-            rows = Array(Array(Neuron)).new
+            rows = Array(Array(Neuron)).new                      # Output xy matrix
             input_channel = input_layer.filters[channel].neurons # Input data xy matrix
 
-            # @window_size.times do |row_in| # Iteration over y in the window
-            case input_y
-            # When dealing with top padding
-            when input_y < 0
-              padding_rows = -input_y # count how many rows with blank neurons to be inserted
-              @window_size.times do |_row|
-                if padding_rows > 0
-                  row = Array(Neuron).new(@window_size) { @blank_neuron }
-                  rows << row
-                  padding_rows -= 1
-                else
-                  row = Array(Neuron).new
+            @window_size.times do |_row| # Iteration over y in the window
+              input_row = input_y + _row
 
-                  case input_x
-                  # When dealing with left padding
-                  when input_x < 0
-                    padding_cols = -input_x # count how many cols with blank neurons to be inserted
-                    @window_size.times do |_col|
-                      if padding_cols > 0
-                        row << @blank_neuron
-                        padding_cols -= 1
-                      else
-                        input_channel[input_y + _row][(input_x + _col)..(input_x + @window_size - 1)].each do |neuron|
-                          row << neuron
-                        end
-                      end
-                    end
-                    rows << row
+              # When dealing with top padding
+              if input_row < 0
+                rows << Array(Neuron).new(@window_size) { @blank_neuron }
+                # puts "top pad"
 
-                    # When dealing with right padding
-                  when input_x > (input_channel.size - @padding - 1)
-                    padding_cols = @padding - (input_channel.size - 1 - input_x) # Count how many cols with blank neurons to be inserted
-
-                    @window_size.times do |_col|
-                      if _col < (@window_size - padding_cols)
-                        row << input_channel[input_y + _row][input_x + _col]
-                      else
-                        row << @blank_neuron
-                      end
-                    end
-                    rows << row
-
-                    # When dealing with all other locations within the input data
-                  else
-                    input_channel[input_y + _row][input_x..(input_x + @window_size - 1)].each do |neuron|
-                      row << neuron
-                    end
-                    rows << row
-                  end
-                end
-              end
-
-              # When dealing with bottom padding
-            when input_y > (input_channel.size - @padding - 1)
-              padding_rows = @padding - (input_channel.size - 1 - input_y) # count how many rows with blank neurons to be inserted
-
-              @window_size.times do |_row|
-                if _row < (@window_size - padding_rows)
-                  row = Array(Neuron).new
-
-                  case input_x
-                  # When dealing with left padding
-                  when input_x < 0
-                    padding_cols = -input_x # count how many cols with blank neurons to be inserted
-                    @window_size.times do |_col|
-                      if padding_cols > 0
-                        row << @blank_neuron
-                        padding_cols -= 1
-                      else
-                        input_channel[input_y + _row][(input_x + _col)..(input_x + @window_size - 1)].each do |neuron|
-                          row << neuron
-                        end
-                      end
-                      rows << row
-                    end
-
-                    # When dealing with right padding
-                  when input_x > (input_channel.size - @padding - 1)
-                    padding_cols = @padding - (input_channel.size - 1 - input_x) # Count how many cols with blank neurons to be inserted
-
-                    @window_size.times do |_col|
-                      if _col < (@window_size - padding_cols)
-                        row << input_channel[input_y + _row][input_x + _col]
-                      else
-                        row << @blank_neuron
-                      end
-                    end
-                    rows << row
-
-                    # When dealing with all other locations within the input data
-                  else
-                    input_channel[input_y + _row][input_x..(input_x + @window_size - 1)].each do |neuron|
-                      row << neuron
-                    end
-                    rows << row
-                  end
-                else
-                  row = Array(Neuron).new(@window_size) { @blank_neuron }
-                  rows << row
-                end
-              end
-
-              # When dealing with all other locations within the input data
-            else
-              @window_size.times do |_row|
+                # When dealing with bottom padding
+              elsif input_row > (input_channel.size - 1)
+                rows << Array(Neuron).new(@window_size) { @blank_neuron }
+                # puts "bottom pad"
+              else
                 row = Array(Neuron).new
-                input_channel[input_y + _row][input_x..(input_x + @window_size - 1)].each do |neuron|
-                  row << neuron
+                @window_size.times do |_col|
+                  input_col = input_x + _col
+
+                  # When dealing with left padding
+                  if input_col < 0
+                    row << @blank_neuron
+
+                    # When dealing with right padding
+                  elsif input_col > (input_channel.size - 1)
+                    row << @blank_neuron
+
+                    # When dealing with all other locations within the input data
+                  else
+                    row << input_channel[input_y + _row][input_x + _col]
+                  end
                 end
                 rows << row
               end
@@ -253,29 +81,21 @@ module SHAInet
             window << rows
           end
 
-          puts "Window, x = #{input_x}, y = #{input_y}"
-          window.each_with_index do |channel, ch|
-            puts "Channel #{ch}"
-            channel.each do |row|
-              puts row.map { |n| n.activation }
+          # # Gather the weighted activations from the entire window
+          input_sum = Float64.new(0)
+          @synapses.size.times do |channel|
+            @synapses[channel].size.times do |row|
+              @synapses[channel][row].size.times do |col| # Synapses are CnnSynpase in this case
+              # Save the weighted activations from previous layer
+                input_sum += @synapses[channel][row][col].weight*window[channel][row][col].activation
+              end
             end
           end
 
-          # # Gather the weighted activations from the entire window
-          # input_sum = Float64.new(0)
-          # @synapses.size.times do |channel|
-          #   @synapses[channel].size.times do |row|
-          #     @synapses[channel][row].size.times do |col| # Synapses are CnnSynpase in this case
-          #     # Save the weighted activations from previous layer
-          #       input_sum += @synapses[channel][row][col].weight*window[channel][row][col].activation
-          #     end
-          #   end
-          # end
-
           # # Add bias and apply activation function
-          # target_neuron = @neurons[output_y][output_x]
-          # target_neuron.input_sum = input_sum + @bias
-          # target_neuron.activation, target_neuron.sigma_prime = @activation_function.call(target_neuron.input_sum)
+          target_neuron = @neurons[output_y][output_x]
+          target_neuron.input_sum = input_sum + @bias
+          target_neuron.activation, target_neuron.sigma_prime = @activation_function.call(target_neuron.input_sum)
 
           # Go to next window horizontaly
           input_x += @stride
@@ -289,52 +109,85 @@ module SHAInet
       end
     end
 
-    def propagate_backward(next_layer : ConvLayer)
-      padded_data = _pad([self], next_layer.padding) # Array of all channels or all filters
-
+    def propagate_backward(input_layer : ConvLayer | CNNLayer)
       # Starting locations
-      input_x = input_y = output_x = output_y = 0
+      input_x = input_y = -@padding
+      output_x = output_y = 0
 
-      # Update the gradients of all neurons in current layer and weight gradients for the filters of the next layer
-      next_layer.filters.size.times do |filter|
-        # Takes a small window from the input data (Channel/Filter x Width x Height) to preform feed forward
-        # Slides the window over the input data volume and updates each neuron of the filter
-        # The window depth is the number of all channels/filters (depending on previous layer)
-        while input_y < (padded_data.first.size - @window_size + @stride)         # Break out of y
-          while input_x < (padded_data.first.first.size - @window_size + @stride) # Break out of x
-            window = padded_data.map { |self_filter| self_filter[input_y..(input_y + @window_size - 1)].map { |row| row[input_x..(input_x + @window_size - 1)] } }
-            source_neuron = next_layer.filters[filter].neurons[output_y][output_x]
+      # Takes a small window from the input data (Channel/Filter x Width x Height) to preform feed forward
+      # Slides the window over the input data volume and updates each neuron of the filter
+      # The window depth is the number of all channels/filters (depending on previous layer)
+      while input_y < (input_layer.filters.first.neurons.size + @padding - @window_size + @stride)         # Break out of y
+        while input_x < (input_layer.filters.first.neurons.first.size + @padding - @window_size + @stride) # Break out of x
 
-            # update the weighted error for the entire window
-            synapses = next_layer.filters[filter].synapses
-            # input_sum = Float64.new(0)
-            synapses.size.times do |channel|
-              synapses[channel].size.times do |row|
-                synapses[channel][row].size.times do |col| # Synapses are CnnSynpase in this case
-                # Propagate the error from next layer to self, keeping in mind that all the filters in next layer contribute to the error
-                  target_neuron = @neurons[row][col]
-                  target_neuron.gradient_sum += synapses[channel][row][col].weight*source_neuron.gradient
+          # Create the window from previous layer(x,y are shared across all channels)
+          window = Array(Array(Array(Neuron))).new
 
-                  # Save the error sum for updating the weights later
-                  synapses[channel][row][col].gradient_sum += source_neuron.gradient*target_neuron.activation
+          input_layer.filters.size.times do |channel|
+            rows = Array(Array(Neuron)).new                      # Output xy matrix
+            input_channel = input_layer.filters[channel].neurons # Input data xy matrix
+
+            @window_size.times do |_row| # Iteration over y in the window
+              input_row = input_y + _row
+
+              # When dealing with top padding
+              if input_row < 0
+                rows << Array(Neuron).new(@window_size) { @blank_neuron }
+                # puts "top pad"
+
+                # When dealing with bottom padding
+              elsif input_row > (input_channel.size - 1)
+                rows << Array(Neuron).new(@window_size) { @blank_neuron }
+                # puts "bottom pad"
+              else
+                row = Array(Neuron).new
+                @window_size.times do |_col|
+                  input_col = input_x + _col
+
+                  # When dealing with left padding
+                  if input_col < 0
+                    row << @blank_neuron
+
+                    # When dealing with right padding
+                  elsif input_col > (input_channel.size - 1)
+                    row << @blank_neuron
+
+                    # When dealing with all other locations within the input data
+                  else
+                    row << input_channel[input_y + _row][input_x + _col]
+                  end
                 end
+                rows << row
+              end
+            end
+            window << rows
+          end
+
+          # Propagate the weighted errors backwards to the entire window
+          source_neuron = @neurons[output_y][output_x]
+
+          # input_sum = Float64.new(0)
+          @synapses.size.times do |channel|
+            @synapses[channel].size.times do |row|
+              @synapses[channel][row].size.times do |col| # Synapses are CnnSynpase in this case
+              # Save the weighted activations from previous layer
+                synapse = @synapses[channel][row][col]
+                target_neuron = window[channel][row][col]
+                target_neuron.gradient = synapse.weight*source_neuron.gradient*target_neuron.sigma_prime
+                synapse.gradient_sum += target_neuron.activation*source_neuron.gradient
               end
             end
           end
+
+          # Go to next window horizontaly
           input_x += @stride
           output_x += 1
         end
-        input_x = output_x = 0
+        # Go to next window verticaly
+        input_x = -@padding
+        output_x = 0
         input_y += @stride
         output_y += 1
-      end
-
-      # update gradients of all neurons in all filters
-      @neurons.each do |row|
-        row.each do |neuron|
-          neuron.gradient = neuron.gradient_sum*neuron.sigma_prime
-          neuron.gradient_sum = 0.0
-        end
       end
     end
 
