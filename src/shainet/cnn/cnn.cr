@@ -31,23 +31,22 @@ module SHAInet
       @error_signal = Array(Float64).new # Array of errors for each neuron in the output layer, based on specific input
       @total_error = Float64.new(1)      # Sum of errors from output layer, based on a specific input
       @mean_error = Float64.new(1)       # MSE of netwrok, based on all errors of output layer for a specific input or batch
-      @w_gradient = Array(Float64).new   # Needed for batch train
-      @b_gradient = Array(Float64).new   # Needed for batch train
+      
 
       @learning_rate = 0.7 # Standard parameter for GD
       @momentum = 0.3      # Improved GD
 
-      @etah_plus = 1.2                           # For iRprop+ , how to increase step size
-      @etah_minus = 0.5                          # For iRprop+ , how to decrease step size
-      @delta_max = 50.0                          # For iRprop+ , max step size
-      @delta_min = 0.1                           # For iRprop+ , min step size
-      @prev_mean_error = rand(0.001..1.0).to_f64 # For iRprop+ , needed for backtracking
+      # @etah_plus = 1.2                           # For iRprop+ , how to increase step size
+      # @etah_minus = 0.5                          # For iRprop+ , how to decrease step size
+      # @delta_max = 50.0                          # For iRprop+ , max step size
+      # @delta_min = 0.1                           # For iRprop+ , min step size
+      # @prev_mean_error = rand(0.001..1.0).to_f64 # For iRprop+ , needed for backtracking
 
-      @alpha = 0.001        # For Adam , step size (recomeneded: only change this hyper parameter when fine-tuning)
-      @beta1 = 0.9          # For Adam , exponential decay rate (not recommended to change value)
-      @beta2 = 0.999        # For Adam , exponential decay rate (not recommended to change value)
-      @epsilon = 10**(-8.0) # For Adam , prevents exploding gradients (not recommended to change value)
-      @time_step = 0        # For Adam
+      # @alpha = 0.001        # For Adam , step size (recomeneded: only change this hyper parameter when fine-tuning)
+      # @beta1 = 0.9          # For Adam , exponential decay rate (not recommended to change value)
+      # @beta2 = 0.999        # For Adam , exponential decay rate (not recommended to change value)
+      # @epsilon = 10**(-8.0) # For Adam , prevents exploding gradients (not recommended to change value)
+      # @time_step = 0        # For Adam
     end
 
     def add_input(input_volume : Array(Int32))
@@ -58,7 +57,9 @@ module SHAInet
                  window_size : Int32,
                  stride : Int32,
                  padding : Int32,
-                 activation_function : Proc(GenNum, Array(Float64)) = SHAInet.none)
+                 activation_function : Proc(GenNum, Array(Float64)) = SHAInet.none,
+                 @learning_rate,
+                 @momentum)
       @layers << ConvLayer.new(@layers.last, filters_num, window_size, stride, padding)
     end
 
@@ -74,7 +75,7 @@ module SHAInet
       @layers << DropoutLayer.new(@layers.last, drop_percent)
     end
 
-    def add_fconnect(l_size : Int32, activation_function : Proc(GenNum, Array(Float64)) = SHAInet.none)
+    def add_fconnect(l_size : Int32, activation_function : Proc(GenNum, Array(Float64)) = SHAInet.none, @learning_rate, @momentum)
       @layers << FullyConnectedLayer.new(@layers.last, l_size, activation_function)
     end
 
@@ -199,7 +200,11 @@ module SHAInet
       raise e
     end
 
-    def update_weights
+    # Go over all layers and update the weights and biases, based on learning type chosen
+    def update_wb(learn_type : Symbol | String, batch : Bool = false)
+      @layers.each do |layer|
+        layer.update_wb(learn_type : Symbol | String, batch : Bool = false) # Each layer does this function differently
+      end
     end
 
     # Update weights based on the learning type chosen and layer type
@@ -209,6 +214,7 @@ module SHAInet
       @all_synapses.each_with_index do |synapse, i|
         # Get current gradient
         if batch == true
+          raise CNNInitializationError.new("Batch is not implemented yet.")
           synapse.gradient = @w_gradient.not_nil![i]
         else
           synapse.gradient = (synapse.source_neuron.activation)*(synapse.dest_neuron.gradient)

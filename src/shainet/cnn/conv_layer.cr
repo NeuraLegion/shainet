@@ -14,6 +14,8 @@ module SHAInet
                    @stride : Int32 = 1,
                    @padding : Int32 = 0,
                    @activation_function : Proc(GenNum, Array(Float64)) = SHAInet.none,
+                   @learning_rate : Float64,
+                   @momentum : Float64,
                    @logger : Logger = Logger.new(STDOUT))
       #
       raise CNNInitializationError.new("ConvLayer must have at least one filter") if filters_num < 1
@@ -31,6 +33,10 @@ module SHAInet
       end
 
       @filters = Array(Filter).new(filters_num) { Filter.new([output_width.to_i, output_width.to_i, filters], @padding, @window_size, @stride, @activation_function) }
+
+      @w_gradient = Array(Float64).new # Needed for batch train
+      @b_gradient = Array(Float64).new # Needed for batch train
+
     end
 
     # Use each filter to create feature maps from the input data of the previous layer
@@ -42,64 +48,125 @@ module SHAInet
       @filters.each { |filter| filter.propagate_backward(@prev_layer) }
     end
 
-    # def error_prop
-    #   _error_prop(@next_layer)
-    # end
+    def update_wb(learn_type : Symbol | String, batch : Bool = false)
+      @filters.each do |filter|
+        filter.all_synapses.each_with_index do |synapse, i|
+          # Get current gradient
+          if batch == true
+            raise CNNInitializationError.new("Batch is not implemented yet.")
+            synapse.gradient = @w_gradient.not_nil![i]
+          end
 
-    # def _error_prop(next_layer : ConvLayer)
-    #   @filters.each do |filter|
-    #     filter.propagate_backward(next_layer) # , activation_function)
-    #   end
-    # end
+          case learn_type.to_s
+          # Update weights based on the gradients and delta rule (including momentum)
+          when "sgdm"
+            delta_weight = (-1)*@learning_rate*synapse.gradient_sum + @momentum*(synapse.weight - synapse.prev_weight)
+            synapse.weight += delta_weight
+            synapse.gradient_sum = Float64.new(0)
+            synapse.prev_weight = synapse.weight
 
-    # def _error_prop(next_layer : ReluLayer | DropoutLayer)
-    #   @filters.size.times do |filter|
-    #     @filters[filter].neurons.size.times do |row|
-    #       @filters[filter].neurons[row].size.times do |neuron|
-    #         @filters[filter].neurons[row][neuron].gradient = next_layer.filters[filter][0][row][neuron].gradient
-    #       end
-    #     end
-    #   end
-    # end
+            # Update weights based on Resilient backpropogation (Rprop), using the improved varient iRprop+
+          when "rprop"
+            raise CNNInitializationError.new("rProp is not implemented yet.")
+            # if synapse.prev_gradient*synapse.gradient > 0
+            #   delta = [@etah_plus*synapse.prev_delta, @delta_max].min
+            #   delta_weight = (-1)*SHAInet.sign(synapse.gradient)*delta
 
-    # def _error_prop(next_layer : MaxPoolLayer)
-    #   @filters.size.times do |filter|
-    #     input_x = input_y = output_x = output_y = 0
+            #   synapse.weight += delta_weight
+            #   synapse.prev_weight = synapse.weight
+            #   synapse.prev_delta = delta
+            #   synapse.prev_delta_w = delta_weight
+            # elsif synapse.prev_gradient*synapse.gradient < 0.0
+            #   delta = [@etah_minus*synapse.prev_delta, @delta_min].max
 
-    #     while input_y < (@filters[filter].neurons.size - next_layer.pool + next_layer.stride)   # Break out of y
-    #       while input_x < (@filters[filter].neurons.size - next_layer.pool + next_layer.stride) # Break out of x (assumes x = y)
-    #         pool_neuron = next_layer.filters[filter][0][output_y][output_x]
+            #   synapse.weight -= synapse.prev_delta_w if @mean_error >= @prev_mean_error
 
-    #         # Only propagate error to the neurons that were chosen during the max pool
-    #         @filters[filter].neurons[input_y..(input_y + next_layer.pool - 1)].each do |row|
-    #           row[input_x..(input_x + next_layer.pool - 1)].each do |neuron|
-    #             if neuron.activation == pool_neuron.activation
-    #               neuron.gradient = pool_neuron.gradient
-    #             end
-    #           end
+            #   synapse.prev_gradient = 0.0
+            #   synapse.prev_delta = delta
+            # elsif synapse.prev_gradient*synapse.gradient == 0.0
+            #   delta_weight = (-1)*SHAInet.sign(synapse.gradient)*synapse.prev_delta
 
-    #           input_x += next_layer.stride
-    #           output_x += 1
-    #         end
-    #         input_x = output_x = 0
-    #         input_y += next_layer.stride
-    #         output_y += 1
-    #       end
-    #     end
-    #   end
-    # end
+            #   synapse.weight += delta_weight
+            #   synapse.prev_delta = @delta_min
+            #   synapse.prev_delta_w = delta_weight
+            # end
 
-    # def _error_prop(next_layer : FullyConnectedLayer)
-    #   @filters.each do |filter|
-    #     filter.neurons.each do |row|
-    #       row.each { |neuron| neuron.hidden_error_prop }
-    #     end
-    #   end
-    # end
+            # Update weights based on Adaptive moment estimation (Adam)
+          when "adam"
+            raise CNNInitializationError.new("ADAM is not implemented yet.")
 
-    # def _error_prop(next_layer : InputLayer | SoftmaxLayer | DummyLayer)
-    #   # Do nothing
-    # end
+            # synapse.m_current = @beta1*synapse.m_prev + (1 - @beta1)*synapse.gradient
+            # synapse.v_current = @beta2*synapse.v_prev + (1 - @beta2)*(synapse.gradient)**2
+
+            # m_hat = synapse.m_current/(1 - (@beta1)**@time_step)
+            # v_hat = synapse.v_current/(1 - (@beta2)**@time_step)
+            # synapse.weight -= (@alpha*m_hat)/(v_hat**0.5 + @epsilon)
+
+            # synapse.m_prev = synapse.m_current
+            # synapse.v_prev = synapse.v_current
+          end
+        end
+
+        # Update biases of the layer
+
+        
+          if batch == true
+            raise CNNInitializationError.new("Batch is not implemented yet.")
+            neuron.gradient = @b_gradient.not_nil![i]
+          else
+            filter.bias = filter.bias_sum
+            filter.bias_sum = Float64.new(0)
+          end
+
+          case learn_type.to_s
+          # Update biases based on the gradients and delta rule (including momentum)
+          when "sgdm"
+            delta_bias = (-1)*@learning_rate*(filter.bias) + @momentum*(filter.bias - filter.prev_bias)
+            filter.bias += delta_bias
+            filter.prev_bias = filter.bias
+
+            # Update weights based on Resilient backpropogation (Rprop), using the improved varient iRprop+
+          when "rprop"
+            raise CNNInitializationError.new("rProp is not implemented yet.")
+            # if neuron.prev_gradient*neuron.gradient > 0
+            #   delta = [@etah_plus*neuron.prev_delta, @delta_max].min
+            #   delta_bias = (-1)*SHAInet.sign(neuron.gradient)*delta
+
+            #   neuron.bias += delta_bias
+            #   neuron.prev_bias = neuron.bias
+            #   neuron.prev_delta = delta
+            #   neuron.prev_delta_b = delta_bias
+            # elsif neuron.prev_gradient*neuron.gradient < 0.0
+            #   delta = [@etah_minus*neuron.prev_delta, @delta_min].max
+
+            #   neuron.bias -= neuron.prev_delta_b if @mean_error >= @prev_mean_error
+
+            #   neuron.prev_gradient = 0.0
+            #   neuron.prev_delta = delta
+            # elsif neuron.prev_gradient*neuron.gradient == 0.0
+            #   delta_bias = (-1)*SHAInet.sign(neuron.gradient)*@delta_min*neuron.prev_delta
+
+            #   neuron.bias += delta_bias
+            #   neuron.prev_delta = @delta_min
+            #   neuron.prev_delta_b = delta_bias
+            # end
+
+            # Update weights based on Adaptive moment estimation (Adam)
+          when "adam"
+            raise CNNInitializationError.new("ADAM is not implemented yet.")
+            # neuron.m_current = @beta1*neuron.m_prev + (1 - @beta1)*neuron.gradient
+            # neuron.v_current = @beta2*neuron.v_prev + (1 - @beta2)*(neuron.gradient)**2
+
+            # m_hat = neuron.m_current/(1 - (@beta1)**@time_step)
+            # v_hat = neuron.v_current/(1 - (@beta2)**@time_step)
+            # neuron.bias -= (@alpha*m_hat)/(v_hat**0.5 + @epsilon)
+
+            # neuron.m_prev = neuron.m_current
+            # neuron.v_prev = neuron.v_current
+          end
+        end
+      end
+    end
 
     def inspect(what : String)
       case what

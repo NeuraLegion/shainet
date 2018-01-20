@@ -3,7 +3,8 @@ require "logger"
 module SHAInet
   class Filter
     getter input_surface : Array(Int32), window_size : Int32, stride : Int32, padding : Int32, activation_function : Proc(GenNum, Array(Float64))
-    property neurons : Array(Array(Neuron)), synapses : Array(Array(Array(CnnSynapse))), bias : Float64
+    property neurons : Array(Array(Neuron)), synapses : Array(Array(Array(CnnSynapse)))
+    property all_synapses : Array(CnnSynapse), bias : Float64, @bias_sum : Float64
 
     def initialize(@input_surface : Array(Int32), # expecting [width, height, channels]
                    @padding : Int32 = 0,
@@ -21,10 +22,14 @@ module SHAInet
         }
       }
 
+      @all_synapses = @synapses.flatten
       @bias = rand(-1..1).to_f64
+      @bias_sum = Float64.new(0)
+      @prev_bias = rand(-1..1).to_f64 # Needed for delta rule improvement using momentum
+
       @blank_neuron = Neuron.new("memory") # This is needed for padding
       @blank_neuron.activation = 0.0
-      @blank_neuron.gradient = 1.0
+      @blank_neuron.gradient = 0.0
     end
 
     def propagate_forward(input_layer : ConvLayer | CNNLayer)
@@ -175,6 +180,7 @@ module SHAInet
                 target_neuron = window[channel][row][col]
                 target_neuron.gradient = synapse.weight*source_neuron.gradient*target_neuron.sigma_prime
                 synapse.gradient_sum += target_neuron.activation*source_neuron.gradient
+                @bias_sum += source_neuron.gradient
               end
             end
           end

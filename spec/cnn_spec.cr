@@ -67,7 +67,7 @@ describe SHAInet::CNN do
     # puts "Error signal is:\n#{cnn.error_signal}"
 
     # puts "-----"
-    cnn.train(training_data, training_type = :sgdm, cost = :mse, epochs = 1, threshold = 0.000001, log_each = 1)
+    cnn.train(training_data, training_type = :sgdm, cost = :mse, epochs = 1000, threshold = 0.000001, log_each = 100)
     cnn.layers.each_with_index do |layer, i|
       puts "Layer #{i} - #{layer.class}:"
       layer.inspect("gradients")

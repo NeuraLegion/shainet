@@ -40,6 +40,10 @@ module SHAInet
       end
     end
 
+    def update_wb(learn_type : Symbol | String, batch : Bool = false)
+      # Do nothing
+    end
+
     def inspect(what : String)
       case what
       when "weights"

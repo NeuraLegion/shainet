@@ -20,8 +20,6 @@ module SHAInet
       height = input_volume[1]
 
       @filters = Array(Filter).new(channels) { Filter.new([width, height, 1]) }
-
-      @next_layer = DummyLayer.new
     end
 
     def activate(input_data : Array(Array(Array(GenNum))))
@@ -36,55 +34,11 @@ module SHAInet
     end
 
     def error_prop
-      _error_prop(@next_layer)
-    end
-
-    def _error_prop(next_layer : ConvLayer)
-      # @filters.each do |filter|
-      #   filter.propagate_backward(next_layer)
-      # end
-    end
-
-    def _error_prop(next_layer : CNNLayer | DummyLayer)
       # Do nothing
     end
 
-    def propagate_backward(next_layer : ConvLayer)
-      padded_data = SHAInet::Filter._pad(@channels, next_layer.padding) # Array of all channels or all filters
-
-      # Starting locations
-      input_x = input_y = output_x = output_y = 0
-
-      # Update the gradients of all neurons in current layer and weight gradients for the filters of the next layer
-      next_layer.filters.size.times do |filter|
-        # Takes a small window from the input data (Channel/Filter x Width x Height) to preform feed forward
-        # Slides the window over the input data volume and updates each neuron of the filter
-        # The window depth is the number of all channels/filters (depending on previous layer)
-        while input_y < (padded_data.first.size - @window_size + @stride)         # Break out of y
-          while input_x < (padded_data.first.first.size - @window_size + @stride) # Break out of x
-            window = padded_data.map { |self_filter| self_filter[input_y..(input_y + @window_size - 1)].map { |row| row[input_x..(input_x + @window_size - 1)] } }
-            source_neuron = next_layer.filters[filter].neurons[output_y][output_x]
-
-            # update the weighted error for the entire window
-            synapses = next_layer.filters[filter].synapses
-            # input_sum = Float64.new(0)
-            synapses.size.times do |channel|
-              synapses[channel].size.times do |row|
-                synapses[channel][row].size.times do |col| # Synapses are CnnSynpase in this case
-                # Save the error sum for updating the weights later
-                  target_neuron = @channels[channel][row][col]
-                  synapses[channel][row][col].gradient_sum += source_neuron.gradient*target_neuron.activation
-                end
-              end
-            end
-          end
-          input_x += @stride
-          output_x += 1
-        end
-        input_x = output_x = 0
-        input_y += @stride
-        output_y += 1
-      end
+    def update_wb(learn_type : Symbol | String, batch : Bool = false)
+      # Do nothing
     end
 
     def inspect(what : String)
