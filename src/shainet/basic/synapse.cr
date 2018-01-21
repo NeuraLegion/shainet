@@ -22,14 +22,6 @@ module SHAInet
       @v_prev = Float64.new(0)    # Previous moment**2 value
     end
 
-    def randomize_weight
-      @weight = rand(-0.1..0.1).to_f64
-    end
-
-    def update_weight(value : Float64) : Float64
-      @weight = value
-    end
-
     # Transfer memory from source_neuron to dest_neuron while applying weight
     def propagate_forward : Float64
       new_memory = @source_neuron.activation*@weight
@@ -48,6 +40,27 @@ module SHAInet
     def propagate_backward : Float64
       weighted_error = @dest_neuron.gradient*@weight
       return weighted_error
+    end
+
+    def randomize_weight
+      @weight = rand(-0.1..0.1).to_f64
+    end
+
+    def clone
+      synapse_old = self
+      synapse_new = Synapse.new(synapse_old.source_neuron, synapse_old.dest_neuron)
+
+      synapse_new.weight = synapse_old.weight
+      synapse_new.gradient = synapse_old.gradient
+      synapse_new.prev_weight = synapse_old.prev_weight
+      synapse_new.prev_gradient = synapse_old.prev_gradient
+      synapse_new.prev_delta = synapse_old.prev_delta
+      synapse_new.prev_delta_w = synapse_old.prev_delta_w
+      synapse_new.m_current = synapse_old.m_current
+      synapse_new.v_current = synapse_old.v_current
+      synapse_new.m_prev = synapse_old.m_prev
+      synapse_new.v_prev = synapse_old.v_prev
+      return synapse_new
     end
 
     def inspect

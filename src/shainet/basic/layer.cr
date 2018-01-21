@@ -11,6 +11,14 @@ module SHAInet
       end
     end
 
+    def clone
+      layer_old = self
+      layer_new = Layer.new(layer_old.n_type, layer_old.l_size, layer_old.activation_function)
+
+      layer_new.neurons = layer_old.neurons.clone
+      return layer_new
+    end
+
     # If you don't want neurons to have a blank memory of zeros
     def random_seed
       @neurons.each do |neuron|

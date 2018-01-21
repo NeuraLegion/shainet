@@ -2,15 +2,15 @@ require "logger"
 require "./**"
 
 module SHAInet
-  alias CNNLayer = InputLayer | ReluLayer | MaxPoolLayer | FullyConnectedLayer | DropoutLayer
+  alias CNNLayer = InputLayer | ReluLayer | MaxPoolLayer | FullyConnectedLayer | DropoutLayer | SoftmaxLayer
 
   # Note: Data is stored within specific classes.
   #       Structure hierarchy: CNN > Layer > Filter > Channel > Row > Neuron/Synapse
 
   class CNN
     # General network parameters
-    getter :layers # , :all_neurons, :all_synapses
-    getter error_signal : Array(Float64), total_error : Float64, :mean_error, w_gradient : Array(Float64), b_gradient : Array(Float64)
+    getter layers : Array(CNNLayer | ConvLayer) # , :all_neurons, :all_synapses
+    getter error_signal : Array(Float64), total_error : Float64, mean_error : Float64, w_gradient : Array(Float64), b_gradient : Array(Float64)
 
     # Parameters for SGD + Momentum
     property learning_rate : Float64, momentum : Float64
@@ -52,10 +52,10 @@ module SHAInet
       @layers << InputLayer.new(input_volume)
     end
 
-    def add_conv(filters_num : Int32 = 1,
-                 window_size : Int32 = 1,
-                 stride : Int32 = 1,
-                 padding : Int32 = 0)
+    def add_conv(filters_num : Int32,
+                 window_size : Int32,
+                 stride : Int32,
+                 padding : Int32)
       @layers << ConvLayer.new(@layers.last, filters_num, window_size, stride, padding)
     end
 
@@ -67,12 +67,17 @@ module SHAInet
       @layers << MaxPoolLayer.new(@layers.last, pool, stride)
     end
 
-    def add_fconnect(l_size : Int32, softmax = false, activation_function : Proc(GenNum, Array(Float64)) = SHAInet.sigmoid)
-      @layers << FullyConnectedLayer.new(@layers.last, l_size, softmax = false, activation_function)
-    end
-
     def add_dropout(drop_percent : Int32 = 5)
       @layers << DropoutLayer.new(@layers.last, drop_percent)
+    end
+
+    def add_fconnect(l_size : Int32, activation_function : Proc(GenNum, Array(Float64)) = SHAInet.none)
+      @layers << FullyConnectedLayer.new(@layers.last, l_size, activation_function)
+    end
+
+    def add_softmax
+      raise CNNInitializationError.new("Softmax layer must come only after a fully connected layer.") unless @layers.last.class == SHAInet::FullyConnectedLayer
+      @layers << SoftmaxLayer.new(@layers.last.as(FullyConnectedLayer))
     end
 
     def run(input_data : Array(Array(Array(GenNum))), stealth : Bool = true)
@@ -81,7 +86,7 @@ module SHAInet
         puts "Starting run..."
       end
       # Activate all layers one by one
-      @layers.each_with_index do |layer, i|
+      @layers.each do |layer|
         if layer.is_a?(InputLayer)
           layer.as(InputLayer).activate(input_data) # activation of input layer
         else
@@ -91,10 +96,10 @@ module SHAInet
       # Get the result from the output layer
       if stealth == false
         puts "....."
-        puts "Network output is: #{@layers.last.as(FullyConnectedLayer).output}"
+        puts "Network output is: #{@layers.last.as(FullyConnectedLayer | SoftmaxLayer).output}"
         puts "############################"
       end
-      return @layers.last.as(FullyConnectedLayer).output
+      return @layers.last.as(FullyConnectedLayer | SoftmaxLayer).output
     end
 
     def evaluate(input_data : Array(Array(Array(GenNum))), expected_output : Array(GenNum), cost_function : Symbol | String)
@@ -108,13 +113,14 @@ module SHAInet
       case cost_function.to_s
       when "mse"
         expected_output.size.times do |i|
-          neuron = @layers.last.as(FullyConnectedLayer).filters[0][0][0][i] # Update error of all neurons in the output layer based on the actual result
+          neuron = @layers.last.as(FullyConnectedLayer | SoftmaxLayer).filters[0][0][0][i] # Update error of all neurons in the output layer based on the actual result
           neuron.gradient = SHAInet.quadratic_cost_derivative(expected_output[i].to_f64, actual[i].to_f64)*neuron.sigma_prime
           @error_signal << SHAInet.quadratic_cost(expected_output[i].to_f64, actual[i].to_f64) # Store the output error based on cost function
+          # .as(FullyConnectedLayer | MaxPoolLayer)
         end
       when "c_ent"
         expected_output.size.times do |i|
-          neuron = @layers.last.as(FullyConnectedLayer).filters[0][0][0][i]
+          neuron = @layers.last.as(FullyConnectedLayer | SoftmaxLayer).filters[0][0][0][i]
           neuron.gradient = SHAInet.cross_entropy_cost_derivative(expected_output[i].to_f64, actual[i].to_f64)*neuron.sigma_prime
           # TODO: add support for multiple output layers
           @error_signal << SHAInet.cross_entropy_cost(expected_output[i].to_f64, actual[i].to_f64)
@@ -163,24 +169,24 @@ module SHAInet
           evaluate(data_point[0], data_point[1], cost_function)
 
           # Propogate the errors backwards through the hidden layers
-          @layers.reverse_each do |l|
-            l.error_prop # Each layer has a different backpropogation function
+          @layers.reverse_each do |layer|
+            layer.error_prop # Each layer has a different backpropogation function
           end
 
           # Calculate MSE
           if @error_signal.size == 1
             error_avg = 0.0
           else
-            error_avg = @total_error/@output_layers.last.neurons.size
+            error_avg = @total_error/@layers.last.as(FullyConnectedLayer).output.size
           end
           sqrd_dists = [] of Float64
           @error_signal.each { |e| sqrd_dists << (e - error_avg)**2 }
           sqr_sum = sqrd_dists.reduce { |acc, i| acc + i }
-          @mean_error = sqr_sum/@output_layers.last.neurons.size
+          @mean_error = sqr_sum/@layers.last.as(FullyConnectedLayer).output.size
 
           # Update all wieghts & biases
-          update_weights(training_type, batch = false)
-          update_biases(training_type, batch = false)
+          # update_weights(training_type, batch = false)
+          # update_biases(training_type, batch = false)
 
           @prev_mean_error = @mean_error
         end

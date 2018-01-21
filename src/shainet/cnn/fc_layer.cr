@@ -5,20 +5,22 @@ module SHAInet
     getter filters : Array(Array(Array(Array(Neuron)))), prev_layer : CNNLayer | ConvLayer
     property next_layer : CNNLayer | ConvLayer | DummyLayer
     getter output : Array(Float64), :all_neurons, :all_synapses
-    @softmax : Bool
+
+    # @softmax : Bool
 
     #################################################
     # # This part is for dealing with conv layers # #
 
     def initialize(prev_layer : ConvLayer,
                    l_size : Int32,
-                   @softmax : Bool = false,
                    @activation_function : Proc(GenNum, Array(Float64)) = SHAInet.sigmoid,
                    @logger : Logger = Logger.new(STDOUT))
+      # @softmax : Bool = false,
       #
 
+      # since this is similar to a classic layer, we store all neurons in a single array
       filters = channels = height = 1
-      width = l_size # since this is similar to a classic layer, we store all neurons in a single array
+      width = l_size
 
       # Channel data is stored within the filters array, this is needed for smooth work with all other layers.
       @filters = Array(Array(Array(Array(Neuron)))).new(filters) {
@@ -57,13 +59,14 @@ module SHAInet
 
     def initialize(prev_layer : CNNLayer,
                    l_size : Int32,
-                   @softmax : Bool = false,
-                   @activation_function : Proc(GenNum, Array(Float64)) = SHAInet.sigmoid,
+                   @activation_function : Proc(GenNum, Array(Float64)) = SHAInet.none,
                    @logger : Logger = Logger.new(STDOUT))
+      # @softmax : Bool = false,
       #
 
+      # since this is similar to a classic layer, we store all neurons in a single array
       filters = channels = height = 1
-      width = l_size # since this is similar to a classic layer, we store all neurons in a single array
+      width = l_size
 
       # Channel data is stored within the filters array, this is needed for smooth work with all other layers.
       @filters = Array(Array(Array(Array(Neuron)))).new(filters) {
@@ -98,40 +101,48 @@ module SHAInet
     end
 
     def activate
-      if @softmax == true
-        sf_activations = [] of Float64
-        @filters.first.first.each do |row|
-          activations = [] of Float64
-          # Calculate the softmax values based on entire row
-          row.each do |neuron|
-            neuron.activate(@activation_function = SHAInet.none)
-            activations << neuron.activation
-            sf_activations = SHAInet.softmax(activations)
-          end
-          # Update the neuron activations to fit the softmax values
-          row.each_with_index do |neuron, i|
-            neuron.activation = sf_activations[i]
-          end
-        end
-        @output = sf_activations
-      else
-        @filters.first.first.first.each_with_index do |neuron, i|
-          neuron.activate(@activation_function)
-          @output[i] = neuron.activation
-        end
+      # if @softmax == true
+      #   sf_activations = [] of Float64
+      #   @filters.first.first.each do |row|
+      #     activations = [] of Float64
+      #     # Calculate the softmax values based on entire row
+      #     row.each do |neuron|
+      #       neuron.activate(@activation_function = SHAInet.none)
+      #       activations << neuron.activation
+      #     end
+      #     sf_activations = SHAInet.softmax(activations)
+      #     # Update the neuron activations to fit the softmax values
+      #     row.each_with_index do |neuron, i|
+      #       neuron.activation = sf_activations[i]
+      #     end
+      #   end
+      #   @output = sf_activations
+      # else
+      @filters.first.first.first.each_with_index do |neuron, i|
+        neuron.activate(@activation_function)
+        @output[i] = neuron.activation
       end
+      # end
     end
 
     def error_prop
       _error_prop(@next_layer)
     end
 
+    def _error_prop(next_layer : SoftmaxLayer)
+      @filters[0][0][0].size.times do |neuron|
+        @filters[0][0][0][neuron].activation = @next_layer.filters[0][0][0][neuron].activation
+        @filters[0][0][0][neuron].sigma_prime = @next_layer.filters[0][0][0][neuron].sigma_prime
+        @filters[0][0][0][neuron].gradient = @next_layer.filters[0][0][0][neuron].gradient
+      end
+    end
+
     def _error_prop(next_layer : ReluLayer | DropoutLayer)
-      @filters.each_with_index do |filter, fi|
-        filter.each_with_index do |channel, ch|
-          channel.each_with_index do |row, r|
-            row.each_with_index do |neuron, n|
-              neuron.gradient = next_layer.filters[fi][ch][r][n].gradient
+      @filters.size.times do |filter|
+        @filters[filter].size.times do |channel|
+          @filters[filter][channel].size.times do |row|
+            @filters[filter][channel][row].size.times do |neuron|
+              @filters[filter][channel][row][neuron].gradient = next_layer.filters[filter][channel][row][neuron].gradient
             end
           end
         end
@@ -139,8 +150,8 @@ module SHAInet
     end
 
     def _error_prop(next_layer : MaxPoolLayer)
-      @filters.each_with_index do |_f, filter|
-        _f.each_with_index do |_ch, channel|
+      @filters.size.times do |filter|
+        @filters[filter].size.times do |channel|
           input_x = input_y = output_x = output_y = 0
 
           while input_y < (@filters[filter][channel].size - @pool + @stride)   # Break out of y

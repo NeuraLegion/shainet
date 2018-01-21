@@ -2,7 +2,7 @@ require "logger"
 
 module SHAInet
   class DropoutLayer
-    getter filters : Array(Array(Array(Array(Neuron)))) | Array(Filter), drop_percent : Int32, prev_layer : CNNLayer | ConvLayer
+    getter filters : Array(Array(Array(Array(Neuron)))), drop_percent : Int32, prev_layer : CNNLayer | ConvLayer
     property next_layer : CNNLayer | ConvLayer | DummyLayer
 
     # Calls different activaton based on previous layer type
@@ -17,7 +17,20 @@ module SHAInet
     def initialize(prev_layer : ConvLayer, @drop_percent : Int32 = 5, @logger : Logger = Logger.new(STDOUT))
       raise CNNInitializationError.new("Drop percent must be Int of 0-100") unless (0..100).includes?(@drop_percent)
 
-      @filters = prev_layer.filters.clone
+      filters = prev_layer.filters.size
+      channels = 1
+      width = height = prev_layer.filters.first.neurons.size # Assumes row == height
+
+      # Channel data is stored within the filters array
+      # This is because after convolution each filter has different feature maps
+      @filters = Array(Array(Array(Array(Neuron)))).new(filters) {
+        Array(Array(Array(Neuron))).new(channels) {
+          Array(Array(Neuron)).new(height) {
+            Array(Neuron).new(width) { Neuron.new("memory") }
+          }
+        }
+      }
+
       @prev_layer = prev_layer
       @next_layer = DummyLayer.new
       @prev_layer.next_layer = self
@@ -25,13 +38,14 @@ module SHAInet
 
     # Randomly select and deactivate a percentage of the neurons from the previous layer
     def _activate(prev_layer : ConvLayer)
-      @filters = prev_layer.filters.clone
-      @filters.each do |filter|
-        filter.neurons.each do |row|
-          row.each do |neuron|
+      @filters.size.times do |filter|
+        @filters[filter][0].size.times do |row| # Conv layers may have multiple filters, but only one channel
+          @filters[filter][0][row].size.times do |neuron|
             x = rand(0..100)
             if x <= @drop_percent
-              neuron.activation = 0.0
+              @filters[filter][0][row][neuron].activation = 0.0
+            else
+              @filters[filter][0][row][neuron].activation = prev_layer.filters[filter].neurons[row][neuron].activation
             end
           end
         end
@@ -41,24 +55,43 @@ module SHAInet
     #######################################################################
     # # This part is for dealing with all layers other than conv layers # #
 
-    # Drop percent is an Int, i.e 5 is 5%
+    # Drop percent is an Integer, i.e 5 is 5%
     def initialize(prev_layer : CNNLayer, @drop_percent : Int32, @logger : Logger = Logger.new(STDOUT))
       raise CNNInitializationError.new("Drop percent must be Int of 0-100") unless (0..100).includes?(@drop_percent)
 
-      @filters = prev_layer.filters.clone
+      channels = prev_layer.filters.first.size
+      filters = 1
+      # Neurons are contained in Multi-Array
+      height = prev_layer.filters.first.first.size
+      width = prev_layer.filters.first.first.first.size
+      # Channel data is stored within the filters array
+      # This is because after convolution each filter has different feature maps
+      @filters = Array(Array(Array(Array(Neuron)))).new(filters) {
+        Array(Array(Array(Neuron))).new(channels) {
+          Array(Array(Neuron)).new(height) {
+            Array(Neuron).new(width) { Neuron.new("memory") }
+          }
+        }
+      }
+
+      # @filters = prev_layer.filters.clone
       @prev_layer = prev_layer
       @next_layer = DummyLayer.new
       @prev_layer.next_layer = self
     end
 
+    # Randomly select and deactivate a percentage of the neurons from the previous layer
     def _activate(prev_layer : CNNLayer)
-      @filters = prev_layer.filters.clone
-      @filters.first.each do |channel|
-        channel.each do |row|
-          row.each do |neuron|
-            x = rand(0..100)
-            if x <= @drop_percent
-              neuron.activation = 0.0
+      @filters.size.times do |filter|
+        @filters[filter].size.times do |channel|
+          @filters[filter][channel].size.times do |row|
+            @filters[filter][channel][row].size.times do |neuron|
+              x = rand(0..100)
+              if x <= @drop_percent
+                @filters[filter][channel][row][neuron].activation = 0.0
+              else
+                @filters[filter][channel][row][neuron].activation = prev_layer.filters[filter][channel][row][neuron].activation
+              end
             end
           end
         end
@@ -69,19 +102,21 @@ module SHAInet
       _error_prop(@next_layer)
     end
 
-    def _error_prop(next_layer : FullyConnectedLayer)
-      @filters.each do |filter|
-        filter.each do |channel|
-          channel.each do |row|
-            row.each { |neuron| neuron.hidden_error_prop }
+    def _error_prop(next_layer : ReluLayer | DropoutLayer)
+      @filters.size.times do |filter|
+        @filters[filter].size.times do |channel|
+          @filters[filter][channel].size.times do |row|
+            @filters[filter][channel][row].size.times do |neuron|
+              @filters[filter][channel][row][neuron].gradient = next_layer.filters[filter][channel][row][neuron].gradient
+            end
           end
         end
       end
     end
 
     def _error_prop(next_layer : MaxPoolLayer)
-      @filters.each_with_index do |_f, filter|
-        _f.each_with_index do |_ch, channel|
+      @filters.size.times do |filter|
+        @filters[filter].size.times do |channel|
           input_x = input_y = output_x = output_y = 0
 
           while input_y < (@filters[filter][channel].size - @pool + @stride)   # Break out of y
@@ -108,13 +143,11 @@ module SHAInet
       end
     end
 
-    def _error_prop(next_layer : ReluLayer | DropoutLayer)
-      @filters.each_with_index do |filter, fi|
-        filter.each_with_index do |channel, ch|
-          channel.each_with_index do |row, r|
-            row.each_with_index do |neuron, n|
-              neuron.gradient = next_layer.filters[fi][ch][r][n].gradient
-            end
+    def _error_prop(next_layer : FullyConnectedLayer)
+      @filters.each do |filter|
+        filter.each do |channel|
+          channel.each do |row|
+            row.each { |neuron| neuron.hidden_error_prop }
           end
         end
       end
