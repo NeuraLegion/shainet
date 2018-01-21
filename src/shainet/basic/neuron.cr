@@ -22,7 +22,7 @@ module SHAInet
 
       @input_sum = Float64.new(0)    # Sum of activations*weights from input neurons (z)
       @sigma_prime = Float64.new(1)  # derivative of input_sum based on activation function used (s')
-      @gradient_sum = Float64.new(0) # Needed for back propagation of convolution layers
+      @gradient_sum = Float64.new(0) # Needed for batch train and back propagation of convolution layers
 
       # Parameters needed for Rprop
       @prev_gradient = rand(-0.1..0.1).to_f64

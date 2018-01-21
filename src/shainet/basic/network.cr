@@ -358,11 +358,6 @@ module SHAInet
             log_summary(e)
             break
           end
-          if (@mean_error/@prev_mean_error <= 0.1) && (e > 1)
-            @logger.info("Reached optimum, error does not change anymore")
-            log_summary(e)
-            break
-          end
 
           batch_mean = [] of Float64
           all_errors = [] of Float64
@@ -380,7 +375,7 @@ module SHAInet
 
             # Sum all gradients from each data point for the batch update
             @all_synapses.each_with_index { |synapse, i| @w_gradient[i] += (synapse.source_neuron.activation)*(synapse.dest_neuron.gradient) }
-            @all_neurons.each_with_index { |neuron, i| @b_gradient[i] += neuron.bias }
+            @all_neurons.each_with_index { |neuron, i| @b_gradient[i] += neuron.gradient }
 
             # Calculate MSE per data point
             if @error_signal.size == 1

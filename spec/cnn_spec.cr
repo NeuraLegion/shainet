@@ -61,7 +61,9 @@ describe SHAInet::CNN do
     puts "Error signal is:\n#{cnn.error_signal}"
 
     # puts "-----"
-    cnn.train(training_data, training_type = :rprop, cost = :mse, epochs = 20000, threshold = 0.000001, log_each = 1000)
+    # cnn.train(training_data, training_type = :rprop, cost = :mse, epochs = 20000, threshold = 0.000001, log_each = 1000)
+
+    cnn.train_batch(training_data, training_type = :rprop, cost = :mse, epochs = 20000, threshold = 0.000001, log_each = 1000, minib = 1)
 
     puts "################################\n"
     puts "Network output:\n#{cnn.layers.last.as(SHAInet::FullyConnectedLayer | SHAInet::SoftmaxLayer).output}\n"

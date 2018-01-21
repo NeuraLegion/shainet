@@ -48,11 +48,22 @@ module SHAInet
       end
     end
 
-    def error_prop
+    def error_prop(batch : Bool = false)
       @prev_layer.filters.size.times do |filter|
         @prev_layer.filters[filter].neurons.size.times do |row|
           @prev_layer.filters[filter].neurons[row].size.times do |neuron|
-            @prev_layer.filters[filter].neurons[row][neuron].hidden_error_prop
+            target_neuron = @prev_layer.filters[filter].neurons[row][neuron]
+            target_neuron.hidden_error_prop
+            if batch == true
+              target_neuron.gradient_sum += target_neuron.gradient
+              target_neuron.synapses_out.each do |synapse|
+                synapse.gradient_sum += synapse.source_neuron.activation*synapse.dest_neuron.gradient
+              end
+            else
+              target_neuron.synapses_out.each do |synapse|
+                synapse.gradient = synapse.source_neuron.activation*synapse.dest_neuron.gradient
+              end
+            end
           end
         end
       end
@@ -60,15 +71,11 @@ module SHAInet
 
     def update_wb(learn_type : Symbol | String, batch : Bool = false)
       # Update all weights of the layer
-      @all_synapses.each_with_index do |synapse, i|
-        # Get current gradient
+      @all_synapses.each do |synapse|
         if batch == true
-          raise CNNInitializationError.new("Batch is not implemented yet.")
-          # synapse.gradient = @w_gradient.not_nil![i]
-        else
-          synapse.gradient = (synapse.source_neuron.activation)*(synapse.dest_neuron.gradient)
+          synapse.gradient = synapse.gradient_sum
+          synapse.gradient_sum = Float64.new(0) # Reset the gradient for next batch
         end
-
         case learn_type.to_s
         # Update weights based on the gradients and delta rule (including momentum)
         when "sgdm"
@@ -116,9 +123,10 @@ module SHAInet
       end
 
       # Update all biases of the layer
-      @all_neurons.each_with_index do |neuron, i|
+      @all_neurons.each do |neuron|
         if batch == true
-          # neuron.gradient = @b_gradient.not_nil![i]
+          neuron.gradient = neuron.gradient_sum
+          neuron.gradient_sum = Float64.new(0)
         end
 
         case learn_type.to_s

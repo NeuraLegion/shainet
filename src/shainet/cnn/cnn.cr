@@ -172,7 +172,7 @@ module SHAInet
 
           # Propogate the errors backwards through the hidden layers
           @layers.reverse_each do |layer|
-            layer.error_prop # Each layer has a different backpropogation function
+            layer.error_prop(batch = false) # Each layer has a different backpropogation function
           end
 
           # Calculate MSE
@@ -199,25 +199,113 @@ module SHAInet
       raise e
     end
 
+    # Batch train, updates weights/biases using a gradient sum from all data points in the batch (using gradient descent)
+    def train_batch(data : Array(Array(Array(Array(Array(Float64))) | Array(Float64))), # Input structure: data = [[Input = Array(Array(Array(GenNum)))],[Expected result = Array(GenNum)]]
+                    training_type : Symbol | String,                                    # Type of training: :sgdm, :rprop, :adam
+                    cost_function : Symbol | String,                                    # one of COST_FUNCTIONS described at the top of the file
+                    epochs : Int32,                                                     # a criteria of when to stop the training
+                    error_threshold : Float64,                                          # a criteria of when to stop the training
+                    log_each : Int32 = 1000,                                            # determines what is the step for error printout
+                    mini_batch_size : Int32 | Nil = nil)
+      #
+      @logger.info("Training started")
+      batch_size = mini_batch_size ? mini_batch_size : data.size
+      @time_step = 0
+      data.each_slice(batch_size, reuse = false) do |data_slice|
+        verify_data(data_slice)
+        @logger.info("Working on mini-batch size: #{batch_size}") if mini_batch_size
+        @time_step += 1 if mini_batch_size # in mini-batch update adam time_step
+        loop do |e|
+          if e % log_each == 0
+            log_summary(e)
+            # @all_neurons.each { |s| puts s.gradient }
+          end
+          if e >= epochs || (error_threshold >= @mean_error) && (e > 1)
+            log_summary(e)
+            break
+          end
+          if (@mean_error/@prev_mean_error <= 0.1) && (e > 1)
+            @logger.info("Reached optimum, error does not change anymore")
+            log_summary(e)
+            break
+          end
+
+          batch_mean = [] of Float64
+          all_errors = [] of Float64
+
+          # Go over each data point and collect gradients of weights/biases based on each specific example
+          data_slice.each do |data_point|
+            # Update error signal, error gradient and total error at the output layer based on current input
+            evaluate(data_point[0].as(Array(Array(Array(Float64)))), data_point[1].as(Array(Float64)), cost_function)
+            all_errors << @total_error
+            # Propogate the errors backwards through the hidden layers
+            @layers.reverse_each do |layer|
+              layer.error_prop(batch = true) # Each layer has a different backpropogation function
+            end
+
+            # Calculate MSE per data point
+            if @error_signal.size == 1
+              error_avg = 0.0
+            else
+              error_avg = @total_error/@layers.last.as(FullyConnectedLayer | SoftmaxLayer).output.size
+            end
+            sqrd_dists = [] of Float64
+            @error_signal.each { |e| sqrd_dists << (e - error_avg)**2 }
+
+            @mean_error = (sqrd_dists.reduce { |acc, i| acc + i })/@layers.last.as(FullyConnectedLayer | SoftmaxLayer).output.size
+            batch_mean << @mean_error
+          end
+
+          # Total error per batch
+          @total_error = all_errors.reduce { |acc, i| acc + i }
+
+          # Calculate MSE per batch
+          batch_mean = (batch_mean.reduce { |acc, i| acc + i })/data_slice.size
+          @mean_error = batch_mean
+
+          # Update all wieghts & biases for the batch
+          @time_step += 1 unless mini_batch_size # Based on how many epochs have passed in current training run, needed for Adam
+          # Update all wieghts & biases
+          update_wb(training_type, batch = true)
+
+          @prev_mean_error = @mean_error
+        end
+      end
+    end
+
     # Go over all layers and update the weights and biases, based on learning type chosen
     def update_wb(training_type : Symbol | String, batch : Bool = false)
       @layers.each do |layer|
-        layer.update_wb(training_type, batch = false) # Each layer does this function differently
+        layer.update_wb(training_type, batch) # Each layer does this function differently
+      end
+    end
+
+    def verify_data(data : Array(Array(Array(Array(Array(Float64))) | Array(Float64))))
+      message = nil
+      if data.sample.size != 2
+        message = "Train data must have two arrays, one for input one for output"
+      end
+      random_input = data.sample.first.size
+      random_output = data.sample.last.size
+      data.each_with_index do |test, i|
+        if (test.first.size != random_input)
+          message = "Input data sizes are inconsistent"
+        end
+        if (test.last.size != random_output)
+          message = "Output data sizes are inconsistent"
+        end
+        unless (test.last.size == @layers.last.as(FullyConnectedLayer | SoftmaxLayer).filters[0].neurons[0].size)
+          message = "data at index #{i} and size: #{test.last.size} mismatch output layer size"
+        end
+      end
+      if message
+        @logger.error("#{message}: #{data}")
+        raise NeuralNetTrainError.new(message)
       end
     end
 
     def log_summary(e)
       @logger.info("Epoch: #{e}, Total error: #{@total_error}, MSE: #{@mean_error}")
-    end
-  end
-
-  class DummyLayer
-    # This is a place-holder layer, allows explicit network directionality
-
-    @filters : Nil
-
-    def initialize
-      @filters = nil
     end
   end
 end
