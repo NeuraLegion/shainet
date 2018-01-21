@@ -6,7 +6,8 @@ module SHAInet
 
   class Neuron
     property :synapses_in, :synapses_out, :n_type, activation : Float64, gradient : Float64, bias : Float64, prev_bias : Float64
-    property :input_sum, :sigma_prime, :id
+    property input_sum : Float64, sigma_prime : Float64, gradient_sum : Float64, :id
+
     property prev_gradient : Float64, prev_delta : Float64, prev_delta_b : Float64
     property m_current : Float64, v_current : Float64, m_prev : Float64, v_prev : Float64
 
@@ -19,8 +20,9 @@ module SHAInet
       @bias = rand(-1..1).to_f64      # Activation threshhold (b)
       @prev_bias = rand(-1..1).to_f64 # Needed for delta rule improvement using momentum
 
-      @input_sum = Float64.new(0)   # Sum of activations*weights from input neurons (z)
-      @sigma_prime = Float64.new(1) # derivative of input_sum based on activation function used (s')
+      @input_sum = Float64.new(0)    # Sum of activations*weights from input neurons (z)
+      @sigma_prime = Float64.new(1)  # derivative of input_sum based on activation function used (s')
+      @gradient_sum = Float64.new(0) # Needed for back propagation of convolution layers
 
       # Parameters needed for Rprop
       @prev_gradient = rand(-0.1..0.1).to_f64

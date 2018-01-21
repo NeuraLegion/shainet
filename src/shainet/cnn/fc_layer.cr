@@ -2,204 +2,199 @@ require "logger"
 
 module SHAInet
   class FullyConnectedLayer
-    getter filters : Array(Array(Array(Array(Neuron)))), prev_layer : CNNLayer | ConvLayer
-    property next_layer : CNNLayer | ConvLayer | DummyLayer
+    getter filters : Array(Filter), prev_layer : CNNLayer | ConvLayer
     getter output : Array(Float64), :all_neurons, :all_synapses
 
-    # @softmax : Bool
-
-    #################################################
-    # # This part is for dealing with conv layers # #
-
-    def initialize(prev_layer : ConvLayer,
-                   l_size : Int32,
-                   @activation_function : Proc(GenNum, Array(Float64)) = SHAInet.sigmoid,
-                   @logger : Logger = Logger.new(STDOUT))
-      # @softmax : Bool = false,
-      #
-
-      # since this is similar to a classic layer, we store all neurons in a single array
-      filters = channels = height = 1
-      width = l_size
-
-      # Channel data is stored within the filters array, this is needed for smooth work with all other layers.
-      @filters = Array(Array(Array(Array(Neuron)))).new(filters) {
-        Array(Array(Array(Neuron))).new(channels) {
-          Array(Array(Neuron)).new(height) {
-            Array(Neuron).new(width) { Neuron.new("memory") }
-          }
-        }
-      }
-
-      @output = Array(Float64).new(l_size) { 0.0 }
-      @all_neurons = Array(Neuron).new
-      @all_synapses = Array(Synapse).new
-
-      # Connect the last layer to the output layer (fully connect)
-      @filters.first.first.first.each do |neuron2| # Target neuron
-        prev_layer.filters.size.times do |filter|
-          prev_layer.filters[filter].neurons.size.times do |row|
-            prev_layer.filters[filter].neurons[row].each do |neuron1| # Source neuron
-              synapse = Synapse.new(neuron1, neuron2)
-              neuron1.synapses_out << synapse
-              neuron2.synapses_in << synapse
-              @all_neurons << neuron2
-              @all_synapses << synapse
-            end
-          end
-        end
-      end
-      @prev_layer = prev_layer
-      @next_layer = DummyLayer.new
-      prev_layer.next_layer = self
-    end
-
-    #######################################################################
-    # # This part is for dealing with all layers other than conv layers # #
-
-    def initialize(prev_layer : CNNLayer,
+    def initialize(@master_network : CNN,
+                   @prev_layer : CNNLayer | ConvLayer,
                    l_size : Int32,
                    @activation_function : Proc(GenNum, Array(Float64)) = SHAInet.none,
                    @logger : Logger = Logger.new(STDOUT))
-      # @softmax : Bool = false,
       #
-
       # since this is similar to a classic layer, we store all neurons in a single array
-      filters = channels = height = 1
+      filters = height = 1
       width = l_size
 
-      # Channel data is stored within the filters array, this is needed for smooth work with all other layers.
-      @filters = Array(Array(Array(Array(Neuron)))).new(filters) {
-        Array(Array(Array(Neuron))).new(channels) {
-          Array(Array(Neuron)).new(height) {
-            Array(Neuron).new(width) { Neuron.new("memory") }
-          }
-        }
-      }
+      @filters = Array(Filter).new(filters) { Filter.new([width, height, filters]) }
 
       @output = Array(Float64).new(l_size) { 0.0 }
       @all_neurons = Array(Neuron).new
       @all_synapses = Array(Synapse).new
 
-      # Connect the last layer to the output layer (fully connect)
-      @filters.first.first.first.each do |neuron2| # Target neuron
-        prev_layer.filters.first.size.times do |channel|
-          prev_layer.filters.first[channel].size.times do |row|
-            prev_layer.filters.first[channel][row].each do |neuron1| # Source neuron
-              synapse = Synapse.new(neuron1, neuron2)
-              neuron1.synapses_out << synapse
-              neuron2.synapses_in << synapse
-              @all_neurons << neuron2
+      @w_gradient = Array(Float64).new # Needed for batch train
+      @b_gradient = Array(Float64).new # Needed for batch train
+
+      # Connect the last layer to the neurons of this layer (fully connect)
+      @filters.first.neurons.first.each do |target_neuron|
+        @prev_layer.filters.size.times do |filter|
+          @prev_layer.filters[filter].neurons.size.times do |row|
+            @prev_layer.filters[filter].neurons[row].each do |source_neuron|
+              synapse = Synapse.new(source_neuron, target_neuron)
+              source_neuron.synapses_out << synapse
+              target_neuron.synapses_in << synapse
+              @all_neurons << target_neuron
+
               @all_synapses << synapse
             end
           end
         end
       end
-      @prev_layer = prev_layer
-      @next_layer = DummyLayer.new
-      prev_layer.next_layer = self
     end
 
     def activate
-      # if @softmax == true
-      #   sf_activations = [] of Float64
-      #   @filters.first.first.each do |row|
-      #     activations = [] of Float64
-      #     # Calculate the softmax values based on entire row
-      #     row.each do |neuron|
-      #       neuron.activate(@activation_function = SHAInet.none)
-      #       activations << neuron.activation
-      #     end
-      #     sf_activations = SHAInet.softmax(activations)
-      #     # Update the neuron activations to fit the softmax values
-      #     row.each_with_index do |neuron, i|
-      #       neuron.activation = sf_activations[i]
-      #     end
-      #   end
-      #   @output = sf_activations
-      # else
-      @filters.first.first.first.each_with_index do |neuron, i|
+      @filters.first.neurons.first.each_with_index do |neuron, i|
         neuron.activate(@activation_function)
         @output[i] = neuron.activation
       end
-      # end
     end
 
     def error_prop
-      _error_prop(@next_layer)
-    end
-
-    def _error_prop(next_layer : SoftmaxLayer)
-      @filters[0][0][0].size.times do |neuron|
-        @filters[0][0][0][neuron].activation = @next_layer.filters[0][0][0][neuron].activation
-        @filters[0][0][0][neuron].sigma_prime = @next_layer.filters[0][0][0][neuron].sigma_prime
-        @filters[0][0][0][neuron].gradient = @next_layer.filters[0][0][0][neuron].gradient
-      end
-    end
-
-    def _error_prop(next_layer : ReluLayer | DropoutLayer)
-      @filters.size.times do |filter|
-        @filters[filter].size.times do |channel|
-          @filters[filter][channel].size.times do |row|
-            @filters[filter][channel][row].size.times do |neuron|
-              @filters[filter][channel][row][neuron].gradient = next_layer.filters[filter][channel][row][neuron].gradient
-            end
+      @prev_layer.filters.size.times do |filter|
+        @prev_layer.filters[filter].neurons.size.times do |row|
+          @prev_layer.filters[filter].neurons[row].size.times do |neuron|
+            @prev_layer.filters[filter].neurons[row][neuron].hidden_error_prop
           end
         end
       end
     end
 
-    def _error_prop(next_layer : MaxPoolLayer)
-      @filters.size.times do |filter|
-        @filters[filter].size.times do |channel|
-          input_x = input_y = output_x = output_y = 0
+    def update_wb(learn_type : Symbol | String, batch : Bool = false)
+      # Update all weights of the layer
+      @all_synapses.each_with_index do |synapse, i|
+        # Get current gradient
+        if batch == true
+          raise CNNInitializationError.new("Batch is not implemented yet.")
+          # synapse.gradient = @w_gradient.not_nil![i]
+        else
+          synapse.gradient = (synapse.source_neuron.activation)*(synapse.dest_neuron.gradient)
+        end
 
-          while input_y < (@filters[filter][channel].size - @pool + @stride)   # Break out of y
-            while input_x < (@filters[filter][channel].size - @pool + @stride) # Break out of x (assumes x = y)
-              pool_neuron = next_layer.filters[filter][channel][output_y][output_x]
+        case learn_type.to_s
+        # Update weights based on the gradients and delta rule (including momentum)
+        when "sgdm"
+          delta_weight = (-1)*@master_network.learning_rate*synapse.gradient + @master_network.momentum*(synapse.weight - synapse.prev_weight)
+          synapse.weight += delta_weight
+          synapse.prev_weight = synapse.weight
 
-              # Only propagate error to the neurons that were chosen during the max pool
-              @filters[filter][channel][input_y..(input_y + @pool - 1)].each do |row|
-                row[input_x..(input_x + @pool - 1)].each do |neuron|
-                  if neuron.activation == pool_neuron.activation
-                    neuron.gradient = pool_neuron.gradient
-                  end
-                end
-              end
+          # Update weights based on Resilient backpropogation (Rprop), using the improved varient iRprop+
+        when "rprop"
+          if synapse.prev_gradient*synapse.gradient > 0
+            delta = [@master_network.etah_plus*synapse.prev_delta, @master_network.delta_max].min
+            delta_weight = (-1)*SHAInet.sign(synapse.gradient)*delta
 
-              input_x += @stride
-              output_x += 1
-            end
-            input_x = output_x = 0
-            input_y += @stride
-            output_y += 1
+            synapse.weight += delta_weight
+            synapse.prev_weight = synapse.weight
+            synapse.prev_delta = delta
+            synapse.prev_delta_w = delta_weight
+          elsif synapse.prev_gradient*synapse.gradient < 0.0
+            delta = [@master_network.etah_minus*synapse.prev_delta, @master_network.delta_min].max
+
+            synapse.weight -= synapse.prev_delta_w if @master_network.mean_error >= @master_network.prev_mean_error
+
+            synapse.prev_gradient = 0.0
+            synapse.prev_delta = delta
+          elsif synapse.prev_gradient*synapse.gradient == 0.0
+            delta_weight = (-1)*SHAInet.sign(synapse.gradient)*synapse.prev_delta
+
+            synapse.weight += delta_weight
+            synapse.prev_delta = @master_network.delta_min
+            synapse.prev_delta_w = delta_weight
           end
+          #
+          # Update weights based on Adaptive moment estimation (Adam)
+        when "adam"
+          synapse.m_current = @master_network.beta1*synapse.m_prev + (1 - @master_network.beta1)*synapse.gradient
+          synapse.v_current = @master_network.beta2*synapse.v_prev + (1 - @master_network.beta2)*(synapse.gradient)**2
+
+          m_hat = synapse.m_current/(1 - (@master_network.beta1)**@master_network.time_step)
+          v_hat = synapse.v_current/(1 - (@master_network.beta2)**@master_network.time_step)
+          synapse.weight -= (@master_network.alpha*m_hat)/(v_hat**0.5 + @master_network.epsilon)
+
+          synapse.m_prev = synapse.m_current
+          synapse.v_prev = synapse.v_current
         end
       end
-    end
 
-    def _error_prop(next_layer : FullyConnectedLayer)
-      @filters.first.first.first.each { |neuron| neuron.hidden_error_prop }
-    end
+      # Update all biases of the layer
+      @all_neurons.each_with_index do |neuron, i|
+        if batch == true
+          # neuron.gradient = @b_gradient.not_nil![i]
+        end
 
-    def _error_prop(next_layer : DummyLayer)
-      # Do nothing because this is the last layer in the network
+        case learn_type.to_s
+        # Update biases based on the gradients and delta rule (including momentum)
+        when "sgdm"
+          delta_bias = (-1)*@master_network.learning_rate*(neuron.gradient) + @master_network.momentum*(neuron.bias - neuron.prev_bias)
+          neuron.bias += delta_bias
+          neuron.prev_bias = neuron.bias
+
+          # Update weights based on Resilient backpropogation (Rprop), using the improved varient iRprop+
+        when "rprop"
+          if neuron.prev_gradient*neuron.gradient > 0
+            delta = [@master_network.etah_plus*neuron.prev_delta, @master_network.delta_max].min
+            delta_bias = (-1)*SHAInet.sign(neuron.gradient)*delta
+
+            neuron.bias += delta_bias
+            neuron.prev_bias = neuron.bias
+            neuron.prev_delta = delta
+            neuron.prev_delta_b = delta_bias
+          elsif neuron.prev_gradient*neuron.gradient < 0.0
+            delta = [@master_network.etah_minus*neuron.prev_delta, @master_network.delta_min].max
+
+            neuron.bias -= neuron.prev_delta_b if @master_network.mean_error >= @master_network.prev_mean_error
+
+            neuron.prev_gradient = 0.0
+            neuron.prev_delta = delta
+          elsif neuron.prev_gradient*neuron.gradient == 0.0
+            delta_bias = (-1)*SHAInet.sign(neuron.gradient)*@master_network.delta_min*neuron.prev_delta
+
+            neuron.bias += delta_bias
+            neuron.prev_delta = @master_network.delta_min
+            neuron.prev_delta_b = delta_bias
+          end
+          #
+          # Update weights based on Adaptive moment estimation (Adam)
+        when "adam"
+          neuron.m_current = @master_network.beta1*neuron.m_prev + (1 - @master_network.beta1)*neuron.gradient
+          neuron.v_current = @master_network.beta2*neuron.v_prev + (1 - @master_network.beta2)*(neuron.gradient)**2
+
+          m_hat = neuron.m_current/(1 - (@master_network.beta1)**@master_network.time_step)
+          v_hat = neuron.v_current/(1 - (@master_network.beta2)**@master_network.time_step)
+          neuron.bias -= (@master_network.alpha*m_hat)/(v_hat**0.5 + @master_network.epsilon)
+
+          neuron.m_prev = neuron.m_current
+          neuron.v_prev = neuron.v_current
+        end
+      end
     end
 
     def inspect(what : String)
-      puts "Fully_connected layer:"
       case what
       when "weights"
-        @filters.first.first.first.each_with_index do |neuron, i|
+        @filters.first.neurons.first.each_with_index do |neuron, i|
           puts "Neuron: #{i}, incoming weights:"
-          puts "#{neuron.synapses_in.map { |synapse| synapse.weight }}"
+          puts "#{neuron.synapses_in.map { |synapse| synapse.weight.round(4) }}"
         end
       when "bias"
-        @filters.first.first.first.each_with_index { |neuron, i| puts "Neuron: #{i}, bias: #{neuron.bias}" }
+        @filters.first.neurons.first.each_with_index { |neuron, i| puts "Neuron: #{i}, bias: #{neuron.bias.round(4)}" }
       when "activations"
-        @filters.first.first.each { |row| puts "#{row.map { |n| n.activation }}" }
+        @filters.each_with_index do |filter, f|
+          puts "---"
+          puts "Filter: #{f}, neuron activations are:"
+          filter.neurons.each do |row|
+            puts "#{row.map { |n| n.activation.round(4) }}"
+          end
+        end
+      when "gradients"
+        @filters.each_with_index do |filter, f|
+          puts "---"
+          puts "Filter: #{f}, neuron gradients are:"
+          filter.neurons.each do |row|
+            puts "#{row.map { |n| n.gradient.round(4) }}"
+          end
+        end
       end
-      puts "------------"
+      puts "------------------------------------------------"
     end
   end
 end
