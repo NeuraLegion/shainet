@@ -1,13 +1,14 @@
 module SHAInet
   class Synapse
     property source_neuron : Neuron, dest_neuron : Neuron
-    property weight : Float64, gradient : Float64, prev_weight : Float64
+    property weight : Float64, gradient : Float64, gradient_sum : Float64, prev_weight : Float64
     property prev_gradient : Float64, prev_delta : Float64, prev_delta_w : Float64
     property m_current : Float64, v_current : Float64, m_prev : Float64, v_prev : Float64
 
     def initialize(@source_neuron : Neuron, @dest_neuron : Neuron)
       @weight = rand(-1.0..1.0).to_f64   # Weight of the synapse
       @gradient = rand(-0.1..0.1).to_f64 # Error of the synapse with respect to cost function (dC/dW)
+      @gradient_sum = Float64.new(0)     # Needed for batch train
       @prev_weight = Float64.new(0)      # Needed for delta rule improvement (with momentum)
 
       # Parameters needed for Rprop

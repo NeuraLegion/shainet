@@ -32,7 +32,7 @@ module SHAInet
       end
     end
 
-    def error_prop
+    def error_prop(batch : Bool = false)
       # Do nothing
     end
 

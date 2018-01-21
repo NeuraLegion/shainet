@@ -40,7 +40,7 @@ module SHAInet
     end
 
     # Send the gradients from current layer backwards without weights, only to the max neurons from forward prop
-    def error_prop
+    def error_prop(batch : Bool = false)
       @prev_layer.filters.size.times do |filter|
         # Zoom in on a small window out of the data matrix and update
         input_x = input_y = output_x = output_y = 0

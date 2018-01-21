@@ -40,7 +40,7 @@ module SHAInet
       @filters.each { |filter| filter.propagate_forward(@prev_layer) }
     end
 
-    def error_prop
+    def error_prop(batch : Bool = false)
       @filters.each { |filter| filter.propagate_backward(@prev_layer) }
     end
 
@@ -50,11 +50,9 @@ module SHAInet
           filter.synapses[channel].size.times do |row|
             filter.synapses[channel][row].size.times do |col|
               synapse = filter.synapses[channel][row][col]
-              # Get current gradient
-              if batch == true
-                raise CNNInitializationError.new("Batch is not implemented yet.")
-                # synapse.gradient = @w_gradient.not_nil![i]
-              end
+
+              synapse.gradient = synapse.gradient_sum # Get current gradient
+              synapse.gradient_sum = Float64.new(0)   # Reset gradient sum for next batch
 
               case learn_type.to_s
               # Update weights based on the gradients and delta rule (including momentum)
@@ -104,15 +102,8 @@ module SHAInet
           end
         end
 
-        # Update biases of the layer
-
-        if batch == true
-          raise CNNInitializationError.new("Batch is not implemented yet.")
-          # neuron.gradient = @b_gradient.not_nil![i]
-        else
-          filter.bias_grad = filter.bias_grad_sum
-          filter.bias_grad_sum = Float64.new(0)
-        end
+        filter.bias_grad = filter.bias_grad_sum # Update biases of the layer
+        filter.bias_grad_sum = Float64.new(0)   # Resest bias sum of the layer
 
         case learn_type.to_s
         # Update biases based on the gradients and delta rule (including momentum)

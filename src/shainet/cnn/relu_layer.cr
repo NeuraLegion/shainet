@@ -28,7 +28,7 @@ module SHAInet
     end
 
     # Send the gradients from current layer backwards without weights
-    def error_prop
+    def error_prop(batch : Bool = false)
       @filters.size.times do |filter|
         @filters[filter].neurons.size.times do |row|
           @filters[filter].neurons[row].size.times do |neuron|
