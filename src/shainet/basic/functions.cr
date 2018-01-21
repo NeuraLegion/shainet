@@ -1,6 +1,10 @@
 module SHAInet
   # As Procs
 
+  def self.none : Proc(GenNum, Array(Float64)) # Output range -inf..inf)
+    ->(value : GenNum) { [value.to_f64, 1.0.to_f64] }
+  end
+
   def self.sigmoid : Proc(GenNum, Array(Float64)) # Output range (0..1)
     ->(value : GenNum) { [_sigmoid(value), _sigmoid_prime(value)] }
   end
@@ -60,6 +64,32 @@ module SHAInet
     end
   end
 
+  def self.softmax(array : Array(GenNum)) : Array(Float64)
+    out_array = Array(Float64).new(array.size) { 0.0 }
+    exp_sum = Float64.new(0.0)
+    array.each { |value| exp_sum += Math::E**(value) }
+    array.size.times { |i| out_array[i] = (Math::E**array[i])/exp_sum }
+    return out_array
+  end
+
+  # The input array in this case has to be the output array of the softmax function
+  def self.softmax_prime(array : Array(GenNum)) : Array(Float64)
+    out_array = Array(Float64).new(array.size) { 0.0 }
+    array.each_with_index { |value, i| out_array[i] = array[i]*(1 - array[i]) }
+    return out_array
+  end
+
+  # Not working yet, do not use
+  def self.log_softmax(array : Array(GenNum)) : Array(Float64)
+    out_array = Array(Float64).new(array.size) { 0.0 }
+    m = array.max
+    exp_sum = Float64.new(0.0)
+    array.each { |value| exp_sum += Math::E**(value - m) }
+
+    array.size.times { |i| out_array[i] = (Math::E**(array[i] - m - Math.log(exp_sum, 10))) }
+    return out_array
+  end
+
   # # Derivatives of activation functions # #
 
   def self._sigmoid_prime(value : GenNum) : Float64
@@ -103,8 +133,13 @@ module SHAInet
   end
 
   def self.cross_entropy_cost(expected : Float64, actual : Float64) : Float64
-    # Cost function =
-    return ((-1)*(expected*Math.log((actual), Math::E) + (1.0 - expected)*Math.log((1.0 - actual), Math::E))).to_f64
+    raise MathError.new("Cross entropy cost is not implemented fully yet, please use quadratic cost for now.")
+    # a = ((-1)*((expected*Math.log((actual), Math::E) + (1.0 - expected)*Math.log((1.0 - actual), Math::E))**2)**0.5).to_f64
+    # if a.to_s.match(/(-NaN|NaN|Infinity)/i)
+    #   return 0.0
+    # else
+    #   return a
+    # end
   end
 
   # # Derivatives of cost functions # #
@@ -114,15 +149,23 @@ module SHAInet
   end
 
   def self.cross_entropy_cost_derivative(expected : Float64, actual : Float64) : Float64
-    return ((actual - expected)/((1.0 - actual)*actual)).to_f64
+    if actual == expected == 0.0 || actual == expected == 1.0
+      a = 0.0
+    elsif actual == 0.0 && expected != 0.0
+      a = -1.0
+    else
+      a = ((actual - expected)/((1.0 - actual)*actual)).to_f64
+    end
+    # puts a
+    return a
   end
 
   ##################################################################
 
   # # Linear algebra math # #
 
-  # vector multiplication
-  def self.vector_mult(array1 : Array(Float64), array2 : Array(Float64))
+  # vector elment-by-element multiplication
+  def self.vector_mult(array1 : Array(GenNum), array2 : Array(GenNum))
     raise MathError.new("Vectors must be the same size to multiply!") if array1.size != array2.size
 
     new_vector = [] of Float64
@@ -133,6 +176,7 @@ module SHAInet
     new_vector
   end
 
+  # vector elment-by-element multiplication
   def self.vector_sum(array1 : Array(Float64), array2 : Array(Float64))
     raise MathError.new("Vectors must be the same size to sum!") if array1.size != array2.size
 
@@ -142,6 +186,21 @@ module SHAInet
       new_vector << result
     end
     new_vector
+  end
+
+  # Matrix dot product
+  def self.dot_product(m1 : Array(Array(GenNum)), m2 : Array(Array(GenNum)))
+    out_matrix = [] of Array(Float64)
+    m2 = m2.transpose
+    m1.each do |v1|
+      new_row = [] of Float64
+      m2.each do |v2|
+        new_vector = vector_mult(v1, v2)
+        new_row << new_vector.reduce { |acc, i| acc + i }
+      end
+      out_matrix << new_row
+    end
+    out_matrix
   end
 
   ##################################################################
@@ -213,9 +272,5 @@ module SHAInet
     else
       return 0
     end
-  end
-
-  def self.softmax
-    # TODO
   end
 end
