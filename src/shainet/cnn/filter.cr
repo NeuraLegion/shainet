@@ -4,7 +4,9 @@ module SHAInet
   class Filter
     getter input_surface : Array(Int32), window_size : Int32, stride : Int32, padding : Int32, activation_function : Proc(GenNum, Array(Float64))
     property neurons : Array(Array(Neuron)), synapses : Array(Array(Array(CnnSynapse)))
-    property bias : Float64, bias_sum : Float64, prev_bias : Float64
+    property bias : Float64, prev_bias : Float64, bias_grad : Float64, bias_grad_sum : Float64
+    property prev_bias_grad : Float64, prev_delta : Float64, prev_delta_b : Float64
+    property m_current : Float64, v_current : Float64, m_prev : Float64, v_prev : Float64
 
     def initialize(@input_surface : Array(Int32), # expecting [width, height, channels]
                    @padding : Int32 = 0,
@@ -22,13 +24,26 @@ module SHAInet
         }
       }
 
-      @bias = rand(-1..1).to_f64
-      @bias_sum = Float64.new(0)
-      @prev_bias = rand(-1..1).to_f64 # Needed for delta rule improvement using momentum
-
       @blank_neuron = Neuron.new("memory") # This is needed for padding
       @blank_neuron.activation = 0.0
       @blank_neuron.gradient = 0.0
+
+      @bias = rand(-1..1).to_f64
+      @prev_bias = rand(-1..1).to_f64 # Needed for delta rule improvement using momentum
+      @bias_grad = Float64.new(0)
+      @bias_grad_sum = Float64.new(0)
+
+      # Parameters needed for Rprop
+      @prev_bias_grad = rand(-0.1..0.1).to_f64
+      @prev_delta = rand(0.0..0.1).to_f64
+      @prev_delta_b = rand(-0.1..0.1).to_f64
+
+      # Parameters needed for Adam
+      @m_current = Float64.new(0) # Current moment value
+      @v_current = Float64.new(0) # Current moment**2 value
+      @m_prev = Float64.new(0)    # Previous moment value
+      @v_prev = Float64.new(0)    # Previous moment**2 value
+
     end
 
     def propagate_forward(input_layer : ConvLayer | CNNLayer)
@@ -179,7 +194,7 @@ module SHAInet
                 target_neuron = window[channel][row][col]
                 target_neuron.gradient = synapse.weight*source_neuron.gradient*target_neuron.sigma_prime
                 synapse.gradient_sum += target_neuron.activation*source_neuron.gradient
-                @bias_sum += source_neuron.gradient
+                @bias_grad_sum += source_neuron.gradient
               end
             end
           end

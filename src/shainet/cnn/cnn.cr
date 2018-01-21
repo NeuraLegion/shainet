@@ -57,7 +57,7 @@ module SHAInet
                  stride : Int32,
                  padding : Int32,
                  activation_function : Proc(GenNum, Array(Float64)) = SHAInet.none)
-      @layers << ConvLayer.new(@layers.last, filters_num, window_size, stride, padding, activation_function, @learning_rate, @momentum)
+      @layers << ConvLayer.new(master = self, @layers.last, filters_num, window_size, stride, padding, activation_function)
     end
 
     def add_relu(l_relu_slope : Float64 = 0.0)
@@ -73,7 +73,7 @@ module SHAInet
     end
 
     def add_fconnect(l_size : Int32, activation_function : Proc(GenNum, Array(Float64)) = SHAInet.none)
-      @layers << FullyConnectedLayer.new(@layers.last, l_size, activation_function, @learning_rate, @momentum)
+      @layers << FullyConnectedLayer.new(master = self, @layers.last, l_size, activation_function)
     end
 
     def add_softmax
