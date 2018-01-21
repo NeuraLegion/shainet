@@ -122,6 +122,7 @@ module SHAInet
       when "c_ent"
         expected_output.size.times do |i|
           neuron = @layers.last.as(FullyConnectedLayer | SoftmaxLayer).filters.first.neurons.first[i]
+
           neuron.gradient = SHAInet.cross_entropy_cost_derivative(expected_output[i].to_f64, actual[i].to_f64)*neuron.sigma_prime
           # TODO: add support for multiple output layers
           @error_signal << SHAInet.cross_entropy_cost(expected_output[i].to_f64, actual[i].to_f64)
@@ -187,6 +188,7 @@ module SHAInet
 
           # Update all wieghts & biases
           update_wb(training_type, batch = false)
+
           # update_biases(training_type, batch = false)
 
           @prev_mean_error = @mean_error
@@ -203,118 +205,6 @@ module SHAInet
         layer.update_wb(training_type, batch = false) # Each layer does this function differently
       end
     end
-
-    # # Update weights based on the learning type chosen and layer type
-    # def update_weights(learn_type : Symbol | String, batch : Bool = false)
-    #   @layers.each do |layer|
-    #   end
-    #   @all_synapses.each_with_index do |synapse, i|
-    #     # Get current gradient
-    #     if batch == true
-    #       raise CNNInitializationError.new("Batch is not implemented yet.")
-    #       synapse.gradient = @w_gradient.not_nil![i]
-    #     else
-    #       synapse.gradient = (synapse.source_neuron.activation)*(synapse.dest_neuron.gradient)
-    #     end
-
-    #     case learn_type.to_s
-    #     # Update weights based on the gradients and delta rule (including momentum)
-    #     when "sgdm"
-    #       delta_weight = (-1)*@learning_rate*synapse.gradient + @momentum*(synapse.weight - synapse.prev_weight)
-    #       synapse.weight += delta_weight
-    #       synapse.prev_weight = synapse.weight
-
-    #       # Update weights based on Resilient backpropogation (Rprop), using the improved varient iRprop+
-    #     when "rprop"
-    #       if synapse.prev_gradient*synapse.gradient > 0
-    #         delta = [@etah_plus*synapse.prev_delta, @delta_max].min
-    #         delta_weight = (-1)*SHAInet.sign(synapse.gradient)*delta
-
-    #         synapse.weight += delta_weight
-    #         synapse.prev_weight = synapse.weight
-    #         synapse.prev_delta = delta
-    #         synapse.prev_delta_w = delta_weight
-    #       elsif synapse.prev_gradient*synapse.gradient < 0.0
-    #         delta = [@etah_minus*synapse.prev_delta, @delta_min].max
-
-    #         synapse.weight -= synapse.prev_delta_w if @mean_error >= @prev_mean_error
-
-    #         synapse.prev_gradient = 0.0
-    #         synapse.prev_delta = delta
-    #       elsif synapse.prev_gradient*synapse.gradient == 0.0
-    #         delta_weight = (-1)*SHAInet.sign(synapse.gradient)*synapse.prev_delta
-
-    #         synapse.weight += delta_weight
-    #         synapse.prev_delta = @delta_min
-    #         synapse.prev_delta_w = delta_weight
-    #       end
-    #       # Update weights based on Adaptive moment estimation (Adam)
-    #     when "adam"
-    #       synapse.m_current = @beta1*synapse.m_prev + (1 - @beta1)*synapse.gradient
-    #       synapse.v_current = @beta2*synapse.v_prev + (1 - @beta2)*(synapse.gradient)**2
-
-    #       m_hat = synapse.m_current/(1 - (@beta1)**@time_step)
-    #       v_hat = synapse.v_current/(1 - (@beta2)**@time_step)
-    #       synapse.weight -= (@alpha*m_hat)/(v_hat**0.5 + @epsilon)
-
-    #       synapse.m_prev = synapse.m_current
-    #       synapse.v_prev = synapse.v_current
-    #     end
-    #   end
-    # end
-
-    # # Update biases based on the learning type chosen
-    # def update_biases(learn_type : Symbol | String, batch : Bool = false)
-    #   @all_neurons.each_with_index do |neuron, i|
-    #     if batch == true
-    #       neuron.gradient = @b_gradient.not_nil![i]
-    #     end
-
-    #     case learn_type.to_s
-    #     # Update biases based on the gradients and delta rule (including momentum)
-    #     when "sgdm"
-    #       delta_bias = (-1)*@learning_rate*(neuron.gradient) + @momentum*(neuron.bias - neuron.prev_bias)
-    #       neuron.bias += delta_bias
-    #       neuron.prev_bias = neuron.bias
-
-    #       # Update weights based on Resilient backpropogation (Rprop), using the improved varient iRprop+
-    #     when "rprop"
-    #       if neuron.prev_gradient*neuron.gradient > 0
-    #         delta = [@etah_plus*neuron.prev_delta, @delta_max].min
-    #         delta_bias = (-1)*SHAInet.sign(neuron.gradient)*delta
-
-    #         neuron.bias += delta_bias
-    #         neuron.prev_bias = neuron.bias
-    #         neuron.prev_delta = delta
-    #         neuron.prev_delta_b = delta_bias
-    #       elsif neuron.prev_gradient*neuron.gradient < 0.0
-    #         delta = [@etah_minus*neuron.prev_delta, @delta_min].max
-
-    #         neuron.bias -= neuron.prev_delta_b if @mean_error >= @prev_mean_error
-
-    #         neuron.prev_gradient = 0.0
-    #         neuron.prev_delta = delta
-    #       elsif neuron.prev_gradient*neuron.gradient == 0.0
-    #         delta_bias = (-1)*SHAInet.sign(neuron.gradient)*@delta_min*neuron.prev_delta
-
-    #         neuron.bias += delta_bias
-    #         neuron.prev_delta = @delta_min
-    #         neuron.prev_delta_b = delta_bias
-    #       end
-    #       # Update weights based on Adaptive moment estimation (Adam)
-    #     when "adam"
-    #       neuron.m_current = @beta1*neuron.m_prev + (1 - @beta1)*neuron.gradient
-    #       neuron.v_current = @beta2*neuron.v_prev + (1 - @beta2)*(neuron.gradient)**2
-
-    #       m_hat = neuron.m_current/(1 - (@beta1)**@time_step)
-    #       v_hat = neuron.v_current/(1 - (@beta2)**@time_step)
-    #       neuron.bias -= (@alpha*m_hat)/(v_hat**0.5 + @epsilon)
-
-    #       neuron.m_prev = neuron.m_current
-    #       neuron.v_prev = neuron.v_current
-    #     end
-    #   end
-    # end
 
     def log_summary(e)
       @logger.info("Epoch: #{e}, Total error: #{@total_error}, MSE: #{@mean_error}")

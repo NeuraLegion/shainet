@@ -33,6 +33,7 @@ module SHAInet
               source_neuron.synapses_out << synapse
               target_neuron.synapses_in << synapse
               @all_neurons << target_neuron
+
               @all_synapses << synapse
             end
           end

@@ -7,6 +7,7 @@ module SHAInet
   class Neuron
     property :synapses_in, :synapses_out, :n_type, activation : Float64, gradient : Float64, bias : Float64, prev_bias : Float64
     property input_sum : Float64, sigma_prime : Float64, gradient_sum : Float64, :id
+
     property prev_gradient : Float64, prev_delta : Float64, prev_delta_b : Float64
     property m_current : Float64, v_current : Float64, m_prev : Float64, v_prev : Float64
 

@@ -5,9 +5,6 @@ module SHAInet
     getter master_network : CNN, prev_layer : CNNLayer | ConvLayer, filters : Array(Filter)
     getter window_size : Int32, stride : Int32, padding : Int32, activation_function : Proc(GenNum, Array(Float64))
 
-    #################################################
-    # # This part is for dealing with conv layers # #
-
     def initialize(@master_network : CNN,
                    @prev_layer : ConvLayer | CNNLayer,
                    filters_num : Int32 = 1,
