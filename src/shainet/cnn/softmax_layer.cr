@@ -2,15 +2,11 @@ require "logger"
 
 module SHAInet
   class SoftmaxLayer
-    getter filters : Array(Filter), prev_layer : FullyConnectedLayer
+    getter filters : Array(Filter), prev_layer : FullyConnectedLayer | ReluLayer
     getter output : Array(Float64), :all_neurons
 
-    def initialize(@prev_layer : FullyConnectedLayer, @logger : Logger = Logger.new(STDOUT))
+    def initialize(@prev_layer : FullyConnectedLayer | ReluLayer, @logger : Logger = Logger.new(STDOUT))
       #
-      unless @prev_layer.is_a?(SHAInet::FullyConnectedLayer)
-        raise CNNInitializationError.new("Softmax layer can only follow a fully connected layer")
-      end
-
       @filters = @prev_layer.filters.clone
       @output = Array(Float64).new
       @all_neurons = Array(Neuron).new
@@ -19,9 +15,10 @@ module SHAInet
     def activate
       @output = Array(Float64).new(@filters.first.neurons.first.size) { Float64.new(0) }
       input_sums = Array(Float64).new
-      @prev_layer.filters.first.neurons.first.each { |neuron| input_sums << neuron.input_sum }
+      @prev_layer.filters.first.neurons.first.each { |neuron| input_sums << neuron.activation }
 
-      sf_activations = SHAInet.softmax(input_sums)        # Calculate the softmax values based on entire output array
+      sf_activations = SHAInet.softmax(input_sums) # Calculate the softmax values based on entire output array
+      # sf_activations = SHAInet.log_softmax(input_sums)    # Calculate the log softmax values based on entire output array
       @filters.first.neurons.first.size.times do |neuron| # Update each neuron's activation and derivative to fit the softmax values
         @filters.first.neurons.first[neuron].activation = sf_activations[neuron]
         @output[neuron] = sf_activations[neuron]

@@ -68,7 +68,7 @@ module SHAInet
     out_array = Array(Float64).new(array.size) { 0.0 }
     exp_sum = Float64.new(0.0)
     array.each { |value| exp_sum += Math::E**(value) }
-    array.size.times { |i| out_array[i] = (Math::E**array[i])/exp_sum }
+    array.size.times { |i| out_array[i] += (Math::E**array[i])/exp_sum }
     return out_array
   end
 
@@ -82,7 +82,7 @@ module SHAInet
   # Not working yet, do not use
   def self.log_softmax(array : Array(GenNum)) : Array(Float64)
     out_array = Array(Float64).new(array.size) { 0.0 }
-    m = array.max
+    m = array.max # Max exponent from input array
     exp_sum = Float64.new(0.0)
     array.each { |value| exp_sum += Math::E**(value - m) }
 
