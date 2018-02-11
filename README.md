@@ -54,25 +54,25 @@ xor.run([0, 0])
 Batch training on the iris dataset using adam
 ```crystal
 # Create a new Data object based on a CSV
-  data = SHAInet::Data.new_with_csv_input_target("iris.csv", 0..3, 4)
+data = SHAInet::Data.new_with_csv_input_target("iris.csv", 0..3, 4)
 
-  # Split the data in a training set and a test set
-  training_set, test_set = data.split(0.67)
+# Split the data in a training set and a test set
+training_set, test_set = data.split(0.67)
 
-  # Initiate a new network
-  iris = SHAInet::Network.new
+# Initiate a new network
+iris = SHAInet::Network.new
 
-  # Add layers
-  iris.add_layer(:input, 4, :memory, SHAInet.sigmoid)
-  iris.add_layer(:hidden, 5, :memory, SHAInet.sigmoid)
-  iris.add_layer(:output, 3, :memory, SHAInet.sigmoid)
-  iris.fully_connect
+# Add layers
+iris.add_layer(:input, 4, :memory, SHAInet.sigmoid)
+iris.add_layer(:hidden, 5, :memory, SHAInet.sigmoid)
+iris.add_layer(:output, 3, :memory, SHAInet.sigmoid)
+iris.fully_connect
 
-  # Train the network
-  iris.train_batch(training_set, :adam, :mse, 30000, 0.000000001)
+# Train the network
+iris.train_batch(training_set, :adam, :mse, 30000, 0.000000001)
 
-  # Test the ANN performance
-  iris.test(test_set)
+# Test the ANN performance
+iris.test(test_set)
 ```
 
 ## Development
