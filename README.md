@@ -71,7 +71,7 @@ iris.fully_connect
 # Train the network
 iris.train_batch(training_set, :adam, :mse, 30000, 0.000000001)
 
-# Test the ANN performance
+# Test the network's performance
 iris.test(test_set)
 ```
 
