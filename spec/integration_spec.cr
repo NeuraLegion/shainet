@@ -25,7 +25,7 @@ describe SHAInet::Network do
     iris.train_batch(training_set, :adam, :mse, 30000, 0.000000001)
 
     # Test the ANN performance
-    iris.test(test_set).should be > 0.90
+    iris.test(test_set).should be > 0.85
 
   end
 
