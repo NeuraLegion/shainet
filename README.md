@@ -53,36 +53,26 @@ xor.run([0, 0])
 
 Batch training on the iris dataset using adam
 ```crystal
-# Configure label encoding
-label = {
-  "setosa"     => [0.to_f64, 0.to_f64, 1.to_f64],
-  "versicolor" => [0.to_f64, 1.to_f64, 0.to_f64],
-  "virginica"  => [1.to_f64, 0.to_f64, 0.to_f64],
-}
-# Initiate a new network
-iris = SHAInet::Network.new
-iris.add_layer(:input, 4, :memory, SHAInet.sigmoid)
-iris.add_layer(:hidden, 5, :memory, SHAInet.sigmoid)
-iris.add_layer(:output, 3, :memory, SHAInet.sigmoid)
-iris.fully_connect
+# Create a new Data object based on a CSV
+  data = SHAInet::Data.new_with_csv_input_target("iris.csv", 0..3, 4)
 
-# load all relevant information from the iris.csv
-outputs = Array(Array(Float64)).new
-inputs = Array(Array(Float64)).new
-CSV.each_row(File.read(__DIR__ + "/test_data/iris.csv")) do |row|
-  row_arr = Array(Float64).new
-  row[0..-2].each do |num|
-    row_arr << num.to_f64
-  end
-  inputs << row_arr
-  outputs << label[row[-1]]
-end
-# Normalize using min_max
-normalized = SHAInet::TrainingData.new(inputs, outputs)
-normalized.normalize_min_max
-# Train using rprop
-iris.train_batch(normalized.data, :adam, :mse, 20000, 0.01)
-iris.run(normalized.normalized_inputs.first)
+  # Split the data in a training set and a test set
+  training_set, test_set = data.split(0.67)
+
+  # Initiate a new network
+  iris = SHAInet::Network.new
+
+  # Add layers
+  iris.add_layer(:input, 4, :memory, SHAInet.sigmoid)
+  iris.add_layer(:hidden, 5, :memory, SHAInet.sigmoid)
+  iris.add_layer(:output, 3, :memory, SHAInet.sigmoid)
+  iris.fully_connect
+
+  # Train the network
+  iris.train_batch(training_set, :adam, :mse, 30000, 0.000000001)
+
+  # Test the ANN performance
+  iris.test(test_set)
 ```
 
 ## Development
@@ -123,4 +113,3 @@ iris.run(normalized.normalized_inputs.first)
 - [ArtLinkov](https://github.com/ArtLinkov) - creator, maintainer
 - [bararchy](https://github.com/bararchy) - creator, maintainer
 - [drujensen](https://github.com/drujensen) - contributor
-
