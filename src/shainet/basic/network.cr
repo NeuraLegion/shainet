@@ -335,17 +335,20 @@ module SHAInet
     end
 
     # Batch train, updates weights/biases using a gradient sum from all data points in the batch (using gradient descent)
-    def train_batch(data : Array(Array(Array(GenNum))), # Input structure: data = [[Input = [] of Float64],[Expected result = [] of Float64]]
+    def train_batch(data : Array(Array(Array(GenNum))) | SHAInet::TrainingData, # Input structure: data = [[Input = [] of Float64],[Expected result = [] of Float64]]
       training_type : Symbol | String,    # Type of training: :sgdm, :rprop, :adam
       cost_function : Symbol | String,    # one of COST_FUNCTIONS described at the top of the file
       epochs : Int32,                     # a criteria of when to stop the training
       error_threshold : Float64,          # a criteria of when to stop the training
       log_each : Int32 = 1000,            # determines what is the step for error printout
       mini_batch_size : Int32 | Nil = nil)
+      # This methods accepts data as either a SHAInet::TrainingData object, or as an Array(Array(Array(GenNum)).
+      # In the case of SHAInet::TrainingData, we convert it to an Array(Array(Array(GenNum)) by calling #data on it.
+      raw_data = data.is_a?(SHAInet::TrainingData) ? data.data : data
       @logger.info("Training started")
-      batch_size = mini_batch_size ? mini_batch_size : data.size
+      batch_size = mini_batch_size ? mini_batch_size : raw_data.size
       @time_step = 0
-      data.each_slice(batch_size, reuse = false) do |data_slice|
+      raw_data.each_slice(batch_size, reuse = false) do |data_slice|
         verify_data(data_slice)
         @logger.info("Working on mini-batch size: #{batch_size}") if mini_batch_size
         @time_step += 1 if mini_batch_size # in mini-batch update adam time_step

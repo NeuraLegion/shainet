@@ -8,8 +8,8 @@ module SHAInet
     @yrange : Int32
     @ymin : Int32
 
-    getter :normalized_outputs, :normalized_inputs
-    setter :outputs, :labels
+    getter :normalized_outputs, :normalized_inputs, :labels
+    setter :outputs
 
     # Takes a path to a CSV file, a range of inputs and the index of the target column.
     # Returns a SHAInet::Data object.
@@ -116,7 +116,7 @@ module SHAInet
       return training_data, test_data
     end
 
-    # Receives an array of labels (String or Symbol) and sets them for this network
+    # Receives an array of labels (String or Symbol) and sets them for this Data object
     def labels=(label_array)
       @labels = label_array.map(&.to_s)
       @logger.info("Labels are #{@labels.join(", ")}") if self.class.name == "SHAInet::Data"
