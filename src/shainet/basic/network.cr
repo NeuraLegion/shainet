@@ -141,7 +141,7 @@ module SHAInet
     def connect_ltl(source : Layer, destination : Layer, connection_type : Symbol | String)
       raise NeuralNetInitalizationError.new("Error initilizing network, must choose correct connection type.") if CONNECTION_TYPES.any? { |x| x == connection_type.to_s } == false
       case connection_type.to_s
-      # Connect each neuron from source layer to all neurons in destination layer
+        # Connect each neuron from source layer to all neurons in destination layer
       when "full"
         source.neurons.each do |neuron1|        # Source neuron
           destination.neurons.each do |neuron2| # Destination neuron
@@ -284,11 +284,11 @@ module SHAInet
 
     # Online train, updates weights/biases after each data point (stochastic gradient descent)
     def train(data : Array(Array(Array(GenNum))), # Input structure: data = [[Input = [] of Float64],[Expected result = [] of Float64]]
-              training_type : Symbol | String,    # Type of training: :sgdm, :rprop, :adam
-              cost_function : Symbol | String,    # one of COST_FUNCTIONS described at the top of the file
-              epochs : Int32,                     # a criteria of when to stop the training
-              error_threshold : Float64,          # a criteria of when to stop the training
-              log_each : Int32 = 1000)            # determines what is the step for error printout
+      training_type : Symbol | String,    # Type of training: :sgdm, :rprop, :adam
+      cost_function : Symbol | String,    # one of COST_FUNCTIONS described at the top of the file
+      epochs : Int32,                     # a criteria of when to stop the training
+      error_threshold : Float64,          # a criteria of when to stop the training
+      log_each : Int32 = 1000)            # determines what is the step for error printout
 
       verify_data(data)
       @logger.info("Training started")
@@ -335,17 +335,20 @@ module SHAInet
     end
 
     # Batch train, updates weights/biases using a gradient sum from all data points in the batch (using gradient descent)
-    def train_batch(data : Array(Array(Array(GenNum))), # Input structure: data = [[Input = [] of Float64],[Expected result = [] of Float64]]
-                    training_type : Symbol | String,    # Type of training: :sgdm, :rprop, :adam
-                    cost_function : Symbol | String,    # one of COST_FUNCTIONS described at the top of the file
-                    epochs : Int32,                     # a criteria of when to stop the training
-                    error_threshold : Float64,          # a criteria of when to stop the training
-                    log_each : Int32 = 1000,            # determines what is the step for error printout
-                    mini_batch_size : Int32 | Nil = nil)
+    def train_batch(data : Array(Array(Array(GenNum))) | SHAInet::TrainingData, # Input structure: data = [[Input = [] of Float64],[Expected result = [] of Float64]]
+      training_type : Symbol | String,    # Type of training: :sgdm, :rprop, :adam
+      cost_function : Symbol | String,    # one of COST_FUNCTIONS described at the top of the file
+      epochs : Int32,                     # a criteria of when to stop the training
+      error_threshold : Float64,          # a criteria of when to stop the training
+      log_each : Int32 = 1000,            # determines what is the step for error printout
+      mini_batch_size : Int32 | Nil = nil)
+      # This methods accepts data as either a SHAInet::TrainingData object, or as an Array(Array(Array(GenNum)).
+      # In the case of SHAInet::TrainingData, we convert it to an Array(Array(Array(GenNum)) by calling #data on it.
+      raw_data = data.is_a?(SHAInet::TrainingData) ? data.data : data
       @logger.info("Training started")
-      batch_size = mini_batch_size ? mini_batch_size : data.size
+      batch_size = mini_batch_size ? mini_batch_size : raw_data.size
       @time_step = 0
-      data.each_slice(batch_size, reuse = false) do |data_slice|
+      raw_data.each_slice(batch_size, reuse = false) do |data_slice|
         verify_data(data_slice)
         @logger.info("Working on mini-batch size: #{batch_size}") if mini_batch_size
         @time_step += 1 if mini_batch_size # in mini-batch update adam time_step
@@ -418,7 +421,7 @@ module SHAInet
         end
 
         case learn_type.to_s
-        # Update weights based on the gradients and delta rule (including momentum)
+          # Update weights based on the gradients and delta rule (including momentum)
         when "sgdm"
           delta_weight = (-1)*@learning_rate*synapse.gradient + @momentum*(synapse.weight - synapse.prev_weight)
           synapse.weight += delta_weight
@@ -471,7 +474,7 @@ module SHAInet
         end
 
         case learn_type.to_s
-        # Update biases based on the gradients and delta rule (including momentum)
+          # Update biases based on the gradients and delta rule (including momentum)
         when "sgdm"
           delta_bias = (-1)*@learning_rate*(neuron.gradient) + @momentum*(neuron.bias - neuron.prev_bias)
           neuron.bias += delta_bias
@@ -632,5 +635,23 @@ module SHAInet
       @logger.info(@all_synapses)
       @logger.info("--------------------------------")
     end
+
+    # Evaluate the network performance on a test set
+    def test(test_set)
+      correct = 0
+      incorrect = 0
+      test_set.normalized_inputs.each_with_index do |input, index|
+        output_array = run(input)
+        if test_set.label_for_array(output_array) == test_set.label_for_array(test_set.normalized_outputs[index])
+          correct += 1
+        else
+          incorrect += 1
+        end
+      end
+      @logger.info("Predicted #{correct} out of #{correct + incorrect} - #{(correct.to_f/(correct+incorrect).to_f)*100}%")
+      correct.to_f/(correct+incorrect).to_f
+    end
+
+
   end
 end
