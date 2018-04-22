@@ -80,34 +80,29 @@ describe SHAInet::CNN do
     raw_training_data = Array(Array(Float64)).new
     raw_test_data = Array(Array(Float64)).new
 
-    test = Array(Array(Array(Float64))).new
-
+    # Load training data (partial dataset)
     csv = CSV.new(File.read(__DIR__ + "/test_data/mnist_train.csv"))
     1000.times do
       # CSV.each_row(File.read(__DIR__ + "/test_data/mnist_train.csv")) do |row|
-
       csv.next
       new_row = Array(Float64).new
       csv.row.to_a.each { |value| new_row << value.to_f64 }
       raw_training_data << new_row
-
-      # channel = Array(Array(Float64)).new
-      # new_row[1..-1].each_slice(28) do |row| # Here we have only one channel since its MNIST
-      #   row.each { |value| value.to_f64 }
-      #   channel << row
-      # end
-      # test << channel
     end
     training_data = SHAInet::TrainingData.new(raw_training_data)
     training_data.for_mnist_conv
     training_data.data_pairs.shuffle!
 
-    # CSV.each_row(File.read(__DIR__ + "/test_data/mnist_test.csv")) do |row|
-    #   row.each { |value| value.to_f64 }
-    #   raw_test_data << row
-    # end
-    # test_data = SHAInet::TrainingData.new(raw_test_data)
-    # test_data.for_mnist_conv
+    # Load test data (partial dataset)
+    csv = CSV.new(File.read(__DIR__ + "/test_data/mnist_test.csv"))
+    1000.times do
+      csv.next
+      new_row = Array(Float64).new
+      csv.row.to_a.each { |value| new_row << value.to_f64 }
+      raw_test_data << new_row
+    end
+    test_data = SHAInet::TrainingData.new(raw_test_data)
+    test_data.for_mnist_conv
 
     cnn = SHAInet::CNN.new
     cnn.add_input(volume = [height = 28, width = 28, channels = 1])                                          # Data = 28x28x1
@@ -116,13 +111,20 @@ describe SHAInet::CNN do
     cnn.add_maxpool(pool = 2, stride = 2)                                                                    # Data = 14x14x20
     # cnn.add_conv(data = 40, window_size = 5, stride = 1, padding = 1, activation_function = SHAInet.none)    # Data = 14x14x40
     # cnn.add_maxpool(pool = 2, stride = 2)                                                                    # Data = 7x7x40
-    cnn.add_fconnect(l_size = 100, SHAInet.none)
+    # cnn.add_fconnect(l_size = 10, SHAInet.none)
     cnn.add_fconnect(l_size = 10, SHAInet.sigmoid)
     # cnn.add_softmax
+    cnn.learning_rate = 0.5
+    cnn.momentum = 0.2
 
     # cnn.run(test, stealth = false)
     # cnn.train(training_data.data_pairs, training_type = :sgdm, cost = :mse, epochs = 20000, threshold = 0.000001, log_each = 1000)
-    cnn.train_batch(training_data.data_pairs, training_type = :sgdm, cost = :mse, epochs = 10, threshold = 0.00000001, log_each = 1, minib = 50)
+    cnn.train_batch(training_data.data_pairs, training_type = :rprop, cost = :mse, epochs = 10, threshold = 0.00001, log_each = 1, minib = 50)
+
+    correct_answers = 0
+    test_data.each do |data_point|
+      cnn.evaluate(data_point[0], data_point[1], :mse)
+    end
   end
 end
 

@@ -55,9 +55,9 @@ module SHAInet
             target_neuron = @prev_layer.filters[filter].neurons[row][neuron]
             target_neuron.hidden_error_prop
             if batch == true
-              target_neuron.gradient_sum += target_neuron.gradient
+              target_neuron.gradient_batch += target_neuron.gradient
               target_neuron.synapses_out.each do |synapse|
-                synapse.gradient_sum += synapse.source_neuron.activation*synapse.dest_neuron.gradient
+                synapse.gradient_batch += synapse.source_neuron.activation*synapse.dest_neuron.gradient
               end
             else
               target_neuron.synapses_out.each do |synapse|
@@ -73,6 +73,10 @@ module SHAInet
       # Update all weights of the layer
       @all_synapses.each do |synapse|
         if batch == true
+          synapse.gradient = synapse.gradient_batch
+          synapse.gradient_batch = Float64.new(0) # Reset the gradient for next input
+          synapse.gradient_sum = Float64.new(0)   # Reset the gradient for next batch
+        else
           synapse.gradient = synapse.gradient_sum
           synapse.gradient_sum = Float64.new(0) # Reset the gradient for next batch
         end

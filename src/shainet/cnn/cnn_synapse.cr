@@ -1,16 +1,18 @@
+require "logger"
+
 module SHAInet
-  class Synapse
-    property source_neuron : Neuron, dest_neuron : Neuron
-    property weight : Float64, gradient : Float64, gradient_sum : Float64, prev_weight : Float64
+  class CnnSynapse
+    property weight : Float64, gradient : Float64, gradient_sum : Float64, gradient_batch : Array(Float64), prev_weight : Float64
     property prev_gradient : Float64, prev_delta : Float64, prev_delta_w : Float64
     property m_current : Float64, v_current : Float64, m_prev : Float64, v_prev : Float64
 
-    def initialize(@source_neuron : Neuron, @dest_neuron : Neuron)
+    def initialize
       @weight = rand(-1.0..1.0).to_f64   # Weight of the synapse
+      @gradient_sum = Float64.new(0)     # For backpropogation of ConvLayers
       @gradient = rand(-0.1..0.1).to_f64 # Error of the synapse with respect to cost function (dC/dW)
-      @gradient_sum = Float64.new(0)     # Needed for batch train
-      @gradient_batch = Float64.new(0)   # Needed for batch train
-      @prev_weight = Float64.new(0)      # Needed for delta rule improvement (with momentum)
+      @gradient_batch = Float64.new(0)   # For batch-train
+
+      @prev_weight = Float64.new(0) # Needed for delta rule improvement (with momentum)
 
       # Parameters needed for Rprop
       @prev_gradient = 0.0
@@ -24,33 +26,13 @@ module SHAInet
       @v_prev = Float64.new(0)    # Previous moment**2 value
     end
 
-    # Transfer memory from source_neuron to dest_neuron while applying weight
-    def propagate_forward : Float64
-      new_memory = @source_neuron.activation*@weight
-
-      case @source_neuron.n_type
-      when "memory"
-        return new_memory
-      when "eraser"
-        return (-1)*new_memory
-      else
-        raise "Other types of neurons are not supported yet!"
-      end
-    end
-
-    # Transfer error from dest_neuron to source_neuron while applying weight and save the synapse gradient
-    def propagate_backward : Float64
-      weighted_error = @dest_neuron.gradient*@weight
-      return weighted_error
-    end
-
     def randomize_weight
       @weight = rand(-0.1..0.1).to_f64
     end
 
     def clone
       synapse_old = self
-      synapse_new = Synapse.new(synapse_old.source_neuron, synapse_old.dest_neuron)
+      synapse_new = CnnSynapse.new
 
       synapse_new.weight = synapse_old.weight
       synapse_new.gradient = synapse_old.gradient

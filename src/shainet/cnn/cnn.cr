@@ -76,8 +76,8 @@ module SHAInet
       @layers << FullyConnectedLayer.new(master = self, @layers.last, l_size, activation_function)
     end
 
-    def add_softmax
-      @layers << SoftmaxLayer.new(@layers.last.as(FullyConnectedLayer | ReluLayer))
+    def add_softmax(range : Range(Int32, Int32) = (0..-1))
+      @layers << SoftmaxLayer.new(@layers.last.as(FullyConnectedLayer | ReluLayer), range: range)
     end
 
     def run(input_data : Array(Array(Array(GenNum))), stealth : Bool = true)
@@ -91,6 +91,10 @@ module SHAInet
           layer.as(InputLayer).activate(input_data) # activation of input layer
         else
           layer.activate # activate the rest of the layers
+
+          if stealth == false
+            layer.inspect("activations")
+          end
         end
       end
       # Get the result from the output layer
@@ -102,40 +106,22 @@ module SHAInet
       return @layers.last.as(FullyConnectedLayer | SoftmaxLayer).output
     end
 
-    def evaluate(input_data : Array(Array(Array(GenNum))), expected_output : Array(GenNum), cost_function : Symbol | String)
+    def evaluate(input_data : Array(Array(Array(GenNum))),
+                 expected_output : Array(GenNum),
+                 cost_function_derivative : Proc(GenNum, GenNum, Float64) = SHAInet.quadratic_cost_derivative)
       # raise NeuralNetRunError.new("Must define correct cost function type (:mse, :c_ent, :exp, :hel_d, :kld, :gkld, :ita_sai_d).") if COST_FUNCTIONS.any? { |x| x == cost_function.to_s } == false
 
-      actual = run(input_data, stealth = true)
+      actual = run(input_data, stealth: true)
 
       raise NeuralNetRunError.new("Expected and network outputs have different sizes.") unless actual.size == expected_output.size
 
       # Get the error signal for the final layer, based on the cost function (error gradient is stored in the output neurons)
       @error_signal = [] of Float64 # Set error signal to 0 for current run
-      case cost_function.to_s
-      when "mse"
-        expected_output.size.times do |i|
-          neuron = @layers.last.as(FullyConnectedLayer | SoftmaxLayer).filters.first.neurons.first[i] # Output neuron
-          real_error = SHAInet.quadratic_cost_derivative(expected_output[i].to_f64, actual[i].to_f64) # Get error based on cost function
-          neuron.gradient = real_error*neuron.sigma_prime                                             # Update gradient of neuron in the output layer based on the actual error result
-          @error_signal << real_error                                                                 # Store the output error signal in an array
-        end
-      when "c_ent"
-        expected_output.size.times do |i|
-          neuron = @layers.last.as(FullyConnectedLayer | SoftmaxLayer).filters.first.neurons.first[i]     # Output neuron
-          real_error = SHAInet.cross_entropy_cost_derivative(expected_output[i].to_f64, actual[i].to_f64) # Get error based on cost function
-          neuron.gradient = real_error*neuron.sigma_prime                                                 # Update gradient of neuron in the output layer based on the actual error result
-          @error_signal << real_error                                                                     # Store the output error signal in an array
-        end
-      when "exp"
-        # TODO
-      when "hel_d"
-        # TODO
-      when "kld"
-        # TODO
-      when "gkld"
-        # TODO
-      when "ita_sai_d"
-        # TODO
+      expected_output.size.times do |i|
+        neuron = @layers.last.as(FullyConnectedLayer | SoftmaxLayer).filters.first.neurons.first[i] # Output neuron
+        real_error = cost_function_derivative.call(expected_output[i].to_f64, actual[i].to_f64)
+        neuron.gradient = real_error*neuron.sigma_prime # Update gradient of neuron in the output layer based on the actual error result
+        @error_signal << real_error
       end
       @total_error = @error_signal.reduce(0.0) { |acc, i| acc + i } # Sum up all the errors from output layer
 
@@ -170,7 +156,7 @@ module SHAInet
 
           # Propogate the errors backwards through the hidden layers
           @layers.reverse_each do |layer|
-            layer.error_prop(batch = false) # Each layer has a different backpropogation function
+            layer.error_prop(batch: false) # Each layer has a different backpropogation function
           end
 
           # Calculate MSE
@@ -184,8 +170,8 @@ module SHAInet
           sqr_sum = sqrd_dists.reduce { |acc, i| acc + i }
           @mean_error = sqr_sum/@layers.last.as(FullyConnectedLayer | SoftmaxLayer).output.size
 
-          # Update all wieghts & biases
-          update_wb(training_type, batch = false)
+          # Update all weights & biases
+          update_wb(training_type, batch: false)
 
           # update_biases(training_type, batch = false)
 
@@ -210,7 +196,7 @@ module SHAInet
       batch_size = mini_batch_size ? mini_batch_size : data.size
       @time_step = 0
       slice_num = 1
-      data.each_slice(batch_size, reuse = false) do |data_slice|
+      data.each_slice(batch_size, reuse: false) do |data_slice|
         verify_data(data_slice)
         @logger.info("Working on mini-batch #{slice_num}, size: #{batch_size}") if mini_batch_size
         slice_num += 1
@@ -229,13 +215,17 @@ module SHAInet
           all_errors = [] of Float64
 
           # Go over each data point and collect gradients of weights/biases based on each specific example
-          data_slice.each do |data_point|
+          data_slice.each_with_index do |data_point, index|
             # Update error signal, error gradient and total error at the output layer based on current input
-            evaluate(data_point[0].as(Array(Array(Array(Float64)))), data_point[1].as(Array(Float64)), cost_function)
+            evaluate(data_point[0].as(Array(Array(Array(Float64)))), data_point[1].as(Array(Float64)), SHAInet.quadratic_cost_derivative)
             all_errors << @total_error
             # Propogate the errors backwards through the hidden layers
             @layers.reverse_each do |layer|
-              layer.error_prop(batch = true) # Each layer has a different backpropogation function
+              if index == (data_slice.size - 1)
+                layer.error_prop(batch: true)
+              else
+                layer.error_prop(batch: false)
+              end
             end
 
             # Calculate MSE per data point
@@ -261,7 +251,7 @@ module SHAInet
           # Update all wieghts & biases for the batch
           @time_step += 1 unless mini_batch_size # Based on how many epochs have passed in current training run, needed for Adam
           # Update all wieghts & biases
-          update_wb(training_type, batch = true)
+          update_wb(training_type, batch: true)
 
           @prev_mean_error = @mean_error
         end
@@ -272,6 +262,29 @@ module SHAInet
     def update_wb(training_type : Symbol | String, batch : Bool = false)
       @layers.each do |layer|
         layer.update_wb(training_type, batch) # Each layer does this function differently
+      end
+    end
+
+    def output : Array(Float64)
+      return @layers.last.as(FullyConnectedLayer | SoftmaxLayer).output
+    end
+
+    def propagate_backwards
+      @layers.reverse_each do |layer|
+        layer.error_prop(batch: false)
+      end
+    end
+
+    # Update the output layer gradients manually
+    def update_output_gradients(cost_function_derivatives : Array(Float64))
+      output_neurons = @layers.last.as(FullyConnectedLayer | SoftmaxLayer).all_neurons
+
+      unless new_gradients.size == output_neurons.size
+        raise NeuralNetRunError.new("New gradients array must be the same size as the output layer.")
+      end
+
+      output_neurons.each_with_index do |neuron, i|
+        neuron.gradient = cost_function_derivatives[i]*neuron.sigma_prime
       end
     end
 

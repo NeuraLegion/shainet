@@ -20,9 +20,10 @@ module SHAInet
       @bias = rand(-1..1).to_f64      # Activation threshhold (b)
       @prev_bias = rand(-1..1).to_f64 # Needed for delta rule improvement using momentum
 
-      @input_sum = Float64.new(0)    # Sum of activations*weights from input neurons (z)
-      @sigma_prime = Float64.new(1)  # derivative of input_sum based on activation function used (s')
-      @gradient_sum = Float64.new(0) # Needed for batch train and back propagation of convolution layers
+      @input_sum = Float64.new(0)      # Sum of activations*weights from input neurons (z)
+      @sigma_prime = Float64.new(1)    # derivative of input_sum based on activation function used (s')
+      @gradient_sum = Float64.new(0)   # Needed for back propagation of convolution layers
+      @gradient_batch = Float64.new(0) # Needed for batch-train
 
       # Parameters needed for Rprop
       @prev_gradient = rand(-0.1..0.1).to_f64

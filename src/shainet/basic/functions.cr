@@ -125,10 +125,19 @@ module SHAInet
   end
 
   ##################################################################
+  # # Proc for cost functions
+
+  def self.quadratic_cost : Proc(GenNum, GenNum, Float64)
+    ->(expected : GenNum, actual : GenNum) { _quadratic_cost(expected.to_f64, actual.to_f64) }
+  end
+
+  def self.quadratic_cost_derivative : Proc(GenNum, GenNum, Float64)
+    ->(expected : GenNum, actual : GenNum) { _quadratic_cost_derivative(expected.to_f64, actual.to_f64) }
+  end
 
   # # Cost functions  # #
 
-  def self.quadratic_cost(expected : Float64, actual : Float64) : Float64
+  def self._quadratic_cost(expected : Float64, actual : Float64) : Float64
     return (0.5*(actual - expected)**2).to_f64
   end
 
@@ -144,7 +153,7 @@ module SHAInet
 
   # # Derivatives of cost functions # #
 
-  def self.quadratic_cost_derivative(expected : Float64, actual : Float64) : Float64
+  def self._quadratic_cost_derivative(expected : Float64, actual : Float64) : Float64
     return (actual - expected).to_f64
   end
 

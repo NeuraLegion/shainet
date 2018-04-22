@@ -5,25 +5,44 @@ module SHAInet
     getter filters : Array(Filter), prev_layer : FullyConnectedLayer | ReluLayer
     getter output : Array(Float64), :all_neurons
 
-    def initialize(@prev_layer : FullyConnectedLayer | ReluLayer, @logger : Logger = Logger.new(STDOUT))
+    def initialize(@prev_layer : FullyConnectedLayer | ReluLayer, @logger : Logger = Logger.new(STDOUT), @range : Range(Int32, Int32) = (0..-1))
       #
       @filters = @prev_layer.filters.clone
-      @output = Array(Float64).new
+
       @all_neurons = Array(Neuron).new
+      @filters.first.neurons.first.each do |neuron|
+        @all_neurons << neuron
+      end
+
+      begin
+        @all_neurons[@range]
+      rescue e : IndexError
+        raise "Index is out of bounds, range surpasses neurons array size. Max size is #{@all_neurons.size}"
+      end
+
+      @output = Array(Float64).new(@all_neurons.size) { Float64.new(0) }
     end
 
     def activate
-      @output = Array(Float64).new(@filters.first.neurons.first.size) { Float64.new(0) }
+      # @filters.first.neurons.first.each_with_index do |neuron, i|
+      @all_neurons.each_with_index do |neuron, i|
+        neuron.activation = @prev_layer.filters.first.neurons.first[i].activation
+        # @all_neurons << neuron
+      end
       input_sums = Array(Float64).new
-      @prev_layer.filters.first.neurons.first.each { |neuron| input_sums << neuron.activation }
+
+      # if @range[1] == -1
+      @all_neurons[@range].each { |neuron| input_sums << neuron.activation }
 
       sf_activations = SHAInet.softmax(input_sums) # Calculate the softmax values based on entire output array
       # sf_activations = SHAInet.log_softmax(input_sums)    # Calculate the log softmax values based on entire output array
-      @filters.first.neurons.first.size.times do |neuron| # Update each neuron's activation and derivative to fit the softmax values
-        @filters.first.neurons.first[neuron].activation = sf_activations[neuron]
-        @output[neuron] = sf_activations[neuron]
-        @filters.first.neurons.first[neuron].sigma_prime = sf_activations[neuron]*(1 - sf_activations[neuron])
+
+      @all_neurons[@range].each_with_index do |neuron, i| # Update each neuron's activation and derivative to fit the softmax values
+        neuron.activation = sf_activations[i]
+        neuron.sigma_prime = sf_activations[i]*(1 - sf_activations[i])
       end
+
+      @all_neurons.each_with_index { |neuron, i| @output[i] = neuron.activation }
     end
 
     # Send the gradients from current layer backwards without weights
@@ -50,7 +69,7 @@ module SHAInet
       when "activations"
         @filters.each_with_index do |filter, f|
           puts "---"
-          puts "Filter: #{f}, neuron activations are:"
+          puts "Softmax layer, neuron activations are:"
           filter.neurons.each do |row|
             puts "#{row.map { |n| n.activation.round(4) }}"
           end
@@ -58,7 +77,7 @@ module SHAInet
       when "gradients"
         @filters.each_with_index do |filter, f|
           puts "---"
-          puts "Filter: #{f}, neuron gradients are:"
+          puts "Softmax layer, neuron gradients are:"
           filter.neurons.each do |row|
             puts "#{row.map { |n| n.gradient.round(4) }}"
           end
