@@ -21,8 +21,8 @@ module SHAInet
       @all_neurons = Array(Neuron).new
       @all_synapses = Array(Synapse).new
 
-      @w_gradient = Array(Float64).new # Needed for batch train
-      @b_gradient = Array(Float64).new # Needed for batch train
+      # @w_gradient = Array(Float64).new # Needed for batch train
+      # @b_gradient = Array(Float64).new # Needed for batch train
 
       # Connect the last layer to the neurons of this layer (fully connect)
       @filters.first.neurons.first.each do |target_neuron|
@@ -32,8 +32,8 @@ module SHAInet
               synapse = Synapse.new(source_neuron, target_neuron)
               source_neuron.synapses_out << synapse
               target_neuron.synapses_in << synapse
-              @all_neurons << target_neuron
 
+              @all_neurons << target_neuron
               @all_synapses << synapse
             end
           end
@@ -74,12 +74,9 @@ module SHAInet
       @all_synapses.each do |synapse|
         if batch == true
           synapse.gradient = synapse.gradient_batch
-          synapse.gradient_batch = Float64.new(0) # Reset the gradient for next input
-          synapse.gradient_sum = Float64.new(0)   # Reset the gradient for next batch
-        else
-          synapse.gradient = synapse.gradient_sum
-          synapse.gradient_sum = Float64.new(0) # Reset the gradient for next batch
+          synapse.gradient_batch = Float64.new(0) # Reset the gradient for next batch
         end
+
         case learn_type.to_s
         # Update weights based on the gradients and delta rule (including momentum)
         when "sgdm"
@@ -129,8 +126,8 @@ module SHAInet
       # Update all biases of the layer
       @all_neurons.each do |neuron|
         if batch == true
-          neuron.gradient = neuron.gradient_sum
-          neuron.gradient_sum = Float64.new(0)
+          neuron.gradient = neuron.gradient_batch
+          neuron.gradient_batch = Float64.new(0)
         end
 
         case learn_type.to_s
@@ -181,6 +178,9 @@ module SHAInet
     end
 
     def inspect(what : String)
+      puts "##################################################"
+      puts "FullyConnectedLayer:"
+      puts "----------"
       case what
       when "weights"
         @filters.first.neurons.first.each_with_index do |neuron, i|

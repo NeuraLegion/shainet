@@ -4,7 +4,7 @@ module SHAInet
   class Filter
     getter input_surface : Array(Int32), window_size : Int32, stride : Int32, padding : Int32, activation_function : Proc(GenNum, Array(Float64))
     property neurons : Array(Array(Neuron)), synapses : Array(Array(Array(CnnSynapse)))
-    property bias : Float64, prev_bias : Float64, bias_grad : Float64, bias_grad_sum : Float64
+    property bias : Float64, prev_bias : Float64, bias_grad : Float64, bias_grad_sum : Float64, bias_grad_batch : Float64
     property prev_bias_grad : Float64, prev_delta : Float64, prev_delta_b : Float64
     property m_current : Float64, v_current : Float64, m_prev : Float64, v_prev : Float64
 

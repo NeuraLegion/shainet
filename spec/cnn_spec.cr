@@ -95,7 +95,7 @@ describe SHAInet::CNN do
 
     # Load test data (partial dataset)
     csv = CSV.new(File.read(__DIR__ + "/test_data/mnist_test.csv"))
-    1000.times do
+    100.times do
       csv.next
       new_row = Array(Float64).new
       csv.row.to_a.each { |value| new_row << value.to_f64 }
@@ -110,21 +110,35 @@ describe SHAInet::CNN do
     cnn.add_relu                                                                                             # Data = 28x28x20
     cnn.add_maxpool(pool = 2, stride = 2)                                                                    # Data = 14x14x20
     # cnn.add_conv(data = 40, window_size = 5, stride = 1, padding = 1, activation_function = SHAInet.none)    # Data = 14x14x40
-    # cnn.add_maxpool(pool = 2, stride = 2)                                                                    # Data = 7x7x40
     # cnn.add_fconnect(l_size = 10, SHAInet.none)
+    # cnn.add_maxpool(pool = 2, stride = 2)                                                                    # Data = 7x7x40
     cnn.add_fconnect(l_size = 10, SHAInet.sigmoid)
-    # cnn.add_softmax
+    cnn.add_softmax
     cnn.learning_rate = 0.5
     cnn.momentum = 0.2
 
     # cnn.run(test, stealth = false)
     # cnn.train(training_data.data_pairs, training_type = :sgdm, cost = :mse, epochs = 20000, threshold = 0.000001, log_each = 1000)
-    cnn.train_batch(training_data.data_pairs, training_type = :rprop, cost = :mse, epochs = 10, threshold = 0.00001, log_each = 1, minib = 50)
+    cnn.train_batch(training_data.data_pairs,
+      training_type = :sgdm,
+      cost = :mse,
+      epochs = 5,
+      threshold = 0.0001,
+      log_each = 5,
+      minib = 25)
 
     correct_answers = 0
-    test_data.each do |data_point|
-      cnn.evaluate(data_point[0], data_point[1], :mse)
+    test_data.data_pairs.each do |data_point|
+      input_data = data_point[0].as(Array(Array(Array(Float64))))
+      expected_output = data_point[1].as(Array(Float64))
+      result = cnn.run(input_data, stealth: true)
+      if (result.index(result.max) == expected_output.index(expected_output.max))
+        correct_answers += 1
+      end
     end
+    cnn.inspect("activations")
+    puts "We managed #{correct_answers} out of #{test_data.data_pairs.size} total"
+    puts "Cnn output: #{cnn.output}"
   end
 end
 

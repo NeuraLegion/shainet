@@ -55,6 +55,8 @@ module SHAInet
               row.each do |neuron|
                 if neuron.activation == pool_neuron.activation
                   neuron.gradient = pool_neuron.gradient
+                else
+                  neuron.gradient = 0.0
                 end
               end
             end
@@ -74,6 +76,9 @@ module SHAInet
     end
 
     def inspect(what : String)
+      puts "##################################################"
+      puts "MaxPoolLayer:"
+      puts "----------"
       case what
       when "weights"
         puts "Maxpool layer has no weights"

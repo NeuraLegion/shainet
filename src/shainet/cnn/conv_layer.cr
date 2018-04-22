@@ -29,10 +29,6 @@ module SHAInet
       end
 
       @filters = Array(Filter).new(filters_num) { Filter.new([output_width.to_i, output_width.to_i, filters], @padding, @window_size, @stride, @activation_function) }
-
-      @w_gradient = Array(Float64).new # Needed for batch train
-      @b_gradient = Array(Float64).new # Needed for batch train
-
     end
 
     # Use each filter to create feature maps from the input data of the previous layer
@@ -164,6 +160,9 @@ module SHAInet
     end
 
     def inspect(what : String)
+      puts "##################################################"
+      puts "ConvLayer:"
+      puts "----------"
       case what
       when "weights"
         @filters.each_with_index do |filter, i|

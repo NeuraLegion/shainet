@@ -57,7 +57,7 @@ module SHAInet
                  stride : Int32,
                  padding : Int32,
                  activation_function : Proc(GenNum, Array(Float64)) = SHAInet.none)
-      @layers << ConvLayer.new(master = self, @layers.last, filters_num, window_size, stride, padding, activation_function)
+      @layers << ConvLayer.new(self, @layers.last, filters_num, window_size, stride, padding, activation_function)
     end
 
     def add_relu(l_relu_slope : Float64 = 0.0)
@@ -73,14 +73,14 @@ module SHAInet
     end
 
     def add_fconnect(l_size : Int32, activation_function : Proc(GenNum, Array(Float64)) = SHAInet.none)
-      @layers << FullyConnectedLayer.new(master = self, @layers.last, l_size, activation_function)
+      @layers << FullyConnectedLayer.new(self, @layers.last, l_size, activation_function)
     end
 
     def add_softmax(range : Range(Int32, Int32) = (0..-1))
       @layers << SoftmaxLayer.new(@layers.last.as(FullyConnectedLayer | ReluLayer), range: range)
     end
 
-    def run(input_data : Array(Array(Array(GenNum))), stealth : Bool = true)
+    def run(input_data : Array(Array(Array(GenNum))), stealth : Bool = true) : Array(Float64)
       if stealth == false
         puts "############################"
         puts "Starting run..."
@@ -309,6 +309,20 @@ module SHAInet
       if message
         @logger.error("#{message}: #{data}")
         raise NeuralNetTrainError.new(message)
+      end
+    end
+
+    def inspect(what : String | Symbol)
+      case what.to_s
+      when "weights"
+        @layers.each { |layer| layer.inspect("weights") }
+      when "bias"
+        @layers.each { |layer| layer.inspect("bias") }
+      when "activations"
+        @layers.each { |layer| layer.inspect("activations") }
+      when "gradients"
+        @layers.each { |layer| layer.inspect("gradients") }
+        puts "------------------------------------------------"
       end
     end
 

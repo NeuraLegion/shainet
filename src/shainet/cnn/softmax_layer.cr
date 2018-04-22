@@ -61,6 +61,9 @@ module SHAInet
     end
 
     def inspect(what : String)
+      puts "##################################################"
+      puts "SoftmaxLayer:"
+      puts "----------"
       case what
       when "weights"
         puts "Softmax layer has no weights"

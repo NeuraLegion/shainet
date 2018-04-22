@@ -45,6 +45,9 @@ module SHAInet
     end
 
     def inspect(what : String)
+      puts "##################################################"
+      puts "DropoutLayer:"
+      puts "----------"
       case what
       when "weights"
         puts "Drop-out layer has no weights"

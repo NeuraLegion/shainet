@@ -41,6 +41,9 @@ module SHAInet
     end
 
     def inspect(what : String)
+      puts "##################################################"
+      puts "InputLayer:"
+      puts "----------"
       case what
       when "weights"
         puts "input layer has no weights"
