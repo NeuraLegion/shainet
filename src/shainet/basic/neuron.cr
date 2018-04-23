@@ -39,7 +39,7 @@ module SHAInet
     # This is the forward propogation
     # Allows the neuron to absorb the activation from its' own input neurons through the synapses
     # Then, it sums the information and an activation function is applied to normalize the data
-    def activate(activation_function : Proc(GenNum, Array(Float64)) = SHAInet.sigmoid) : Float64
+    def activate(activation_function : ActivationFunction = SHAInet.sigmoid) : Float64
       new_memory = Array(Float64).new
       @synapses_in.each do |synapse| # Claclulate activation from each incoming neuron with applied weights, returns Array(Float64)
         new_memory << synapse.propagate_forward
