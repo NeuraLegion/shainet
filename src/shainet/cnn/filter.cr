@@ -28,8 +28,8 @@ module SHAInet
       @blank_neuron.activation = 0.0
       @blank_neuron.gradient = 0.0
 
-      @bias = rand(-1..1).to_f64
-      @prev_bias = rand(-1..1).to_f64 # Needed for delta rule improvement using momentum
+      @bias = rand(-0.1..0.1).to_f64
+      @prev_bias = rand(-0.1..0.1).to_f64 # Needed for delta rule improvement using momentum
       @bias_grad = Float64.new(0)
       @bias_grad_sum = Float64.new(0)   # For conv-layer backprop
       @bias_grad_batch = Float64.new(0) # For mini-batch backprop

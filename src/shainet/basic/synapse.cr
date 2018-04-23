@@ -6,7 +6,7 @@ module SHAInet
     property m_current : Float64, v_current : Float64, m_prev : Float64, v_prev : Float64
 
     def initialize(@source_neuron : Neuron, @dest_neuron : Neuron)
-      @weight = rand(-1.0..1.0).to_f64   # Weight of the synapse
+      @weight = rand(-0.1..0.1).to_f64   # Weight of the synapse
       @gradient = rand(-0.1..0.1).to_f64 # Error of the synapse with respect to cost function (dC/dW)
       @gradient_sum = Float64.new(0)     # Needed for batch train
       @gradient_batch = Float64.new(0)   # Needed for batch train

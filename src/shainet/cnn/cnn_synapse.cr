@@ -7,7 +7,7 @@ module SHAInet
     property m_current : Float64, v_current : Float64, m_prev : Float64, v_prev : Float64
 
     def initialize
-      @weight = rand(-1.0..1.0).to_f64   # Weight of the synapse
+      @weight = rand(-0.1..0.1).to_f64   # Weight of the synapse
       @gradient_sum = Float64.new(0)     # For backpropogation of ConvLayers
       @gradient = rand(-0.1..0.1).to_f64 # Error of the synapse with respect to cost function (dC/dW)
       @gradient_batch = Float64.new(0)   # For batch-train

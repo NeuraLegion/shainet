@@ -3,6 +3,7 @@ require "./**"
 
 module SHAInet
   alias CNNLayer = InputLayer | ReluLayer | MaxPoolLayer | FullyConnectedLayer | DropoutLayer | SoftmaxLayer
+  alias CNNPair = {input: Array(Array(Array(Float64))), output: Array(Float64)}
 
   # Note: Data is stored within specific classes.
   #       Structure hierarchy: CNN > Layer > Filter > Channel > Row > Neuron/Synapse
@@ -115,6 +116,10 @@ module SHAInet
 
       raise NeuralNetRunError.new("Expected and network outputs have different sizes.") unless actual.size == expected_output.size
 
+      # if actual(NaN) == true
+      #   raise NeuralNetRunError.new("Found a NaN value, run stopped.\noutput:#{actual}")
+      # end
+
       # Get the error signal for the final layer, based on the cost function (error gradient is stored in the output neurons)
       @error_signal = [] of Float64 # Set error signal to 0 for current run
       expected_output.size.times do |i|
@@ -131,12 +136,12 @@ module SHAInet
     end
 
     # Online train, updates weights/biases after each data point (stochastic gradient descent)
-    def train(data : Array(Array(Array(Array(Array(Float64))) | Array(Float64))), # Input structure: data = [[Input = Array(Array(Array(GenNum)))],[Expected result = Array(GenNum)]]
-              training_type : Symbol | String,                                    # Type of training: :sgdm, :rprop, :adam
-              cost_function : Symbol | String,                                    # one of COST_FUNCTIONS described at the top of the file
-              epochs : Int32,                                                     # a criteria of when to stop the training
-              error_threshold : Float64,                                          # a criteria of when to stop the training
-              log_each : Int32 = 1000)                                            # determines what is the step for error printout
+    def train(data : CNNPair,                  # Input structure: data = [[Input = Array(Array(Array(GenNum)))],[Expected result = Array(GenNum)]]
+              training_type : Symbol | String, # Type of training: :sgdm, :rprop, :adam
+              cost_function : Symbol | String, # one of COST_FUNCTIONS described at the top of the file
+              epochs : Int32,                  # a criteria of when to stop the training
+              error_threshold : Float64,       # a criteria of when to stop the training
+              log_each : Int32 = 1000)         # determines what is the step for error printout
 
       # verify_data(data)
       @logger.info("Training started")
@@ -152,7 +157,7 @@ module SHAInet
         # Go over each data point and update the weights/biases based on the specific example
         data.each do |data_point|
           # Update error signal, error gradient and total error at the output layer based on current input
-          evaluate(data_point[0].as(Array(Array(Array(Float64)))), data_point[1].as(Array(Float64)), cost_function)
+          evaluate(data_point[:input], data_point[:output], cost_function)
 
           # Propogate the errors backwards through the hidden layers
           @layers.reverse_each do |layer|
@@ -184,12 +189,12 @@ module SHAInet
     end
 
     # Batch train, updates weights/biases using a gradient sum from all data points in the batch (using gradient descent)
-    def train_batch(data : Array(Array(Array(Array(Array(Float64))) | Array(Float64))), # Input structure: data = [[Input = Array(Array(Array(GenNum)))],[Expected result = Array(GenNum)]]
-                    training_type : Symbol | String,                                    # Type of training: :sgdm, :rprop, :adam
-                    cost_function : Symbol | String,                                    # one of COST_FUNCTIONS described at the top of the file
-                    epochs : Int32,                                                     # a criteria of when to stop the training
-                    error_threshold : Float64,                                          # a criteria of when to stop the training
-                    log_each : Int32 = 1000,                                            # determines what is the step for error printout
+    def train_batch(data : Array(CNNPair),                                    # Input structure: data = [[Input = Array(Array(Array(GenNum)))],[Expected result = Array(GenNum)]]
+                    training_type : Symbol | String,                          # Type of training: :sgdm, :rprop, :adam
+                    cost_function : Proc = SHAInet.quadratic_cost_derivative, # one of COST_FUNCTIONS described at the top of the file
+                    epochs : Int32 = 1,                                       # a criteria of when to stop the training
+                    error_threshold : Float64 = 0.001,                        # a criteria of when to stop the training
+                    log_each : Int32 = 1000,                                  # determines what is the step for error printout
                     mini_batch_size : Int32 | Nil = nil)
       #
       time_start = Time.new
@@ -220,7 +225,8 @@ module SHAInet
           # Go over each data point and collect gradients of weights/biases based on each specific example
           data_slice.each_with_index do |data_point, index|
             # Update error signal, error gradient and total error at the output layer based on current input
-            evaluate(data_point[0].as(Array(Array(Array(Float64)))), data_point[1].as(Array(Float64)), SHAInet.quadratic_cost_derivative)
+
+            evaluate(data_point[:input], data_point[:output], cost_function)
             all_errors << @total_error
             # Propogate the errors backwards through the hidden layers
             @layers.reverse_each do |layer|
@@ -291,22 +297,20 @@ module SHAInet
       end
     end
 
-    def verify_data(data : Array(Array(Array(Array(Array(Float64))) | Array(Float64))))
+    def verify_data(data : Array(CNNPair))
       message = nil
-      if data.sample.size != 2
-        message = "Train data must have two arrays, one for input one for output"
-      end
-      random_input = data.sample.first.size
-      random_output = data.sample.last.size
+
+      random_input = data.sample[:input].size
+      random_output = data.sample[:output].size
       data.each_with_index do |test, i|
-        if (test.first.size != random_input)
+        if (test[:input].size != random_input)
           message = "Input data sizes are inconsistent"
         end
-        if (test.last.size != random_output)
+        if (test[:output].size != random_output)
           message = "Output data sizes are inconsistent"
         end
-        unless (test.last.size == @layers.last.as(FullyConnectedLayer | SoftmaxLayer).filters[0].neurons[0].size)
-          message = "data at index #{i} and size: #{test.last.size} mismatch output layer size"
+        unless (test[:output].size == @layers.last.as(FullyConnectedLayer | SoftmaxLayer).filters[0].neurons[0].size)
+          message = "data at index #{i} and size: #{test[:output].size} mismatch output layer size"
         end
       end
       if message

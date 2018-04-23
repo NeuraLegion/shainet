@@ -77,62 +77,80 @@ describe SHAInet::CNN do
   #
 
   it "Figure out MNIST (mini-batch train, mse)" do
-    raw_training_data = Array(Array(Float64)).new
-    raw_test_data = Array(Array(Float64)).new
-
     # Load training data (partial dataset)
+    raw_data = Array(Array(Float64)).new
     csv = CSV.new(File.read(__DIR__ + "/test_data/mnist_train.csv"))
     1000.times do
       # CSV.each_row(File.read(__DIR__ + "/test_data/mnist_train.csv")) do |row|
       csv.next
       new_row = Array(Float64).new
       csv.row.to_a.each { |value| new_row << value.to_f64 }
-      raw_training_data << new_row
+      raw_data << new_row
     end
-    training_data = SHAInet::TrainingData.new(raw_training_data)
+    raw_input_data = Array(Array(Float64)).new
+    raw_output_data = Array(Array(Float64)).new
+
+    raw_data.each do |row|
+      raw_input_data << row[1..-1]
+      raw_output_data << [row[0]]
+    end
+
+    training_data = SHAInet::CNNData.new(raw_input_data, raw_output_data)
     training_data.for_mnist_conv
     training_data.data_pairs.shuffle!
 
+    # puts "#{training_data.data_pairs.first[:output]}"
+    # training_data.data_pairs.first[:input].first.each do |row|
+    #   puts "#{row}"
+    # end
+
     # Load test data (partial dataset)
+    raw_data = Array(Array(Float64)).new
     csv = CSV.new(File.read(__DIR__ + "/test_data/mnist_test.csv"))
     100.times do
       csv.next
       new_row = Array(Float64).new
       csv.row.to_a.each { |value| new_row << value.to_f64 }
-      raw_test_data << new_row
+      raw_data << new_row
     end
-    test_data = SHAInet::TrainingData.new(raw_test_data)
+
+    raw_input_data = Array(Array(Float64)).new
+    raw_output_data = Array(Array(Float64)).new
+
+    raw_data.each do |row|
+      raw_input_data << row[1..-1]
+      raw_output_data << [row[0]]
+    end
+
+    test_data = SHAInet::CNNData.new(raw_input_data, raw_output_data)
     test_data.for_mnist_conv
 
     cnn = SHAInet::CNN.new
     cnn.add_input(volume = [height = 28, width = 28, channels = 1])                                          # Data = 28x28x1
     cnn.add_conv(filters = 10, window_size = 5, stride = 1, padding = 2, activation_function = SHAInet.none) # Data = 28x28x20
-    cnn.add_relu                                                                                             # Data = 28x28x20
-    cnn.add_maxpool(pool = 2, stride = 2)                                                                    # Data = 14x14x20
-    cnn.add_conv(filters = 20, window_size = 5, stride = 1, padding = 1, activation_function = SHAInet.none) # Data = 14x14x40
+    cnn.add_relu(0.01)                                                                                       # Data = 28x28x20
+    # cnn.add_maxpool(pool = 2, stride = 2)                                                                    # Data = 14x14x20
+    # cnn.add_conv(filters = 20, window_size = 5, stride = 1, padding = 1, activation_function = SHAInet.none) # Data = 14x14x40
     # cnn.add_maxpool(pool = 2, stride = 2)                                                                    # Data = 7x7x40
-    cnn.add_fconnect(l_size = 10, activation_function = SHAInet.sigmoid)
+    # cnn.add_fconnect(l_size = 10, activation_function = SHAInet.sigmoid)
     cnn.add_fconnect(l_size = 10, activation_function = SHAInet.sigmoid)
     cnn.add_softmax
     cnn.learning_rate = 0.5
     cnn.momentum = 0.2
 
-    # cnn.run(test, stealth = false)
-    # cnn.train(training_data.data_pairs, training_type = :sgdm, cost = :mse, epochs = 20000, threshold = 0.000001, log_each = 1000)
+    # cnn.run(test_data.data_pairs.first[:input], stealth = false)
     cnn.train_batch(training_data.data_pairs,
       training_type = :sgdm,
-      cost = :mse,
-      epochs = 5,
+      cost = SHAInet.quadratic_cost_derivative,
+      epochs = 3,
       threshold = 0.0001,
       log_each = 1,
       minib = 25)
 
     correct_answers = 0
     test_data.data_pairs.each do |data_point|
-      input_data = data_point[0].as(Array(Array(Array(Float64))))
-      expected_output = data_point[1].as(Array(Float64))
-      result = cnn.run(input_data, stealth: true)
-      if (result.index(result.max) == expected_output.index(expected_output.max))
+      result = cnn.run(data_point[:input], stealth: true)
+      if (result.index(result.max) == data_point[:output].index(data_point[:output].max))
         correct_answers += 1
       end
     end
