@@ -192,24 +192,27 @@ module SHAInet
                     log_each : Int32 = 1000,                                            # determines what is the step for error printout
                     mini_batch_size : Int32 | Nil = nil)
       #
+      time_start = Time.new
       @logger.info("Training started")
       batch_size = mini_batch_size ? mini_batch_size : data.size
       @time_step = 0
-      slice_num = 1
-      data.each_slice(batch_size, reuse: false) do |data_slice|
-        verify_data(data_slice)
-        @logger.info("Working on mini-batch #{slice_num}, size: #{batch_size}") if mini_batch_size
-        slice_num += 1
-        @time_step += 1 if mini_batch_size # in mini-batch update adam time_step
-        loop do |e|
-          if e % log_each == 0
-            log_summary(e)
-            # @all_neurons.each { |s| puts s.gradient }
-          end
-          if e >= epochs || (error_threshold >= @mean_error) && (e > 1)
-            log_summary(e)
-            break
-          end
+      loop do |epoch|
+        slice_num = 1
+        if epoch % log_each == 0
+          log_summary(epoch)
+          # @all_neurons.each { |s| puts s.gradient }
+        end
+        if epoch >= epochs || (error_threshold >= @mean_error) && (epoch > 1)
+          log_summary(epoch)
+          break
+        end
+
+        data.each_slice(batch_size, reuse: false) do |data_slice|
+          verify_data(data_slice)
+          time_now = Time.new
+          @logger.info("Mini-batch # #{slice_num}| Mini-batch size: #{batch_size} | Runtime: #{time_now - time_start}") if mini_batch_size
+          slice_num += 1
+          @time_step += 1 if mini_batch_size # in mini-batch update adam time_step
 
           batch_mean = [] of Float64
           all_errors = [] of Float64

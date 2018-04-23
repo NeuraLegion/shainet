@@ -109,10 +109,10 @@ describe SHAInet::CNN do
     cnn.add_conv(filters = 10, window_size = 5, stride = 1, padding = 2, activation_function = SHAInet.none) # Data = 28x28x20
     cnn.add_relu                                                                                             # Data = 28x28x20
     cnn.add_maxpool(pool = 2, stride = 2)                                                                    # Data = 14x14x20
-    # cnn.add_conv(data = 40, window_size = 5, stride = 1, padding = 1, activation_function = SHAInet.none)    # Data = 14x14x40
-    # cnn.add_fconnect(l_size = 10, SHAInet.none)
+    cnn.add_conv(filters = 20, window_size = 5, stride = 1, padding = 1, activation_function = SHAInet.none) # Data = 14x14x40
     # cnn.add_maxpool(pool = 2, stride = 2)                                                                    # Data = 7x7x40
-    cnn.add_fconnect(l_size = 10, SHAInet.sigmoid)
+    cnn.add_fconnect(l_size = 10, activation_function = SHAInet.sigmoid)
+    cnn.add_fconnect(l_size = 10, activation_function = SHAInet.sigmoid)
     cnn.add_softmax
     cnn.learning_rate = 0.5
     cnn.momentum = 0.2
@@ -124,7 +124,7 @@ describe SHAInet::CNN do
       cost = :mse,
       epochs = 5,
       threshold = 0.0001,
-      log_each = 5,
+      log_each = 1,
       minib = 25)
 
     correct_answers = 0
