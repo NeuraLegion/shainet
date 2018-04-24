@@ -3,7 +3,7 @@ require "logger"
 module SHAInet
   class ConvLayer
     getter master_network : CNN, prev_layer : CNNLayer | ConvLayer, filters : Array(Filter)
-    getter window_size : Int32, stride : Int32, padding : Int32, activation_function : Proc(GenNum, Array(Float64))
+    getter window_size : Int32, stride : Int32, padding : Int32, activation_function : ActivationFunction
 
     def initialize(@master_network : CNN,
                    @prev_layer : ConvLayer | CNNLayer,
@@ -11,7 +11,7 @@ module SHAInet
                    @window_size : Int32 = 1,
                    @stride : Int32 = 1,
                    @padding : Int32 = 0,
-                   @activation_function : Proc(GenNum, Array(Float64)) = SHAInet.none,
+                   @activation_function : ActivationFunction = SHAInet.none,
                    @logger : Logger = Logger.new(STDOUT))
       #
       raise CNNInitializationError.new("ConvLayer must have at least one filter") if filters_num < 1

@@ -2,7 +2,7 @@ require "logger"
 
 module SHAInet
   class Filter
-    getter input_surface : Array(Int32), window_size : Int32, stride : Int32, padding : Int32, activation_function : Proc(GenNum, Array(Float64))
+    getter input_surface : Array(Int32), window_size : Int32, stride : Int32, padding : Int32, activation_function : ActivationFunction
     property neurons : Array(Array(Neuron)), synapses : Array(Array(Array(CnnSynapse)))
     property bias : Float64, prev_bias : Float64, bias_grad : Float64, bias_grad_sum : Float64, bias_grad_batch : Float64
     property prev_bias_grad : Float64, prev_delta : Float64, prev_delta_b : Float64
@@ -12,7 +12,7 @@ module SHAInet
                    @padding : Int32 = 0,
                    @window_size : Int32 = 1,
                    @stride : Int32 = 1,
-                   @activation_function : Proc(GenNum, Array(Float64)) = SHAInet.none)
+                   @activation_function : ActivationFunction = SHAInet.none)
       #
       @neurons = Array(Array(Neuron)).new(input_surface[1]) {
         Array(Neuron).new(input_surface[0]) { Neuron.new("memory") }
