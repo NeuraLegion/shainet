@@ -56,7 +56,7 @@ module SHAInet
                  window_size : Int32,
                  stride : Int32,
                  padding : Int32,
-                 activation_function : Proc(GenNum, Array(Float64)) = SHAInet.none)
+                 activation_function : ActivationFunction = SHAInet.none)
       @layers << ConvLayer.new(master = self, @layers.last, filters_num, window_size, stride, padding, activation_function)
     end
 
@@ -72,7 +72,7 @@ module SHAInet
       @layers << DropoutLayer.new(@layers.last, drop_percent)
     end
 
-    def add_fconnect(l_size : Int32, activation_function : Proc(GenNum, Array(Float64)) = SHAInet.none)
+    def add_fconnect(l_size : Int32, activation_function : ActivationFunction = SHAInet.none)
       @layers << FullyConnectedLayer.new(master = self, @layers.last, l_size, activation_function)
     end
 

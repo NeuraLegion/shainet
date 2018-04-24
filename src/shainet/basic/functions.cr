@@ -1,33 +1,35 @@
 module SHAInet
+  alias ActivationFunction = Proc(GenNum, Tuple(Float64, Float64))
+
   # As Procs
 
-  def self.none : Proc(GenNum, Array(Float64)) # Output range -inf..inf)
-    ->(value : GenNum) { [value.to_f64, 1.0.to_f64] }
+  def self.none : ActivationFunction # Output range -inf..inf)
+    ->(value : GenNum) { {value.to_f64, 1.0_f64} }
   end
 
-  def self.sigmoid : Proc(GenNum, Array(Float64)) # Output range (0..1)
-    ->(value : GenNum) { [_sigmoid(value), _sigmoid_prime(value)] }
+  def self.sigmoid : ActivationFunction # Output range (0..1)
+    ->(value : GenNum) { {_sigmoid(value), _sigmoid_prime(value)} }
   end
 
-  def self.bp_sigmoid : Proc(GenNum, Array(Float64)) # Output range (-1..1)
-    ->(value : GenNum) { [_bp_sigmoid(value), _bp_sigmoid_prime(value)] }
+  def self.bp_sigmoid : ActivationFunction # Output range (-1..1)
+    ->(value : GenNum) { {_bp_sigmoid(value), _bp_sigmoid_prime(value)} }
   end
 
-  def self.log_sigmoid : Proc(GenNum, Array(Float64)) # Output range (0..1)
-    ->(value : GenNum) { [_log_sigmoid(value), _log_sigmoid_prime(value)] }
+  def self.log_sigmoid : ActivationFunction # Output range (0..1)
+    ->(value : GenNum) { {_log_sigmoid(value), _log_sigmoid_prime(value)} }
   end
 
-  def self.tanh : Proc(GenNum, Array(Float64)) # Output range (-1..1)
-    ->(value : GenNum) { [_tanh(value), _tanh_prime(value)] }
+  def self.tanh : ActivationFunction # Output range (-1..1)
+    ->(value : GenNum) { {_tanh(value), _tanh_prime(value)} }
   end
 
-  def self.relu : Proc(GenNum, Array(Float64)) # Output range (0..inf)
-    ->(value : GenNum) { [_relu(value), _relu_prime(value)] }
+  def self.relu : ActivationFunction # Output range (0..inf)
+    ->(value : GenNum) { {_relu(value), _relu_prime(value)} }
   end
 
-  def self.l_relu : Proc(GenNum, Array(Float64)) # Output range (-inf..inf)
+  def self.l_relu : ActivationFunction # Output range (-inf..inf)
     # (value : GenNum, slope : Float64 = 0.01) : Float64
-    ->(value : GenNum) { [_l_relu(value), _l_relu_prime(value)] }
+    ->(value : GenNum) { {_l_relu(value), _l_relu_prime(value)} }
   end
 
   # # Activation functions # #

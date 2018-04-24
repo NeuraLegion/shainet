@@ -8,7 +8,7 @@ module SHAInet
     def initialize(@master_network : CNN,
                    @prev_layer : CNNLayer | ConvLayer,
                    l_size : Int32,
-                   @activation_function : Proc(GenNum, Array(Float64)) = SHAInet.none,
+                   @activation_function : ActivationFunction = SHAInet.none,
                    @logger : Logger = Logger.new(STDOUT))
       #
       # since this is similar to a classic layer, we store all neurons in a single array
