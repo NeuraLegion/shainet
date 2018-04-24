@@ -41,15 +41,9 @@ module SHAInet
     # Normalize input to 3D image and change expected outputs to 1-hot vector
     def for_mnist_conv
       @inputs.each_with_index do |raw_input, i|
-        channel = Array(Array(Float64)).new
-        raw_input.each_slice(28) do |row|
-          row_array = Array(Float64).new
-          row.each do |member|
-            n = normalize(x: member.as(Float64), xmin: 0, xmax: 255)
-            row_array << n
-          end
-          channel << row_array
-        end
+        raw_input.each_with_index { |v, i| raw_input[i] = normalize(x: v.as(Float64), xmin: 0, xmax: 255) }
+        channel = vector_to_2d(vector: raw_input, window_size: 28)
+
         normalized_input = [channel] # Mnist has only one channel
 
         normalized_output = Array(Float64).new(10) { 0.0 } # One-hot vector output (for 10 digits)
@@ -57,6 +51,12 @@ module SHAInet
 
         @data_pairs.as(Array(CNNPair)) << {input: normalized_input, output: normalized_output}
       end
+    end
+
+    def vector_to_2d(vector : Array(Float64), window_size : Int32)
+      channel = Array(Array(Float64)).new
+      vector.each_slice(window_size) { |row| channel << row }
+      return channel
     end
   end
 end

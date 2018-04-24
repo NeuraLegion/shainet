@@ -228,13 +228,10 @@ module SHAInet
 
             evaluate(data_point[:input], data_point[:output], cost_function)
             all_errors << @total_error
+
             # Propogate the errors backwards through the hidden layers
             @layers.reverse_each do |layer|
-              if index == (data_slice.size - 1)
-                layer.error_prop(batch: true)
-              else
-                layer.error_prop(batch: false)
-              end
+              layer.error_prop(batch: true)
             end
 
             # Calculate MSE per data point
