@@ -6,7 +6,7 @@ module SHAInet
   alias CNNPair = {input: Array(Array(Array(Float64))), output: Array(Float64)}
 
   # Note: Data is stored within specific classes.
-  #       Structure hierarchy: CNN > Layer > Filter > Channel > Row > Neuron/Synapse
+  # Structure hierarchy: CNN > Layer > Filter > Channel > Row > Neuron/Synapse
 
   class CNN
     # General network parameters
@@ -33,8 +33,8 @@ module SHAInet
       @total_error = Float64.new(1)      # Sum of errors from output layer, based on a specific input
       @mean_error = Float64.new(1)       # MSE of netwrok, based on all errors of output layer for a specific input or batch
 
-      @learning_rate = 0.2 # Standard parameter for GD
-      @momentum = 0.05     # Improved GD
+      @learning_rate = 0.005 # Standard parameter for GD
+      @momentum = 0.05       # Improved GD
 
       @etah_plus = 1.2                           # For iRprop+ , how to increase step size
       @etah_minus = 0.5                          # For iRprop+ , how to decrease step size
@@ -136,12 +136,12 @@ module SHAInet
     end
 
     # Online train, updates weights/biases after each data point (stochastic gradient descent)
-    def train(data : CNNPair,                  # Input structure: data = [[Input = Array(Array(Array(GenNum)))],[Expected result = Array(GenNum)]]
-              training_type : Symbol | String, # Type of training: :sgdm, :rprop, :adam
-              cost_function : Symbol | String, # one of COST_FUNCTIONS described at the top of the file
-              epochs : Int32,                  # a criteria of when to stop the training
-              error_threshold : Float64,       # a criteria of when to stop the training
-              log_each : Int32 = 1000)         # determines what is the step for error printout
+    def train(data : CNNPair,                                        # Input structure: data = [[Input = Array(Array(Array(GenNum)))],[Expected result = Array(GenNum)]]
+              training_type : Symbol | String,                       # Type of training: :sgdm, :rprop, :adam
+              cost_function : Symbol | String | CostFunction = :mse, # one of COST_FUNCTIONS described at the top of the file or Proc
+              epochs : Int32 = 1,                                    # a criteria of when to stop the training
+              error_threshold : Float64 = 0.0,                       # a criteria of when to stop the training
+              log_each : Int32 = 1000)                               # determines what is the step for error printout
 
       # verify_data(data)
       @logger.info("Training started")
@@ -152,6 +152,13 @@ module SHAInet
         if e >= epochs || (error_threshold >= @mean_error) && (e > 0)
           log_summary(e)
           break
+        end
+
+        # Change String/Symbol into the corrent proc
+        if cost_function.is_a?(Symbol) || cost_function.is_a?(String)
+          raise NeuralNetRunError.new("Must define correct cost function type (:mse, :c_ent, :exp, :hel_d, :kld, :gkld, :ita_sai_d).") if COST_FUNCTIONS.any? { |x| x == cost_function.to_s } == false
+          proc = get_cost_proc(cost_function.to_s)
+          cost_function = proc
         end
 
         # Go over each data point and update the weights/biases based on the specific example
@@ -189,18 +196,26 @@ module SHAInet
     end
 
     # Batch train, updates weights/biases using a gradient sum from all data points in the batch (using gradient descent)
-    def train_batch(data : Array(CNNPair),                                    # Input structure: data = [[Input = Array(Array(Array(GenNum)))],[Expected result = Array(GenNum)]]
-                    training_type : Symbol | String,                          # Type of training: :sgdm, :rprop, :adam
-                    cost_function : Proc = SHAInet.quadratic_cost_derivative, # one of COST_FUNCTIONS described at the top of the file
-                    epochs : Int32 = 1,                                       # a criteria of when to stop the training
-                    error_threshold : Float64 = 0.001,                        # a criteria of when to stop the training
-                    log_each : Int32 = 1000,                                  # determines what is the step for error printout
+    def train_batch(data : Array(CNNPair),                                 # Input structure: data = [[Input = Array(Array(Array(GenNum)))],[Expected result = Array(GenNum)]]
+                    training_type : Symbol | String,                       # Type of training: :sgdm, :rprop, :adam
+                    cost_function : Symbol | String | CostFunction = :mse, # one of COST_FUNCTIONS described at the top of the file or Proc
+                    epochs : Int32 = 1,                                    # a criteria of when to stop the training
+                    error_threshold : Float64 = 0.0,                       # a criteria of when to stop the training
+                    log_each : Int32 = 1000,                               # determines what is the step for error printout
                     mini_batch_size : Int32 | Nil = nil)
       #
       time_start = Time.new
       @logger.info("Training started")
       batch_size = mini_batch_size ? mini_batch_size : data.size
       @time_step = 0
+
+      # Change String/Symbol into the corrent proc
+      if cost_function.is_a?(Symbol) || cost_function.is_a?(String)
+        raise NeuralNetRunError.new("Must define correct cost function type (:mse, :c_ent, :exp, :hel_d, :kld, :gkld, :ita_sai_d).") if COST_FUNCTIONS.any? { |x| x == cost_function.to_s } == false
+        proc = get_cost_proc(cost_function.to_s)
+        cost_function = proc
+      end
+
       loop do |epoch|
         slice_num = 1
         if epoch % log_each == 0
@@ -251,11 +266,11 @@ module SHAInet
           @total_error = all_errors.reduce { |acc, i| acc + i }
 
           # Calculate MSE per batch
-          batch_mean = (batch_mean.reduce { |acc, i| acc + i })/data_slice.size
-          @mean_error = batch_mean
+          @mean_error = (batch_mean.reduce { |acc, i| acc + i })/data_slice.size
 
           # Update all wieghts & biases for the batch
           @time_step += 1 unless mini_batch_size # Based on how many epochs have passed in current training run, needed for Adam
+
           # Update all wieghts & biases
           update_wb(training_type, batch: true)
 
@@ -268,6 +283,16 @@ module SHAInet
     def update_wb(training_type : Symbol | String, batch : Bool = false)
       @layers.each do |layer|
         layer.update_wb(training_type, batch) # Each layer does this function differently
+      end
+    end
+
+    def check_nan : Bool
+      @layers.last.as(FullyConnectedLayer | SoftmaxLayer).output.each do |value|
+        if value.nan? == true
+          return true
+        else
+          return false
+        end
       end
     end
 
@@ -313,6 +338,17 @@ module SHAInet
       if message
         @logger.error("#{message}: #{data}")
         raise NeuralNetTrainError.new(message)
+      end
+    end
+
+    def get_cost_proc(function_name : String) : CostFunction
+      case function_name
+      when "mse"
+        return SHAInet.quadratic_cost
+      when "c_ent"
+        raise MathError.new("Cross entropy cost is not implemented fully yet, please use quadratic cost for now.")
+      else
+        raise NeuralNetInitalizationError.new("Must choose correct cost function or provide a correct Proc")
       end
     end
 

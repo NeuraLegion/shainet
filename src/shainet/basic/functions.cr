@@ -1,5 +1,6 @@
 module SHAInet
   alias ActivationFunction = Proc(GenNum, Tuple(Float64, Float64))
+  alias CostFunction = Proc(GenNum, GenNum, NamedTuple(value: Float64, derivative: Float64))
 
   # As Procs
 
@@ -127,15 +128,18 @@ module SHAInet
   end
 
   ##################################################################
-  # # Proc for cost functions
+  # # Procs for cost functions
 
-  def self.quadratic_cost : Proc(GenNum, GenNum, Float64)
-    ->(expected : GenNum, actual : GenNum) { _quadratic_cost(expected.to_f64, actual.to_f64) }
+  def self.quadratic_cost : CostFunction
+    ->(expected : GenNum, actual : GenNum) {
+      {value:      _quadratic_cost(expected.to_f64, actual.to_f64),
+       derivative: _quadratic_cost_derivative(expected.to_f64, actual.to_f64)}
+    }
   end
 
-  def self.quadratic_cost_derivative : Proc(GenNum, GenNum, Float64)
-    ->(expected : GenNum, actual : GenNum) { _quadratic_cost_derivative(expected.to_f64, actual.to_f64) }
-  end
+  # def self.quadratic_cost_derivative : Proc(GenNum, GenNum, Float64)
+  #   ->(expected : GenNum, actual : GenNum) { _quadratic_cost_derivative(expected.to_f64, actual.to_f64) }
+  # end
 
   # # Cost functions  # #
 

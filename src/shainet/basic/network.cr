@@ -40,8 +40,8 @@ module SHAInet
       @w_gradient = Array(Float64).new   # Needed for batch train
       @b_gradient = Array(Float64).new   # Needed for batch train
 
-      @learning_rate = 0.7 # Standard parameter for GD
-      @momentum = 0.3      # Improved GD
+      @learning_rate = 0.005 # Standard parameter for GD
+      @momentum = 0.05       # Improved GD
 
       @etah_plus = 1.2                           # For iRprop+ , how to increase step size
       @etah_minus = 0.5                          # For iRprop+ , how to decrease step size
@@ -214,37 +214,26 @@ module SHAInet
 
     # Quantifies how good the network performed for a single input compared to the expected output
     # This function returns the actual output and updates the error gradient for the output layer
-    def evaluate(input : Array(GenNum), expected : Array(GenNum), cost_function : Symbol | String)
-      raise NeuralNetRunError.new("Must define correct cost function type (:mse, :c_ent, :exp, :hel_d, :kld, :gkld, :ita_sai_d).") if COST_FUNCTIONS.any? { |x| x == cost_function.to_s } == false
+    def evaluate(input : Array(GenNum),
+                 expected : Array(GenNum),
+                 cost_function : CostFunction = SHAInet.quadratic_cost)
+      #
 
       actual = run(input, stealth = true)
+
       # Get the error signal for the final layer, based on the cost function (error gradient is stored in the output neurons)
       @error_signal = [] of Float64
-      case cost_function.to_s
-      when "mse"
-        expected.size.times do |i|
-          neuron = @output_layers.last.neurons.first[i] # Update error of all neurons in the output layer based on the actual result
-          neuron.gradient = SHAInet.quadratic_cost_derivative(expected[i].to_f64, actual[i].to_f64)*neuron.sigma_prime
-          # TODO: add support for multiple output layers
-          @error_signal << SHAInet.quadratic_cost(expected[i].to_f64, actual[i].to_f64) # Store the output error based on cost function
-        end
-      when "c_ent"
-        expected.size.times do |i|
-          neuron = @output_layers.last.neurons.first[i]
-          neuron.gradient = SHAInet.cross_entropy_cost_derivative(expected[i].to_f64, actual[i].to_f64)*neuron.sigma_prime
-          # TODO: add support for multiple output layers
-          @error_signal << SHAInet.cross_entropy_cost(expected[i].to_f64, actual[i].to_f64)
-        end
-      when "exp"
-        # TODO
-      when "hel_d"
-        # TODO
-      when "kld"
-        # TODO
-      when "gkld"
-        # TODO
-      when "ita_sai_d"
-        # TODO
+
+      actual.each_with_index do |e, i|
+        neuron = @output_layers.last.neurons[i] # Update error of all neurons in the output layer based on the actual result
+        cost = cost_function.call(expected[i], actual[i])
+        neuron.gradient = cost[:derivative]*neuron.sigma_prime
+        @error_signal << cost[:value] # Store the output error based on cost function
+
+        # puts "Actual output: #{actual}"
+        # puts "Cost value: #{cost[:value]}"
+        # puts "cost derivative: #{cost[:derivative]}"
+        # puts "---"
       end
 
       @total_error = @error_signal.reduce(0.0) { |acc, i| acc + i } # Sum up all the errors from output layer
@@ -283,12 +272,12 @@ module SHAInet
     end
 
     # Online train, updates weights/biases after each data point (stochastic gradient descent)
-    def train(data : Array(Array(Array(GenNum))), # Input structure: data = [[Input = [] of Float64],[Expected result = [] of Float64]]
-              training_type : Symbol | String,    # Type of training: :sgdm, :rprop, :adam
-              cost_function : Symbol | String,    # one of COST_FUNCTIONS described at the top of the file
-              epochs : Int32,                     # a criteria of when to stop the training
-              error_threshold : Float64,          # a criteria of when to stop the training
-              log_each : Int32 = 1000)            # determines what is the step for error printout
+    def train(data : Array(Array(Array(GenNum))),                    # Input structure: data = [[Input = [] of Float64],[Expected result = [] of Float64]]
+              training_type : Symbol | String,                       # Type of training: :sgdm, :rprop, :adam
+              cost_function : Symbol | String | CostFunction = :mse, # Proc returns the function value and it's derivative
+              epochs : Int32 = 1,                                    # a criteria of when to stop the training
+              error_threshold : Float64 = 0.0,                       # a criteria of when to stop the training
+              log_each : Int32 = 1000)                               # determines what is the step for error printout
 
       verify_data(data)
       @logger.info("Training started")
@@ -301,9 +290,17 @@ module SHAInet
           break
         end
 
+        # Change String/Symbol into the corrent proc
+        if cost_function.is_a?(Symbol) || cost_function.is_a?(String)
+          raise NeuralNetRunError.new("Must define correct cost function type (:mse, :c_ent, :exp, :hel_d, :kld, :gkld, :ita_sai_d).") if COST_FUNCTIONS.any? { |x| x == cost_function.to_s } == false
+          proc = get_cost_proc(cost_function.to_s)
+          cost_function = proc
+        end
+
         # Go over each data point and update the weights/biases based on the specific example
         data.each do |data_point|
           # Update error signal, error gradient and total error at the output layer based on current input
+          # puts "Data-point: #{data_point} [[input], [expected]]"
           evaluate(data_point[0], data_point[1], cost_function)
 
           # Propogate the errors backwards through the hidden layers
@@ -337,9 +334,9 @@ module SHAInet
     # Batch train, updates weights/biases using a gradient sum from all data points in the batch (using gradient descent)
     def train_batch(data : Array(Array(Array(GenNum))) | SHAInet::TrainingData, # Input structure: data = [[Input = [] of Float64],[Expected result = [] of Float64]]
                     training_type : Symbol | String,                            # Type of training: :sgdm, :rprop, :adam
-                    cost_function : Symbol | String,                            # one of COST_FUNCTIONS described at the top of the file
-                    epochs : Int32,                                             # a criteria of when to stop the training
-                    error_threshold : Float64,                                  # a criteria of when to stop the training
+                    cost_function : Symbol | String | CostFunction = :mse,      # Proc returns the function value and it's derivative
+                    epochs : Int32 = 1,                                         # a criteria of when to stop the training
+                    error_threshold : Float64 = 0.0,                            # a criteria of when to stop the training
                     log_each : Int32 = 1000,                                    # determines what is the step for error printout
                     mini_batch_size : Int32 | Nil = nil)
       # This methods accepts data as either a SHAInet::TrainingData object, or as an Array(Array(Array(GenNum)).
@@ -348,6 +345,14 @@ module SHAInet
       @logger.info("Training started")
       batch_size = mini_batch_size ? mini_batch_size : raw_data.size
       @time_step = 0
+
+      # Change String/Symbol into the corrent proc
+      if cost_function.is_a?(Symbol) || cost_function.is_a?(String)
+        raise NeuralNetRunError.new("Must define correct cost function type (:mse, :c_ent, :exp, :hel_d, :kld, :gkld, :ita_sai_d).") if COST_FUNCTIONS.any? { |x| x == cost_function.to_s } == false
+        proc = get_cost_proc(cost_function.to_s)
+        cost_function = proc
+      end
+
       raw_data.each_slice(batch_size, reuse = false) do |data_slice|
         verify_data(data_slice)
         @logger.info("Working on mini-batch size: #{batch_size}") if mini_batch_size
@@ -623,6 +628,17 @@ module SHAInet
         end
       end
       @logger.info("Network loaded from: #{file_path}")
+    end
+
+    def get_cost_proc(function_name : String) : CostFunction
+      case function_name
+      when "mse"
+        return SHAInet.quadratic_cost
+      when "c_ent"
+        raise MathError.new("Cross entropy cost is not implemented fully yet, please use quadratic cost for now.")
+      else
+        raise NeuralNetInitalizationError.new("Must choose correct cost function or provide a correct Proc")
+      end
     end
 
     def inspect

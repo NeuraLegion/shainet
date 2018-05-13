@@ -138,14 +138,15 @@ describe SHAInet::CNN do
     cnn.learning_rate = 0.5
     cnn.momentum = 0.2
 
+    puts "#{training_data.data_pairs.class}"
     # cnn.run(test_data.data_pairs.first[:input], stealth = false)
-    cnn.train_batch(training_data.data_pairs,
-      training_type = :sgdm,
-      cost = SHAInet.quadratic_cost_derivative,
-      epochs = 3,
-      threshold = 0.0001,
-      log_each = 1,
-      minib = 25)
+    cnn.train_batch(data: training_data.data_pairs,
+      training_type: :sgdm,
+      cost_function: :mse,
+      epochs: 3,
+      threshold: 0.0001,
+      log_each: 1,
+      mini_batch_size: 25)
 
     correct_answers = 0
     test_data.data_pairs.each do |data_point|
