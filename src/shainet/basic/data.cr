@@ -2,7 +2,6 @@ require "csv"
 
 module SHAInet
   class Data
-
     @normalized_inputs : Array(Array(Float64))
     @normalized_outputs : Array(Array(Float64))
     @yrange : Int32
@@ -30,7 +29,7 @@ module SHAInet
       end
       d = Data.new(inputs, outputs)
       d.labels = outputs_as_string.uniq
-      d.outputs = outputs_as_string.map{|string_output| d.array_for_label(string_output)}
+      d.outputs = outputs_as_string.map { |string_output| d.array_for_label(string_output) }
       d.normalize_min_max
       d
     end
@@ -42,6 +41,12 @@ module SHAInet
       @ymax = 1
       @ymin = 0
       @yrange = @ymax - @ymin
+
+      @i_min = Array(GenNum).new
+      @i_max = Array(GenNum).new
+      @o_min = Array(GenNum).new
+      @o_max = Array(GenNum).new
+
       @labels = Array(String).new # Array of possible data labels
       @logger = Logger.new(STDOUT)
     end
@@ -64,34 +69,67 @@ module SHAInet
 
     def normalize_min_max
       # Get inputs min-max
-      i_max = Array(GenNum).new
-      i_min = Array(GenNum).new
-      @inputs.transpose.each { |a| i_max << a.max; i_min << a.min }
+      @inputs.transpose.each { |a| @i_max << a.max; @i_min << a.min }
 
       # Get outputs min-max
-      o_max = Array(GenNum).new
-      o_min = Array(GenNum).new
-      @outputs.transpose.each { |a| o_max << a.max; o_min << a.min }
+      @outputs.transpose.each { |a| @o_max << a.max; @o_min << a.min }
 
       @inputs.each do |row|
-        row_array = Array(Float64).new
-        row.each_with_index do |member, i|
-          row_array << normalize(member, i_min[i], i_max[i])
-        end
-        @normalized_inputs << row_array
+        @normalized_inputs << normalize_inputs(row)
       end
 
       @outputs.each do |row|
-        row_array = Array(Float64).new
-        row.each_with_index do |member, i|
-          row_array << normalize(member, o_min[i], o_max[i])
-        end
-        @normalized_outputs << row_array
+        @normalized_outputs << normalize_outputs(row)
       end
     end
 
-    def normalize(x : GenNum, xmin : GenNum, xmax : GenNum) : Float64
-      value = (@ymin + (x - xmin) * (@yrange.to_f64 / (xmax - xmin))).to_f64
+    def normalize_inputs(inputs : Array(Float64))
+      results = Array(Float64).new
+      inputs.each_with_index do |input, i|
+        results << normalize_input(input, i)
+      end
+      return results
+    end
+
+    def normalize_outputs(outputs : Array(Float64))
+      results = Array(Float64).new
+      outputs.each_with_index do |output, i|
+        results << normalize_output(output, i)
+      end
+      return results
+    end
+
+    def normalize_input(x : Float64, idx : Int32)
+      range = @i_max[idx] - @i_min[idx]
+      adj_x = x - (@i_min[idx] + @ymin)
+      norm = (@yrange / range)
+      value = adj_x * norm
+      return 0.0 if value.nan?
+      value
+    end
+
+    def normalize_output(x : Float64, idx : Int32)
+      range = @o_max[idx] - @o_min[idx]
+      adj_x = x - (@o_min[idx] + @ymin)
+      norm = (@yrange / range)
+      value = adj_x * norm
+      return 0.0 if value.nan?
+      value
+    end
+
+    def denormalize_outputs(outputs : Array(Float64))
+      results = Array(Float64).new
+      outputs.each_with_index do |output, i|
+        results << denormalize_output(output, i)
+      end
+      return results
+    end
+
+    def denormalize_output(x : Float64, idx : Int32)
+      range = @o_max[idx] - @o_min[idx]
+      denorm = x * (range / @yrange)
+      adj_x = @ymin + @o_min[idx]
+      value = denorm + adj_x
       return 0.0 if value.nan?
       value
     end
@@ -104,12 +142,12 @@ module SHAInet
       test_set = shuffled_data[training_set_size..shuffled_data.size - 1]
 
       @logger.info "Selected #{training_set.size} / #{data.size} rows for training"
-      training_data = SHAInet::TrainingData.new(training_set.map{|el| el[0]}, training_set.map{|el| el[1]})
+      training_data = SHAInet::TrainingData.new(training_set.map { |el| el[0] }, training_set.map { |el| el[1] })
       training_data.labels = @labels
       training_data.normalize_min_max
 
       @logger.info "Selected #{test_set.size} / #{data.size} rows for testing"
-      test_data = SHAInet::TestData.new(test_set.map{|el| el[0]}, test_set.map{|el| el[1]})
+      test_data = SHAInet::TestData.new(test_set.map { |el| el[0] }, test_set.map { |el| el[1] })
       test_data.labels = @labels
       test_data.normalize_min_max
 
@@ -124,7 +162,7 @@ module SHAInet
 
     # Takes a label as a String and returns the corresponding output array
     def array_for_label(a_label)
-      @labels.map{|label| a_label == label ? 1.to_f64 : 0.to_f64}
+      @labels.map { |label| a_label == label ? 1.to_f64 : 0.to_f64 }
     end
 
     # Takes an output array of 0,1s and returns the corresponding label
@@ -132,7 +170,5 @@ module SHAInet
       index = an_array.index(an_array.max.to_f64)
       index ? @labels[index] : ""
     end
-
-
   end
 end
