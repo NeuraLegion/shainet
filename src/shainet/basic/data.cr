@@ -83,7 +83,7 @@ module SHAInet
       end
     end
 
-    def normalize_inputs(inputs : Array(Float64))
+    def normalize_inputs(inputs : Array(GenNum))
       results = Array(Float64).new
       inputs.each_with_index do |input, i|
         results << normalize_input(input, i)
@@ -91,7 +91,7 @@ module SHAInet
       return results
     end
 
-    def normalize_outputs(outputs : Array(Float64))
+    def normalize_outputs(outputs : Array(GenNum))
       results = Array(Float64).new
       outputs.each_with_index do |output, i|
         results << normalize_output(output, i)
@@ -99,25 +99,25 @@ module SHAInet
       return results
     end
 
-    def normalize_input(x : Float64, idx : Int32)
+    def normalize_input(x : GenNum, idx : Int32)
       range = @i_max[idx] - @i_min[idx]
-      adj_x = x - (@i_min[idx] + @ymin)
+      adj_x = x.to_f64 - (@i_min[idx] + @ymin)
       norm = (@yrange / range)
       value = adj_x * norm
       return 0.0 if value.nan?
       value
     end
 
-    def normalize_output(x : Float64, idx : Int32)
+    def normalize_output(x : GenNum, idx : Int32)
       range = @o_max[idx] - @o_min[idx]
-      adj_x = x - (@o_min[idx] + @ymin)
+      adj_x = x.to_f64 - (@o_min[idx] + @ymin)
       norm = (@yrange / range)
       value = adj_x * norm
       return 0.0 if value.nan?
       value
     end
 
-    def denormalize_outputs(outputs : Array(Float64))
+    def denormalize_outputs(outputs : Array(GenNum))
       results = Array(Float64).new
       outputs.each_with_index do |output, i|
         results << denormalize_output(output, i)
@@ -125,9 +125,9 @@ module SHAInet
       return results
     end
 
-    def denormalize_output(x : Float64, idx : Int32)
+    def denormalize_output(x : GenNum, idx : Int32)
       range = @o_max[idx] - @o_min[idx]
-      denorm = x * (range / @yrange)
+      denorm = x.to_f64 * (range / @yrange)
       adj_x = @ymin + @o_min[idx]
       value = denorm + adj_x
       return 0.0 if value.nan?
