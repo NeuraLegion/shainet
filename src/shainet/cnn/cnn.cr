@@ -3,11 +3,14 @@ require "./**"
 
 module SHAInet
   alias CNNLayer = InputLayer | ReluLayer | MaxPoolLayer | FullyConnectedLayer | DropoutLayer | SoftmaxLayer
+  alias CNNPair = {input: Array(Array(Array(Float64))), output: Array(Float64)}
 
   # Note: Data is stored within specific classes.
-  #       Structure hierarchy: CNN > Layer > Filter > Channel > Row > Neuron/Synapse
+  # Structure hierarchy: CNN > Layer > Filter > Channel > Row > Neuron/Synapse
 
   class CNN
+    COST_FUNCTIONS = ["mse", "c_ent", "exp", "hel_d", "kld", "gkld", "ita_sai_d"]
+
     # General network parameters
     getter layers : Array(CNNLayer | ConvLayer)                                       # , :all_neurons, :all_synapses
     getter error_signal : Array(Float64), total_error : Float64, mean_error : Float64 # , w_gradient : Array(Float64), b_gradient : Array(Float64)
@@ -32,8 +35,8 @@ module SHAInet
       @total_error = Float64.new(1)      # Sum of errors from output layer, based on a specific input
       @mean_error = Float64.new(1)       # MSE of netwrok, based on all errors of output layer for a specific input or batch
 
-      @learning_rate = 0.7 # Standard parameter for GD
-      @momentum = 0.3      # Improved GD
+      @learning_rate = 0.005 # Standard parameter for GD
+      @momentum = 0.05       # Improved GD
 
       @etah_plus = 1.2                           # For iRprop+ , how to increase step size
       @etah_minus = 0.5                          # For iRprop+ , how to decrease step size
@@ -57,7 +60,7 @@ module SHAInet
                  stride : Int32,
                  padding : Int32,
                  activation_function : ActivationFunction = SHAInet.none)
-      @layers << ConvLayer.new(master = self, @layers.last, filters_num, window_size, stride, padding, activation_function)
+      @layers << ConvLayer.new(self, @layers.last, filters_num, window_size, stride, padding, activation_function)
     end
 
     def add_relu(l_relu_slope : Float64 = 0.0)
@@ -76,22 +79,25 @@ module SHAInet
       @layers << FullyConnectedLayer.new(master = self, @layers.last, l_size, activation_function)
     end
 
-    def add_softmax
-      raise CNNInitializationError.new("Softmax layer must come only after a fully connected layer.") unless @layers.last.class == SHAInet::FullyConnectedLayer
-      @layers << SoftmaxLayer.new(@layers.last.as(FullyConnectedLayer))
+    def add_softmax(range : Range(Int32, Int32) = (0..-1))
+      @layers << SoftmaxLayer.new(@layers.last.as(FullyConnectedLayer | ReluLayer), range: range)
     end
 
-    def run(input_data : Array(Array(Array(GenNum))), stealth : Bool = true)
+    def run(input_data : Array(Array(Array(GenNum))), stealth : Bool = true) : Array(Float64)
       if stealth == false
         puts "############################"
         puts "Starting run..."
       end
-      # Activate all layers one by one
+      # Activate all layers one by onelayer.inspect("activations")
       @layers.each do |layer|
         if layer.is_a?(InputLayer)
           layer.as(InputLayer).activate(input_data) # activation of input layer
         else
           layer.activate # activate the rest of the layers
+
+          if stealth == false
+            layer.inspect("activations")
+          end
         end
       end
       # Get the result from the output layer
@@ -103,42 +109,26 @@ module SHAInet
       return @layers.last.as(FullyConnectedLayer | SoftmaxLayer).output
     end
 
-    def evaluate(input_data : Array(Array(Array(GenNum))), expected_output : Array(GenNum), cost_function : Symbol | String)
-      # raise NeuralNetRunError.new("Must define correct cost function type (:mse, :c_ent, :exp, :hel_d, :kld, :gkld, :ita_sai_d).") if COST_FUNCTIONS.any? { |x| x == cost_function.to_s } == false
+    def evaluate(input_data : Array(Array(Array(GenNum))),
+                 expected_output : Array(GenNum),
+                 cost_function : CostFunction = SHAInet.quadratic_cost)
+      #
+      actual_output = run(input_data, stealth: true)
 
-      actual = run(input_data, stealth = true)
-      raise NeuralNetRunError.new("Expected and network outputs have different sizes.") unless actual.size == expected_output.size
+      raise NeuralNetRunError.new(
+        "Expected and network outputs have different sizes.") unless actual_output.size == expected_output.size
+      # Stop scan if we have NaNs in the output
+      actual_output.each { |ar| raise NeuralNetRunError.new(
+        "Found a NaN value, run stopped.\noutput:#{actual_output}") if ar.nan? }
 
       # Get the error signal for the final layer, based on the cost function (error gradient is stored in the output neurons)
-      @error_signal = [] of Float64 # Set error signal to 0 for current run
-      case cost_function.to_s
-      when "mse"
-        expected_output.size.times do |i|
-          neuron = @layers.last.as(FullyConnectedLayer | SoftmaxLayer).filters.first.neurons.first[i] # Update error of all neurons in the output layer based on the actual result
-          neuron.gradient = SHAInet.quadratic_cost_derivative(expected_output[i].to_f64, actual[i].to_f64)*neuron.sigma_prime
-          @error_signal << SHAInet.quadratic_cost(expected_output[i].to_f64, actual[i].to_f64) # Store the output error based on cost function
-          # .as(FullyConnectedLayer | MaxPoolLayer)
-        end
-      when "c_ent"
-        expected_output.size.times do |i|
-          neuron = @layers.last.as(FullyConnectedLayer | SoftmaxLayer).filters.first.neurons.first[i]
-
-          neuron.gradient = SHAInet.cross_entropy_cost_derivative(expected_output[i].to_f64, actual[i].to_f64)*neuron.sigma_prime
-          # TODO: add support for multiple output layers
-          @error_signal << SHAInet.cross_entropy_cost(expected_output[i].to_f64, actual[i].to_f64)
-        end
-      when "exp"
-        # TODO
-      when "hel_d"
-        # TODO
-      when "kld"
-        # TODO
-      when "gkld"
-        # TODO
-      when "ita_sai_d"
-        # TODO
+      @error_signal = [] of Float64 # collect all the errors for current run
+      actual_output.size.times do |i|
+        neuron = @layers.last.as(FullyConnectedLayer | SoftmaxLayer).filters.first.neurons.first[i] # Output neuron
+        cost = cost_function.call(expected_output[i], actual_output[i])
+        neuron.gradient = cost[:derivative]*neuron.sigma_prime # Update error of all neurons in the output layer based on the actual result
+        @error_signal << cost[:value]                          # Store the output error based on cost function
       end
-
       @total_error = @error_signal.reduce(0.0) { |acc, i| acc + i } # Sum up all the errors from output layer
 
 
@@ -147,12 +137,12 @@ module SHAInet
     end
 
     # Online train, updates weights/biases after each data point (stochastic gradient descent)
-    def train(data : Array(Array(Array(Array(Array(Float64))) | Array(Float64))), # Input structure: data = [[Input = Array(Array(Array(GenNum)))],[Expected result = Array(GenNum)]]
-              training_type : Symbol | String,                                    # Type of training: :sgdm, :rprop, :adam
-              cost_function : Symbol | String,                                    # one of COST_FUNCTIONS described at the top of the file
-              epochs : Int32,                                                     # a criteria of when to stop the training
-              error_threshold : Float64,                                          # a criteria of when to stop the training
-              log_each : Int32 = 1000)                                            # determines what is the step for error printout
+    def train(data : NamedTuple(input: Array(Array(Array(Float64))), output: Array(Float64)), # Input structure: data = [[Input = Array(Array(Array(GenNum)))],[Expected result = Array(GenNum)]]
+              training_type : Symbol | String,                                                # Type of training: :sgdm, :rprop, :adam
+              cost_function : Symbol | String | CostFunction = :mse,                          # one of COST_FUNCTIONS described at the top of the file or Proc
+              epochs : Int32 = 1,                                                             # a criteria of when to stop the training
+              error_threshold : Float64 = 0.0,                                                # a criteria of when to stop the training
+              log_each : Int32 = 1000)                                                        # determines what is the step for error printout
 
       # verify_data(data)
       @logger.info("Training started")
@@ -165,14 +155,21 @@ module SHAInet
           break
         end
 
+        # Change String/Symbol into the corrent proc
+        if cost_function.is_a?(Symbol) || cost_function.is_a?(String)
+          raise NeuralNetRunError.new("Must define correct cost function type (:mse, :c_ent, :exp, :hel_d, :kld, :gkld, :ita_sai_d).") if COST_FUNCTIONS.any? { |x| x == cost_function.to_s } == false
+          proc = get_cost_proc(cost_function.to_s)
+          cost_function = proc
+        end
+
         # Go over each data point and update the weights/biases based on the specific example
         data.each do |data_point|
           # Update error signal, error gradient and total error at the output layer based on current input
-          evaluate(data_point[0].as(Array(Array(Array(Float64)))), data_point[1].as(Array(Float64)), cost_function)
+          evaluate(data_point[:input], data_point[:output], cost_function)
 
           # Propogate the errors backwards through the hidden layers
           @layers.reverse_each do |layer|
-            layer.error_prop(batch = false) # Each layer has a different backpropogation function
+            layer.error_prop(batch: false) # Each layer has a different backpropogation function
           end
 
           # Calculate MSE
@@ -186,8 +183,8 @@ module SHAInet
           sqr_sum = sqrd_dists.reduce { |acc, i| acc + i }
           @mean_error = sqr_sum/@layers.last.as(FullyConnectedLayer | SoftmaxLayer).output.size
 
-          # Update all wieghts & biases
-          update_wb(training_type, batch = false)
+          # Update all weights & biases
+          update_wb(training_type, batch: false)
 
           # update_biases(training_type, batch = false)
 
@@ -200,47 +197,58 @@ module SHAInet
     end
 
     # Batch train, updates weights/biases using a gradient sum from all data points in the batch (using gradient descent)
-    def train_batch(data : Array(Array(Array(Array(Array(Float64))) | Array(Float64))), # Input structure: data = [[Input = Array(Array(Array(GenNum)))],[Expected result = Array(GenNum)]]
-                    training_type : Symbol | String,                                    # Type of training: :sgdm, :rprop, :adam
-                    cost_function : Symbol | String,                                    # one of COST_FUNCTIONS described at the top of the file
-                    epochs : Int32,                                                     # a criteria of when to stop the training
-                    error_threshold : Float64,                                          # a criteria of when to stop the training
-                    log_each : Int32 = 1000,                                            # determines what is the step for error printout
+    def train_batch(data : Array(CNNPair), # Input structure: data = [[Input = Array(Array(Array(GenNum)))],[Expected result = Array(GenNum)]]
+                    # data : Array(NamedTuple(input: Array(Array(Array(Float64))), output: Array(Float64))), # Input structure: data = [[Input = Array(Array(Array(GenNum)))],[Expected result = Array(GenNum)]]
+                    training_type : Symbol | String,                       # Type of training: :sgdm, :rprop, :adam
+                    cost_function : Symbol | String | CostFunction = :mse, # one of COST_FUNCTIONS described at the top of the file or Proc
+                    epochs : Int32 = 1,                                    # a criteria of when to stop the training
+                    error_threshold : Float64 = 0.0,                       # a criteria of when to stop the training
+                    log_each : Int32 = 1000,                               # determines what is the step for error printout
                     mini_batch_size : Int32 | Nil = nil)
       #
+      time_start = Time.new
       @logger.info("Training started")
       batch_size = mini_batch_size ? mini_batch_size : data.size
       @time_step = 0
-      data.each_slice(batch_size, reuse = false) do |data_slice|
-        verify_data(data_slice)
-        @logger.info("Working on mini-batch size: #{batch_size}") if mini_batch_size
-        @time_step += 1 if mini_batch_size # in mini-batch update adam time_step
-        loop do |e|
-          if e % log_each == 0
-            log_summary(e)
-            # @all_neurons.each { |s| puts s.gradient }
-          end
-          if e >= epochs || (error_threshold >= @mean_error) && (e > 1)
-            log_summary(e)
-            break
-          end
-          if (@mean_error/@prev_mean_error <= 0.1) && (e > 1)
-            @logger.info("Reached optimum, error does not change anymore")
-            log_summary(e)
-            break
-          end
+
+      # Change String/Symbol into the corrent proc
+      if cost_function.is_a?(Symbol) || cost_function.is_a?(String)
+        raise NeuralNetRunError.new("Must define correct cost function type (:mse, :c_ent, :exp, :hel_d, :kld, :gkld, :ita_sai_d).") if COST_FUNCTIONS.any? { |x| x == cost_function.to_s } == false
+        proc = get_cost_proc(cost_function.to_s)
+        cost_function = proc
+      end
+
+      loop do |epoch|
+        slice_num = 1
+        if epoch % log_each == 0
+          log_summary(epoch)
+          # @all_neurons.each { |s| puts s.gradient }
+        end
+        if epoch >= epochs || (error_threshold >= @mean_error) && (epoch > 1)
+          log_summary(epoch)
+          break
+        end
+
+        data.each_slice(batch_size, reuse: false) do |data_slice|
+          verify_data(data_slice)
+          time_now = Time.new
+          @logger.info("Mini-batch # #{slice_num}| Mini-batch size: #{batch_size} | Runtime: #{time_now - time_start}") if mini_batch_size
+          slice_num += 1
+          @time_step += 1 if mini_batch_size # in mini-batch update adam time_step
 
           batch_mean = [] of Float64
           all_errors = [] of Float64
 
           # Go over each data point and collect gradients of weights/biases based on each specific example
-          data_slice.each do |data_point|
+          data_slice.each_with_index do |data_point, index|
             # Update error signal, error gradient and total error at the output layer based on current input
-            evaluate(data_point[0].as(Array(Array(Array(Float64)))), data_point[1].as(Array(Float64)), cost_function)
+
+            evaluate(data_point[:input], data_point[:output], cost_function)
             all_errors << @total_error
+
             # Propogate the errors backwards through the hidden layers
             @layers.reverse_each do |layer|
-              layer.error_prop(batch = true) # Each layer has a different backpropogation function
+              layer.error_prop(batch: true)
             end
 
             # Calculate MSE per data point
@@ -260,13 +268,13 @@ module SHAInet
           @total_error = all_errors.reduce { |acc, i| acc + i }
 
           # Calculate MSE per batch
-          batch_mean = (batch_mean.reduce { |acc, i| acc + i })/data_slice.size
-          @mean_error = batch_mean
+          @mean_error = (batch_mean.reduce { |acc, i| acc + i })/data_slice.size
 
           # Update all wieghts & biases for the batch
           @time_step += 1 unless mini_batch_size # Based on how many epochs have passed in current training run, needed for Adam
+
           # Update all wieghts & biases
-          update_wb(training_type, batch = true)
+          update_wb(training_type, batch: true)
 
           @prev_mean_error = @mean_error
         end
@@ -280,27 +288,83 @@ module SHAInet
       end
     end
 
-    def verify_data(data : Array(Array(Array(Array(Array(Float64))) | Array(Float64))))
-      message = nil
-      if data.sample.size != 2
-        message = "Train data must have two arrays, one for input one for output"
+    def check_nan : Bool
+      @layers.last.as(FullyConnectedLayer | SoftmaxLayer).output.each do |value|
+        if value.nan? == true
+          return true
+        else
+          return false
+        end
       end
-      random_input = data.sample.first.size
-      random_output = data.sample.last.size
+    end
+
+    def output : Array(Float64)
+      return @layers.last.as(FullyConnectedLayer | SoftmaxLayer).output
+    end
+
+    def propagate_backwards
+      @layers.reverse_each do |layer|
+        layer.error_prop(batch: false)
+      end
+    end
+
+    # Update the output layer gradients manually
+    def update_output_gradients(cost_function_derivatives : Array(Float64))
+      output_neurons = @layers.last.as(FullyConnectedLayer | SoftmaxLayer).all_neurons
+
+      unless new_gradients.size == output_neurons.size
+        raise NeuralNetRunError.new("New gradients array must be the same size as the output layer.")
+      end
+
+      output_neurons.each_with_index do |neuron, i|
+        neuron.gradient = cost_function_derivatives[i]*neuron.sigma_prime
+      end
+    end
+
+    def verify_data(data : Array(CNNPair))
+      message = nil
+
+      random_input = data.sample[:input].size
+      random_output = data.sample[:output].size
       data.each_with_index do |test, i|
-        if (test.first.size != random_input)
+        if (test[:input].size != random_input)
           message = "Input data sizes are inconsistent"
         end
-        if (test.last.size != random_output)
+        if (test[:output].size != random_output)
           message = "Output data sizes are inconsistent"
         end
-        unless (test.last.size == @layers.last.as(FullyConnectedLayer | SoftmaxLayer).filters[0].neurons[0].size)
-          message = "data at index #{i} and size: #{test.last.size} mismatch output layer size"
+        unless (test[:output].size == @layers.last.as(FullyConnectedLayer | SoftmaxLayer).filters[0].neurons[0].size)
+          message = "data at index #{i} and size: #{test[:output].size} mismatch output layer size"
         end
       end
       if message
         @logger.error("#{message}: #{data}")
         raise NeuralNetTrainError.new(message)
+      end
+    end
+
+    def get_cost_proc(function_name : String) : CostFunction
+      case function_name
+      when "mse"
+        return SHAInet.quadratic_cost
+      when "c_ent"
+        raise MathError.new("Cross entropy cost is not implemented fully yet, please use quadratic cost for now.")
+      else
+        raise NeuralNetInitalizationError.new("Must choose correct cost function or provide a correct Proc")
+      end
+    end
+
+    def inspect(what : String | Symbol)
+      case what.to_s
+      when "weights"
+        @layers.each { |layer| layer.inspect("weights") }
+      when "bias"
+        @layers.each { |layer| layer.inspect("bias") }
+      when "activations"
+        @layers.each { |layer| layer.inspect("activations") }
+      when "gradients"
+        @layers.each { |layer| layer.inspect("gradients") }
+        puts "------------------------------------------------"
       end
     end
 

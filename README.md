@@ -86,11 +86,11 @@ iris.test(test_set)
     - [x] ADAM  
 
 ### Advanced Features  
+  - [x] Convolutional Neural Net.  
   - [ ] Bind and use CUDA (GPU acceleration)  
   - [ ] graphic printout of network architecture.  
   - [ ] Add LSTM.  
     - [ ] RNN.  
-  - [ ] Convolutional Neural Net.  
   - [ ] GNG (growing neural gas).  
   - [ ] SOM (self organizing maps).  
   - [ ] DBM (deep belief network).  
@@ -113,3 +113,4 @@ iris.test(test_set)
 - [ArtLinkov](https://github.com/ArtLinkov) - creator, maintainer
 - [bararchy](https://github.com/bararchy) - creator, maintainer
 - [drujensen](https://github.com/drujensen) - contributor
+- [hugoabonizio](https://github.com/hugoabonizio) - contributor

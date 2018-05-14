@@ -43,6 +43,9 @@ module SHAInet
     end
 
     def inspect(what : String)
+      puts "##################################################"
+      puts "ReluLayer:"
+      puts "----------"
       case what
       when "weights"
         puts "ReLu layer has no weights"

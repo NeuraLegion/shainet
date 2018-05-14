@@ -2,15 +2,13 @@ require "csv"
 
 module SHAInet
   class Data
-
-    @normalized_inputs : Array(Array(Float64))
-    @normalized_outputs : Array(Array(Float64))
     @yrange : Int32
     @ymin : Int32
 
     getter :normalized_outputs, :normalized_inputs, :labels
     setter :outputs
 
+    # @data_pairs :
     # Takes a path to a CSV file, a range of inputs and the index of the target column.
     # Returns a SHAInet::Data object.
     # ```
@@ -30,7 +28,7 @@ module SHAInet
       end
       d = Data.new(inputs, outputs)
       d.labels = outputs_as_string.uniq
-      d.outputs = outputs_as_string.map{|string_output| d.array_for_label(string_output)}
+      d.outputs = outputs_as_string.map { |string_output| d.array_for_label(string_output) }
       d.normalize_min_max
       d
     end
@@ -38,7 +36,6 @@ module SHAInet
     def initialize(@inputs : Array(Array(Float64)), @outputs : Array(Array(Float64)))
       @normalized_inputs = Array(Array(Float64)).new
       @normalized_outputs = Array(Array(Float64)).new
-      @targets = Array(String).new
       @ymax = 1
       @ymin = 0
       @yrange = @ymax - @ymin
@@ -104,12 +101,12 @@ module SHAInet
       test_set = shuffled_data[training_set_size..shuffled_data.size - 1]
 
       @logger.info "Selected #{training_set.size} / #{data.size} rows for training"
-      training_data = SHAInet::TrainingData.new(training_set.map{|el| el[0]}, training_set.map{|el| el[1]})
+      training_data = SHAInet::TrainingData.new(training_set.map { |el| el[0] }, training_set.map { |el| el[1] })
       training_data.labels = @labels
       training_data.normalize_min_max
 
       @logger.info "Selected #{test_set.size} / #{data.size} rows for testing"
-      test_data = SHAInet::TestData.new(test_set.map{|el| el[0]}, test_set.map{|el| el[1]})
+      test_data = SHAInet::TestData.new(test_set.map { |el| el[0] }, test_set.map { |el| el[1] })
       test_data.labels = @labels
       test_data.normalize_min_max
 
@@ -124,7 +121,7 @@ module SHAInet
 
     # Takes a label as a String and returns the corresponding output array
     def array_for_label(a_label)
-      @labels.map{|label| a_label == label ? 1.to_f64 : 0.to_f64}
+      @labels.map { |label| a_label == label ? 1.to_f64 : 0.to_f64 }
     end
 
     # Takes an output array of 0,1s and returns the corresponding label
@@ -132,7 +129,5 @@ module SHAInet
       index = an_array.index(an_array.max.to_f64)
       index ? @labels[index] : ""
     end
-
-
   end
 end
