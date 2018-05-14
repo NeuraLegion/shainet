@@ -126,18 +126,14 @@ describe SHAInet::CNN do
     test_data.for_mnist_conv
 
     cnn = SHAInet::CNN.new
-    cnn.add_input([height = 28, width = 28, channels = 1]) # Data = 28x28x1
+    cnn.add_input([height = 28, width = 28, channels = 1]) # Output shape = 28x28x1
     cnn.add_conv(
       filters_num: 10,
       window_size: 5,
       stride: 1,
       padding: 2,
-      activation_function: SHAInet.none) # Data = 28x28x20
-    cnn.add_relu(0.01)                   # Data = 28x28x20
-    # cnn.add_maxpool(pool = 2, stride = 2)                                                                    # Data = 14x14x20
-    # cnn.add_conv(filters = 20, window_size = 5, stride = 1, padding = 1, activation_function = SHAInet.none) # Data = 14x14x40
-    # cnn.add_maxpool(pool = 2, stride = 2)                                                                    # Data = 7x7x40
-    # cnn.add_fconnect(l_size = 10, activation_function = SHAInet.sigmoid)
+      activation_function: SHAInet.none) # Output shape = 28x28x20
+    cnn.add_relu(0.01)                   # Output shape = 28x28x20
     cnn.add_fconnect(l_size: 10, activation_function: SHAInet.sigmoid)
     cnn.add_softmax
 
