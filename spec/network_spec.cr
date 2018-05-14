@@ -42,8 +42,17 @@ describe SHAInet::Network do
     1.times { |x| xor.add_layer(:hidden, 3, "memory", SHAInet.sigmoid) }
     xor.add_layer(:output, 1, "memory", SHAInet.sigmoid)
     xor.fully_connect
-    # data, training_type, cost_function, activation_function, epochs, error_threshold (MSE %), log each steps
-    xor.train(training_data, :sgdm, :mse, epochs = 5000, threshold = 0.000001, log = 100)
+
+    xor.learning_rate = 0.7
+    xor.momentum = 0.3
+
+    xor.train(
+      data: training_data,
+      training_type: :sgdm,
+      cost_function: :mse,
+      epochs: 5000,
+      error_threshold: 0.000001,
+      log_each: 1000)
 
     (xor.run([0, 0]).first < 0.1).should eq(true)
     (xor.run([1, 0]).first > 0.9).should eq(true)
@@ -66,45 +75,22 @@ describe SHAInet::Network do
     1.times { |x| xor.add_layer("hidden", 3, "memory", SHAInet.sigmoid) }
     xor.add_layer("output", 1, "memory", SHAInet.sigmoid)
     xor.fully_connect
-    xor.train(training_data, "sgdm", "mse", epochs = 5000, threshold = 0.000001, log = 100)
+
+    xor.learning_rate = 0.7
+    xor.momentum = 0.3
+
+    xor.train(
+      data: training_data,
+      training_type: "sgdm",
+      cost_function: "mse",
+      epochs: 5000,
+      error_threshold: 0.000001,
+      log_each: 1000)
 
     (xor.run([0, 0]).first < 0.1).should eq(true)
     (xor.run([1, 0]).first > 0.9).should eq(true)
     (xor.run([0, 1]).first > 0.9).should eq(true)
     (xor.run([1, 1]).first < 0.1).should eq(true)
-  end
-
-  it "Figure out iris with SGD + M, using cross-entropy cost (no batch)" do
-    puts "---"
-    puts "Figure out iris with SGD + momentum (train, mse, sigmoid)"
-    label = {
-      "setosa"     => [0.to_f64, 0.to_f64, 1.to_f64],
-      "versicolor" => [0.to_f64, 1.to_f64, 0.to_f64],
-      "virginica"  => [1.to_f64, 0.to_f64, 0.to_f64],
-    }
-    iris = SHAInet::Network.new
-    iris.add_layer(:input, 4, :memory, SHAInet.sigmoid)
-    iris.add_layer(:hidden, 4, :memory, SHAInet.sigmoid)
-    iris.add_layer(:output, 3, :memory, SHAInet.sigmoid)
-    iris.fully_connect
-
-    outputs = Array(Array(Float64)).new
-    inputs = Array(Array(Float64)).new
-    CSV.each_row(File.read(__DIR__ + "/test_data/iris.csv")) do |row|
-      row_arr = Array(Float64).new
-      row[0..-2].each do |num|
-        row_arr << num.to_f64
-      end
-      inputs << row_arr
-      outputs << label[row[-1]]
-    end
-    normalized = SHAInet::TrainingData.new(inputs, outputs)
-    normalized.normalize_min_max
-    iris.learning_rate = 0.7
-    iris.momentum = 0.6
-    iris.train(normalized.data.shuffle, :sgdm, :mse, epochs = 20000, threshold = 0.0001, log = 1000)
-    result = iris.run(normalized.normalized_inputs.first)
-    ((result.first < 0.3) && (result[1] < 0.3) && (result.last > 0.7)).should eq(true)
   end
 
   it "works on iris dataset with batch train with Rprop (batch)" do
@@ -121,6 +107,9 @@ describe SHAInet::Network do
     iris.add_layer(:output, 3, :memory, SHAInet.sigmoid)
     iris.fully_connect
 
+    iris.learning_rate = 0.7
+    iris.momentum = 0.3
+
     outputs = Array(Array(Float64)).new
     inputs = Array(Array(Float64)).new
     CSV.each_row(File.read(__DIR__ + "/test_data/iris.csv")) do |row|
@@ -134,7 +123,14 @@ describe SHAInet::Network do
     normalized = SHAInet::TrainingData.new(inputs, outputs)
     normalized.normalize_min_max
 
-    iris.train_batch(normalized.data.shuffle, :rprop, :mse, 5000, 0.00001)
+    iris.train_batch(
+      data: normalized.data.shuffle,
+      training_type: :rprop,
+      cost_function: :mse,
+      epochs: 5000,
+      error_threshold: 0.000001,
+      log_each: 1000)
+
     result = iris.run(normalized.normalized_inputs.first)
     ((result.first < 0.3) && (result[1] < 0.3) && (result.last > 0.7)).should eq(true)
   end
@@ -153,6 +149,9 @@ describe SHAInet::Network do
     iris.add_layer(:output, 3, :memory, SHAInet.sigmoid)
     iris.fully_connect
 
+    iris.learning_rate = 0.7
+    iris.momentum = 0.3
+
     outputs = Array(Array(Float64)).new
     inputs = Array(Array(Float64)).new
     CSV.each_row(File.read(__DIR__ + "/test_data/iris.csv")) do |row|
@@ -165,7 +164,15 @@ describe SHAInet::Network do
     end
     normalized = SHAInet::TrainingData.new(inputs, outputs)
     normalized.normalize_min_max
-    iris.train_batch(normalized.data.shuffle, :adam, :mse, 20000, 0.00001)
+
+    iris.train_batch(
+      data: normalized.data.shuffle,
+      training_type: :adam,
+      cost_function: :mse,
+      epochs: 20000,
+      error_threshold: 0.000001,
+      log_each: 1000)
+
     result = iris.run(normalized.normalized_inputs.first)
     ((result.first < 0.3) && (result[1] < 0.3) && (result.last > 0.9)).should eq(true)
   end
@@ -184,6 +191,9 @@ describe SHAInet::Network do
     iris.add_layer(:output, 3, :memory, SHAInet.sigmoid)
     iris.fully_connect
 
+    iris.learning_rate = 0.7
+    iris.momentum = 0.3
+
     outputs = Array(Array(Float64)).new
     inputs = Array(Array(Float64)).new
     CSV.each_row(File.read(__DIR__ + "/test_data/iris.csv")) do |row|
@@ -196,7 +206,16 @@ describe SHAInet::Network do
     end
     normalized = SHAInet::TrainingData.new(inputs, outputs)
     normalized.normalize_min_max
-    iris.train_batch(normalized.data.shuffle, :adam, :mse, 5000, 0.00001, 1000, 50)
+
+    iris.train_batch(
+      data: normalized.data.shuffle,
+      training_type: :adam,
+      cost_function: :mse,
+      epochs: 5000,
+      error_threshold: 0.000001,
+      mini_batch_size: 50,
+      log_each: 1000)
+
     result = iris.run(normalized.normalized_inputs.first)
     ((result.first < 0.3) && (result[1] < 0.3) && (result.last > 0.9)).should eq(true)
   end
@@ -215,6 +234,9 @@ describe SHAInet::Network do
     iris.add_layer(:output, 3, :memory, SHAInet.sigmoid)
     iris.fully_connect
 
+    iris.learning_rate = 0.7
+    iris.momentum = 0.3
+
     outputs = Array(Array(Float64)).new
     inputs = Array(Array(Float64)).new
     CSV.each_row(File.read(__DIR__ + "/test_data/iris.csv")) do |row|
@@ -227,7 +249,15 @@ describe SHAInet::Network do
     end
     normalized = SHAInet::TrainingData.new(inputs, outputs)
     normalized.normalize_min_max
-    iris.train_batch(normalized.data.shuffle, :adam, :mse, 5000, 0.00001, 1000, 50)
+
+    iris.train_batch(
+      data: normalized.data.shuffle,
+      training_type: :adam,
+      cost_function: :mse,
+      epochs: 5000,
+      error_threshold: 0.000001,
+      mini_batch_size: 50,
+      log_each: 1000)
 
     iris.save_to_file("./my_net.nn")
     nn = SHAInet::Network.new
