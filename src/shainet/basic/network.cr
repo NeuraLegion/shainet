@@ -214,23 +214,23 @@ module SHAInet
 
     # Quantifies how good the network performed for a single input compared to the expected output
     # This function returns the actual output and updates the error gradient for the output layer
-    def evaluate(input : Array(GenNum),
-                 expected : Array(GenNum),
+    def evaluate(input_data : Array(GenNum),
+                 expected_output : Array(GenNum),
                  cost_function : CostFunction = SHAInet.quadratic_cost)
       #
 
-      actual = run(input, stealth = true)
+      actual_output = run(input_data, stealth = true)
 
       # Get the error signal for the final layer, based on the cost function (error gradient is stored in the output neurons)
-      @error_signal = [] of Float64
+      @error_signal = [] of Float64 # Collect all the errors for current run
 
-      actual.each_with_index do |e, i|
+      actual_output.size.times do |i|
         neuron = @output_layers.last.neurons[i] # Update error of all neurons in the output layer based on the actual result
-        cost = cost_function.call(expected[i], actual[i])
+        cost = cost_function.call(expected_output[i], actual_output[i])
         neuron.gradient = cost[:derivative]*neuron.sigma_prime
         @error_signal << cost[:value] # Store the output error based on cost function
 
-        # puts "Actual output: #{actual}"
+        # puts "Actual output: #{actual_output}"
         # puts "Cost value: #{cost[:value]}"
         # puts "cost derivative: #{cost[:derivative]}"
         # puts "---"

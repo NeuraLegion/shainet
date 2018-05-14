@@ -22,7 +22,7 @@ module SHAInet
       @labels = Array(String).new # Array of possible data labels
       @logger = Logger.new(STDOUT)
 
-      @data_pairs = Array(CNNPair).new
+      @data_pairs = Array({input: Array(Array(Array(Float64))), output: Array(Float64)}).new
     end
 
     # When inputs are three-dimentional

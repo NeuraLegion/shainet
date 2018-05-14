@@ -126,27 +126,33 @@ describe SHAInet::CNN do
     test_data.for_mnist_conv
 
     cnn = SHAInet::CNN.new
-    cnn.add_input(volume = [height = 28, width = 28, channels = 1])                                          # Data = 28x28x1
-    cnn.add_conv(filters = 10, window_size = 5, stride = 1, padding = 2, activation_function = SHAInet.none) # Data = 28x28x20
-    cnn.add_relu(0.01)                                                                                       # Data = 28x28x20
+    cnn.add_input([height = 28, width = 28, channels = 1]) # Data = 28x28x1
+    cnn.add_conv(
+      filters_num: 10,
+      window_size: 5,
+      stride: 1,
+      padding: 2,
+      activation_function: SHAInet.none) # Data = 28x28x20
+    cnn.add_relu(0.01)                   # Data = 28x28x20
     # cnn.add_maxpool(pool = 2, stride = 2)                                                                    # Data = 14x14x20
     # cnn.add_conv(filters = 20, window_size = 5, stride = 1, padding = 1, activation_function = SHAInet.none) # Data = 14x14x40
     # cnn.add_maxpool(pool = 2, stride = 2)                                                                    # Data = 7x7x40
     # cnn.add_fconnect(l_size = 10, activation_function = SHAInet.sigmoid)
-    cnn.add_fconnect(l_size = 10, activation_function = SHAInet.sigmoid)
+    cnn.add_fconnect(l_size: 10, activation_function: SHAInet.sigmoid)
     cnn.add_softmax
-    cnn.learning_rate = 0.5
-    cnn.momentum = 0.2
 
-    puts "#{training_data.data_pairs.class}"
+    cnn.learning_rate = 0.005
+    cnn.momentum = 0.02
+
     # cnn.run(test_data.data_pairs.first[:input], stealth = false)
-    cnn.train_batch(data: training_data.data_pairs,
+    cnn.train_batch(
+      data: training_data.data_pairs,
       training_type: :sgdm,
       cost_function: :mse,
       epochs: 3,
-      threshold: 0.0001,
+      error_threshold: 0.0001,
       log_each: 1,
-      mini_batch_size: 25)
+      mini_batch_size: 50)
 
     correct_answers = 0
     test_data.data_pairs.each do |data_point|

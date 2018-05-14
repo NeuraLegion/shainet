@@ -9,6 +9,8 @@ module SHAInet
   # Structure hierarchy: CNN > Layer > Filter > Channel > Row > Neuron/Synapse
 
   class CNN
+    COST_FUNCTIONS = ["mse", "c_ent", "exp", "hel_d", "kld", "gkld", "ita_sai_d"]
+
     # General network parameters
     getter layers : Array(CNNLayer | ConvLayer)                                       # , :all_neurons, :all_synapses
     getter error_signal : Array(Float64), total_error : Float64, mean_error : Float64 # , w_gradient : Array(Float64), b_gradient : Array(Float64)
@@ -109,24 +111,23 @@ module SHAInet
 
     def evaluate(input_data : Array(Array(Array(GenNum))),
                  expected_output : Array(GenNum),
-                 cost_function_derivative : Proc(GenNum, GenNum, Float64) = SHAInet.quadratic_cost_derivative)
-      # raise NeuralNetRunError.new("Must define correct cost function type (:mse, :c_ent, :exp, :hel_d, :kld, :gkld, :ita_sai_d).") if COST_FUNCTIONS.any? { |x| x == cost_function.to_s } == false
+                 cost_function : CostFunction = SHAInet.quadratic_cost)
+      #
+      actual_output = run(input_data, stealth: true)
 
-      actual = run(input_data, stealth: true)
-
-      raise NeuralNetRunError.new("Expected and network outputs have different sizes.") unless actual.size == expected_output.size
-
-      # if actual(NaN) == true
-      #   raise NeuralNetRunError.new("Found a NaN value, run stopped.\noutput:#{actual}")
-      # end
+      raise NeuralNetRunError.new(
+        "Expected and network outputs have different sizes.") unless actual_output.size == expected_output.size
+      # Stop scan if we have NaNs in the output
+      actual_output.each { |ar| raise NeuralNetRunError.new(
+        "Found a NaN value, run stopped.\noutput:#{actual_output}") if ar.nan? }
 
       # Get the error signal for the final layer, based on the cost function (error gradient is stored in the output neurons)
-      @error_signal = [] of Float64 # Set error signal to 0 for current run
-      expected_output.size.times do |i|
+      @error_signal = [] of Float64 # collect all the errors for current run
+      actual_output.size.times do |i|
         neuron = @layers.last.as(FullyConnectedLayer | SoftmaxLayer).filters.first.neurons.first[i] # Output neuron
-        real_error = cost_function_derivative.call(expected_output[i].to_f64, actual[i].to_f64)
-        neuron.gradient = real_error*neuron.sigma_prime # Update gradient of neuron in the output layer based on the actual error result
-        @error_signal << real_error
+        cost = cost_function.call(expected_output[i], actual_output[i])
+        neuron.gradient = cost[:derivative]*neuron.sigma_prime # Update error of all neurons in the output layer based on the actual result
+        @error_signal << cost[:value]                          # Store the output error based on cost function
       end
       @total_error = @error_signal.reduce(0.0) { |acc, i| acc + i } # Sum up all the errors from output layer
 
@@ -136,12 +137,12 @@ module SHAInet
     end
 
     # Online train, updates weights/biases after each data point (stochastic gradient descent)
-    def train(data : CNNPair,                                        # Input structure: data = [[Input = Array(Array(Array(GenNum)))],[Expected result = Array(GenNum)]]
-              training_type : Symbol | String,                       # Type of training: :sgdm, :rprop, :adam
-              cost_function : Symbol | String | CostFunction = :mse, # one of COST_FUNCTIONS described at the top of the file or Proc
-              epochs : Int32 = 1,                                    # a criteria of when to stop the training
-              error_threshold : Float64 = 0.0,                       # a criteria of when to stop the training
-              log_each : Int32 = 1000)                               # determines what is the step for error printout
+    def train(data : NamedTuple(input: Array(Array(Array(Float64))), output: Array(Float64)), # Input structure: data = [[Input = Array(Array(Array(GenNum)))],[Expected result = Array(GenNum)]]
+              training_type : Symbol | String,                                                # Type of training: :sgdm, :rprop, :adam
+              cost_function : Symbol | String | CostFunction = :mse,                          # one of COST_FUNCTIONS described at the top of the file or Proc
+              epochs : Int32 = 1,                                                             # a criteria of when to stop the training
+              error_threshold : Float64 = 0.0,                                                # a criteria of when to stop the training
+              log_each : Int32 = 1000)                                                        # determines what is the step for error printout
 
       # verify_data(data)
       @logger.info("Training started")
@@ -196,7 +197,8 @@ module SHAInet
     end
 
     # Batch train, updates weights/biases using a gradient sum from all data points in the batch (using gradient descent)
-    def train_batch(data : Array(CNNPair),                                 # Input structure: data = [[Input = Array(Array(Array(GenNum)))],[Expected result = Array(GenNum)]]
+    def train_batch(data : Array(CNNPair), # Input structure: data = [[Input = Array(Array(Array(GenNum)))],[Expected result = Array(GenNum)]]
+                    # data : Array(NamedTuple(input: Array(Array(Array(Float64))), output: Array(Float64))), # Input structure: data = [[Input = Array(Array(Array(GenNum)))],[Expected result = Array(GenNum)]]
                     training_type : Symbol | String,                       # Type of training: :sgdm, :rprop, :adam
                     cost_function : Symbol | String | CostFunction = :mse, # one of COST_FUNCTIONS described at the top of the file or Proc
                     epochs : Int32 = 1,                                    # a criteria of when to stop the training
