@@ -6,35 +6,18 @@ module SHAInet
     alias CNNoutputData = Array(Array(Float64))              # Array of all expected outputs
     alias CNNPair = {input: Array(Array(Array(Float64))), output: Array(Float64)}
 
-    @yrange : Int32
-    @ymin : Int32
-
-    getter :normalized_outputs, :normalized_inputs, :labels, :data_pairs
-    setter :outputs
+    getter :data_pairs
 
     # When inputs are one-dimentional
     def initialize(@inputs : Array(Array(Float64)), @outputs : Array(Array(Float64)))
-      @normalized_inputs = Array(Array(Float64)).new
-      @normalized_outputs = Array(Array(Float64)).new
-      @ymax = 1
-      @ymin = 0
-      @yrange = @ymax - @ymin
-      @labels = Array(String).new # Array of possible data labels
-      @logger = Logger.new(STDOUT)
-
-      @data_pairs = Array({input: Array(Array(Array(Float64))), output: Array(Float64)}).new
+      super(@inputs, @outputs)
+      @data_pairs = Array(CNNPair).new
     end
 
     # When inputs are three-dimentional
     def initialize(@inputs : CNNinputData, @outputs : CNNoutputData)
+      super(Array(Array(Float64)).new, Array(Array(Float64)).new)
       @normalized_inputs = Array(Array(Array(Array(Float64)))).new
-      @normalized_outputs = Array(Array(Float64)).new
-      @ymax = 1
-      @ymin = 0
-      @yrange = @ymax - @ymin
-      @labels = Array(String).new # Array of possible data labels
-      @logger = Logger.new(STDOUT)
-
       @data_pairs = Array(CNNPair).new
     end
 

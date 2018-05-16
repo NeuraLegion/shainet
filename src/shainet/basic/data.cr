@@ -3,6 +3,7 @@ require "csv"
 module SHAInet
   class Data
     @yrange : Int32
+    @ymax : Int32
     @ymin : Int32
 
     getter :normalized_outputs, :normalized_inputs, :labels
@@ -34,8 +35,6 @@ module SHAInet
     end
 
     def initialize(@inputs : Array(Array(Float64)), @outputs : Array(Array(Float64)))
-      @normalized_inputs = Array(Array(Float64)).new
-      @normalized_outputs = Array(Array(Float64)).new
       @ymax = 1
       @ymin = 0
       @yrange = @ymax - @ymin
@@ -47,6 +46,9 @@ module SHAInet
 
       @labels = Array(String).new # Array of possible data labels
       @logger = Logger.new(STDOUT)
+
+      @normalized_inputs = Array(Array(Float64)).new
+      @normalized_outputs = Array(Array(Float64)).new
     end
 
     def data
@@ -84,7 +86,7 @@ module SHAInet
     def normalize_inputs(inputs : Array(GenNum))
       results = Array(Float64).new
       inputs.each_with_index do |input, i|
-        results << normalize_input(input, i)
+        results << normalize(input, @i_min[i], @i_max[i])
       end
       return results
     end
@@ -92,23 +94,14 @@ module SHAInet
     def normalize_outputs(outputs : Array(GenNum))
       results = Array(Float64).new
       outputs.each_with_index do |output, i|
-        results << normalize_output(output, i)
+        results << normalize(output, @o_min[i], @o_max[i])
       end
       return results
     end
 
-    def normalize_input(x : GenNum, idx : Int32)
-      range = @i_max[idx] - @i_min[idx]
-      adj_x = x.to_f64 - (@i_min[idx] + @ymin)
-      norm = (@yrange / range)
-      value = adj_x * norm
-      return 0.0 if value.nan?
-      value
-    end
-
-    def normalize_output(x : GenNum, idx : Int32)
-      range = @o_max[idx] - @o_min[idx]
-      adj_x = x.to_f64 - (@o_min[idx] + @ymin)
+    def normalize(x, xmin, xmax)
+      range = xmax - xmin
+      adj_x = x.to_f64 - (xmin + @ymin)
       norm = (@yrange / range)
       value = adj_x * norm
       return 0.0 if value.nan?
@@ -118,15 +111,15 @@ module SHAInet
     def denormalize_outputs(outputs : Array(GenNum))
       results = Array(Float64).new
       outputs.each_with_index do |output, i|
-        results << denormalize_output(output, i)
+        results << denormalize(output, @o_min[i], @o_max[i])
       end
       return results
     end
 
-    def denormalize_output(x : GenNum, idx : Int32)
-      range = @o_max[idx] - @o_min[idx]
+    def denormalize(x, xmin, xmax)
+      range = xmax - xmin
       denorm = x.to_f64 * (range / @yrange)
-      adj_x = @ymin + @o_min[idx]
+      adj_x = @ymin + xmin
       value = denorm + adj_x
       return 0.0 if value.nan?
       value
