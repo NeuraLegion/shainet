@@ -41,6 +41,9 @@ module SHAInet
     end
 
     def inspect(what : String)
+      puts "##################################################"
+      puts "InputLayer:"
+      puts "----------"
       case what
       when "weights"
         puts "input layer has no weights"
@@ -51,7 +54,7 @@ module SHAInet
           puts "---"
           puts "Channel: #{f}, neuron activations are:"
           filter.neurons.each do |row|
-            puts "#{row.map { |n| n.activation.round(4) }}"
+            puts "#{row.map { |n| n.activation.round(3) }}"
           end
         end
       when "gradients"

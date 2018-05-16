@@ -2,14 +2,13 @@ require "csv"
 
 module SHAInet
   class Data
-    @normalized_inputs : Array(Array(Float64))
-    @normalized_outputs : Array(Array(Float64))
     @yrange : Int32
     @ymin : Int32
 
     getter :normalized_outputs, :normalized_inputs, :labels
     setter :outputs
 
+    # @data_pairs :
     # Takes a path to a CSV file, a range of inputs and the index of the target column.
     # Returns a SHAInet::Data object.
     # ```
@@ -37,7 +36,6 @@ module SHAInet
     def initialize(@inputs : Array(Array(Float64)), @outputs : Array(Array(Float64)))
       @normalized_inputs = Array(Array(Float64)).new
       @normalized_outputs = Array(Array(Float64)).new
-      @targets = Array(String).new
       @ymax = 1
       @ymin = 0
       @yrange = @ymax - @ymin

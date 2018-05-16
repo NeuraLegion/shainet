@@ -29,10 +29,6 @@ module SHAInet
       end
 
       @filters = Array(Filter).new(filters_num) { Filter.new([output_width.to_i, output_width.to_i, filters], @padding, @window_size, @stride, @activation_function) }
-
-      @w_gradient = Array(Float64).new # Needed for batch train
-      @b_gradient = Array(Float64).new # Needed for batch train
-
     end
 
     # Use each filter to create feature maps from the input data of the previous layer
@@ -41,7 +37,7 @@ module SHAInet
     end
 
     def error_prop(batch : Bool = false)
-      @filters.each { |filter| filter.propagate_backward(@prev_layer) }
+      @filters.each { |filter| filter.propagate_backward(@prev_layer, batch) }
     end
 
     def update_wb(learn_type : Symbol | String, batch : Bool = false)
@@ -51,8 +47,14 @@ module SHAInet
             filter.synapses[channel][row].size.times do |col|
               synapse = filter.synapses[channel][row][col]
 
-              synapse.gradient = synapse.gradient_sum # Get current gradient
-              synapse.gradient_sum = Float64.new(0)   # Reset gradient sum for next batch
+              if batch == true
+                synapse.gradient = synapse.gradient_batch # Get current gradient
+                synapse.gradient_sum = Float64.new(0)     # Reset gradient sum for next input
+                synapse.gradient_batch = Float64.new(0)   # Reset gradient sum for next batch
+              else
+                synapse.gradient = synapse.gradient_sum # Get current gradient
+                synapse.gradient_sum = Float64.new(0)   # Reset gradient sum for next input
+              end
 
               case learn_type.to_s
               # Update weights based on the gradients and delta rule (including momentum)
@@ -102,8 +104,14 @@ module SHAInet
           end
         end
 
-        filter.bias_grad = filter.bias_grad_sum # Update biases of the layer
-        filter.bias_grad_sum = Float64.new(0)   # Resest bias sum of the layer
+        if batch == true
+          filter.bias_grad = filter.bias_grad_batch # Update biases of the layer
+          filter.bias_grad_sum = Float64.new(0)     # Resest bias sum of the layer
+          filter.bias_grad_batch = Float64.new(0)   # Resest bias sum of the layer
+        else
+          filter.bias_grad = filter.bias_grad_sum # Update biases of the layer
+          filter.bias_grad_sum = Float64.new(0)   # Resest bias sum of the layer
+        end
 
         case learn_type.to_s
         # Update biases based on the gradients and delta rule (including momentum)
@@ -152,6 +160,9 @@ module SHAInet
     end
 
     def inspect(what : String)
+      puts "##################################################"
+      puts "ConvLayer:"
+      puts "----------"
       case what
       when "weights"
         @filters.each_with_index do |filter, i|

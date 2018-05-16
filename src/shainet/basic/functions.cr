@@ -1,5 +1,6 @@
 module SHAInet
   alias ActivationFunction = Proc(GenNum, Tuple(Float64, Float64))
+  alias CostFunction = Proc(GenNum, GenNum, NamedTuple(value: Float64, derivative: Float64))
 
   # As Procs
 
@@ -70,7 +71,7 @@ module SHAInet
     out_array = Array(Float64).new(array.size) { 0.0 }
     exp_sum = Float64.new(0.0)
     array.each { |value| exp_sum += Math::E**(value) }
-    array.size.times { |i| out_array[i] = (Math::E**array[i])/exp_sum }
+    array.size.times { |i| out_array[i] += (Math::E**array[i])/exp_sum }
     return out_array
   end
 
@@ -84,7 +85,7 @@ module SHAInet
   # Not working yet, do not use
   def self.log_softmax(array : Array(GenNum)) : Array(Float64)
     out_array = Array(Float64).new(array.size) { 0.0 }
-    m = array.max
+    m = array.max # Max exponent from input array
     exp_sum = Float64.new(0.0)
     array.each { |value| exp_sum += Math::E**(value - m) }
 
@@ -127,10 +128,22 @@ module SHAInet
   end
 
   ##################################################################
+  # # Procs for cost functions
+
+  def self.quadratic_cost : CostFunction
+    ->(expected : GenNum, actual : GenNum) {
+      {value:      _quadratic_cost(expected.to_f64, actual.to_f64),
+       derivative: _quadratic_cost_derivative(expected.to_f64, actual.to_f64)}
+    }
+  end
+
+  # def self.quadratic_cost_derivative : Proc(GenNum, GenNum, Float64)
+  #   ->(expected : GenNum, actual : GenNum) { _quadratic_cost_derivative(expected.to_f64, actual.to_f64) }
+  # end
 
   # # Cost functions  # #
 
-  def self.quadratic_cost(expected : Float64, actual : Float64) : Float64
+  def self._quadratic_cost(expected : Float64, actual : Float64) : Float64
     return (0.5*(actual - expected)**2).to_f64
   end
 
@@ -146,7 +159,7 @@ module SHAInet
 
   # # Derivatives of cost functions # #
 
-  def self.quadratic_cost_derivative(expected : Float64, actual : Float64) : Float64
+  def self._quadratic_cost_derivative(expected : Float64, actual : Float64) : Float64
     return (actual - expected).to_f64
   end
 
