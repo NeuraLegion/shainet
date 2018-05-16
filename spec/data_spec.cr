@@ -23,7 +23,7 @@ describe SHAInet::Data do
     data.labels.should eq(["setosa", "versicolor", "virginica"])
   end
 
-  it "should normalize data" do
+  it "should normalize inputs" do
     inputs = [
       [1.0], [2.0], [3.0],
     ]
@@ -36,12 +36,24 @@ describe SHAInet::Data do
     data.normalize_inputs([1]).should eq([0.0])
     data.normalize_inputs([2]).should eq([0.5])
     data.normalize_inputs([3]).should eq([1.0])
+  end
+
+  it "should normalize outputs" do
+    inputs = [
+      [1.0], [2.0], [3.0],
+    ]
+    outputs = [
+      [1.0], [2.0], [3.0],
+    ]
+
+    data = SHAInet::Data.new(inputs, outputs)
+    data.normalize_min_max
     data.normalize_outputs([1]).should eq([0.0])
     data.normalize_outputs([2]).should eq([0.5])
     data.normalize_outputs([3]).should eq([1.0])
   end
 
-  it "should denormalize data" do
+  it "should denormalize outputs" do
     inputs = [
       [1.0], [2.0], [3.0],
     ]
