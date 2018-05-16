@@ -3,6 +3,7 @@ require "csv"
 module SHAInet
   class Data
     @yrange : Int32
+    @ymax : Int32
     @ymin : Int32
 
     getter :normalized_outputs, :normalized_inputs, :labels
@@ -34,13 +35,20 @@ module SHAInet
     end
 
     def initialize(@inputs : Array(Array(Float64)), @outputs : Array(Array(Float64)))
-      @normalized_inputs = Array(Array(Float64)).new
-      @normalized_outputs = Array(Array(Float64)).new
       @ymax = 1
       @ymin = 0
       @yrange = @ymax - @ymin
+
+      @i_min = Array(GenNum).new
+      @i_max = Array(GenNum).new
+      @o_min = Array(GenNum).new
+      @o_max = Array(GenNum).new
+
       @labels = Array(String).new # Array of possible data labels
       @logger = Logger.new(STDOUT)
+
+      @normalized_inputs = Array(Array(Float64)).new
+      @normalized_outputs = Array(Array(Float64)).new
     end
 
     def data
@@ -61,34 +69,58 @@ module SHAInet
 
     def normalize_min_max
       # Get inputs min-max
-      i_max = Array(GenNum).new
-      i_min = Array(GenNum).new
-      @inputs.transpose.each { |a| i_max << a.max; i_min << a.min }
+      @inputs.transpose.each { |a| @i_max << a.max; @i_min << a.min }
 
       # Get outputs min-max
-      o_max = Array(GenNum).new
-      o_min = Array(GenNum).new
-      @outputs.transpose.each { |a| o_max << a.max; o_min << a.min }
+      @outputs.transpose.each { |a| @o_max << a.max; @o_min << a.min }
 
       @inputs.each do |row|
-        row_array = Array(Float64).new
-        row.each_with_index do |member, i|
-          row_array << normalize(member, i_min[i], i_max[i])
-        end
-        @normalized_inputs << row_array
+        @normalized_inputs << normalize_inputs(row)
       end
 
       @outputs.each do |row|
-        row_array = Array(Float64).new
-        row.each_with_index do |member, i|
-          row_array << normalize(member, o_min[i], o_max[i])
-        end
-        @normalized_outputs << row_array
+        @normalized_outputs << normalize_outputs(row)
       end
     end
 
-    def normalize(x : GenNum, xmin : GenNum, xmax : GenNum) : Float64
-      value = (@ymin + (x - xmin) * (@yrange.to_f64 / (xmax - xmin))).to_f64
+    def normalize_inputs(inputs : Array(GenNum))
+      results = Array(Float64).new
+      inputs.each_with_index do |input, i|
+        results << normalize(input, @i_min[i], @i_max[i])
+      end
+      return results
+    end
+
+    def normalize_outputs(outputs : Array(GenNum))
+      results = Array(Float64).new
+      outputs.each_with_index do |output, i|
+        results << normalize(output, @o_min[i], @o_max[i])
+      end
+      return results
+    end
+
+    def normalize(x, xmin, xmax)
+      range = xmax - xmin
+      adj_x = x.to_f64 - (xmin + @ymin)
+      norm = (@yrange / range)
+      value = adj_x * norm
+      return 0.0 if value.nan?
+      value
+    end
+
+    def denormalize_outputs(outputs : Array(GenNum))
+      results = Array(Float64).new
+      outputs.each_with_index do |output, i|
+        results << denormalize(output, @o_min[i], @o_max[i])
+      end
+      return results
+    end
+
+    def denormalize(x, xmin, xmax)
+      range = xmax - xmin
+      denorm = x.to_f64 * (range / @yrange)
+      adj_x = @ymin + xmin
+      value = denorm + adj_x
       return 0.0 if value.nan?
       value
     end
