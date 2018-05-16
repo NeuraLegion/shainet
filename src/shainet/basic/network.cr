@@ -221,6 +221,10 @@ module SHAInet
 
       actual_output = run(input_data, stealth = true)
 
+      # Stop scan if we have NaNs in the output
+      actual_output.each { |ar| raise NeuralNetRunError.new(
+        "Found a NaN value, run stopped.\noutput:#{actual_output}") if ar.nan? }
+
       # Get the error signal for the final layer, based on the cost function (error gradient is stored in the output neurons)
       @error_signal = [] of Float64 # Collect all the errors for current run
 
