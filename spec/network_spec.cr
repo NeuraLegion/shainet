@@ -5,6 +5,49 @@ require "csv"
 system("cd #{__DIR__}/test_data && tar xvf tests.tar.xz")
 
 describe SHAInet::Network do
+  it "Test on a linear regression model" do
+    # data structures to hold the input and results
+    inputs = Array(Array(Float64)).new
+    outputs = Array(Array(Float64)).new
+
+    # read the file
+    raw = File.read("./spec/linear_data/data.csv")
+    csv = CSV.new(raw, headers: true)
+
+    # load the data structures
+    while (csv.next)
+      inputs << [csv.row["Height"].to_f64]
+      outputs << [csv.row["Weight"].to_f64]
+    end
+
+    # normalize the data
+    training = SHAInet::TrainingData.new(inputs, outputs)
+
+    # create a network
+    model = SHAInet::Network.new
+    model.add_layer(:input, 1, :memory, SHAInet.none)
+    # model.add_layer(:hidden, 1, :memory, SHAInet.none)
+    model.add_layer(:output, 1, :memory, SHAInet.none)
+    model.fully_connect
+
+    # Update learing rate (default is 0.005)
+    model.learning_rate = 0.01
+
+    # train the network using Stochastic Gradient Descent with momentum
+    model.train(training.raw_data, :sgdm, :mse, 5000, 0.0, 100)
+
+    # model.show
+
+    # Test model
+    output = model.run([1.47]).first
+    error = ((output - 51.008)/51.008).abs
+    (error < 0.05).should eq(true) # require less than 5% error
+
+    output = model.run([1.83]).first
+    error = ((output - 73.066)/73.066).abs
+    (error < 0.05).should eq(true) # require less than 5% error
+  end
+
   it "Initialize" do
     nn = SHAInet::Network.new
     nn.should be_a(SHAInet::Network)

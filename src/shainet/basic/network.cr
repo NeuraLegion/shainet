@@ -109,8 +109,8 @@ module SHAInet
     def verify_net_before_train
       if @input_layers.empty?
         raise NeuralNetRunError.new("No input layers defined")
-      elsif @hidden_layers.empty?
-        raise NeuralNetRunError.new("Need atleast one hidden layer")
+        # elsif @hidden_layers.empty?
+        #   raise NeuralNetRunError.new("Need atleast one hidden layer")
       elsif @output_layers.empty?
         raise NeuralNetRunError.new("No output layers defined")
       end
@@ -118,23 +118,32 @@ module SHAInet
 
     # Connect all the layers in order (input and output don't connect between themselves): input, hidden, output
     def fully_connect
-      # Connect all input layers to the first hidden layer
-      @input_layers.each do |source|
-        connect_ltl(source, @hidden_layers.first, :full)
-      end
+      if @hidden_layers.empty?
+        # Connect all input layers to all output layers
+        @output_layers.each do |out_layer|
+          @input_layers.each do |in_layer|
+            connect_ltl(in_layer, out_layer, :full)
+          end
+        end
+      else
+        # Connect all input layers to the first hidden layer
+        @input_layers.each do |source|
+          connect_ltl(source, @hidden_layers.first, :full)
+        end
 
-      # Connect all hidden layer between each other hierarchically
-      @hidden_layers.size.times do |index|
-        next if index + 2 > @hidden_layers.size
-        connect_ltl(@hidden_layers[index], @hidden_layers[index + 1], :full)
-      end
+        # Connect all hidden layer between each other hierarchically
+        @hidden_layers.size.times do |index|
+          next if index + 2 > @hidden_layers.size
+          connect_ltl(@hidden_layers[index], @hidden_layers[index + 1], :full)
+        end
 
-      # Connect last hidden layer to all output layers
-      @output_layers.each do |layer|
-        connect_ltl(@hidden_layers.last, layer, :full)
+        # Connect last hidden layer to all output layers
+        @output_layers.each do |layer|
+          connect_ltl(@hidden_layers.last, layer, :full)
+        end
       end
-    rescue e : Exception
-      raise NeuralNetRunError.new("Error fully connecting network: #{e}")
+      # rescue e : Exception
+      #   raise NeuralNetRunError.new("Error fully connecting network: #{e}")
     end
 
     # Connect two specific layers with synapses
@@ -312,6 +321,11 @@ module SHAInet
             l.neurons.each { |neuron| neuron.hidden_error_prop } # Update neuron error based on errors*weights of neurons from the next layer
           end
 
+          # Propogate the errors backwards through the input layers
+          @input_layers.reverse_each do |l|
+            l.neurons.each { |neuron| neuron.hidden_error_prop } # Update neuron error based on errors*weights of neurons from the next layer
+          end
+
           # Calculate MSE
           if @error_signal.size == 1
             error_avg = 0.0
@@ -380,8 +394,14 @@ module SHAInet
           data_slice.each do |data_point|
             evaluate(data_point[0], data_point[1], cost_function) # Get error gradient from output layer based on current input
             all_errors << @total_error
+
             # Propogate the errors backwards through the hidden layers
             @hidden_layers.reverse_each do |l|
+              l.neurons.each { |neuron| neuron.hidden_error_prop } # Update neuron error based on errors*weights of neurons from the next layer
+            end
+
+            # Propogate the errors backwards through the input layers
+            @input_layers.reverse_each do |l|
               l.neurons.each { |neuron| neuron.hidden_error_prop } # Update neuron error based on errors*weights of neurons from the next layer
             end
 
