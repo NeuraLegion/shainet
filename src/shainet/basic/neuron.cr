@@ -53,12 +53,11 @@ module SHAInet
     # Allows the neuron to absorb the error from its' own target neurons through the synapses
     # Then, it sums the information and a derivative of the activation function is applied to normalize the data
     def hidden_error_prop : Float64
-      new_errors = [] of Float64
+      weighted_error_sum = Float64.new(0)
       @synapses_out.each do |synapse| # Calculate weighted error from each target neuron, returns Array(Float64)
-        new_errors << synapse.propagate_backward
+        weighted_error_sum += synapse.propagate_backward
       end
-      weighted_error_sum = new_errors.reduce { |acc, i| acc + i } # Sum weighted error from target neurons (instead of using w_matrix*delta), returns Float64
-      @gradient = weighted_error_sum*@sigma_prime                 # New error of the neuron
+      @gradient = weighted_error_sum*@sigma_prime # New error of the neuron
     end
 
     def clone
