@@ -14,14 +14,14 @@ module SHAInet
 
     # General network parameters
     getter :input_layers, :output_layers, :hidden_layers, :all_neurons, :all_synapses
-    getter error_signal : Array(Float64), total_error : Float64, :mean_error, w_gradient : Array(Float64), b_gradient : Array(Float64)
+    getter error_signal : Array(Float64), total_error : Float64, :mse, w_gradient : Array(Float64), b_gradient : Array(Float64)
 
     # Parameters for SGD + Momentum
     property learning_rate : Float64, momentum : Float64
 
     # Parameters for Rprop
     property etah_plus : Float64, etah_minus : Float64, delta_max : Float64, delta_min : Float64
-    getter prev_mean_error : Float64
+    getter prev_mse : Float64
 
     # Parameters for Adam
     property alpha : Float64
@@ -36,18 +36,18 @@ module SHAInet
       @all_synapses = Array(Synapse).new # Array of all current synapses in the network
       @error_signal = Array(Float64).new # Array of errors for each neuron in the output layers, based on specific input
       @total_error = Float64.new(1)      # Sum of errors from output layer, based on a specific input
-      @mean_error = Float64.new(1)       # MSE of netwrok, based on all errors of output layer for a specific input or batch
+      @mse = Float64.new(1)              # MSE of netwrok, based on all errors of output layer for a specific input or batch
       @w_gradient = Array(Float64).new   # Needed for batch train
       @b_gradient = Array(Float64).new   # Needed for batch train
 
       @learning_rate = 0.005 # Standard parameter for GD
       @momentum = 0.05       # Improved GD
 
-      @etah_plus = 1.2                           # For iRprop+ , how to increase step size
-      @etah_minus = 0.5                          # For iRprop+ , how to decrease step size
-      @delta_max = 50.0                          # For iRprop+ , max step size
-      @delta_min = 0.1                           # For iRprop+ , min step size
-      @prev_mean_error = rand(0.001..1.0).to_f64 # For iRprop+ , needed for backtracking
+      @etah_plus = 1.2                    # For iRprop+ , how to increase step size
+      @etah_minus = 0.5                   # For iRprop+ , how to decrease step size
+      @delta_max = 50.0                   # For iRprop+ , max step size
+      @delta_min = 0.1                    # For iRprop+ , min step size
+      @prev_mse = rand(0.001..1.0).to_f64 # For iRprop+ , needed for backtracking
 
       @alpha = 0.001        # For Adam , step size (recomeneded: only change this hyper parameter when fine-tuning)
       @beta1 = 0.9          # For Adam , exponential decay rate (not recommended to change value)
@@ -256,6 +256,18 @@ module SHAInet
       raise NeuralNetRunError.new("Error in evaluate: #{e}")
     end
 
+    # Calculate MSE from the error signal of the output layer
+    def update_mse
+      if @error_signal.size == 1
+        error_avg = 0.0
+      else
+        error_avg = @total_error/@output_layers.last.neurons.size
+      end
+      sqrd_dists = 0.0
+      @error_signal.each { |e| sqrd_dists += (e - error_avg)**2 }
+      @mse = sqrd_dists/@output_layers.last.neurons.size
+    end
+
     def verify_data(data : Array(Array(Array(GenNum))))
       message = nil
       if data.sample.size != 2
@@ -281,7 +293,7 @@ module SHAInet
     end
 
     def log_summary(e)
-      @logger.info("Epoch: #{e}, Total error: #{@total_error}, MSE: #{@mean_error}")
+      @logger.info("Epoch: #{e}, Total error: #{@total_error}, MSE: #{@mse}")
     end
 
     # Online train, updates weights/biases after each data point (stochastic gradient descent)
@@ -298,12 +310,12 @@ module SHAInet
         if e % log_each == 0
           log_summary(e)
         end
-        if e >= epochs || (error_threshold >= @mean_error) && (e > 0)
+        if e >= epochs || (error_threshold >= @mse) && (e > 0)
           log_summary(e)
           break
         end
 
-        # Change String/Symbol into the corrent proc
+        # Change String/Symbol into the corrent proc of the cost function
         if cost_function.is_a?(Symbol) || cost_function.is_a?(String)
           raise NeuralNetRunError.new("Must define correct cost function type (:mse, :c_ent, :exp, :hel_d, :kld, :gkld, :ita_sai_d).") if COST_FUNCTIONS.any? { |x| x == cost_function.to_s } == false
           proc = get_cost_proc(cost_function.to_s)
@@ -313,35 +325,23 @@ module SHAInet
         # Go over each data point and update the weights/biases based on the specific example
         data.each do |data_point|
           # Update error signal, error gradient and total error at the output layer based on current input
-          # puts "Data-point: #{data_point} [[input], [expected]]"
           evaluate(data_point[0], data_point[1], cost_function)
+          update_mse
 
-          # Propogate the errors backwards through the hidden layers
+          # Propogate the errors backwards
           @hidden_layers.reverse_each do |l|
             l.neurons.each { |neuron| neuron.hidden_error_prop } # Update neuron error based on errors*weights of neurons from the next layer
           end
 
-          # Propogate the errors backwards through the input layers
           @input_layers.reverse_each do |l|
             l.neurons.each { |neuron| neuron.hidden_error_prop } # Update neuron error based on errors*weights of neurons from the next layer
           end
-
-          # Calculate MSE
-          if @error_signal.size == 1
-            error_avg = 0.0
-          else
-            error_avg = @total_error/@output_layers.last.neurons.size
-          end
-          sqrd_dists = [] of Float64
-          @error_signal.each { |e| sqrd_dists << (e - error_avg)**2 }
-          sqr_sum = sqrd_dists.reduce { |acc, i| acc + i }
-          @mean_error = sqr_sum/@output_layers.last.neurons.size
 
           # Update all wieghts & biases
           update_weights(training_type, batch = false)
           update_biases(training_type, batch = false)
 
-          @prev_mean_error = @mean_error
+          @prev_mse = @mse.clone
         end
       end
     rescue e : Exception
@@ -364,7 +364,7 @@ module SHAInet
       batch_size = mini_batch_size ? mini_batch_size : raw_data.size
       @time_step = 0
 
-      # Change String/Symbol into the corrent proc
+      # Change String/Symbol into the corrent proc of the cost function
       if cost_function.is_a?(Symbol) || cost_function.is_a?(String)
         raise NeuralNetRunError.new("Must define correct cost function type (:mse, :c_ent, :exp, :hel_d, :kld, :gkld, :ita_sai_d).") if COST_FUNCTIONS.any? { |x| x == cost_function.to_s } == false
         proc = get_cost_proc(cost_function.to_s)
@@ -380,7 +380,7 @@ module SHAInet
             log_summary(e)
             # @all_neurons.each { |s| puts s.gradient }
           end
-          if e >= epochs || (error_threshold >= @mean_error) && (e > 1)
+          if e >= epochs || (error_threshold >= @mse) && (e > 1)
             log_summary(e)
             break
           end
@@ -418,8 +418,8 @@ module SHAInet
             sqrd_dists = [] of Float64
             @error_signal.each { |e| sqrd_dists << (e - error_avg)**2 }
 
-            @mean_error = (sqrd_dists.reduce { |acc, i| acc + i })/@output_layers.last.neurons.size
-            batch_mean << @mean_error
+            @mse = (sqrd_dists.reduce { |acc, i| acc + i })/@output_layers.last.neurons.size
+            batch_mean << @mse
           end
 
           # Total error per batch
@@ -427,14 +427,14 @@ module SHAInet
 
           # Calculate MSE per batch
           batch_mean = (batch_mean.reduce { |acc, i| acc + i })/data_slice.size
-          @mean_error = batch_mean
+          @mse = batch_mean
 
           # Update all wieghts & biases for the batch
           @time_step += 1 unless mini_batch_size # Based on how many epochs have passed in current training run, needed for Adam
           update_weights(training_type, batch = true)
           update_biases(training_type, batch = true)
 
-          @prev_mean_error = @mean_error
+          @prev_mse = @mse.clone
         end
       end
     end
@@ -469,7 +469,7 @@ module SHAInet
           elsif synapse.prev_gradient*synapse.gradient < 0.0
             delta = [@etah_minus*synapse.prev_delta, @delta_min].max
 
-            synapse.weight -= synapse.prev_delta_w if @mean_error >= @prev_mean_error
+            synapse.weight -= synapse.prev_delta_w if @mse >= @prev_mse
 
             synapse.prev_gradient = 0.0
             synapse.prev_delta = delta
@@ -522,7 +522,7 @@ module SHAInet
           elsif neuron.prev_gradient*neuron.gradient < 0.0
             delta = [@etah_minus*neuron.prev_delta, @delta_min].max
 
-            neuron.bias -= neuron.prev_delta_b if @mean_error >= @prev_mean_error
+            neuron.bias -= neuron.prev_delta_b if @mse >= @prev_mse
 
             neuron.prev_gradient = 0.0
             neuron.prev_delta = delta
@@ -548,13 +548,91 @@ module SHAInet
       end
     end
 
+    # Use evolutionary strategies for network optimization instread of gradient based approach
+    def train_es(data : Array(Array(Array(GenNum))) | SHAInet::TrainingData, # Input structure: data = [[Input = [] of Float64],[Expected result = [] of Float64]]
+                 pool_size : Int32,                                          # Pool size for the organisms
+                 cost_function : Symbol | String | CostFunction = :mse,      # Proc returns the function value and it's derivative
+                 epochs : Int32 = 1,                                         # a criteria of when to stop the training
+                 mini_batch_size : Int32 = 1,                                # Size of batch
+                 error_threshold : Float64 = 0.0,                            # a criteria of when to stop the training
+                 log_each : Int32 = 1)                                       # determines what is the step for error printout
+      # This methods accepts data as either a SHAInet::TrainingData object, or as an Array(Array(Array(GenNum)).
+      # In the case of SHAInet::TrainingData, we convert it to an Array(Array(Array(GenNum)) by calling #data on it.
+      raw_data = data.is_a?(SHAInet::TrainingData) ? data.data : data
+      @logger.info("Training started")
+      batch_size = mini_batch_size ? mini_batch_size : raw_data.size
+
+      # Change String/Symbol into the corrent proc of the cost function
+      if cost_function.is_a?(Symbol) || cost_function.is_a?(String)
+        raise NeuralNetRunError.new("Must define correct cost function type (:mse, :c_ent, :exp, :hel_d, :kld, :gkld, :ita_sai_d).") if COST_FUNCTIONS.any? { |x| x == cost_function.to_s } == false
+        proc = get_cost_proc(cost_function.to_s)
+        cost_function = proc
+      end
+
+      # Create a pool for the training
+      pool = Pool.new(network: self, pool_size: pool_size)
+
+      loop do |e|
+        if e % log_each == 0
+          log_summary(e)
+          # @all_neurons.each { |s| puts s.gradient }
+        end
+        if e >= epochs || (error_threshold >= @mse) && (e > 1)
+          log_summary(e)
+          break
+        end
+
+        raw_data.each_slice(batch_size, reuse = false) do |data_slice|
+          verify_data(data_slice)
+          pool.save_nn_params
+          # @logger.info("Working on mini-batch size: #{batch_size}") if mini_batch_size
+
+          lowest_mse = 100000.0
+          # Update wieghts & biases for the batch
+          pool.organisms.each do |organism|
+            organism.get_new_params # Get new weights & biases
+
+            # Go over each data points and collect mse
+            # based on each specific example in the batch
+            batch_mean = 0.0
+            data_slice.each do |data_point|
+              evaluate(data_point[0], data_point[1], cost_function) # Update error signal in output layer
+              update_mse
+              batch_mean += @mse
+            end
+            batch_mean /= mini_batch_size # Update MSE of the batch
+
+            organism.mse = batch_mean
+            if batch_mean < pool.mvp.mse
+              pool.mvp = organism
+              lowest_mse = batch_mean
+            end
+          end
+
+          if pool.mvp.mse < @prev_mse
+            # Update pool for the next batch
+            @mse = pool.mvp.mse
+            pool.natural_select(@mse)
+
+            # Get the best parameters from the pool
+            pool.mvp.pull_params
+            @prev_mse = @mse.clone
+          else
+            # Try new pool on next batch
+            pool.reset
+            pool.restore_nn_params
+          end
+        end
+      end
+    end
+
     def randomize_all_weights
       raise NeuralNetRunError.new("Cannot randomize weights without synapses") if @all_synapses.empty?
       @all_synapses.each &.randomize_weight
     end
 
     def randomize_all_biases
-      raise NeuralNetRunError.new("Cannot randomize biases without synapses") if @all_synapses.empty?
+      raise NeuralNetRunError.new("Cannot randomize biases without neurons") if @all_synapses.empty?
       @all_neurons.each &.randomize_bias
     end
 
