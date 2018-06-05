@@ -1,10 +1,9 @@
 module SHAInet
   class Pool
-    property mvp : Organism
+    property :mvp # : Organism
+    getter original_biases : Array(Float64), original_weights : Array(Float64), organisms : Array(Organism)
 
-    @organisms : Array(Organism)
-
-    def initialize(@network : Network, @pool_size : Int32)
+    def initialize(@network : Network, @pool_size : Int32 = 1)
       # Store previous data to avoid moving towards worse network states
       @original_biases = Array(Float64).new
       @original_weights = Array(Float64).new
@@ -41,6 +40,8 @@ module SHAInet
     @pool : Pool
     @learning_rate : Float64
     @mutation_chance : Float64
+    @biases : Array(Float64)
+    @weights : Array(Float64)
 
     def initialize(@pool : Pool)
       @learning_rate = rand(0.0..1.0)
@@ -54,8 +55,8 @@ module SHAInet
       @learning_rate = rand(0.0..1.0)
       @mutation_chance = rand(0.0..1.0)
       @mse = 100000.0
-      @biases = @pool.original_biases.clone
-      @weights = @pool.original_weights.clone
+      # @biases = @pool.original_biases.clone
+      # @weights = @pool.original_weights.clone
     end
 
     def get_new_params
@@ -67,8 +68,7 @@ module SHAInet
           # Update networks biases using the organisms specific parameters
           threshold = (@learning_rate*@pool.original_biases[i]).abs
 
-          change = rand(-threshold..threshold)
-          new_value = @pool.original_biases[i] + change
+          new_value = @pool.original_biases[i] + rand(-threshold..threshold)
           neuron.bias = new_value
           @biases[i] = new_value
         end
@@ -82,8 +82,7 @@ module SHAInet
           # Update networks biases using the organisms specific parameters
           threshold = (@learning_rate*@pool.original_weights[i]).abs
 
-          change = rand(-threshold..threshold)
-          new_value = @pool.original_weights + change
+          new_value = @pool.original_weights + rand(-threshold..threshold)
           synapse.weight = new_value
           @weights[i] = new_value
         end
