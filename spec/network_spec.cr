@@ -340,7 +340,7 @@ describe SHAInet::Network do
       data: normalized.data.shuffle,
       pool_size: 1000,
       cost_function: :mse,
-      epochs: 10,
+      epochs: 100,
       mini_batch_size: 10,
       error_threshold: 0.0,
       log_each: 1)
