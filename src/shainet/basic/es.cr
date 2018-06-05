@@ -1,15 +1,21 @@
 module SHAInet
   class Pool
-    property mvp : Organism
+    property :mvp
+    getter :organisms
 
     @organisms : Array(Organism)
+    @mvp : Organism
 
     def initialize(@network : Network, @pool_size : Int32)
       # Store previous data to avoid moving towards worse network states
       @original_biases = Array(Float64).new
       @original_weights = Array(Float64).new
-      @organisms = Array(Organism).new(@pool_size) { Organism.new(pool: self) }
-      @mvp = @organisms.sample
+      @organisms = Array(Organism).new
+      save_nn_params
+      @pool_size.times do
+        @organisms << Organism.new(@network, @original_biases, @original_weights)
+      end
+      @mvp = @organisms.sample.as(Organism)
     end
 
     def save_nn_params
@@ -23,7 +29,10 @@ module SHAInet
     end
 
     def reset
-      @organisms = Array(Organism).new(@pool_size) { Organism.new(pool: self) }
+      @organisms = Array(Organism).new
+      @pool_size.times do
+        @organisms << Organism.new(@network, @original_biases, @original_weights)
+      end
     end
 
     def natural_select(error_threshold : Float64)
@@ -38,52 +47,58 @@ module SHAInet
   class Organism
     property mse : Float64
 
-    @pool : Pool
+    @network : Network
     @learning_rate : Float64
     @mutation_chance : Float64
+    @biases : Array(Float64)
+    @weights : Array(Float64)
 
-    def initialize(@pool : Pool)
+    def initialize(@network : Network, original_biases : Array(Float64), original_weights : Array(Float64))
       @learning_rate = rand(0.0..1.0)
       @mutation_chance = rand(0.0..1.0)
       @mse = 100000.0
-      @biases = @pool.original_biases.clone
-      @weights = @pool.original_weights.clone
+
+      @original_biases = original_biases
+      @original_weights = original_weights
+      @biases = original_biases.clone
+      @weights = original_weights.clone
     end
 
     def reset
       @learning_rate = rand(0.0..1.0)
       @mutation_chance = rand(0.0..1.0)
       @mse = 100000.0
-      @biases = @pool.original_biases.clone
-      @weights = @pool.original_weights.clone
+      @biases = @original_biases.clone
+      @weights = @original_weights.clone
     end
 
     def get_new_params
       # Update biases
-      @pool.network.all_neurons.each_with_index do |neuron, i|
+      @network.all_neurons.each_with_index do |neuron, i|
         # Only change value if mutation is triggered
         # This alows for some of the values to remain between epochs
         if rand(0.0..1.0) < @mutation_chance
           # Update networks biases using the organisms specific parameters
-          threshold = (@learning_rate*@pool.original_biases[i]).abs
+          threshold = (@learning_rate*@original_biases[i]).abs
 
           change = rand(-threshold..threshold)
-          new_value = @pool.original_biases[i] + change
+          new_value = @original_biases[i] + change
           neuron.bias = new_value
+
           @biases[i] = new_value
         end
       end
 
       # Update weights
-      @pool.network.all_synapses.each_with_index do |synapse, i|
+      @network.all_synapses.each_with_index do |synapse, i|
         # Only change value if mutation is triggered
         # This alows for some of the values to remain between epochs
         if rand(0.0..1.0) < @mutation_chance
           # Update networks biases using the organisms specific parameters
-          threshold = (@learning_rate*@pool.original_weights[i]).abs
+          threshold = (@learning_rate*@original_weights[i]).abs
 
           change = rand(-threshold..threshold)
-          new_value = @pool.original_weights + change
+          new_value = @original_weights[i] + change
           synapse.weight = new_value
           @weights[i] = new_value
         end
@@ -92,12 +107,12 @@ module SHAInet
 
     def pull_params
       # Update biases
-      @pool.network.all_neurons.each_with_index do |neuron, i|
+      @network.all_neurons.each_with_index do |neuron, i|
         neuron.bias = @biases[i].clone
       end
 
       # Update weights
-      @pool.network.all_synapses.each_with_index do |synapse, i|
+      @network.all_synapses.each_with_index do |synapse, i|
         synapse.weight = @weights[i].clone
       end
     end
