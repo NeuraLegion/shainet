@@ -69,39 +69,50 @@ describe SHAInet::Network do
   #   (nn.all_neurons.size > 0).should eq(true)
   # end
 
-  # it "Figure out XOR with SGD + M" do
-  #   puts "---"
-  #   puts "Figure out XOR SGD + momentum (train, mse, sigmoid)"
-  #   training_data = [
-  #     [[0, 0], [0]],
-  #     [[1, 0], [1]],
-  #     [[0, 1], [1]],
-  #     [[1, 1], [0]],
-  #   ]
+  it "Figure out XOR with SGD + M" do
+    puts "---"
+    puts "Figure out XOR SGD + momentum (train, mse, sigmoid)"
+    training_data = [
+      [[0, 0], [0]],
+      [[1, 0], [1]],
+      [[0, 1], [1]],
+      [[1, 1], [0]],
+    ]
 
-  #   xor = SHAInet::Network.new
+    xor = SHAInet::Network.new
 
-  #   xor.add_layer(:input, 2, "memory", SHAInet.sigmoid)
-  #   1.times { |x| xor.add_layer(:hidden, 3, "memory", SHAInet.sigmoid) }
-  #   xor.add_layer(:output, 1, "memory", SHAInet.sigmoid)
-  #   xor.fully_connect
+    xor.add_layer(:input, 2, "memory", SHAInet.sigmoid)
+    1.times { |x| xor.add_layer(:hidden, 3, "memory", SHAInet.sigmoid) }
+    xor.add_layer(:output, 1, "memory", SHAInet.sigmoid)
+    xor.fully_connect
 
-  #   xor.learning_rate = 0.7
-  #   xor.momentum = 0.3
+    # xor.learning_rate = 0.7
+    # xor.momentum = 0.3
 
-  #   xor.train(
-  #     data: training_data,
-  #     training_type: :sgdm,
-  #     cost_function: :mse,
-  #     epochs: 5000,
-  #     error_threshold: 0.000001,
-  #     log_each: 1000)
+    # xor.train(
+    #   data: training_data,
+    #   training_type: :sgdm,
+    #   cost_function: :mse,
+    #   epochs: 5000,
+    #   error_threshold: 0.000001,
+    #   log_each: 1000)
 
-  #   (xor.run([0, 0]).first < 0.1).should eq(true)
-  #   (xor.run([1, 0]).first > 0.9).should eq(true)
-  #   (xor.run([0, 1]).first > 0.9).should eq(true)
-  #   (xor.run([1, 1]).first < 0.1).should eq(true)
-  # end
+    xor.train_es(
+      data: training_data,
+      pool_size: 100,
+      learning_rate: 0.2,
+      sigma: 0.3,
+      cost_function: :mse,
+      epochs: 1000,
+      mini_batch_size: 1,
+      error_threshold: 0.0,
+      log_each: 10)
+
+    (xor.run([0, 0]).first < 0.1).should eq(true)
+    (xor.run([1, 0]).first > 0.9).should eq(true)
+    (xor.run([0, 1]).first > 0.9).should eq(true)
+    (xor.run([1, 1]).first < 0.1).should eq(true)
+  end
 
   # it "Supports both Symbols or Strings as input params" do
   #   puts "---"
@@ -338,10 +349,12 @@ describe SHAInet::Network do
 
     iris.train_es(
       data: normalized.data.shuffle,
-      pool_size: 1000,
+      pool_size: 50,
+      learning_rate: 0.2,
+      sigma: 0.3,
       cost_function: :mse,
       epochs: 10,
-      mini_batch_size: 10,
+      mini_batch_size: 1,
       error_threshold: 0.0,
       log_each: 1)
 

@@ -43,11 +43,11 @@ module SHAInet
       @learning_rate = 0.005 # Standard parameter for GD
       @momentum = 0.05       # Improved GD
 
-      @etah_plus = 1.2                    # For iRprop+ , how to increase step size
-      @etah_minus = 0.5                   # For iRprop+ , how to decrease step size
-      @delta_max = 50.0                   # For iRprop+ , max step size
-      @delta_min = 0.1                    # For iRprop+ , min step size
-      @prev_mse = rand(0.001..1.0).to_f64 # For iRprop+ , needed for backtracking
+      @etah_plus = 1.2           # For iRprop+ , how to increase step size
+      @etah_minus = 0.5          # For iRprop+ , how to decrease step size
+      @delta_max = 50.0          # For iRprop+ , max step size
+      @delta_min = 0.1           # For iRprop+ , min step size
+      @prev_mse = Float64.new(1) # For iRprop+ , needed for backtracking
 
       @alpha = 0.001        # For Adam , step size (recomeneded: only change this hyper parameter when fine-tuning)
       @beta1 = 0.9          # For Adam , exponential decay rate (not recommended to change value)
@@ -550,7 +550,9 @@ module SHAInet
 
     # Use evolutionary strategies for network optimization instread of gradient based approach
     def train_es(data : Array(Array(Array(GenNum))) | SHAInet::TrainingData, # Input structure: data = [[Input = [] of Float64],[Expected result = [] of Float64]]
-                 pool_size : Int32,                                          # Pool size for the organisms
+                 pool_size : Int32,                                          # How many random direction to try each time
+                 learning_rate : Float64,                                    # How much of the noise i used for the parameter update
+                 sigma : Float64,                                            # Range of noise values
                  cost_function : Symbol | String | CostFunction = :mse,      # Proc returns the function value and it's derivative
                  epochs : Int32 = 1,                                         # a criteria of when to stop the training
                  mini_batch_size : Int32 = 1,                                # Size of batch
@@ -569,9 +571,6 @@ module SHAInet
         cost_function = proc
       end
 
-      # Create a pool for the training
-      pool = Pool.new(network: self, pool_size: pool_size)
-
       loop do |e|
         if e % log_each == 0
           log_summary(e)
@@ -584,44 +583,53 @@ module SHAInet
 
         raw_data.each_slice(batch_size, reuse = false) do |data_slice|
           verify_data(data_slice)
+
+          pool = Pool.new(
+            network: self,
+            pool_size: pool_size,
+            learning_rate: learning_rate,
+            sigma: sigma)
           pool.save_nn_params
           # @logger.info("Working on mini-batch size: #{batch_size}") if mini_batch_size
 
-          lowest_mse = 100000.0
           # Update wieghts & biases for the batch
           pool.organisms.each do |organism|
             organism.get_new_params # Get new weights & biases
 
             # Go over each data points and collect mse
             # based on each specific example in the batch
-            batch_mean = 0.0
+            batch_sum = 0.0
             data_slice.each do |data_point|
               evaluate(data_point[0], data_point[1], cost_function) # Update error signal in output layer
               update_mse
-              batch_mean += @mse
+              batch_sum += @mse
             end
-            batch_mean /= mini_batch_size # Update MSE of the batch
 
-            organism.mse = batch_mean
-            if batch_mean < pool.mvp.mse
-              pool.mvp = organism
-              lowest_mse = batch_mean
-            end
+            organism.mse = batch_sum # / mini_batch_size # Update MSE of the batch
+            organism.update_reward
+
+            #   if organism.mse < pool.mvp.mse
+            #     pool.mvp = organism
+            #   end
           end
 
-          if pool.mvp.mse < @prev_mse
-            # Update pool for the next batch
-            @mse = pool.mvp.mse
-            pool.natural_select(@mse)
+          pool.pull_params
 
-            # Get the best parameters from the pool
-            pool.mvp.pull_params
-            @prev_mse = @mse.clone
-          else
-            # Try new pool on next batch
-            pool.reset
-            pool.restore_nn_params
-          end
+          # if pool.mvp.mse < @prev_mse
+          #   # Get the best parameters from the pool
+          #   pool.mvp.pull_params
+          #   @mse = pool.mvp.mse
+          #   @prev_mse = @mse.clone
+
+          #   puts "improved!"
+
+          #   # # Update pool for the next batch
+          #   # pool.natural_select(@prev_mse)
+          # else
+          #   # Try new pool on next batch
+          #   pool.restore_nn_params
+          #   # pool.reset
+          # end
         end
       end
     end
