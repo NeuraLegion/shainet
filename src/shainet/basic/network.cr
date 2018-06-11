@@ -553,7 +553,7 @@ module SHAInet
                  pool_size : Int32,                                          # How many random direction to try each time
                  learning_rate : Float64,                                    # How much of the noise i used for the parameter update
                  sigma : Float64,                                            # Range of noise values
-                 cost_function : Symbol | String | CostFunction = :mse,      # Proc returns the function value and it's derivative
+                 cost_function : Symbol | String | CostFunction = :c_ent,    # Proc returns the function value and it's derivative
                  epochs : Int32 = 1,                                         # a criteria of when to stop the training
                  mini_batch_size : Int32 = 1,                                # Size of batch
                  error_threshold : Float64 = 0.0,                            # a criteria of when to stop the training
@@ -607,8 +607,8 @@ module SHAInet
               batch_mse_sum += @mse
               @error_signal.size.times { |i| batch_err_sig_sum[i] += @error_signal[i] }
 
-              puts "data_point: #{data_point}"
-              puts "@error_signal: #{@error_signal}"
+              # puts "data_point: #{data_point}"
+              # puts "@error_signal: #{@error_signal}"
             end
 
             @mse = batch_mse_sum / mini_batch_size # Update MSE of the batch
