@@ -361,8 +361,8 @@ describe SHAInet::Network do
 
     result = iris.run(normalized.normalized_inputs.first)
     expected = [0.0, 0.0, 1.0]
-    puts "result: \t#{result}"
-    puts "expected: \t#{expected}"
+    puts "result: \t#{result.round(4)}"
+    puts "expected: \t#{expected.round(4)}"
     ((result.first < 0.3) && (result[1] < 0.3) && (result.last > 0.9)).should eq(true)
   end
 
