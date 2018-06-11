@@ -69,50 +69,50 @@ describe SHAInet::Network do
   #   (nn.all_neurons.size > 0).should eq(true)
   # end
 
-  it "Figure out XOR with SGD + M" do
-    puts "---"
-    puts "Figure out XOR SGD + momentum (train, mse, sigmoid)"
-    training_data = [
-      [[0, 0], [0]],
-      [[1, 0], [1]],
-      [[0, 1], [1]],
-      [[1, 1], [0]],
-    ]
+  # it "Figure out XOR with SGD + M" do
+  #   puts "---"
+  #   puts "Figure out XOR SGD + momentum (train, mse, sigmoid)"
+  #   training_data = [
+  #     [[0, 0], [0]],
+  #     [[1, 0], [1]],
+  #     [[0, 1], [1]],
+  #     [[1, 1], [0]],
+  #   ]
 
-    xor = SHAInet::Network.new
+  #   xor = SHAInet::Network.new
 
-    xor.add_layer(:input, 2, "memory", SHAInet.sigmoid)
-    1.times { |x| xor.add_layer(:hidden, 3, "memory", SHAInet.sigmoid) }
-    xor.add_layer(:output, 1, "memory", SHAInet.sigmoid)
-    xor.fully_connect
+  #   xor.add_layer(:input, 2, "memory", SHAInet.sigmoid)
+  #   1.times { |x| xor.add_layer(:hidden, 3, "memory", SHAInet.sigmoid) }
+  #   xor.add_layer(:output, 1, "memory", SHAInet.sigmoid)
+  #   xor.fully_connect
 
-    # xor.learning_rate = 0.7
-    # xor.momentum = 0.3
+  #   # xor.learning_rate = 0.7
+  #   # xor.momentum = 0.3
 
-    # xor.train(
-    #   data: training_data,
-    #   training_type: :sgdm,
-    #   cost_function: :mse,
-    #   epochs: 5000,
-    #   error_threshold: 0.000001,
-    #   log_each: 1000)
+  #   # xor.train(
+  #   #   data: training_data,
+  #   #   training_type: :sgdm,
+  #   #   cost_function: :mse,
+  #   #   epochs: 5000,
+  #   #   error_threshold: 0.000001,
+  #   #   log_each: 1000)
 
-    xor.train_es(
-      data: training_data,
-      pool_size: 100,
-      learning_rate: 0.2,
-      sigma: 0.3,
-      cost_function: :mse,
-      epochs: 1000,
-      mini_batch_size: 1,
-      error_threshold: 0.0,
-      log_each: 10)
+  #   xor.train_es(
+  #     data: training_data,
+  #     pool_size: 100,
+  #     learning_rate: 0.2,
+  #     sigma: 0.3,
+  #     cost_function: :mse,
+  #     epochs: 1000,
+  #     mini_batch_size: 1,
+  #     error_threshold: 0.0,
+  #     log_each: 10)
 
-    (xor.run([0, 0]).first < 0.1).should eq(true)
-    (xor.run([1, 0]).first > 0.9).should eq(true)
-    (xor.run([0, 1]).first > 0.9).should eq(true)
-    (xor.run([1, 1]).first < 0.1).should eq(true)
-  end
+  #   (xor.run([0, 0]).first < 0.1).should eq(true)
+  #   (xor.run([1, 0]).first > 0.9).should eq(true)
+  #   (xor.run([0, 1]).first > 0.9).should eq(true)
+  #   (xor.run([1, 1]).first < 0.1).should eq(true)
+  # end
 
   # it "Supports both Symbols or Strings as input params" do
   #   puts "---"
@@ -320,9 +320,9 @@ describe SHAInet::Network do
   #   ((result.first < 0.3) && (result[1] < 0.3) && (result.last > 0.9)).should eq(true)
   # end
 
-  it "works on iris dataset using evolutionary strategies as optimizer" do
+  it "Works with cross-entropy" do
     puts "---"
-    puts "works on iris dataset using evolutionary strategies as optimizer"
+    puts "Works with cross-entropy (sgdm, mini-batch_train, cross-entropy, sigmoid + softmax)"
     label = {
       "setosa"     => [0.to_f64, 0.to_f64, 1.to_f64],
       "versicolor" => [0.to_f64, 1.to_f64, 0.to_f64],
@@ -333,6 +333,9 @@ describe SHAInet::Network do
     iris.add_layer(:hidden, 4, :memory, SHAInet.sigmoid)
     iris.add_layer(:output, 3, :memory, SHAInet.sigmoid)
     iris.fully_connect
+
+    iris.learning_rate = 0.7
+    iris.momentum = 0.3
 
     outputs = Array(Array(Float64)).new
     inputs = Array(Array(Float64)).new
@@ -347,20 +350,63 @@ describe SHAInet::Network do
     normalized = SHAInet::TrainingData.new(inputs, outputs)
     normalized.normalize_min_max
 
-    iris.train_es(
+    iris.train_batch(
       data: normalized.data.shuffle,
-      pool_size: 50,
-      learning_rate: 0.2,
-      sigma: 0.3,
-      cost_function: :mse,
-      epochs: 10,
-      mini_batch_size: 1,
-      error_threshold: 0.0,
-      log_each: 1)
+      training_type: :sgdm,
+      cost_function: :c_ent,
+      epochs: 100,
+      error_threshold: 0.000001,
+      mini_batch_size: 50,
+      log_each: 10)
 
     result = iris.run(normalized.normalized_inputs.first)
-    ((result.first < 0.3) && (result[1] < 0.3) && (result.last > 0.7)).should eq(true)
+    expected = [0.0, 0.0, 1.0]
+    puts "result: \t#{result}"
+    puts "expected: \t#{expected}"
+    ((result.first < 0.3) && (result[1] < 0.3) && (result.last > 0.9)).should eq(true)
   end
+
+  # it "works on iris dataset using evolutionary strategies as optimizer" do
+  #   puts "---"
+  #   puts "works on iris dataset using evolutionary strategies as optimizer"
+  #   label = {
+  #     "setosa"     => [0.to_f64, 0.to_f64, 1.to_f64],
+  #     "versicolor" => [0.to_f64, 1.to_f64, 0.to_f64],
+  #     "virginica"  => [1.to_f64, 0.to_f64, 0.to_f64],
+  #   }
+  #   iris = SHAInet::Network.new
+  #   iris.add_layer(:input, 4, :memory, SHAInet.sigmoid)
+  #   iris.add_layer(:hidden, 4, :memory, SHAInet.sigmoid)
+  #   iris.add_layer(:output, 3, :memory, SHAInet.sigmoid)
+  #   iris.fully_connect
+
+  #   outputs = Array(Array(Float64)).new
+  #   inputs = Array(Array(Float64)).new
+  #   CSV.each_row(File.read(__DIR__ + "/test_data/iris.csv")) do |row|
+  #     row_arr = Array(Float64).new
+  #     row[0..-2].each do |num|
+  #       row_arr << num.to_f64
+  #     end
+  #     inputs << row_arr
+  #     outputs << label[row[-1]]
+  #   end
+  #   normalized = SHAInet::TrainingData.new(inputs, outputs)
+  #   normalized.normalize_min_max
+
+  #   iris.train_es(
+  #     data: normalized.data.shuffle,
+  #     pool_size: 50,
+  #     learning_rate: 0.2,
+  #     sigma: 0.3,
+  #     cost_function: :mse,
+  #     epochs: 10,
+  #     mini_batch_size: 1,
+  #     error_threshold: 0.0,
+  #     log_each: 1)
+
+  #   result = iris.run(normalized.normalized_inputs.first)
+  #   ((result.first < 0.3) && (result[1] < 0.3) && (result.last > 0.7)).should eq(true)
+  # end
 
   # it "works on the mnist dataset using adam and batch" do
   #   mnist = SHAInet::Network.new

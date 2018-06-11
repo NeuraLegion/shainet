@@ -14,6 +14,7 @@ module SHAInet
                    @learning_rate : Float64,
                    @sigma : Float64)
       #
+      raise "Pool size must be at least 2" if @pool_size < 2
       # Store previous data to avoid moving towards worse network states
       @pool_biases = Array(Float64).new
       @pool_weights = Array(Float64).new
@@ -70,15 +71,21 @@ module SHAInet
     def pull_params
       normalize_rewards
       norm_value = @learning_rate / (@pool_size * @sigma)
+      # puts "norm_value: #{norm_value}"
 
       @organisms.each do |organism|
         organism.biases.each_with_index do |bias, i|
           weighted_value = bias * organism.reward
-          @pool_biases[i] += norm_value * weighted_value
+          @pool_biases[i] += weighted_value # norm_value * weighted_value
+          # puts "i: #{i}"
+          # puts "organism.error_signal: #{organism.error_signal}"
+          # puts "organism.reward: #{organism.reward}"
+          # puts "bias: #{bias}"
+          # puts "weighted_value: #{weighted_value}"
         end
         organism.weights.each_with_index do |weight, i|
           weighted_value = weight * organism.reward
-          @pool_weights[i] += norm_value * weighted_value
+          @pool_weights[i] += weighted_value # norm_value * weighted_value
         end
       end
 
@@ -121,7 +128,7 @@ module SHAInet
   end
 
   class Organism
-    property mse : Float64, reward : Float64
+    property mse : Float64, error_signal : Array(Float64), reward : Float64
     getter biases : Array(Float64), weights : Array(Float64)
 
     @network : Network
@@ -140,6 +147,7 @@ module SHAInet
       # @sigma = rand(0.0..1.0)
       @mse = 0.0
       @reward = 0.0
+      @error_signal = [] of Float64
 
       @original_biases = original_biases.clone
       @original_weights = original_weights.clone
@@ -209,7 +217,15 @@ module SHAInet
     # end
 
     def update_reward
-      @reward = -@mse.clone # ((@network.prev_mse - @mse) / @network.prev_mse)
+      @error_signal = @network.error_signal.clone
+      @reward = 0.0
+      @error_signal.each { |v| @reward -= v }
+      # reward_sum = -@error_signal.reduce(0.0) { |acc, i| acc + i }
+      # @reward = SHAInet._tanh(reward_sum)
+
+      # puts "@reward: #{@reward}"
+      # puts "@error_signal: #{@error_signal}"
+      # @reward = -@mse.clone # ((@network.prev_mse - @mse) / @network.prev_mse)
       # puts "###############"
       # puts "@network.prev_mse: #{@network.prev_mse}"
       # puts "@mse: #{@mse}"

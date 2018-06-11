@@ -598,14 +598,21 @@ module SHAInet
 
             # Go over each data points and collect mse
             # based on each specific example in the batch
-            batch_sum = 0.0
+            batch_mse_sum = 0.0
+            batch_err_sig_sum = Array(Float64).new(@output_layers.last.neurons.size) { 0.0 }
+
             data_slice.each do |data_point|
               evaluate(data_point[0], data_point[1], cost_function) # Update error signal in output layer
               update_mse
-              batch_sum += @mse
+              batch_mse_sum += @mse
+              @error_signal.size.times { |i| batch_err_sig_sum[i] += @error_signal[i] }
+
+              puts "data_point: #{data_point}"
+              puts "@error_signal: #{@error_signal}"
             end
 
-            organism.mse = batch_sum # / mini_batch_size # Update MSE of the batch
+            @mse = batch_mse_sum / mini_batch_size # Update MSE of the batch
+            # organism.mse
             organism.update_reward
 
             #   if organism.mse < pool.mvp.mse
@@ -745,7 +752,8 @@ module SHAInet
       when "mse"
         return SHAInet.quadratic_cost
       when "c_ent"
-        raise MathError.new("Cross entropy cost is not implemented fully yet, please use quadratic cost for now.")
+        # raise MathError.new("Cross entropy cost is not implemented fully yet, please use quadratic cost for now.")
+        return SHAInet.cross_entropy_cost
       else
         raise NeuralNetInitalizationError.new("Must choose correct cost function or provide a correct Proc")
       end
