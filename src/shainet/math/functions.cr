@@ -137,9 +137,12 @@ module SHAInet
     }
   end
 
-  # def self.quadratic_cost_derivative : Proc(GenNum, GenNum, Float64)
-  #   ->(expected : GenNum, actual : GenNum) { _quadratic_cost_derivative(expected.to_f64, actual.to_f64) }
-  # end
+  def self.cross_entropy_cost : CostFunction
+    ->(expected : GenNum, actual : GenNum) {
+      {value:      _cross_entropy_cost(expected.to_f64, actual.to_f64),
+       derivative: _cross_entropy_cost_derivative(expected.to_f64, actual.to_f64)}
+    }
+  end
 
   # # Cost functions  # #
 
@@ -147,32 +150,24 @@ module SHAInet
     return (0.5*(actual - expected)**2).to_f64
   end
 
-  def self.cross_entropy_cost(expected : Float64, actual : Float64) : Float64
-    raise MathError.new("Cross entropy cost is not implemented fully yet, please use quadratic cost for now.")
-    # a = ((-1)*((expected*Math.log((actual), Math::E) + (1.0 - expected)*Math.log((1.0 - actual), Math::E))**2)**0.5).to_f64
-    # if a.to_s.match(/(-NaN|NaN|Infinity)/i)
-    #   return 0.0
-    # else
-    #   return a
-    # end
+  def self._cross_entropy_cost(expected : Float64, actual : Float64) : Float64
+    # raise MathError.new("Cross entropy cost is not implemented fully yet, please use quadratic cost for now.")
+    if expected == 1.0
+      return (-1)*Math.log((actual), Math::E)
+    elsif expected == 0.0
+      return (-1)*Math.log((1.0 - actual), Math::E)
+    else
+      raise MathError.new("Expected value must be 0 or 1 for cross entropy cost.")
+    end
   end
 
   # # Derivatives of cost functions # #
-
   def self._quadratic_cost_derivative(expected : Float64, actual : Float64) : Float64
     return (actual - expected).to_f64
   end
 
-  def self.cross_entropy_cost_derivative(expected : Float64, actual : Float64) : Float64
-    if actual == expected == 0.0 || actual == expected == 1.0
-      a = 0.0
-    elsif actual == 0.0 && expected != 0.0
-      a = -1.0
-    else
-      a = ((actual - expected)/((1.0 - actual)*actual)).to_f64
-    end
-    # puts a
-    return a
+  def self._cross_entropy_cost_derivative(expected : Float64, actual : Float64) : Float64
+    return (actual - expected).to_f64
   end
 
   ##################################################################

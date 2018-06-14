@@ -6,8 +6,8 @@ module SHAInet
     @ymax : Int32
     @ymin : Int32
 
-    getter :normalized_outputs, :normalized_inputs, :labels
-    setter :outputs
+    property :normalized_outputs, :normalized_inputs, :labels, :outputs
+    getter :inputs
 
     # @data_pairs :
     # Takes a path to a CSV file, a range of inputs and the index of the target column.
@@ -64,7 +64,20 @@ module SHAInet
       @inputs.each_with_index do |i_arr, i|
         arr << [@inputs[i], @outputs[i]]
       end
-      arr
+      return arr
+    end
+
+    def normalize_min_max(data : Array(Array(Float64)))
+      normalized_data = Array(Array(Float64)).new
+
+      # Get min-max
+      data.transpose.each { |a| @i_max << a.max; @i_min << a.min }
+
+      data.each do |row|
+        normalized_data << normalize_inputs(row)
+      end
+
+      return normalized_data
     end
 
     def normalize_min_max
@@ -128,9 +141,16 @@ module SHAInet
     # Splits the receiver in a TrainingData and a TestData object according to factor
     def split(factor)
       training_set_size = (data.size * factor).to_i
+
+      # puts data
       shuffled_data = data.shuffle
+
+      # puts shuffled_data
+
       training_set = shuffled_data[0..training_set_size - 1]
       test_set = shuffled_data[training_set_size..shuffled_data.size - 1]
+
+      # puts training_set
 
       @logger.info "Selected #{training_set.size} / #{data.size} rows for training"
       training_data = SHAInet::TrainingData.new(training_set.map { |el| el[0] }, training_set.map { |el| el[1] })
@@ -160,6 +180,21 @@ module SHAInet
     def label_for_array(an_array)
       index = an_array.index(an_array.max.to_f64)
       index ? @labels[index] : ""
+    end
+
+    def size
+      return @inputs.size
+    end
+
+    def to_onehot(data : Array(Array(Float64)), vector_size : Int32)
+      data.each_with_index do |point, i|
+        lbl = point.first.clone.to_i
+        one_hot = Array(Float64).new(vector_size) { 0.0 }
+        one_hot[lbl] = 1.0
+        data[i] = one_hot
+      end
+
+      return data
     end
   end
 end
