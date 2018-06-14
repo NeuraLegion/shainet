@@ -3,11 +3,9 @@
 
 module SHAInet
   class Pool
-    property :mvp
-    getter :organisms
+    getter organisms : Array(Organism), pool_biases : Array(Float64), pool_weights : Array(Float64)
 
-    @organisms : Array(Organism)
-    @mvp : Organism
+    # property mvp : Organism
 
     def initialize(@network : Network,
                    @pool_size : Int32,
@@ -15,13 +13,13 @@ module SHAInet
                    @sigma : Float64)
       #
       raise "Pool size must be at least 2" if @pool_size < 2
+
       # Store previous data to avoid moving towards worse network states
       @pool_biases = Array(Float64).new
-      @pool_weights = Array(Float64).new
-      save_nn_params
+      @network.all_neurons.each { |neuron| @pool_biases << neuron.bias }
 
-      # @pool_biases = Array(Float64).new
-      # @pool_weights = Array(Float64).new
+      @pool_weights = Array(Float64).new
+      @network.all_synapses.each { |synapse| @pool_weights << synapse.weight }
 
       @organisms = Array(Organism).new
       @pool_size.times do
@@ -33,20 +31,8 @@ module SHAInet
           original_weights: @pool_weights
         )
       end
-      @mvp = @organisms.sample.as(Organism)
+      # @mvp = @organisms.sample.as(Organism)
     end
-
-    def save_nn_params
-      # @pool_biases = Array(Float64).new
-      # @pool_weights = Array(Float64).new
-      @network.all_neurons.each { |neuron| @pool_biases << neuron.bias }
-      @network.all_synapses.each { |synapse| @pool_weights << synapse.weight }
-    end
-
-    # def restore_nn_params
-    #   @network.all_neurons.each_with_index { |neuron, i| neuron.bias = @pool_biases[i] }
-    #   @network.all_synapses.each_with_index { |synapse, i| synapse.weight = @pool_weights[i] }
-    # end
 
     def normalize_rewards
       reward_mean = 0.0
@@ -60,7 +46,7 @@ module SHAInet
 
       # Calculate standard deviation
       @organisms.each do |organism|
-        reward_stdv += Math.sqrt((organism.reward - reward_mean)**2 / (@organisms.size - 1))
+        reward_stdv += ((organism.reward - reward_mean)**2 / (@organisms.size - 1))**0.5
       end
 
       @organisms.each do |organism|
@@ -73,21 +59,25 @@ module SHAInet
       norm_value = @learning_rate / (@pool_size * @sigma)
       # puts "norm_value: #{norm_value}"
 
+      # Sum the relative change each organism provides
       @organisms.each do |organism|
         organism.biases.each_with_index do |bias, i|
           weighted_value = bias * organism.reward
-          @pool_biases[i] += weighted_value # norm_value * weighted_value
+          @pool_biases[i] += norm_value * weighted_value
           # puts "i: #{i}"
           # puts "organism.error_signal: #{organism.error_signal}"
           # puts "organism.reward: #{organism.reward}"
           # puts "bias: #{bias}"
           # puts "weighted_value: #{weighted_value}"
         end
+
         organism.weights.each_with_index do |weight, i|
           weighted_value = weight * organism.reward
-          @pool_weights[i] += weighted_value # norm_value * weighted_value
+          @pool_weights[i] += norm_value * weighted_value
         end
       end
+
+      # puts "@pool_biases: #{@pool_biases}"
 
       # Update network biases
       @network.all_neurons.each_with_index do |neuron, i|
@@ -99,36 +89,11 @@ module SHAInet
         synapse.weight = @pool_weights[i].clone
       end
     end
-
-    # def reset
-    #   @organisms = Array(Organism).new
-    #   @pool_size.times do
-    #     @organisms << Organism.new(
-    #       network: @network,
-    #       learning_rate: @learning_rate,
-    #       sigma: @sigma,
-    #       original_biases: @original_biases,
-    #       original_weights: @original_weights
-    #     )
-    #   end
-    # end
-
-    # def natural_select(error_threshold : Float64)
-    #   @original_biases = @mvp.original_biases.clone
-    #   @original_weights = @mvp.original_weights.clone
-
-    #   @organisms.each do |organism|
-    #     if organism.mse > error_threshold
-    #       organism.reset(@original_biases, @original_weights)
-    #     else
-    #       organism.update_params(@original_biases, @original_weights)
-    #     end
-    #   end
-    # end
   end
 
   class Organism
-    property mse : Float64, error_signal : Array(Float64), reward : Float64
+    property reward : Float64
+    getter mse : Float64, error_signal : Array(Float64)
     getter biases : Array(Float64), weights : Array(Float64)
 
     @network : Network
@@ -155,81 +120,43 @@ module SHAInet
       @weights = original_weights.clone
     end
 
-    # def reset(original_biases : Array(Float64), original_weights : Array(Float64))
-    #   @learning_rate = rand(0.0..1.0)
-    #   @sigma = rand(0.0..1.0)
-    #   @mse = 100000.0
-    #   @original_biases = original_biases
-    #   @original_weights = original_weights
-    # end
-
-    # def update_params(original_biases : Array(Float64), original_weights : Array(Float64))
-    #   @original_biases = original_biases
-    #   @original_weights = original_weights
-    # end
-
     def get_new_params
       # Update biases
       @network.all_neurons.each_with_index do |neuron, i|
-        # Only change value if mutation is triggered
-        # This alows for some of the values to remain between epochs
+        # threshold = @sigma*(neuron.bias.clone).abs
+        # change = rand(-threshold..threshold) # Add noise
 
-        # if rand(0.0..1.0) < @sigma
-        # Update networks biases using the organisms specific parameters
-        # threshold = (@learning_rate*@original_biases[i]).abs
+        # change = rand(-@sigma..@sigma) # Add noise
+        # new_value = @original_biases[i].clone + change*@learning_rate
 
-        change = rand(-@sigma..@sigma) # Add noise
-        new_value = @original_biases[i] + change*@learning_rate
+        new_value = SHAInet::RandomNormal.sample(n: 1, mu: neuron.bias, sigma: @sigma).first
+        # puts "new_value: #{new_value}"
         neuron.bias = new_value.clone
         @biases[i] = new_value.clone
-
-        # end
       end
 
       # Update weights
       @network.all_synapses.each_with_index do |synapse, i|
-        # Only change value if mutation is triggered
-        # This alows for some of the values to remain between epochs
-        # if rand(0.0..1.0) < @sigma
-        # Update networks biases using the organisms specific parameters
-        # threshold = (@learning_rate*@original_weights[i]).abs
+        # threshold = @sigma*(synapse.weight.clone).abs
+        # change = rand(-threshold..threshold) # Add noise
+        # # change = rand(-@sigma..@sigma) # Add noise
+        # new_value = @original_weights[i].clone + change*@learning_rate
 
-        change = rand(-@sigma..@sigma) # Add noise
-
-        # change = rand(-threshold..threshold)
-        new_value = @original_weights[i] + change*@learning_rate
+        new_value = SHAInet::RandomNormal.sample(n: 1, mu: synapse.weight, sigma: @sigma).first
         synapse.weight = new_value
         @weights[i] = new_value
-        # end
       end
     end
-
-    # def pull_params
-    #   # Update biases
-    #   @network.all_neurons.each_with_index do |neuron, i|
-    #     neuron.bias = @biases[i].clone
-    #   end
-
-    #   # Update weights
-    #   @network.all_synapses.each_with_index do |synapse, i|
-    #     synapse.weight = @weights[i].clone
-    #   end
-    # end
 
     def update_reward
       @error_signal = @network.error_signal.clone
       @reward = 0.0
       @error_signal.each { |v| @reward -= v }
-      # reward_sum = -@error_signal.reduce(0.0) { |acc, i| acc + i }
-      # @reward = SHAInet._tanh(reward_sum)
 
-      # puts "@reward: #{@reward}"
-      # puts "@error_signal: #{@error_signal}"
-      # @reward = -@mse.clone # ((@network.prev_mse - @mse) / @network.prev_mse)
       # puts "###############"
       # puts "@network.prev_mse: #{@network.prev_mse}"
       # puts "@mse: #{@mse}"
-      # puts "reward: #{@reward}"
+      # puts "@reward: #{@reward}"
       # puts "###############"
     end
   end

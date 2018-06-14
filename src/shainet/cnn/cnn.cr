@@ -348,7 +348,8 @@ module SHAInet
       when "mse"
         return SHAInet.quadratic_cost
       when "c_ent"
-        raise MathError.new("Cross entropy cost is not implemented fully yet, please use quadratic cost for now.")
+        # raise MathError.new("Cross entropy cost is not implemented fully yet, please use quadratic cost for now.")
+        return SHAInet.cross_entropy_cost
       else
         raise NeuralNetInitalizationError.new("Must choose correct cost function or provide a correct Proc")
       end

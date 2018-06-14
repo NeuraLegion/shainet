@@ -5,7 +5,11 @@
 
 
 SHAInet - stands for Super Human Artificial Intelligence network
-a neural network in pure [Crystal](https://crystal-lang.org/)  
+a neural network in pure [Crystal](https://crystal-lang.org/)
+
+This is a free-time project, happily hosted by NeuraLegion that was created as part of some internal research. We started it with research in mind, rather than production, and just kept going, also thanks to members of the community.
+
+We wanted to try and implement some inspiration from the biological world into this project. In addition to that, we wanted to try an approach for NNs using object-oriented modeling instead of matrices. The main reason behind that was, to try new types of neurons aiming for more robust learning (if possible) or at least have more fine-tuned control over the manipulation of each neuron (which is difficult using a matrix-driven approach).
 
 At the [Roadmap](https://github.com/NeuraLegion/shainet#development) you can see what we plan to add to the network as the project will progress.  
 
@@ -201,11 +205,13 @@ puts "Cnn output: #{cnn.output}"
   - [x] Add more activation functions.  
   - [x] Add more cost functions.  
   - [x] Add more gradient optimizers
-    - [x] Add iRprop+  
-    - [x] ADAM  
+    - [x] iRprop+  
+    - [x] ADAM
+    - [x] ES (evolutionary strategy, non-backprop)
 
 ### Advanced Features  
   - [x] Convolutional Neural Net.  
+  - [ ] Add support for multiple neuron types.  
   - [ ] Bind and use CUDA (GPU acceleration)  
   - [ ] graphic printout of network architecture.  
   - [ ] Add LSTM.  
@@ -213,7 +219,6 @@ puts "Cnn output: #{cnn.output}"
   - [ ] GNG (growing neural gas).  
   - [ ] SOM (self organizing maps).  
   - [ ] DBM (deep belief network).  
-  - [ ] Add support for multiple neuron types.  
 
 
 

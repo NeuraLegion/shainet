@@ -7,6 +7,7 @@ module SHAInet
     @ymin : Int32
 
     getter :normalized_outputs, :normalized_inputs, :labels
+    getter :inputs, :outputs
     setter :outputs
 
     # @data_pairs :
@@ -64,7 +65,7 @@ module SHAInet
       @inputs.each_with_index do |i_arr, i|
         arr << [@inputs[i], @outputs[i]]
       end
-      arr
+      return arr
     end
 
     def normalize_min_max
@@ -128,9 +129,16 @@ module SHAInet
     # Splits the receiver in a TrainingData and a TestData object according to factor
     def split(factor)
       training_set_size = (data.size * factor).to_i
+
+      # puts data
       shuffled_data = data.shuffle
+
+      # puts shuffled_data
+
       training_set = shuffled_data[0..training_set_size - 1]
       test_set = shuffled_data[training_set_size..shuffled_data.size - 1]
+
+      # puts training_set
 
       @logger.info "Selected #{training_set.size} / #{data.size} rows for training"
       training_data = SHAInet::TrainingData.new(training_set.map { |el| el[0] }, training_set.map { |el| el[1] })
@@ -160,6 +168,10 @@ module SHAInet
     def label_for_array(an_array)
       index = an_array.index(an_array.max.to_f64)
       index ? @labels[index] : ""
+    end
+
+    def size
+      return @inputs.size
     end
   end
 end

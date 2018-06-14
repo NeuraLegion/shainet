@@ -371,19 +371,20 @@ module SHAInet
         cost_function = proc
       end
 
-      raw_data.each_slice(batch_size, reuse = false) do |data_slice|
-        verify_data(data_slice)
-        @logger.info("Working on mini-batch size: #{batch_size}") if mini_batch_size
-        @time_step += 1 if mini_batch_size # in mini-batch update adam time_step
-        loop do |e|
-          if e % log_each == 0
-            log_summary(e)
-            # @all_neurons.each { |s| puts s.gradient }
-          end
-          if e >= epochs || (error_threshold >= @mse) && (e > 1)
-            log_summary(e)
-            break
-          end
+      loop do |e|
+        if e % log_each == 0
+          log_summary(e)
+          # @all_neurons.each { |s| puts s.gradient }
+        end
+        if e >= epochs || (error_threshold >= @mse) && (e > 1)
+          log_summary(e)
+          break
+        end
+
+        raw_data.each_slice(batch_size, reuse = false) do |data_slice|
+          verify_data(data_slice)
+          # @logger.info("Working on mini-batch size: #{batch_size}") if mini_batch_size
+          @time_step += 1 if mini_batch_size # in mini-batch update adam time_step
 
           batch_mean = [] of Float64
           all_errors = [] of Float64
@@ -557,7 +558,8 @@ module SHAInet
                  epochs : Int32 = 1,                                         # a criteria of when to stop the training
                  mini_batch_size : Int32 = 1,                                # Size of batch
                  error_threshold : Float64 = 0.0,                            # a criteria of when to stop the training
-                 log_each : Int32 = 1)                                       # determines what is the step for error printout
+                 log_each : Int32 = 1,                                       # determines what is the step for error printout
+                 show_slice : Bool = false)                                  # Show MSE for each slice
       # This methods accepts data as either a SHAInet::TrainingData object, or as an Array(Array(Array(GenNum)).
       # In the case of SHAInet::TrainingData, we convert it to an Array(Array(Array(GenNum)) by calling #data on it.
       raw_data = data.is_a?(SHAInet::TrainingData) ? data.data : data
@@ -572,14 +574,23 @@ module SHAInet
       end
 
       loop do |e|
-        if e % log_each == 0
-          log_summary(e)
-          # @all_neurons.each { |s| puts s.gradient }
-        end
         if e >= epochs || (error_threshold >= @mse) && (e > 1)
           log_summary(e)
           break
         end
+
+        # Show training progress of epochs
+        if e % log_each == 0
+          log_summary(e)
+        end
+
+        # Counters for disply
+        i = 0
+        slices = data.size / mini_batch_size
+
+        # Temp
+        biases = [] of Float64
+        weights = [] of Float64
 
         raw_data.each_slice(batch_size, reuse = false) do |data_slice|
           verify_data(data_slice)
@@ -589,54 +600,37 @@ module SHAInet
             pool_size: pool_size,
             learning_rate: learning_rate,
             sigma: sigma)
-          pool.save_nn_params
-          # @logger.info("Working on mini-batch size: #{batch_size}") if mini_batch_size
 
           # Update wieghts & biases for the batch
           pool.organisms.each do |organism|
             organism.get_new_params # Get new weights & biases
 
-            # Go over each data points and collect mse
+            # Go over each data points and collect errors
             # based on each specific example in the batch
             batch_mse_sum = 0.0
-            batch_err_sig_sum = Array(Float64).new(@output_layers.last.neurons.size) { 0.0 }
+            batch_errors_sum = Array(Float64).new(@output_layers.last.neurons.size) { 0.0 }
 
             data_slice.each do |data_point|
-              evaluate(data_point[0], data_point[1], cost_function) # Update error signal in output layer
+              # Update error signal in output layer
+              evaluate(data_point[0], data_point[1], cost_function)
               update_mse
               batch_mse_sum += @mse
-              @error_signal.size.times { |i| batch_err_sig_sum[i] += @error_signal[i] }
-
-              # puts "data_point: #{data_point}"
-              # puts "@error_signal: #{@error_signal}"
+              @error_signal.size.times { |i| batch_errors_sum[i] += @error_signal[i] }
             end
 
-            @mse = batch_mse_sum / mini_batch_size # Update MSE of the batch
-            # organism.mse
+            @mse = (batch_mse_sum / mini_batch_size) # Update MSE of the batch
+            @error_signal = batch_errors_sum
             organism.update_reward
-
-            #   if organism.mse < pool.mvp.mse
-            #     pool.mvp = organism
-            #   end
           end
 
           pool.pull_params
 
-          # if pool.mvp.mse < @prev_mse
-          #   # Get the best parameters from the pool
-          #   pool.mvp.pull_params
-          #   @mse = pool.mvp.mse
-          #   @prev_mse = @mse.clone
-
-          #   puts "improved!"
-
-          #   # # Update pool for the next batch
-          #   # pool.natural_select(@prev_mse)
-          # else
-          #   # Try new pool on next batch
-          #   pool.restore_nn_params
-          #   # pool.reset
-          # end
+          # Show training progress of the mini-batches
+          i += 1
+          if e % log_each == 0
+            @logger.info("Slice: (#{i} / #{slices}), MSE: #{@mse}") if show_slice
+            # @logger.info("@error_signal: #{@error_signal}")
+          end
         end
       end
     end
@@ -649,6 +643,18 @@ module SHAInet
     def randomize_all_biases
       raise NeuralNetRunError.new("Cannot randomize biases without neurons") if @all_synapses.empty?
       @all_neurons.each &.randomize_bias
+    end
+
+    def get_cost_proc(function_name : String) : CostFunction
+      case function_name
+      when "mse"
+        return SHAInet.quadratic_cost
+      when "c_ent"
+        # raise MathError.new("Cross entropy cost is not implemented fully yet, please use quadratic cost for now.")
+        return SHAInet.cross_entropy_cost
+      else
+        raise NeuralNetInitalizationError.new("Must choose correct cost function or provide a correct Proc")
+      end
     end
 
     def save_to_file(file_path : String)
@@ -745,18 +751,6 @@ module SHAInet
         end
       end
       @logger.info("Network loaded from: #{file_path}")
-    end
-
-    def get_cost_proc(function_name : String) : CostFunction
-      case function_name
-      when "mse"
-        return SHAInet.quadratic_cost
-      when "c_ent"
-        # raise MathError.new("Cross entropy cost is not implemented fully yet, please use quadratic cost for now.")
-        return SHAInet.cross_entropy_cost
-      else
-        raise NeuralNetInitalizationError.new("Must choose correct cost function or provide a correct Proc")
-      end
     end
 
     def inspect
