@@ -26,7 +26,7 @@ dependencies:
 
 ## Usage
 
-Standard training on XOR example  
+### Standard training on XOR example  
 ```crystal
 require "shainet"
 
@@ -65,7 +65,7 @@ xor.run([0, 0])
 ```
 
 
-Batch training on the iris dataset using adam
+### Batch training on the iris dataset using adam
 ```crystal
 # Create a new Data object based on a CSV
 data = SHAInet::Data.new_with_csv_input_target("iris.csv", 0..3, 4)
@@ -99,7 +99,7 @@ iris.train_batch(
 iris.test(test_set)
 ```
 
-Using convolutional network
+### Using convolutional network
 ```crystal
 
 # Load training data (partial dataset)
@@ -198,7 +198,7 @@ puts "We managed #{correct_answers} out of #{test_data.data_pairs.size} total"
 puts "Cnn output: #{cnn.output}"
 ```
 
-Evolutionary optimizer example:
+### Evolutionary optimizer example:
 ```crystal
 label = {
       "setosa"     => [0.to_f64, 0.to_f64, 1.to_f64],
