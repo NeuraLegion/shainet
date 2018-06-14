@@ -1,5 +1,3 @@
-require "csv"
-
 module SHAInet
   module RandomNormal
     extend self
@@ -14,6 +12,7 @@ module SHAInet
     # Sampling n points from a normal distribution with mu & sigma,
     # using the Metropolis-Hastings algorithm
     def metropolis(n : Int32 = 1, mu : Float64 = 0.0, sigma : Float64 = 1.0)
+      raise "Parameter error, sampling must be of n >= 1" if n < 1
       points = Array(Float64).new
       r = mu
       p = pdf(x: r, mu: mu, sigma: sigma)
@@ -38,19 +37,8 @@ module SHAInet
       return points
     end
 
-    # alias_method :sample, :metropolis
     def sample(n : Int32 = 1, mu : Float64 = 0.0, sigma : Float64 = 1.0)
-      raise "Parameter error, sampling must be of n >= 1" if n < 1
       return metropolis(n: n, mu: mu, sigma: sigma)
     end
   end
 end
-
-data = SHAInet::RandomNormal.sample(10000, 0.0, 3.0)
-csv_file = CSV.build do |csv|
-  data.each do |value|
-    csv.row value
-  end
-end
-
-File.write("csv_file.csv", csv_file)

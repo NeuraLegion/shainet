@@ -296,67 +296,35 @@ module SHAInet
       @logger.info("Epoch: #{e}, Total error: #{@total_error}, MSE: #{@mse}")
     end
 
-    # Online train, updates weights/biases after each data point (stochastic gradient descent)
-    def train(data : Array(Array(Array(GenNum))),                    # Input structure: data = [[Input = [] of Float64],[Expected result = [] of Float64]]
-              training_type : Symbol | String,                       # Type of training: :sgdm, :rprop, :adam
-              cost_function : Symbol | String | CostFunction = :mse, # Proc returns the function value and it's derivative
-              epochs : Int32 = 1,                                    # a criteria of when to stop the training
-              error_threshold : Float64 = 0.0,                       # a criteria of when to stop the training
-              log_each : Int32 = 1000)                               # determines what is the step for error printout
-
-      verify_data(data)
-      @logger.info("Training started")
-      loop do |e|
-        if e % log_each == 0
-          log_summary(e)
-        end
-        if e >= epochs || (error_threshold >= @mse) && (e > 0)
-          log_summary(e)
-          break
-        end
-
-        # Change String/Symbol into the corrent proc of the cost function
-        if cost_function.is_a?(Symbol) || cost_function.is_a?(String)
-          raise NeuralNetRunError.new("Must define correct cost function type (:mse, :c_ent, :exp, :hel_d, :kld, :gkld, :ita_sai_d).") if COST_FUNCTIONS.any? { |x| x == cost_function.to_s } == false
-          proc = get_cost_proc(cost_function.to_s)
-          cost_function = proc
-        end
-
-        # Go over each data point and update the weights/biases based on the specific example
-        data.each do |data_point|
-          # Update error signal, error gradient and total error at the output layer based on current input
-          evaluate(data_point[0], data_point[1], cost_function)
-          update_mse
-
-          # Propogate the errors backwards
-          @hidden_layers.reverse_each do |l|
-            l.neurons.each { |neuron| neuron.hidden_error_prop } # Update neuron error based on errors*weights of neurons from the next layer
-          end
-
-          @input_layers.reverse_each do |l|
-            l.neurons.each { |neuron| neuron.hidden_error_prop } # Update neuron error based on errors*weights of neurons from the next layer
-          end
-
-          # Update all wieghts & biases
-          update_weights(training_type, batch = false)
-          update_biases(training_type, batch = false)
-
-          @prev_mse = @mse.clone
-        end
-      end
-    rescue e : Exception
-      @logger.error("Error in training: #{e} #{e.inspect_with_backtrace}")
-      raise e
+    # Training the model
+    def train(data : Array(Array(Array(GenNum))) | SHAInet::TrainingData, # Input structure: data = [[Input = [] of Float64],[Expected result = [] of Float64]]
+              training_type : Symbol | String,                            # Type of training: :sgdm, :rprop, :adam
+              cost_function : Symbol | String | CostFunction = :mse,      # Proc returns the function value and it's derivative
+              epochs : Int32 = 1,                                         # a criteria of when to stop the training
+              error_threshold : Float64 = 0.00000001,                     # a criteria of when to stop the training
+              mini_batch_size : Int32 = 1,
+              log_each : Int32 = 1000,
+              show_slice : Bool = false)
+      train_batch(data: data,
+        training_type: training_type,
+        cost_function: cost_function,
+        epochs: epochs,
+        error_threshold: error_threshold,
+        mini_batch_size: mini_batch_size,
+        log_each: log_each,
+        show_slice: show_slice)
     end
 
-    # Batch train, updates weights/biases using a gradient sum from all data points in the batch (using gradient descent)
+    # This method is kept for matching syntax of previous versions.
+    # It is possible to use the "train" method instead
     def train_batch(data : Array(Array(Array(GenNum))) | SHAInet::TrainingData, # Input structure: data = [[Input = [] of Float64],[Expected result = [] of Float64]]
-                    training_type : Symbol | String,                            # Type of training: :sgdm, :rprop, :adam
+                    training_type : Symbol | String = :sgdm,                    # Type of training: :sgdm, :rprop, :adam
                     cost_function : Symbol | String | CostFunction = :mse,      # Proc returns the function value and it's derivative
                     epochs : Int32 = 1,                                         # a criteria of when to stop the training
-                    error_threshold : Float64 = 0.0,                            # a criteria of when to stop the training
-                    log_each : Int32 = 1000,                                    # determines what is the step for error printout
-                    mini_batch_size : Int32 | Nil = nil)
+                    error_threshold : Float64 = 0.00000001,                     # a criteria of when to stop the training
+                    mini_batch_size : Int32 = 1,                                # Size of mini-batches to train with
+                    log_each : Int32 = 1,                                       # determines what is the step for error printout
+                    show_slice : Bool = false)                                  # Show progress of each mini-batch slice
       # This methods accepts data as either a SHAInet::TrainingData object, or as an Array(Array(Array(GenNum)).
       # In the case of SHAInet::TrainingData, we convert it to an Array(Array(Array(GenNum)) by calling #data on it.
       raw_data = data.is_a?(SHAInet::TrainingData) ? data.data : data
@@ -372,38 +340,53 @@ module SHAInet
       end
 
       loop do |e|
+        # Show training progress of epochs
         if e % log_each == 0
           log_summary(e)
           # @all_neurons.each { |s| puts s.gradient }
         end
+
+        # Break condtitions
         if e >= epochs || (error_threshold >= @mse) && (e > 1)
           log_summary(e)
           break
         end
 
+        # Counters for disply
+        i = 0
+        slices = data.size / mini_batch_size
+
+        # Iterate over each mini-batch
         raw_data.each_slice(batch_size, reuse = false) do |data_slice|
           verify_data(data_slice)
-          # @logger.info("Working on mini-batch size: #{batch_size}") if mini_batch_size
           @time_step += 1 if mini_batch_size # in mini-batch update adam time_step
 
-          batch_mean = [] of Float64
-          all_errors = [] of Float64
-          @w_gradient = Array(Float64).new(@all_synapses.size) { 0.0 } # Save gradients from entire batch before updating weights & biases
+          # batch_mean = [] of Float64
+          # all_errors = [] of Float64
+          batch_mean = 0.0
+          all_errors = 0.0
+
+          # Save gradients from entire batch before updating weights & biases
+          @w_gradient = Array(Float64).new(@all_synapses.size) { 0.0 }
           @b_gradient = Array(Float64).new(@all_neurons.size) { 0.0 }
 
-          # Go over each data point and collect gradients of weights/biases based on each specific example
+          # Go over each data point and collect gradients of weights/biases
+          # based on each specific example
           data_slice.each do |data_point|
             evaluate(data_point[0], data_point[1], cost_function) # Get error gradient from output layer based on current input
-            all_errors << @total_error
+            # all_errors << @total_error
+            all_errors += @total_error
 
             # Propogate the errors backwards through the hidden layers
             @hidden_layers.reverse_each do |l|
-              l.neurons.each { |neuron| neuron.hidden_error_prop } # Update neuron error based on errors*weights of neurons from the next layer
+              # Update neuron error based on errors*weights of neurons from the next layer
+              l.neurons.each { |neuron| neuron.hidden_error_prop }
             end
 
             # Propogate the errors backwards through the input layers
             @input_layers.reverse_each do |l|
-              l.neurons.each { |neuron| neuron.hidden_error_prop } # Update neuron error based on errors*weights of neurons from the next layer
+              # Update neuron error based on errors*weights of neurons from the next layer
+              l.neurons.each { |neuron| neuron.hidden_error_prop }
             end
 
             # Sum all gradients from each data point for the batch update
@@ -416,18 +399,25 @@ module SHAInet
             else
               error_avg = @total_error/@output_layers.last.neurons.size
             end
-            sqrd_dists = [] of Float64
-            @error_signal.each { |e| sqrd_dists << (e - error_avg)**2 }
+            # sqrd_dists = [] of Float64
+            # @error_signal.each { |e| sqrd_dists << (e - error_avg)**2 }
+            sqrd_dists = 0.0
+            @error_signal.each { |e| sqrd_dists += (e - error_avg)**2 }
 
-            @mse = (sqrd_dists.reduce { |acc, i| acc + i })/@output_layers.last.neurons.size
-            batch_mean << @mse
+            # @mse = (sqrd_dists.reduce { |acc, i| acc + i })/@output_layers.last.neurons.size
+            # batch_mean << @mse
+            @mse = sqrd_dists / @output_layers.last.neurons.size
+            batch_mean += @mse
           end
 
           # Total error per batch
-          @total_error = all_errors.reduce { |acc, i| acc + i }
+          # @total_error = all_errors.reduce { |acc, i| acc + i }
+          @total_error = all_errors
 
           # Calculate MSE per batch
-          batch_mean = (batch_mean.reduce { |acc, i| acc + i })/data_slice.size
+          # batch_mean = (batch_mean.reduce { |acc, i| acc + i })/data_slice.size
+          # @mse = batch_mean
+          batch_mean /= data_slice.size
           @mse = batch_mean
 
           # Update all wieghts & biases for the batch
@@ -436,6 +426,13 @@ module SHAInet
           update_biases(training_type, batch = true)
 
           @prev_mse = @mse.clone
+
+          # Show training progress of the mini-batches
+          i += 1
+          if e % log_each == 0
+            @logger.info("Slice: (#{i} / #{slices}), MSE: #{@mse}") if show_slice
+            # @logger.info("@error_signal: #{@error_signal}")
+          end
         end
       end
     end
@@ -486,8 +483,8 @@ module SHAInet
           synapse.m_current = @beta1*synapse.m_prev + (1 - @beta1)*synapse.gradient
           synapse.v_current = @beta2*synapse.v_prev + (1 - @beta2)*(synapse.gradient)**2
 
-          m_hat = synapse.m_current/(1 - (@beta1)**@time_step)
-          v_hat = synapse.v_current/(1 - (@beta2)**@time_step)
+          m_hat = synapse.m_current/(1 - @beta1**@time_step)
+          v_hat = synapse.v_current/(1 - @beta2**@time_step)
           synapse.weight -= (@alpha*m_hat)/(v_hat**0.5 + @epsilon)
 
           synapse.m_prev = synapse.m_current
@@ -539,8 +536,9 @@ module SHAInet
           neuron.m_current = @beta1*neuron.m_prev + (1 - @beta1)*neuron.gradient
           neuron.v_current = @beta2*neuron.v_prev + (1 - @beta2)*(neuron.gradient)**2
 
-          m_hat = neuron.m_current/(1 - (@beta1)**@time_step)
-          v_hat = neuron.v_current/(1 - (@beta2)**@time_step)
+          m_hat = neuron.m_current/(1 - @beta1**@time_step)
+          v_hat = neuron.v_current/(1 - @beta2**@time_step)
+
           neuron.bias -= (@alpha*m_hat)/(v_hat**0.5 + @epsilon)
 
           neuron.m_prev = neuron.m_current
@@ -587,10 +585,6 @@ module SHAInet
         # Counters for disply
         i = 0
         slices = data.size / mini_batch_size
-
-        # Temp
-        biases = [] of Float64
-        weights = [] of Float64
 
         raw_data.each_slice(batch_size, reuse = false) do |data_slice|
           verify_data(data_slice)
