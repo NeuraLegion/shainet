@@ -107,9 +107,6 @@ module SHAInet
                    @sigma : Float64,
                    original_biases : Array(Float64),
                    original_weights : Array(Float64))
-      #
-      # @learning_rate = rand(0.0..1.0)
-      # @sigma = rand(0.0..1.0)
       @mse = 0.0
       @reward = 0.0
       @error_signal = [] of Float64
@@ -123,25 +120,13 @@ module SHAInet
     def get_new_params
       # Update biases
       @network.all_neurons.each_with_index do |neuron, i|
-        # threshold = @sigma*(neuron.bias.clone).abs
-        # change = rand(-threshold..threshold) # Add noise
-
-        # change = rand(-@sigma..@sigma) # Add noise
-        # new_value = @original_biases[i].clone + change*@learning_rate
-
         new_value = SHAInet::RandomNormal.sample(n: 1, mu: neuron.bias, sigma: @sigma).first
-        # puts "new_value: #{new_value}"
         neuron.bias = new_value.clone
         @biases[i] = new_value.clone
       end
 
       # Update weights
       @network.all_synapses.each_with_index do |synapse, i|
-        # threshold = @sigma*(synapse.weight.clone).abs
-        # change = rand(-threshold..threshold) # Add noise
-        # # change = rand(-@sigma..@sigma) # Add noise
-        # new_value = @original_weights[i].clone + change*@learning_rate
-
         new_value = SHAInet::RandomNormal.sample(n: 1, mu: synapse.weight, sigma: @sigma).first
         synapse.weight = new_value
         @weights[i] = new_value

@@ -6,9 +6,8 @@ module SHAInet
     @ymax : Int32
     @ymin : Int32
 
-    getter :normalized_outputs, :normalized_inputs, :labels
-    getter :inputs, :outputs
-    setter :outputs
+    property :normalized_outputs, :normalized_inputs, :labels, :outputs
+    getter :inputs
 
     # @data_pairs :
     # Takes a path to a CSV file, a range of inputs and the index of the target column.
@@ -66,6 +65,19 @@ module SHAInet
         arr << [@inputs[i], @outputs[i]]
       end
       return arr
+    end
+
+    def normalize_min_max(data : Array(Array(Float64)))
+      normalized_data = Array(Array(Float64)).new
+
+      # Get min-max
+      data.transpose.each { |a| @i_max << a.max; @i_min << a.min }
+
+      data.each do |row|
+        normalized_data << normalize_inputs(row)
+      end
+
+      return normalized_data
     end
 
     def normalize_min_max
@@ -172,6 +184,17 @@ module SHAInet
 
     def size
       return @inputs.size
+    end
+
+    def to_onehot(data : Array(Array(Float64)), vector_size : Int32)
+      data.each_with_index do |point, i|
+        lbl = point.first.clone.to_i
+        one_hot = Array(Float64).new(vector_size) { 0.0 }
+        one_hot[lbl] = 1.0
+        data[i] = one_hot
+      end
+
+      return data
     end
   end
 end
