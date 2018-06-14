@@ -196,7 +196,7 @@ describe SHAInet::Network do
     data = SHAInet::TrainingData.new(inputs, outputs)
     data.normalize_min_max
 
-    training_data, test_data = data.split(0.9) # Split also shuffles
+    training_data, test_data = data.split(0.75) # Split also shuffles
 
     iris.train(
       data: training_data,
@@ -221,8 +221,9 @@ describe SHAInet::Network do
       end
       correct += 1 if error_sum < 0.3
     end
-    puts "Correct answers: (#{correct} / #{test_data.size})"
-    (correct >= 9).should eq(true)
+    accuracy = (correct.to_f64 / test_data.size)
+    puts "Correct answers: #{correct} / #{test_data.size}, Accuracy: #{(accuracy*100).round(3)}%"
+    (accuracy >= 0.6).should eq(true)
   end
 
   puts "############################################################"
@@ -256,7 +257,7 @@ describe SHAInet::Network do
     data = SHAInet::TrainingData.new(inputs, outputs)
     data.normalize_min_max
 
-    training_data, test_data = data.split(0.9) # Split also shuffles
+    training_data, test_data = data.split(0.75) # Split also shuffles
 
     iris.train(
       data: training_data,
@@ -281,8 +282,9 @@ describe SHAInet::Network do
       end
       correct += 1 if error_sum < 0.3
     end
-    puts "Correct answers: (#{correct} / #{test_data.size})"
-    (correct >= 9).should eq(true)
+    accuracy = (correct.to_f64 / test_data.size)
+    puts "Correct answers: #{correct} / #{test_data.size}, Accuracy: #{(accuracy*100).round(3)}%"
+    (accuracy >= 0.6).should eq(true)
   end
 
   puts "############################################################"
@@ -316,7 +318,7 @@ describe SHAInet::Network do
     data = SHAInet::TrainingData.new(inputs, outputs)
     data.normalize_min_max
 
-    training_data, test_data = data.split(0.9) # Split also shuffles
+    training_data, test_data = data.split(0.75) # Split also shuffles
 
     iris.train(
       data: training_data,
@@ -345,8 +347,9 @@ describe SHAInet::Network do
       end
       correct += 1 if error_sum < 0.3
     end
-    puts "Correct answers: (#{correct} / #{test_data.size})"
-    (correct >= 9).should eq(true)
+    accuracy = (correct.to_f64 / test_data.size)
+    puts "Correct answers: #{correct} / #{test_data.size}, Accuracy: #{(accuracy*100).round(3)}%"
+    (accuracy >= 0.6).should eq(true)
   end
 
   puts "############################################################"
@@ -380,7 +383,7 @@ describe SHAInet::Network do
     data = SHAInet::TrainingData.new(inputs, outputs)
     data.normalize_min_max
 
-    training_data, test_data = data.split(0.9) # Split also shuffles
+    training_data, test_data = data.split(0.75) # Split also shuffles
 
     iris.train(
       data: training_data,
@@ -405,8 +408,9 @@ describe SHAInet::Network do
       end
       correct += 1 if error_sum < 0.3
     end
-    puts "Correct answers: (#{correct} / #{test_data.size})"
-    (correct >= 9).should eq(true)
+    accuracy = (correct.to_f64 / test_data.size)
+    puts "Correct answers: #{correct} / #{test_data.size}, Accuracy: #{(accuracy*100).round(3)}%"
+    (accuracy >= 0.6).should eq(true)
   end
 
   puts "############################################################"
@@ -438,7 +442,7 @@ describe SHAInet::Network do
     data = SHAInet::TrainingData.new(inputs, outputs)
     data.normalize_min_max
 
-    training_data, test_data = data.split(0.9)
+    training_data, test_data = data.split(0.75)
 
     iris.train_es(
       data: training_data,
@@ -465,8 +469,9 @@ describe SHAInet::Network do
       end
       correct += 1 if error_sum < 0.3
     end
-    puts "Correct answers: (#{correct} / #{test_data.size})"
-    (correct >= 9).should eq(true)
+    accuracy = (correct.to_f64 / test_data.size)
+    puts "Correct answers: #{correct} / #{test_data.size}, Accuracy: #{(accuracy*100).round(3)}%"
+    (accuracy >= 0.6).should eq(true)
   end
 
   puts "############################################################"

@@ -5,7 +5,9 @@ require "csv"
 system("cd #{__DIR__}/test_data && tar xvf tests.tar.xz")
 
 describe SHAInet::Network do
+  puts "############################################################"
   it "Saves XOR to a file" do
+    puts "\n"
     training_data = [
       [[0, 0], [0]],
       [[1, 0], [1]],

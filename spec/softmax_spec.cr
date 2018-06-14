@@ -2,7 +2,9 @@ require "./spec_helper"
 require "csv"
 
 describe SHAInet::CNN do
+  puts "############################################################"
   it "Test softmax layer" do
+    puts "\n"
     img_data = [
       [[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
        [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],

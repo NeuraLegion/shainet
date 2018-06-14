@@ -763,14 +763,14 @@ module SHAInet
       correct = 0
       incorrect = 0
       test_set.normalized_inputs.each_with_index do |input, index|
-        output_array = run(input)
+        output_array = run(input: input, stealth: true)
         if test_set.label_for_array(output_array) == test_set.label_for_array(test_set.normalized_outputs[index])
           correct += 1
         else
           incorrect += 1
         end
       end
-      @logger.info("Predicted #{correct} out of #{correct + incorrect} - #{(correct.to_f/(correct + incorrect).to_f)*100}%")
+      @logger.info("Predicted #{correct} out of #{correct + incorrect} (#{(correct.to_f/(correct + incorrect).to_f)*100}% accuracy)")
       correct.to_f/(correct + incorrect).to_f
     end
   end

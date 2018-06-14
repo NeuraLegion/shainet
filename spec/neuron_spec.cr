@@ -1,7 +1,9 @@
 require "./spec_helper"
 
 describe SHAInet::Neuron do
-  it "Initialize" do
+  puts "############################################################"
+  it "Initialize neuron" do
+    puts "\n"
     neuron = SHAInet::Neuron.new("memory")
     neuron.should be_a(SHAInet::Neuron)
   end

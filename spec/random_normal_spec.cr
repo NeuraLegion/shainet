@@ -3,7 +3,6 @@ require "csv"
 
 describe SHAInet::RandomNormal do
   puts "############################################################"
-
   it "Get 10000 random samples from normal distribution" do
     puts "\n"
 
