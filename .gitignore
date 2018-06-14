@@ -3,6 +3,7 @@
 /bin/
 /.shards/
 /spec/test_data/*.csv
+/spec/*.csv
 my_net.nn
 # Libraries don't need dependency lock
 # Dependencies will be locked in application that uses them
