@@ -111,11 +111,11 @@ describe SHAInet::Network do
     xor = SHAInet::Network.new
 
     xor.add_layer(:input, 2, "memory", SHAInet.sigmoid)
-    1.times { |x| xor.add_layer(:hidden, 3, "memory", SHAInet.sigmoid) }
+    1.times { |x| xor.add_layer(:hidden, 2, "memory", SHAInet.sigmoid) }
     xor.add_layer(:output, 1, "memory", SHAInet.sigmoid)
     xor.fully_connect
 
-    xor.learning_rate = 0.7
+    xor.learning_rate = 0.1
     xor.momentum = 0.3
 
     xor.train(
@@ -450,7 +450,7 @@ describe SHAInet::Network do
       learning_rate: 0.5,
       sigma: 0.1,
       cost_function: :c_ent,
-      epochs: 150,
+      epochs: 1000,
       mini_batch_size: 5,
       error_threshold: 1e-9,
       log_each: 100,
@@ -557,3 +557,5 @@ end
 
 # Remove train data
 system("cd #{__DIR__}/test_data && rm *.csv")
+File.delete("my_net.nn")
+File.delete("xor.nn")

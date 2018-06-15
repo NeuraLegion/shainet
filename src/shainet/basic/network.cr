@@ -338,17 +338,17 @@ module SHAInet
         proc = get_cost_proc(cost_function.to_s)
         cost_function = proc
       end
-
-      loop do |e|
+      counter = 0_i64
+      loop do
         # Show training progress of epochs
-        if e % log_each == 0
-          log_summary(e)
+        if counter % log_each == 0
+          log_summary(counter)
           # @all_neurons.each { |s| puts s.gradient }
         end
 
         # Break condtitions
-        if e >= epochs || (error_threshold >= @mse) && (e > 1)
-          log_summary(e)
+        if counter >= epochs || (error_threshold >= @mse) && (counter > 1)
+          log_summary(counter)
           break
         end
 
@@ -429,10 +429,11 @@ module SHAInet
 
           # Show training progress of the mini-batches
           i += 1
-          if e % log_each == 0
+          if counter % log_each == 0
             @logger.info("Slice: (#{i} / #{slices}), MSE: #{@mse}") if show_slice
             # @logger.info("@error_signal: #{@error_signal}")
           end
+          counter += 1
         end
       end
     end
@@ -571,15 +572,16 @@ module SHAInet
         cost_function = proc
       end
 
-      loop do |e|
-        if e >= epochs || (error_threshold >= @mse) && (e > 1)
-          log_summary(e)
+      counter = 0_i64
+      loop do
+        if counter >= epochs || (error_threshold >= @mse) && (counter > 1)
+          log_summary(counter)
           break
         end
 
         # Show training progress of epochs
-        if e % log_each == 0
-          log_summary(e)
+        if counter % log_each == 0
+          log_summary(counter)
         end
 
         # Counters for disply
@@ -621,10 +623,11 @@ module SHAInet
 
           # Show training progress of the mini-batches
           i += 1
-          if e % log_each == 0
+          if counter % log_each == 0
             @logger.info("Slice: (#{i} / #{slices}), MSE: #{@mse}") if show_slice
             # @logger.info("@error_signal: #{@error_signal}")
           end
+          counter += 1
         end
       end
     end
