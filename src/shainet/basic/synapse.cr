@@ -6,22 +6,22 @@ module SHAInet
     property m_current : Float64, v_current : Float64, m_prev : Float64, v_prev : Float64
 
     def initialize(@source_neuron : Neuron, @dest_neuron : Neuron)
-      @weight = rand(-0.1..0.1).to_f64   # Weight of the synapse
-      @gradient = rand(-0.1..0.1).to_f64 # Error of the synapse with respect to cost function (dC/dW)
-      @gradient_sum = Float64.new(0)     # Needed for batch train
-      @gradient_batch = Float64.new(0)   # Needed for batch train
-      @prev_weight = Float64.new(0)      # Needed for delta rule improvement (with momentum)
+      @weight = rand(-0.1_f64..0.1_f64)   # Weight of the synapse
+      @gradient = rand(-0.1_f64..0.1_f64) # Error of the synapse with respect to cost function (dC/dW)
+      @gradient_sum = 0_f64               # Needed for batch train
+      @gradient_batch = 0_f64             # Needed for batch train
+      @prev_weight = 0_f64                # Needed for delta rule improvement (with momentum)
 
       # Parameters needed for Rprop
-      @prev_gradient = 0.0
-      @prev_delta = 0.1
-      @prev_delta_w = 0.1
+      @prev_gradient = 0.0_f64
+      @prev_delta = 0.1_f64
+      @prev_delta_w = 0.1_f64
 
       # Parameters needed for Adam
-      @m_current = Float64.new(0) # Current moment value
-      @v_current = Float64.new(0) # Current moment**2 value
-      @m_prev = Float64.new(0)    # Previous moment value
-      @v_prev = Float64.new(0)    # Previous moment**2 value
+      @m_current = 0_f64 # Current moment value
+      @v_current = 0_f64 # Current moment**2 value
+      @m_prev = 0_f64    # Previous moment value
+      @v_prev = 0_f64    # Previous moment**2 value
     end
 
     # Transfer memory from source_neuron to dest_neuron while applying weight
@@ -45,7 +45,7 @@ module SHAInet
     end
 
     def randomize_weight
-      @weight = rand(-0.1..0.1).to_f64
+      @weight = rand(-0.1_f64..0.1_f64)
     end
 
     def clone

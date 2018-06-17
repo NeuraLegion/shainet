@@ -186,7 +186,7 @@ module SHAInet
     new_vector
   end
 
-  # vector elment-by-element multiplication
+  # vector elment-by-element addition
   def self.vector_sum(array1 : Array(Float64), array2 : Array(Float64))
     raise MathError.new("Vectors must be the same size to sum!") if array1.size != array2.size
 
