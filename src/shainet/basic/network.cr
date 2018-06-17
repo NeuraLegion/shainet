@@ -251,6 +251,9 @@ module SHAInet
 
       @total_error = @error_signal.reduce(0.0) { |acc, i| acc + i } # Sum up all the errors from output layer
 
+      # puts "@error_signal: #{@error_signal}"
+      # puts "@total_error: #{@total_error}"
+
 
     rescue e : Exception
       raise NeuralNetRunError.new("Error in evaluate: #{e}")
@@ -338,6 +341,7 @@ module SHAInet
         proc = get_cost_proc(cost_function.to_s)
         cost_function = proc
       end
+
       counter = 0_i64
       loop do
         # Show training progress of epochs
@@ -363,8 +367,8 @@ module SHAInet
 
           # batch_mean = [] of Float64
           # all_errors = [] of Float64
-          batch_mean = 0.0
-          all_errors = 0.0
+          batch_mean = 0.0_f64
+          all_errors = 0.0_f64
 
           # Save gradients from entire batch before updating weights & biases
           @w_gradient = Array(Float64).new(@all_synapses.size) { 0.0 }
@@ -395,13 +399,13 @@ module SHAInet
 
             # Calculate MSE per data point
             if @error_signal.size == 1
-              error_avg = 0.0
+              error_avg = 0.0_f64
             else
               error_avg = @total_error/@output_layers.last.neurons.size
             end
             # sqrd_dists = [] of Float64
             # @error_signal.each { |e| sqrd_dists << (e - error_avg)**2 }
-            sqrd_dists = 0.0
+            sqrd_dists = 0.0_f64
             @error_signal.each { |e| sqrd_dists += (e - error_avg)**2 }
 
             # @mse = (sqrd_dists.reduce { |acc, i| acc + i })/@output_layers.last.neurons.size
@@ -433,8 +437,8 @@ module SHAInet
             @logger.info("Slice: (#{i} / #{slices}), MSE: #{@mse}") if show_slice
             # @logger.info("@error_signal: #{@error_signal}")
           end
-          counter += 1
         end
+        counter += 1
       end
     end
 
@@ -586,7 +590,7 @@ module SHAInet
 
         # Counters for disply
         i = 0
-        slices = data.size / mini_batch_size
+        slices = (data.size.to_f64 / mini_batch_size).ceil.to_i
 
         raw_data.each_slice(batch_size, reuse = false) do |data_slice|
           verify_data(data_slice)
@@ -603,7 +607,7 @@ module SHAInet
 
             # Go over each data points and collect errors
             # based on each specific example in the batch
-            batch_mse_sum = 0.0
+            batch_mse_sum = 0.0_f64
             batch_errors_sum = Array(Float64).new(@output_layers.last.neurons.size) { 0.0 }
 
             data_slice.each do |data_point|
@@ -627,8 +631,8 @@ module SHAInet
             @logger.info("Slice: (#{i} / #{slices}), MSE: #{@mse}") if show_slice
             # @logger.info("@error_signal: #{@error_signal}")
           end
-          counter += 1
         end
+        counter += 1
       end
     end
 
