@@ -56,7 +56,18 @@ module SHAInet
 
       actual_output = run(input_data, stealth = true)
 
-      # Stop scan if we have NaNs in the output
+      # Detect exploading gradiants in output
+      actual_output.each do |ar|
+        if ar.infinite?
+          @logger.info("Found an '#{ar}' value, run stopped.")
+          puts "output:#{actual_output}"
+          puts "Output neurons:"
+          puts @output_layers.last.neurons
+          raise NeuralNetRunError.new("Exploding gradients detected")
+        end
+      end
+
+      # Detect NaNs in output
       actual_output.each { |ar| raise NeuralNetRunError.new(
         "Found a NaN value, run stopped.\noutput:#{actual_output}") if ar.nan? }
 
