@@ -1,0 +1,317 @@
+require "logger"
+require "json"
+
+module SHAInet
+  class Network
+    # Notes:
+    # ------------
+    # There are no matrices in this implementation, instead the gradient values
+    # are stored in each neuron/synapse independently.
+    # When preforming propogation,
+    # all the math is done iteratively on each neuron/synapse locally.
+    #
+    # This file contains all the methods for creating and maintaining
+    # the network, for methods regarding running and training go to network_run.cr
+    # ------------
+
+    LAYER_TYPES      = ["input", "hidden", "output"]
+    CONNECTION_TYPES = ["full", "ind_to_ind", "random"]
+    COST_FUNCTIONS   = ["mse", "c_ent"] # , "exp", "hel_d", "kld", "gkld", "ita_sai_d"]
+
+    # General network parameters
+    getter :input_layers, :output_layers, :hidden_layers, :all_neurons, :all_synapses
+    getter error_signal : Array(Float64), total_error : Float64, :mse, w_gradient : Array(Float64), b_gradient : Array(Float64)
+
+    # Parameters for SGD + Momentum
+    property learning_rate : Float64, momentum : Float64
+
+    # Parameters for Rprop
+    property etah_plus : Float64, etah_minus : Float64, delta_max : Float64, delta_min : Float64
+    getter prev_mse : Float64
+
+    # Parameters for Adam
+    property alpha : Float64
+    getter beta1 : Float64, beta2 : Float64, epsilon : Float64, time_step : Int32
+
+    # First creates an empty shell of the entire network
+    def initialize(@logger : Logger = Logger.new(STDOUT))
+      @input_layers = Array(Layer).new
+      @output_layers = Array(Layer).new
+      @hidden_layers = Array(Layer).new
+      @all_neurons = Array(Neuron).new   # Array of all current neurons in the network
+      @all_synapses = Array(Synapse).new # Array of all current synapses in the network
+      @error_signal = Array(Float64).new # Array of errors for each neuron in the output layers, based on specific input
+      @total_error = Float64.new(1)      # Sum of errors from output layer, based on a specific input
+      @mse = Float64.new(1)              # MSE of netwrok, based on all errors of output layer for a specific input or batch
+      @w_gradient = Array(Float64).new   # Needed for batch train
+      @b_gradient = Array(Float64).new   # Needed for batch train
+
+      @learning_rate = 0.005 # Standard parameter for GD
+      @momentum = 0.05       # Improved GD
+
+      @etah_plus = 1.2           # For iRprop+ , how to increase step size
+      @etah_minus = 0.5          # For iRprop+ , how to decrease step size
+      @delta_max = 50.0          # For iRprop+ , max step size
+      @delta_min = 0.1           # For iRprop+ , min step size
+      @prev_mse = Float64.new(1) # For iRprop+ , needed for backtracking
+
+      @alpha = 0.001        # For Adam , step size (recomeneded: only change this hyper parameter when fine-tuning)
+      @beta1 = 0.9          # For Adam , exponential decay rate (not recommended to change value)
+      @beta2 = 0.999        # For Adam , exponential decay rate (not recommended to change value)
+      @epsilon = 10**(-8.0) # For Adam , prevents exploding gradients (not recommended to change value)
+      @time_step = 0        # For Adam
+    end
+
+    # Create and populate a layer with neurons
+    # l_type is: :input, :hidden or :output
+    # l_size = how many neurons in the layer
+    # n_type = advanced option for different neuron types
+    def add_layer(l_type : Symbol | String, l_size : Int32, n_type : Symbol | String = "memory", activation_function : ActivationFunction = SHAInet.sigmoid)
+      layer = Layer.new(n_type.to_s, l_size, activation_function, @logger)
+      layer.neurons.each { |neuron| @all_neurons << neuron } # To easily access neurons later
+
+      case l_type.to_s
+      when "input"
+        @input_layers << layer
+      when "hidden"
+        @hidden_layers << layer
+      when "output"
+        if @output_layers.empty?
+          @output_layers << layer
+        else
+          @output_layers.delete(@output_layers.first)
+          @output_layers << layer
+          connect_ltl(@hidden_layers.last, @output_layers.first, :full)
+        end
+      else
+        raise NeuralNetRunError.new("Must define correct layer type (:input, :hidden, :output).")
+      end
+    end
+
+    # Connect all the layers in order (input and output don't connect between themselves): input, hidden, output
+    def fully_connect
+      if @hidden_layers.empty?
+        # Connect all input layers to all output layers
+        @output_layers.each do |out_layer|
+          @input_layers.each do |in_layer|
+            connect_ltl(in_layer, out_layer, :full)
+          end
+        end
+      else
+        # Connect all input layers to the first hidden layer
+        @input_layers.each do |source|
+          connect_ltl(source, @hidden_layers.first, :full)
+        end
+
+        # Connect all hidden layer between each other hierarchically
+        @hidden_layers.size.times do |index|
+          next if index + 2 > @hidden_layers.size
+          connect_ltl(@hidden_layers[index], @hidden_layers[index + 1], :full)
+        end
+
+        # Connect last hidden layer to all output layers
+        @output_layers.each do |layer|
+          connect_ltl(@hidden_layers.last, layer, :full)
+        end
+      end
+      # rescue e : Exception
+      #   raise NeuralNetRunError.new("Error fully connecting network: #{e}")
+    end
+
+    # Connect two specific layers with synapses
+    def connect_ltl(source : Layer, destination : Layer, connection_type : Symbol | String)
+      raise NeuralNetInitalizationError.new("Error initilizing network, must choose correct connection type.") if CONNECTION_TYPES.any? { |x| x == connection_type.to_s } == false
+      case connection_type.to_s
+      # Connect each neuron from source layer to all neurons in destination layer
+      when "full"
+        source.neurons.each do |neuron1|        # Source neuron
+          destination.neurons.each do |neuron2| # Destination neuron
+            synapse = Synapse.new(neuron1, neuron2)
+            neuron1.synapses_out << synapse
+            neuron2.synapses_in << synapse
+            @all_synapses << synapse
+          end
+        end
+        # Connect each neuron from source layer to neuron with corresponding index in destination layer
+      when "ind_to_ind"
+        raise NeuralNetInitalizationError.new("Error initializing network, index to index connection requires layers of same size.") if source.neurons.size != destination.neurons.size
+        (0..source.neurons.size).each do |index|
+          synapse = Synapse.new(source.neurons[index], destination.neurons[index])
+          source.neurons[index].synapses_out << synapse
+          destination.neurons[index].synapses_in << synapse
+          @all_synapses << synapse
+        end
+
+        # Randomly decide if each neuron from source layer will connect to a neuron from destination layer
+      when "random"
+        source.neurons.each do |neuron1|        # Source neuron
+          destination.neurons.each do |neuron2| # Destination neuron
+            x = rand(0..1)
+            if x <= 0.5 # Currently set to 50% chance, this can be changed at will
+              synapse = Synapse.new(neuron1, neuron2)
+              neuron1.synapses_out << synapse
+              neuron2.synapses_in << synapse
+              @all_synapses << synapse
+            end
+          end
+        end
+      end
+      @all_synapses.uniq!
+    end
+
+    def log_summary(e)
+      @logger.info("Epoch: #{e}, Total error: #{@total_error}, MSE: #{@mse}")
+    end
+
+    def clean_dead_neurons
+      current_neuron_number = @all_neurons.size
+      @hidden_layers.each do |h_l|
+        h_l.neurons.each do |neuron|
+          kill = false
+          if neuron.bias == 0
+            neuron.synapses_in.each do |s|
+              if s.weight == 0
+                kill = true
+              end
+            end
+          end
+          if kill
+            # Kill neuron and all connected synapses
+            neuron.synapses_in.each { |s| @all_synapses.delete(s) }
+            neuron.synapses_out.each { |s| @all_synapses.delete(s) }
+            @all_neurons.delete(neuron)
+            h_l.neurons.delete(neuron)
+          end
+        end
+      end
+      @logger.info("Cleaned #{current_neuron_number - @all_neurons.size} dead neurons")
+    end
+
+    def verify_net_before_train
+      if @input_layers.empty?
+        raise NeuralNetRunError.new("No input layers defined")
+        # elsif @hidden_layers.empty?
+        #   raise NeuralNetRunError.new("Need atleast one hidden layer")
+      elsif @output_layers.empty?
+        raise NeuralNetRunError.new("No output layers defined")
+      end
+    end
+
+    def randomize_all_weights
+      raise NeuralNetRunError.new("Cannot randomize weights without synapses") if @all_synapses.empty?
+      @all_synapses.each &.randomize_weight
+    end
+
+    def randomize_all_biases
+      raise NeuralNetRunError.new("Cannot randomize biases without neurons") if @all_synapses.empty?
+      @all_neurons.each &.randomize_bias
+    end
+
+    def save_to_file(file_path : String)
+      dump_network = Array(Hash(String, String | Array(Hash(String, Array(Hash(String, String | Float64)) | Float64 | String | String)))).new
+
+      [@input_layers, @output_layers, @hidden_layers].flatten.each do |layer|
+        dump_layer = Hash(String, String | Array(Hash(String, Array(Hash(String, String | Float64)) | Float64 | String | String))).new
+        dump_neurons = Array(Hash(String, Array(Hash(String, String | Float64)) | Float64 | String | String)).new
+        layer.neurons.each do |neuron|
+          n = Hash(String, Array(Hash(String, String | Float64)) | Float64 | String | String).new
+          n["id"] = neuron.id
+          n["bias"] = neuron.bias
+          n["n_type"] = neuron.n_type.to_s
+          n["synapses_in"] = Array(Hash(String, String | Float64)).new
+          n["synapses_out"] = Array(Hash(String, String | Float64)).new
+          neuron.synapses_in.each do |s|
+            s_h = Hash(String, String | Float64).new
+            s_h["source"] = s.source_neuron.id
+            s_h["destination"] = s.dest_neuron.id
+            s_h["weight"] = s.weight
+            n["synapses_in"].as(Array(Hash(String, String | Float64))) << s_h
+          end
+          neuron.synapses_out.each do |s|
+            s_h = Hash(String, String | Float64).new
+            s_h["source"] = s.source_neuron.id
+            s_h["destination"] = s.dest_neuron.id
+            s_h["weight"] = s.weight
+            n["synapses_out"].as(Array(Hash(String, String | Float64))) << s_h
+          end
+          dump_neurons << n
+        end
+
+        l_type = ""
+        if @input_layers.includes?(layer)
+          l_type = "input"
+        elsif @hidden_layers.includes?(layer)
+          l_type = "hidden"
+        else
+          l_type = "output"
+        end
+
+        dump_layer["l_type"] = l_type
+        dump_layer["neurons"] = dump_neurons
+        dump_layer["activation_function"] = layer.activation_function.to_s
+        dump_network << dump_layer
+      end
+      File.write(file_path, {"layers" => dump_network}.to_json)
+      @logger.info("Network saved to: #{file_path}")
+    end
+
+    def load_from_file(file_path : String)
+      net = NetDump.from_json(File.read(file_path))
+      net.layers.each do |layer|
+        l = Layer.new("memory", 0)
+        layer.neurons.each do |neuron|
+          n = Neuron.new(neuron.n_type, neuron.id)
+          n.bias = neuron.bias
+          l.neurons << n
+          @all_neurons << n
+        end
+        case layer.l_type
+        when "input"
+          @input_layers << l
+        when "output"
+          @output_layers << l
+        when "hidden"
+          @hidden_layers << l
+        end
+      end
+      net.layers.each do |layer|
+        layer.neurons.each do |n|
+          n.synapses_in.each do |s|
+            source = @all_neurons.find { |i| i.id == s.source }
+            destination = @all_neurons.find { |i| i.id == s.destination }
+            next unless source && destination
+            _s = Synapse.new(source, destination)
+            _s.weight = s.weight
+            neuron = @all_neurons.find { |i| i.id == n.id }
+            next unless neuron
+            neuron.not_nil!.synapses_in << _s
+            @all_synapses << _s
+          end
+          n.synapses_out.each do |s|
+            source = @all_neurons.find { |i| i.id == s.source }
+            destination = @all_neurons.find { |i| i.id == s.destination }
+            next unless source && destination
+            _s = Synapse.new(source, destination)
+            _s.weight = s.weight
+            neuron = @all_neurons.find { |i| i.id == n.id }
+            next unless neuron
+            neuron.not_nil!.synapses_out << _s
+            @all_synapses << _s
+          end
+        end
+      end
+      @logger.info("Network loaded from: #{file_path}")
+    end
+
+    def inspect
+      @logger.info(@input_layers)
+      @logger.info("--------------------------------")
+      @logger.info(@hidden_layers)
+      @logger.info("--------------------------------")
+      @logger.info(@output_layers)
+      @logger.info("--------------------------------")
+      @logger.info(@all_synapses)
+      @logger.info("--------------------------------")
+    end
+  end
+end
