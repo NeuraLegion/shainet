@@ -26,6 +26,8 @@ dependencies:
 
 ## Usage
 
+More usage examples can be found in the specs
+
 ### Standard training on XOR example  
 ```crystal
 require "shainet"
@@ -261,21 +263,37 @@ label = {
 ## Development
 
 ### Basic Features  
-  - [x] Add sgd,minibatch-update.  
-  - [x] Add more activation functions.  
-  - [x] Add more cost functions.  
-  - [x] Add more gradient optimizers
+  - [x] Train network
+  - [x] Save/load
+  - [x] Activation functions:
+    - [x] Sigmoid
+    - [x] Bipolar sigmoid
+    - [x] log-sigmoid
+    - [x] Tanh
+    - [x] ReLU
+    - [x] Leaky ReLU
+    - [x] Softmax
+  - [x] Cost functions:
+    - [x] Quadratic
+    - [x] Cross-entropy
+  - [x] Gradient optimizers
+    - [x] SGD + momentum
     - [x] iRprop+  
     - [x] ADAM
     - [x] ES (evolutionary strategy, non-backprop)
+  - [x] Autosave during training
 
-### Advanced Features  
+### Advanced Features
+  - [x] Support activation functions as Proc
+  - [x] Support cost functions as Proc
   - [x] Convolutional Neural Net.  
   - [ ] Add support for multiple neuron types.  
   - [ ] Bind and use CUDA (GPU acceleration)  
   - [ ] graphic printout of network architecture.  
-  - [ ] Add LSTM.  
-    - [ ] RNN.  
+  
+### Possible Future Features
+  - [ ] RNN (recurant neural network)
+  - [ ] LSTM (long-short term memory)
   - [ ] GNG (growing neural gas).  
   - [ ] SOM (self organizing maps).  
   - [ ] DBM (deep belief network).  
