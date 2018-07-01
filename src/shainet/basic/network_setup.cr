@@ -41,25 +41,25 @@ module SHAInet
       @all_neurons = Array(Neuron).new   # Array of all current neurons in the network
       @all_synapses = Array(Synapse).new # Array of all current synapses in the network
       @error_signal = Array(Float64).new # Array of errors for each neuron in the output layers, based on specific input
-      @total_error = Float64.new(1)      # Sum of errors from output layer, based on a specific input
-      @mse = Float64.new(1)              # MSE of netwrok, based on all errors of output layer for a specific input or batch
+      @total_error = 1_f64               # Sum of errors from output layer, based on a specific input
+      @mse = 1_f64                       # MSE of netwrok, based on all errors of output layer for a specific input or batch
       @w_gradient = Array(Float64).new   # Needed for batch train
       @b_gradient = Array(Float64).new   # Needed for batch train
 
-      @learning_rate = 0.005 # Standard parameter for GD
-      @momentum = 0.05       # Improved GD
+      @learning_rate = 0.005_f64 # Standard parameter for GD
+      @momentum = 0.05_f64       # Improved GD
 
-      @etah_plus = 1.2           # For iRprop+ , how to increase step size
-      @etah_minus = 0.5          # For iRprop+ , how to decrease step size
-      @delta_max = 50.0          # For iRprop+ , max step size
-      @delta_min = 0.1           # For iRprop+ , min step size
-      @prev_mse = Float64.new(1) # For iRprop+ , needed for backtracking
+      @etah_plus = 1.2_f64  # For iRprop+ , how to increase step size
+      @etah_minus = 0.5_f64 # For iRprop+ , how to decrease step size
+      @delta_max = 50_f64   # For iRprop+ , max step size
+      @delta_min = 0.1_f64  # For iRprop+ , min step size
+      @prev_mse = 1_f64     # For iRprop+ , needed for backtracking
 
-      @alpha = 0.001        # For Adam , step size (recomeneded: only change this hyper parameter when fine-tuning)
-      @beta1 = 0.9          # For Adam , exponential decay rate (not recommended to change value)
-      @beta2 = 0.999        # For Adam , exponential decay rate (not recommended to change value)
-      @epsilon = 10**(-8.0) # For Adam , prevents exploding gradients (not recommended to change value)
-      @time_step = 0        # For Adam
+      @alpha = 0.001_f64   # For Adam , step size (recomeneded: only change this hyper parameter when fine-tuning)
+      @beta1 = 0.9_f64     # For Adam , exponential decay rate (not recommended to change value)
+      @beta2 = 0.999_f64   # For Adam , exponential decay rate (not recommended to change value)
+      @epsilon = 10e-8_f64 # For Adam , prevents exploding gradients (not recommended to change value)
+      @time_step = 0_i32   # For Adam
     end
 
     # Create and populate a layer with neurons
@@ -68,7 +68,9 @@ module SHAInet
     # n_type = advanced option for different neuron types
     def add_layer(l_type : Symbol | String, l_size : Int32, n_type : Symbol | String = "memory", activation_function : ActivationFunction = SHAInet.sigmoid)
       layer = Layer.new(n_type.to_s, l_size, activation_function, @logger)
-      layer.neurons.each { |neuron| @all_neurons << neuron } # To easily access neurons later
+      layer.neurons.each do |neuron|
+        @all_neurons << neuron # To easily access neurons later
+      end
 
       case l_type.to_s
       when "input"
@@ -99,64 +101,80 @@ module SHAInet
         end
       else
         # Connect all input layers to the first hidden layer
-        @input_layers.each do |source|
-          connect_ltl(source, @hidden_layers.first, :full)
+        @input_layers.each do |in_layer|
+          connect_ltl(in_layer, @hidden_layers.first, :full)
         end
 
         # Connect all hidden layer between each other hierarchically
-        @hidden_layers.size.times do |index|
-          next if index + 2 > @hidden_layers.size
-          connect_ltl(@hidden_layers[index], @hidden_layers[index + 1], :full)
+        (@hidden_layers.size).times do |l|
+          next if (l + 1) == @hidden_layers.size
+          connect_ltl(@hidden_layers[l], @hidden_layers[l + 1], :full)
         end
 
         # Connect last hidden layer to all output layers
-        @output_layers.each do |layer|
-          connect_ltl(@hidden_layers.last, layer, :full)
+        @output_layers.each do |out_layer|
+          connect_ltl(@hidden_layers.last, out_layer, :full)
         end
       end
-      # rescue e : Exception
-      #   raise NeuralNetRunError.new("Error fully connecting network: #{e}")
+    rescue e : Exception
+      raise NeuralNetRunError.new("Error fully connecting network: #{e}")
     end
 
     # Connect two specific layers with synapses
-    def connect_ltl(source : Layer, destination : Layer, connection_type : Symbol | String)
+    def connect_ltl(src_layer : Layer, dest_layer : Layer, connection_type : Symbol | String)
       raise NeuralNetInitalizationError.new("Error initilizing network, must choose correct connection type.") if CONNECTION_TYPES.any? { |x| x == connection_type.to_s } == false
       case connection_type.to_s
       # Connect each neuron from source layer to all neurons in destination layer
       when "full"
-        source.neurons.each do |neuron1|        # Source neuron
-          destination.neurons.each do |neuron2| # Destination neuron
-            synapse = Synapse.new(neuron1, neuron2)
-            neuron1.synapses_out << synapse
-            neuron2.synapses_in << synapse
+        # Resize the weights matrix based on the connecting layer
+        dest_layer.weights.reshape_new(src_layer.size, dest_layer.size)
+
+        src_layer.neurons.each_with_index do |src_neuron, src_i|
+          dest_layer.neurons.each_with_index do |dest_neuron, dest_i|
+            synapse = Synapse.new(src_neuron, dest_neuron)
+            src_neuron.synapses_out << synapse
+            dest_neuron.synapses_in << synapse
             @all_synapses << synapse
+
+            dest_layer.weights.data[dest_i][src_i] = synapse.weight_ptr
+
+            # weights_vector << pointerof(synapse.weight)
+            # prev_weights_vector << pointerof(synapse.prev_weight)
+            # w_grad_vector << pointerof(synapse.gradient)
           end
         end
-        # Connect each neuron from source layer to neuron with corresponding index in destination layer
+        # Connect each neuron from source layer to neuron with
+        # corresponding index in destination layer
+        # Matrix training is not implemented yet for this connection
       when "ind_to_ind"
-        raise NeuralNetInitalizationError.new("Error initializing network, index to index connection requires layers of same size.") if source.neurons.size != destination.neurons.size
-        (0..source.neurons.size).each do |index|
-          synapse = Synapse.new(source.neurons[index], destination.neurons[index])
-          source.neurons[index].synapses_out << synapse
-          destination.neurons[index].synapses_in << synapse
+        raise NeuralNetInitalizationError.new(
+          "Error initializing network, index to index connection requires layers of same size.") if src_layer.neurons.size != dest_layer.neurons.size
+        (0..src_layer.neurons.size).each do |index|
+          synapse = Synapse.new(src_layer.neurons[index], dest_layer.neurons[index])
+          src_layer.neurons[index].synapses_out << synapse
+          dest_layer.neurons[index].synapses_in << synapse
           @all_synapses << synapse
         end
 
-        # Randomly decide if each neuron from source layer will connect to a neuron from destination layer
+        # Randomly decide if each neuron from source layer will
+        # connect to a neuron from destination layer
+        # Matrix training is not implemented yet for this connection
       when "random"
-        source.neurons.each do |neuron1|        # Source neuron
-          destination.neurons.each do |neuron2| # Destination neuron
+        src_layer.neurons.each do |src_neuron|     # Source neuron
+          dest_layer.neurons.each do |dest_neuron| # Destination neuron
             x = rand(0..1)
             if x <= 0.5 # Currently set to 50% chance, this can be changed at will
-              synapse = Synapse.new(neuron1, neuron2)
-              neuron1.synapses_out << synapse
-              neuron2.synapses_in << synapse
+              synapse = Synapse.new(src_neuron, dest_neuron)
+              src_neuron.synapses_out << synapse
+              dest_neuron.synapses_in << synapse
               @all_synapses << synapse
             end
           end
         end
       end
       @all_synapses.uniq!
+    rescue e : Exception
+      raise NeuralNetRunError.new("Error in connect_ltl: #{e}")
     end
 
     def log_summary(e)

@@ -16,7 +16,8 @@ module SHAInet
     # Run an input throught the network to get an output (weights & biases do not change)
     def run(input : Array(GenNum), stealth : Bool = false) : Array(Float64)
       verify_net_before_train
-      raise NeuralNetRunError.new("Error input data size: #{input.size} doesn't fit input layer size: #{@input_layers.first.neurons.size}.") unless input.size == @input_layers.first.neurons.size
+      raise NeuralNetRunError.new(
+        "Error input data size: #{input.size} doesn't fit input layer size: #{@input_layers.first.neurons.size}.") unless input.size == @input_layers.first.neurons.size
 
       # Insert the input data into the input layer
       input.each_with_index do |data, i|
@@ -80,10 +81,11 @@ module SHAInet
         neuron.gradient = cost[:derivative]*neuron.sigma_prime
         @error_signal << cost[:value] # Store the output error based on cost function
 
-        # puts "Actual output: #{actual_output}"
-        # puts "Cost value: #{cost[:value]}"
-        # puts "cost derivative: #{cost[:derivative]}"
-        # puts "---"
+        puts "Actual output: #{actual_output}"
+        puts "Cost value: #{cost[:value]}"
+        puts "Cost derivative: #{cost[:derivative]}"
+        puts "Neuron.sigma_prime: #{neuron.sigma_prime}"
+        puts "---"
       end
 
       @total_error = @error_signal.reduce(0.0) { |acc, i| acc + i } # Sum up all the errors from output layer
@@ -98,14 +100,15 @@ module SHAInet
 
     # Calculate MSE from the error signal of the output layer
     def update_mse
+      n = @output_layers.last.neurons.size
       if @error_signal.size == 1
         error_avg = 0.0
       else
-        error_avg = @total_error/@output_layers.last.neurons.size
+        error_avg = @total_error / n
       end
       sqrd_dists = 0.0
       @error_signal.each { |e| sqrd_dists += (e - error_avg)**2 }
-      @mse = sqrd_dists/@output_layers.last.neurons.size
+      @mse = sqrd_dists / n
     end
 
     def verify_data(data : Array(Array(Array(GenNum))))
@@ -147,6 +150,7 @@ module SHAInet
       # In the case of SHAInet::TrainingData, we convert it to an Array(Array(Array(GenNum)) by calling #data on it.
       raw_data = data.is_a?(SHAInet::TrainingData) ? data.data : data
       @logger.info("Training started")
+      start_time = Time.new
       batch_size = mini_batch_size ? mini_batch_size : raw_data.size
       @time_step = 0
 
@@ -170,7 +174,7 @@ module SHAInet
         # Break condtitions
         if counter >= epochs || (error_threshold >= @mse) && (counter > 1)
           log_summary(counter)
-          @logger.info("Training finished.")
+          @logger.info("Training finished. (Elapsed: #{Time.new - start_time})")
           break
         end
 
@@ -409,6 +413,7 @@ module SHAInet
       # In the case of SHAInet::TrainingData, we convert it to an Array(Array(Array(GenNum)) by calling #data on it.
       raw_data = data.is_a?(SHAInet::TrainingData) ? data.data : data
       @logger.info("Training started")
+      start_time = Time.new
       batch_size = mini_batch_size ? mini_batch_size : raw_data.size
 
       # Change String/Symbol into the corrent proc of the cost function
@@ -418,32 +423,36 @@ module SHAInet
         cost_function = proc
       end
 
-      counter = 0_i64
+      epoch = 0_i64
       loop do
         # Autosave the network
         unless autosave.nil?
-          if counter % autosave[:freq] == 0 && (counter > 0)
+          if epoch % autosave[:freq] == 0 && (epoch > 0)
             # @logger.info("Network saved.")
-            save_to_file("#{autosave[:path]}/autosave_epoch_#{counter}.nn")
+            save_to_file("#{autosave[:path]}/autosave_epoch_#{epoch}.nn")
           end
         end
 
         # Break condtitions
-        if counter >= epochs || (error_threshold >= @mse) && (counter > 1)
-          log_summary(counter)
-          @logger.info("Training finished.")
+        if epoch >= epochs || (error_threshold >= @mse) && (epoch > 1)
+          log_summary(epoch)
+          @logger.info("Training finished. (Elapsed: #{Time.new - start_time})")
           break
         end
 
         # Show training progress of epochs
-        if counter % log_each == 0
-          log_summary(counter)
+        if epoch % log_each == 0
+          log_summary(epoch)
           # @all_neurons.each { |s| puts s.gradient }
         end
 
         # Counters for disply
         i = 0
         slices = (data.size.to_f64 / mini_batch_size).ceil.to_i
+
+        # For error break condition
+        epoch_mse = 0.0
+        epoch_error_sum = Array(Float64).new(@output_layers.last.neurons.size) { 0.0 }
 
         raw_data.each_slice(batch_size, reuse = false) do |data_slice|
           verify_data(data_slice)
@@ -476,16 +485,20 @@ module SHAInet
             organism.update_reward
           end
 
+          epoch_mse += @mse
+          @error_signal.size.times { |i| epoch_error_sum[i] += @error_signal[i] }
           pool.pull_params
 
           # Show training progress of the mini-batches
           i += 1
-          if counter % log_each == 0
+          if epoch % log_each == 0
             @logger.info("  Slice: (#{i} / #{slices}), MSE: #{@mse}") if show_slice
             # @logger.info("@error_signal: #{@error_signal}")
           end
         end
-        counter += 1
+        @mse = (epoch_mse / slices)
+        @error_signal.size.times { |i| @error_signal[i] = (epoch_error_sum[i] / slices) }
+        epoch += 1
       end
     end
 
