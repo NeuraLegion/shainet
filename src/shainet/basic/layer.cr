@@ -8,13 +8,8 @@ module SHAInet
     def initialize(@n_type : String, @l_size : Int32, @activation_function : ActivationFunction = SHAInet.sigmoid, @logger : Logger = Logger.new(STDOUT))
       @neurons = Array(Neuron).new
 
+      # ------- Experimental -------
       # Pointer matrices for forward propogation
-      # @input_sums = PtrMatrix.new(width: 1, height: @l_size)
-      # @weights = PtrMatrix.new(width: 1, height: 1) # temp matrix
-      # @biases = PtrMatrix.new(width: 1, height: @l_size)
-      # @activations = PtrMatrix.new(width: 1, height: @l_size)
-      # @sigma_primes = PtrMatrix.new(width: 1, height: @l_size)
-
       @input_sums = PtrMatrix.new(width: @l_size, height: 1)
       @weights = PtrMatrix.new(width: 1, height: 1) # temp matrix
       @biases = PtrMatrix.new(width: @l_size, height: 1)
@@ -33,6 +28,7 @@ module SHAInet
 
         @neurons << neuron
 
+        # ------- Experimental -------
         @input_sums.data[0][i] = neuron.input_sum_ptr
         @biases.data[0][i] = neuron.bias_ptr
         @activations.data[0][i] = neuron.activation_ptr
@@ -42,6 +38,7 @@ module SHAInet
         # @b_gradients.data[0][i] = neuron.gradient_ptr
       end
 
+      # ------- Experimental -------
       # Transpose the needed matrices
       @input_sums.t
       @biases.t

@@ -232,22 +232,5 @@ module SHAInet
     rescue e : Exception
       raise NeuralNetRunError.new("Error in run_es: #{e.inspect_with_backtrace}")
     end
-
-    def validate_values(array : Array(Float64), location : String)
-      # Detect exploading gradiants in output
-      array.each do |ar|
-        if ar.infinite?
-          @logger.info("Found an '#{ar}' value, run stopped.")
-          puts "#{location}: #{array}"
-          puts "Output neurons:"
-          puts @output_layers.last.neurons
-          raise NeuralNetRunError.new("Exploding gradients detected")
-        end
-      end
-
-      # Detect NaNs in output
-      array.each { |ar| raise NeuralNetRunError.new(
-        "Found a NaN value, run stopped.\n#{location}: #{array}") if ar.nan? }
-    end
   end
 end
