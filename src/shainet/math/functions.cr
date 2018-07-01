@@ -153,9 +153,21 @@ module SHAInet
   def self._cross_entropy_cost(expected : Float64, actual : Float64) : Float64
     # raise MathError.new("Cross entropy cost is not implemented fully yet, please use quadratic cost for now.")
     if expected == 1.0
-      return (-1)*Math.log((actual), Math::E)
+      if actual <= 0.000001
+        return 10.0
+      elsif actual == 1.0
+        return 0.0
+      else
+        return (-1)*Math.log((actual), Math::E)
+      end
     elsif expected == 0.0
-      return (-1)*Math.log((1.0 - actual), Math::E)
+      if actual >= 0.999999
+        return 10.0
+      elsif actual == 0.0
+        return 0.0
+      else
+        return (-1)*Math.log((1.0 - actual), Math::E)
+      end
     else
       raise MathError.new("Expected value must be 0 or 1 for cross entropy cost.")
     end
@@ -168,49 +180,6 @@ module SHAInet
 
   def self._cross_entropy_cost_derivative(expected : Float64, actual : Float64) : Float64
     return (actual - expected).to_f64
-  end
-
-  ##################################################################
-
-  # # Linear algebra math # #
-
-  # vector elment-by-element multiplication
-  def self.vector_mult(array1 : Array(GenNum), array2 : Array(GenNum))
-    raise MathError.new("Vectors must be the same size to multiply!") if array1.size != array2.size
-
-    new_vector = [] of Float64
-    (0..array1.size - 1).each do |x|
-      result = array1[x]*array2[x]
-      new_vector << result
-    end
-    new_vector
-  end
-
-  # vector elment-by-element addition
-  def self.vector_sum(array1 : Array(Float64), array2 : Array(Float64))
-    raise MathError.new("Vectors must be the same size to sum!") if array1.size != array2.size
-
-    new_vector = [] of Float64
-    (0..array1.size - 1).each do |x|
-      result = array1[x] + array2[x]
-      new_vector << result
-    end
-    new_vector
-  end
-
-  # Matrix dot product
-  def self.dot_product(m1 : Array(Array(GenNum)), m2 : Array(Array(GenNum)))
-    out_matrix = [] of Array(Float64)
-    m2 = m2.transpose
-    m1.each do |v1|
-      new_row = [] of Float64
-      m2.each do |v2|
-        new_vector = vector_mult(v1, v2)
-        new_row << new_vector.reduce { |acc, i| acc + i }
-      end
-      out_matrix << new_row
-    end
-    out_matrix
   end
 
   ##################################################################

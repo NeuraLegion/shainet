@@ -75,6 +75,18 @@ describe SHAInet::Network do
       error_threshold: 1e-9,
       log_each: 1000)
 
+    # model.train_es(
+    #   data: training.raw_data,
+    #   pool_size: 50,
+    #   learning_rate: 0.5,
+    #   sigma: 0.1,
+    #   cost_function: :mse,
+    #   epochs: 1000,
+    #   mini_batch_size: 5,
+    #   error_threshold: 1e-9,
+    #   log_each: 100,
+    #   show_slice: true)
+
     # model.show
 
     # Test model
@@ -97,7 +109,7 @@ describe SHAInet::Network do
     (error < 0.05).should eq(true) # require less than 5% error
   end
 
-  puts "############################################################"
+  # puts "############################################################"
 
   it "Figure out XOR with SGD + M" do
     puts "\n"
@@ -479,14 +491,14 @@ describe SHAInet::Network do
     iris.train_es(
       data: training_data,
       pool_size: 50,
-      learning_rate: 0.5,
-      sigma: 0.1,
+      learning_rate: 0.3,
+      sigma: 0.15,
       cost_function: :c_ent,
       epochs: 1000,
       mini_batch_size: 5,
       error_threshold: 1e-9,
-      log_each: 100,
-      show_slice: true)
+      log_each: 10,
+      show_slice: false)
 
     # Test the trained model
     correct = 0
@@ -508,91 +520,152 @@ describe SHAInet::Network do
 
   puts "############################################################"
 
-  # it "Works on the mnist dataset using evolutionary optimizer and batch" do
-  #   mnist = SHAInet::Network.new
-  #   mnist.add_layer(:input, 784, "memory", SHAInet.none)
-  #   mnist.add_layer(:hidden, 10, "memory", SHAInet.tanh)
-  #   # mnist.add_layer(:hidden, 40, "eraser", SHAInet.sigmoid)
-  #   mnist.add_layer(:hidden, 10, "memory", SHAInet.sigmoid)
-  #   # mnist.add_layer(:hidden, 100, "memory", SHAInet.sigmoid)
-  #   mnist.add_layer(:output, 10, "memory", SHAInet.sigmoid)
+  # it "Test matrix forward prop" do
+  #   puts "\n"
+  #   label = {
+  #     "setosa"     => [0.to_f64, 0.to_f64, 1.to_f64],
+  #     "versicolor" => [0.to_f64, 1.to_f64, 0.to_f64],
+  #     "virginica"  => [1.to_f64, 0.to_f64, 0.to_f64],
+  #   }
 
-  #   # Input to first hidden
-  #   mnist.fully_connect
+  #   iris = SHAInet::Network.new
+  #   iris.add_layer(:input, 4, :memory, SHAInet.none)
+  #   iris.add_layer(:hidden, 4, :memory, SHAInet.none)
+  #   iris.add_layer(:output, 3, :memory, SHAInet.sigmoid)
+  #   iris.fully_connect
 
-  #   # Load training data
-  #   raw_data = Array(Array(Float64)).new
-  #   csv = CSV.new(File.read(__DIR__ + "/test_data/mnist_train.csv"))
-  #   5000.times do
-  #     # CSV.each_row(File.read(__DIR__ + "/test_data/mnist_train.csv")) do |row|
-  #     csv.next
-  #     new_row = Array(Float64).new
-  #     csv.row.to_a.each { |value| new_row << value.to_f64 }
-  #     raw_data << new_row
+  #   outputs = Array(Array(Float64)).new
+  #   inputs = Array(Array(Float64)).new
+  #   CSV.each_row(File.read(__DIR__ + "/test_data/iris.csv")) do |row|
+  #     row_arr = Array(Float64).new
+  #     row[0..-2].each do |num|
+  #       row_arr << num.to_f64
+  #     end
+  #     inputs << row_arr
+  #     outputs << label[row[-1]]
   #   end
-  #   raw_input_data = Array(Array(Float64)).new
-  #   raw_output_data = Array(Array(Float64)).new
+  #   data = SHAInet::TrainingData.new(inputs, outputs)
+  #   data.normalize_min_max
 
-  #   raw_data.each do |row|
-  #     raw_input_data << row[1..-1]
-  #     raw_output_data << [row[0]]
-  #   end
+  #   training_data, test_data = data.split(0.75)
 
-  #   training_data = SHAInet::TrainingData.new(raw_input_data, raw_output_data)
-  #   # training_data.normalize_min_max
-  #   training_data.normalized_inputs = training_data.normalize_min_max(data: training_data.inputs)
-  #   training_data.normalized_outputs = training_data.to_onehot(data: training_data.outputs, vector_size: 10)
-
-  #   # Train on the data
-  #   mnist.train_es(
+  #   iris.train_es_exp(
   #     data: training_data,
   #     pool_size: 50,
   #     learning_rate: 0.5,
   #     sigma: 0.1,
   #     cost_function: :c_ent,
-  #     epochs: 1,
-  #     mini_batch_size: 50,
-  #     error_threshold: 0.00000001,
-  #     log_each: 1,
+  #     epochs: 1000,
+  #     mini_batch_size: 5,
+  #     error_threshold: 1e-9,
+  #     log_each: 100,
   #     show_slice: true)
 
-  #   # Load test data
-  #   raw_data = Array(Array(Float64)).new
-  #   csv = CSV.new(File.read(__DIR__ + "/test_data/mnist_test.csv"))
-  #   1000.times do
-  #     # CSV.each_row(File.read(__DIR__ + "/test_data/mnist_train.csv")) do |row|
-  #     csv.next
-  #     new_row = Array(Float64).new
-  #     csv.row.to_a.each { |value| new_row << value.to_f64 }
-  #     raw_data << new_row
-  #   end
-  #   raw_input_data = Array(Array(Float64)).new
-  #   raw_output_data = Array(Array(Float64)).new
-
-  #   raw_data.each do |row|
-  #     raw_input_data << row[1..-1]
-  #     raw_output_data << [row[0]]
-  #   end
-
-  #   test_data = SHAInet::TrainingData.new(raw_input_data, raw_output_data)
-  #   test_data.normalized_inputs = test_data.normalize_min_max(data: test_data.inputs)
-  #   test_data.normalized_outputs = test_data.to_onehot(data: test_data.outputs, vector_size: 10)
-
-  #   # Run on all test data
+  #   # Test the trained model
   #   correct = 0
-  #   total = test_data.normalized_outputs.size
-
-  #   test_data.normalized_inputs.each_with_index do |test, i|
-  #     result = mnist.run(input: test, stealth: true)
-  #     result_lbl = result.index(result.max)
-  #     expected_lbl = test_data.normalized_outputs[i].index(test_data.normalized_outputs[i].max)
-
-  #     correct += 1 if result_lbl == expected_lbl
+  #   test_data.data.each do |data_point|
+  #     result = iris.run(data_point[0], stealth: true)
+  #     expected = data_point[1]
+  #     # puts "result: \t#{result.map { |x| x.round(5) }}"
+  #     # puts "expected: \t#{expected}"
+  #     error_sum = 0.0
+  #     result.size.times do |i|
+  #       error_sum += (result[i] - expected[i]).abs
+  #     end
+  #     correct += 1 if error_sum < 0.3
   #   end
-  #   accuracy = (correct.to_f64 / total)
-  #   puts "Correct answers: #{correct} / #{total}, Accuracy: #{(accuracy*100).round(3)}%"
-  #   (accuracy >= 0.2).should eq(true) # Without training acc is ~= 10%
+  #   accuracy = (correct.to_f64 / test_data.size)
+  #   puts "Correct answers: #{correct} / #{test_data.size}, Accuracy: #{(accuracy*100).round(3)}%"
+  #   (accuracy >= 0.6).should eq(true)
   # end
+
+  # puts "############################################################"
+
+  # # it "Works on the mnist dataset using evolutionary optimizer and batch" do
+  # #   mnist = SHAInet::Network.new
+  # #   mnist.add_layer(:input, 784, "memory", SHAInet.none)
+  # #   mnist.add_layer(:hidden, 10, "memory", SHAInet.tanh)
+  # #   # mnist.add_layer(:hidden, 40, "eraser", SHAInet.sigmoid)
+  # #   mnist.add_layer(:hidden, 10, "memory", SHAInet.sigmoid)
+  # #   # mnist.add_layer(:hidden, 100, "memory", SHAInet.sigmoid)
+  # #   mnist.add_layer(:output, 10, "memory", SHAInet.sigmoid)
+
+  # #   # Input to first hidden
+  # #   mnist.fully_connect
+
+  # #   # Load training data
+  # #   raw_data = Array(Array(Float64)).new
+  # #   csv = CSV.new(File.read(__DIR__ + "/test_data/mnist_train.csv"))
+  # #   5000.times do
+  # #     # CSV.each_row(File.read(__DIR__ + "/test_data/mnist_train.csv")) do |row|
+  # #     csv.next
+  # #     new_row = Array(Float64).new
+  # #     csv.row.to_a.each { |value| new_row << value.to_f64 }
+  # #     raw_data << new_row
+  # #   end
+  # #   raw_input_data = Array(Array(Float64)).new
+  # #   raw_output_data = Array(Array(Float64)).new
+
+  # #   raw_data.each do |row|
+  # #     raw_input_data << row[1..-1]
+  # #     raw_output_data << [row[0]]
+  # #   end
+
+  # #   training_data = SHAInet::TrainingData.new(raw_input_data, raw_output_data)
+  # #   # training_data.normalize_min_max
+  # #   training_data.normalized_inputs = training_data.normalize_min_max(data: training_data.inputs)
+  # #   training_data.normalized_outputs = training_data.to_onehot(data: training_data.outputs, vector_size: 10)
+
+  # #   # Train on the data
+  # #   mnist.train_es(
+  # #     data: training_data,
+  # #     pool_size: 50,
+  # #     learning_rate: 0.5,
+  # #     sigma: 0.1,
+  # #     cost_function: :c_ent,
+  # #     epochs: 1,
+  # #     mini_batch_size: 50,
+  # #     error_threshold: 0.00000001,
+  # #     log_each: 1,
+  # #     show_slice: true)
+
+  # #   # Load test data
+  # #   raw_data = Array(Array(Float64)).new
+  # #   csv = CSV.new(File.read(__DIR__ + "/test_data/mnist_test.csv"))
+  # #   1000.times do
+  # #     # CSV.each_row(File.read(__DIR__ + "/test_data/mnist_train.csv")) do |row|
+  # #     csv.next
+  # #     new_row = Array(Float64).new
+  # #     csv.row.to_a.each { |value| new_row << value.to_f64 }
+  # #     raw_data << new_row
+  # #   end
+  # #   raw_input_data = Array(Array(Float64)).new
+  # #   raw_output_data = Array(Array(Float64)).new
+
+  # #   raw_data.each do |row|
+  # #     raw_input_data << row[1..-1]
+  # #     raw_output_data << [row[0]]
+  # #   end
+
+  # #   test_data = SHAInet::TrainingData.new(raw_input_data, raw_output_data)
+  # #   test_data.normalized_inputs = test_data.normalize_min_max(data: test_data.inputs)
+  # #   test_data.normalized_outputs = test_data.to_onehot(data: test_data.outputs, vector_size: 10)
+
+  # #   # Run on all test data
+  # #   correct = 0
+  # #   total = test_data.normalized_outputs.size
+
+  # #   test_data.normalized_inputs.each_with_index do |test, i|
+  # #     result = mnist.run(input: test, stealth: true)
+  # #     result_lbl = result.index(result.max)
+  # #     expected_lbl = test_data.normalized_outputs[i].index(test_data.normalized_outputs[i].max)
+
+  # #     correct += 1 if result_lbl == expected_lbl
+  # #   end
+  # #   accuracy = (correct.to_f64 / total)
+  # #   puts "Correct answers: #{correct} / #{total}, Accuracy: #{(accuracy*100).round(3)}%"
+  # #   (accuracy >= 0.2).should eq(true) # Without training acc is ~= 10%
+  # # end
 end
 
 # Remove train data

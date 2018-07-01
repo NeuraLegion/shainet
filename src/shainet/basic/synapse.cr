@@ -70,5 +70,18 @@ module SHAInet
       pp @source_neuron
       pp @dest_neuron
     end
+
+    # Methods for Pointer matrix implementation - experimental
+    def prev_weight_ptr
+      return pointerof(@prev_weight)
+    end
+
+    def weight_ptr
+      return pointerof(@weight)
+    end
+
+    def gradient_ptr
+      return pointerof(@gradient)
+    end
   end
 end

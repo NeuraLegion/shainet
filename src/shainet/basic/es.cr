@@ -13,6 +13,7 @@ module SHAInet
                    @sigma : Float64)
       #
       raise "Pool size must be at least 2" if @pool_size < 2
+      raise "Sigma (std dev for sampling) must be > 0" if @sigma <= 0.0
 
       # Store previous data to avoid moving towards worse network states
       @pool_biases = Array(Float64).new
@@ -44,13 +45,21 @@ module SHAInet
       end
       reward_mean /= @organisms.size
 
+      # puts "reward_mean: #{reward_mean}"
+
       # Calculate standard deviation
       @organisms.each do |organism|
         reward_stdv += ((organism.reward - reward_mean)**2 / (@organisms.size - 1))**0.5
       end
 
       @organisms.each do |organism|
-        organism.reward = (organism.reward.clone - reward_mean) / reward_stdv
+        # puts "reward_stdv: #{reward_stdv}"
+        old_reward = organism.reward.clone
+        organism.reward = (old_reward - reward_mean) / reward_stdv
+        if organism.reward.nan?
+          organism.reward = (old_reward - reward_mean)
+        end
+        # puts "organism.reward: #{organism.reward}"
       end
     end
 
@@ -139,8 +148,7 @@ module SHAInet
       @error_signal.each { |v| @reward -= v }
 
       # puts "###############"
-      # puts "@network.prev_mse: #{@network.prev_mse}"
-      # puts "@mse: #{@mse}"
+      # puts "@error_signal: #{@error_signal}"
       # puts "@reward: #{@reward}"
       # puts "###############"
     end
