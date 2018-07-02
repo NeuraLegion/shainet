@@ -6,23 +6,23 @@ module SHAInet
 
     property :n_type, :neurons
     getter :activation_function, :l_size
-    getter input_sums : PtrMatrix, weights : PtrMatrix, biases : PtrMatrix
-    getter activations : PtrMatrix, sigma_primes : PtrMatrix
+    # getter input_sums : PtrMatrix, weights : PtrMatrix, biases : PtrMatrix
+    # getter activations : PtrMatrix, sigma_primes : PtrMatrix
 
-    @[JSON::Field(ignore: true)]
-    @input_sums : PtrMatrix = PtrMatrix.new(width: @l_size, height: 1)
+    # @[JSON::Field(ignore: true)]
+    # @input_sums : PtrMatrix = PtrMatrix.new(width: @l_size, height: 1)
 
-    @[JSON::Field(ignore: true)]
-    @activations : PtrMatrix = PtrMatrix.new(width: @l_size, height: 1)
+    # @[JSON::Field(ignore: true)]
+    # @activations : PtrMatrix = PtrMatrix.new(width: @l_size, height: 1)
 
-    @[JSON::Field(ignore: true)]
-    @weights : PtrMatrix = PtrMatrix.new(width: 1, height: 1) # temp matrix
+    # @[JSON::Field(ignore: true)]
+    # @weights : PtrMatrix = PtrMatrix.new(width: 1, height: 1) # temp matrix
 
-    @[JSON::Field(ignore: true)]
-    @sigma_primes : PtrMatrix = PtrMatrix.new(width: @l_size, height: 1)
+    # @[JSON::Field(ignore: true)]
+    # @sigma_primes : PtrMatrix = PtrMatrix.new(width: @l_size, height: 1)
 
-    @[JSON::Field(ignore: true)]
-    @biases : PtrMatrix = PtrMatrix.new(width: @l_size, height: 1)
+    # @[JSON::Field(ignore: true)]
+    # @biases : PtrMatrix = PtrMatrix.new(width: @l_size, height: 1)
 
     @[JSON::Field(ignore: true)]
     @activation_function : ActivationFunction = SHAInet.sigmoid
@@ -30,19 +30,20 @@ module SHAInet
     @[JSON::Field(ignore: true)]
     @logger : Logger = Logger.new(STDOUT)
 
-    @neurons : Array(SHAInet::Neuron) = Array(SHAInet::Neuron).new
+    @neurons : Array(SHAInet::Neuron)
 
     def initialize(@n_type : String, @l_size : Int32, @activation_function : ActivationFunction = SHAInet.sigmoid, @logger : Logger = Logger.new(STDOUT))
+      @neurons = Array(SHAInet::Neuron).new
       # Populate layer with neurons and save pointers
       @l_size.times do |i|
         neuron = Neuron.new(@n_type)
 
         @neurons << neuron
         # ------- Experimental -------
-        @input_sums.data[0][i] = neuron.input_sum_ptr
-        @biases.data[0][i] = neuron.bias_ptr
-        @activations.data[0][i] = neuron.activation_ptr
-        @sigma_primes.data[0][i] = neuron.sigma_prime_ptr
+        # @input_sums.data[0][i] = neuron.input_sum_ptr
+        # @biases.data[0][i] = neuron.bias_ptr
+        # @activations.data[0][i] = neuron.activation_ptr
+        # @sigma_primes.data[0][i] = neuron.sigma_prime_ptr
 
         # @prev_bias.data[0][i] = neuron.prev_bias_ptr
         # @b_gradients.data[0][i] = neuron.gradient_ptr
