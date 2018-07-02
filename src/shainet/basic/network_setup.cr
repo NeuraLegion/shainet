@@ -130,7 +130,6 @@ module SHAInet
       # Connect each neuron from source layer to all neurons in destination layer
       when "full"
         # Resize the weights matrix based on the connecting layer
-        # dest_layer.weights.reshape_new(src_layer.size, dest_layer.size)
 
         src_layer.neurons.each_with_index do |src_neuron, src_i|
           dest_layer.neurons.each_with_index do |dest_neuron, dest_i|
@@ -138,12 +137,6 @@ module SHAInet
             src_neuron.synapses_out << synapse
             dest_neuron.synapses_in << synapse
             @all_synapses << synapse
-
-            # dest_layer.weights.data[dest_i][src_i] = synapse.weight_ptr
-
-            # weights_vector << pointerof(synapse.weight)
-            # prev_weights_vector << pointerof(synapse.prev_weight)
-            # w_grad_vector << pointerof(synapse.gradient)
           end
         end
         # Connect each neuron from source layer to neuron with
