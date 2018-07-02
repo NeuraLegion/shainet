@@ -3,6 +3,8 @@ require "json"
 
 module SHAInet
   class Network
+    include JSON::Serializable
+
     # ------------
     # There are no matrices in this implementation, instead the gradient values
     # are stored in each neuron/synapse independently.
@@ -132,7 +134,7 @@ module SHAInet
         unless autosave.nil?
           if counter % autosave[:freq] == 0 && (counter > 0)
             # @logger.info("Network saved.")
-            save_to_file("#{autosave[:path]}/autosave_epoch_#{counter}.nn")
+            File.write(self.to_json, "#{autosave[:path]}/autosave_epoch_#{counter}.nn")
           end
         end
 
@@ -405,7 +407,7 @@ module SHAInet
         unless autosave.nil?
           if epoch % autosave[:freq] == 0 && (epoch > 0)
             # @logger.info("Network saved.")
-            save_to_file("#{autosave[:path]}/autosave_epoch_#{epoch}.nn")
+            File.write("#{autosave[:path]}/autosave_epoch_#{epoch}.nn", self.to_json)
           end
         end
 

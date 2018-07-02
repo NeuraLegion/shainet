@@ -1,5 +1,7 @@
 module SHAInet
   class Synapse
+    include JSON::Serializable
+
     property source_neuron : Neuron, dest_neuron : Neuron
     property weight : Float64, gradient : Float64, gradient_sum : Float64, gradient_batch : Float64, prev_weight : Float64
     property prev_gradient : Float64, prev_delta : Float64, prev_delta_w : Float64

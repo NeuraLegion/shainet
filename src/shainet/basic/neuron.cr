@@ -5,6 +5,8 @@ module SHAInet
   NEURON_TYPES = ["memory", "eraser", "amplifier", "fader", "sensor"]
 
   class Neuron
+    include JSON::Serializable
+
     property :synapses_in, :synapses_out, :n_type, activation : Float64, gradient : Float64, bias : Float64, prev_bias : Float64
     property :id, input_sum : Float64, sigma_prime : Float64, gradient_sum : Float64, gradient_batch : Float64
 
