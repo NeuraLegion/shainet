@@ -33,10 +33,6 @@ module SHAInet
     @neurons : Array(SHAInet::Neuron) = Array(SHAInet::Neuron).new
 
     def initialize(@n_type : String, @l_size : Int32, @activation_function : ActivationFunction = SHAInet.sigmoid, @logger : Logger = Logger.new(STDOUT))
-      after_initialize
-    end
-
-    protected def after_initialize
       # Populate layer with neurons and save pointers
       @l_size.times do |i|
         neuron = Neuron.new(@n_type)
@@ -54,10 +50,10 @@ module SHAInet
 
       # ------- Experimental -------
       # Transpose the needed matrices
-      @input_sums.t
-      @biases.t
-      @activations.t
-      @sigma_primes.t
+      # @input_sums.t
+      # @biases.t
+      # @activations.t
+      # @sigma_primes.t
     end
 
     def clone
