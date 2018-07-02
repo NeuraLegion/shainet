@@ -1,5 +1,6 @@
 require "./spec_helper"
 require "csv"
+require "json"
 
 # Extract train data
 system("cd #{__DIR__}/test_data && tar xvf tests.tar.xz")
@@ -22,10 +23,9 @@ describe SHAInet::Network do
     xor.fully_connect
     # data, training_type, cost_function, activation_function, epochs, error_threshold (MSE %), log each steps
     xor.train(training_data, :sgdm, :mse, epochs = 5000, threshold = 0.000001, log = 100)
-    xor.save_to_file("./xor.nn")
+    File.write("./xor.nn", xor.to_json)
 
-    xor2 = SHAInet::Network.new
-    xor2.load_from_file("./xor.nn")
+    xor2 = SHAInet::Network.from_json("./xor.nn")
 
     xor.run([0, 0]).first.to_f32.should eq xor2.run([0, 0]).first.to_f32
     xor.run([1, 0]).first.to_f32.should eq xor2.run([1, 0]).first.to_f32

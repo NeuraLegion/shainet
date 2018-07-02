@@ -22,7 +22,7 @@ describe SHAInet::Network do
     nn.add_layer(:output, 2, :memory, SHAInet.sigmoid)
     nn.add_layer(:hidden, 2, :memory, SHAInet.sigmoid)
     nn.fully_connect
-    nn.save_to_file("#{__DIR__}/my_net.nn")
+    File.write("#{__DIR__}/my_net.nn", nn.to_json)
     File.exists?("#{__DIR__}/my_net.nn").should eq(true)
   end
 
@@ -30,8 +30,7 @@ describe SHAInet::Network do
 
   it "Loads from file" do
     puts "\n"
-    nn = SHAInet::Network.new
-    nn.load_from_file("#{__DIR__}/my_net.nn")
+    nn = SHAInet::Network.from_json("#{__DIR__}/my_net.nn")
     (nn.all_neurons.size > 0).should eq(true)
   end
 
@@ -342,9 +341,8 @@ describe SHAInet::Network do
       log_each: 1000,
       show_slice: false)
 
-    iris.save_to_file("./my_net.nn")
-    nn = SHAInet::Network.new
-    nn.load_from_file("./my_net.nn")
+    File.write("./my_net.nn", iris.to_json)
+    nn = SHAInet::Network.from_json("./my_net.nn")
 
     # Test the trained model
     correct = 0

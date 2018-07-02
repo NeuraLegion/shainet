@@ -1,20 +1,45 @@
+require "json"
+
 module SHAInet
   class Layer
+    include JSON::Serializable
+
     property :n_type, :neurons
     getter :activation_function, :l_size
-    getter input_sums : PtrMatrix, weights : PtrMatrix, biases : PtrMatrix
-    getter activations : PtrMatrix, sigma_primes : PtrMatrix
+    getter input_sums : PtrMatrix | Nil, weights : PtrMatrix | Nil, biases : PtrMatrix | Nil
+    getter activations : PtrMatrix | Nil, sigma_primes : PtrMatrix | Nil
+
+    @[JSON::Field(ignore: true)]
+    @input_sums : PtrMatrix = PtrMatrix.new(width: @l_size, height: 1)
+
+    @[JSON::Field(ignore: true)]
+    @activations : PtrMatrix | Nil
+
+    @[JSON::Field(ignore: true)]
+    @weights : PtrMatrix = PtrMatrix.new(width: 1, height: 1)
+
+    @[JSON::Field(ignore: true)]
+    @sigma_primes : PtrMatrix | Nil
+
+    @[JSON::Field(ignore: true)]
+    @biases : PtrMatrix | Nil
+
+    @[JSON::Field(ignore: true)]
+    @activation_function : ActivationFunction = SHAInet.sigmoid
+
+    @[JSON::Field(ignore: true)]
+    @logger : Logger = Logger.new(STDOUT)
 
     def initialize(@n_type : String, @l_size : Int32, @activation_function : ActivationFunction = SHAInet.sigmoid, @logger : Logger = Logger.new(STDOUT))
       @neurons = Array(Neuron).new
 
       # ------- Experimental -------
       # Pointer matrices for forward propogation
-      @input_sums = PtrMatrix.new(width: @l_size, height: 1)
-      @weights = PtrMatrix.new(width: 1, height: 1) # temp matrix
-      @biases = PtrMatrix.new(width: @l_size, height: 1)
-      @activations = PtrMatrix.new(width: @l_size, height: 1)
-      @sigma_primes = PtrMatrix.new(width: @l_size, height: 1)
+      input_sums = PtrMatrix.new(width: @l_size, height: 1)
+      weights = PtrMatrix.new(width: 1, height: 1) # temp matrix
+      biases = PtrMatrix.new(width: @l_size, height: 1)
+      activations = PtrMatrix.new(width: @l_size, height: 1)
+      sigma_primes = PtrMatrix.new(width: @l_size, height: 1)
 
       # # Pointer matrices for back propogation
       # @w_gradients = Array(Array(Pointer)).new
@@ -27,12 +52,11 @@ module SHAInet
         neuron = Neuron.new(@n_type)
 
         @neurons << neuron
-
         # ------- Experimental -------
-        @input_sums.data[0][i] = neuron.input_sum_ptr
-        @biases.data[0][i] = neuron.bias_ptr
-        @activations.data[0][i] = neuron.activation_ptr
-        @sigma_primes.data[0][i] = neuron.sigma_prime_ptr
+        input_sums.data[0][i] = neuron.input_sum_ptr
+        biases.data[0][i] = neuron.bias_ptr
+        activations.data[0][i] = neuron.activation_ptr
+        sigma_primes.data[0][i] = neuron.sigma_prime_ptr
 
         # @prev_bias.data[0][i] = neuron.prev_bias_ptr
         # @b_gradients.data[0][i] = neuron.gradient_ptr
@@ -40,10 +64,15 @@ module SHAInet
 
       # ------- Experimental -------
       # Transpose the needed matrices
-      @input_sums.t
-      @biases.t
-      @activations.t
-      @sigma_primes.t
+      input_sums.t
+      biases.t
+      activations.t
+      sigma_primes.t
+
+      @input_sums = input_sums
+      @biases = biases
+      @activations = activations
+      @sigma_primes = sigma_primes
     end
 
     def clone
