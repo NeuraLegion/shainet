@@ -290,11 +290,7 @@ module SHAInet
 
     def check_nan : Bool
       @layers.last.as(FullyConnectedLayer | SoftmaxLayer).output.each do |value|
-        if value.nan? == true
-          return true
-        else
-          return false
-        end
+        return value.nan?
       end
     end
 

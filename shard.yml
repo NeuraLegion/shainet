@@ -7,6 +7,10 @@ authors:
 
 crystal: 0.31.1
 
+dependencies:
+  apatite:
+    github: watzon/apatite
+
 development_dependencies:
   ameba:
     github: veelenga/ameba

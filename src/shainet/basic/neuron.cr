@@ -103,30 +103,5 @@ module SHAInet
     def update_bias(value : Float64)
       @bias = value
     end
-
-    # Methods for Pointer matrix implementation - experimental
-    def activation_ptr
-      pointerof(@activation)
-    end
-
-    def gradient_ptr
-      pointerof(@gradient)
-    end
-
-    def bias_ptr
-      pointerof(@bias)
-    end
-
-    def prev_bias_ptr
-      pointerof(@prev_bias)
-    end
-
-    def input_sum_ptr
-      pointerof(@input_sum)
-    end
-
-    def sigma_prime_ptr
-      pointerof(@sigma_prime)
-    end
   end
 end
