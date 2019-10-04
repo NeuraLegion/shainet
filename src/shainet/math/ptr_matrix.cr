@@ -73,7 +73,7 @@ module SHAInet
     end
 
     def shape
-      return [@data.size, @data.first.size]
+      [@data.size, @data.first.size]
     end
 
     def reshape_new(width : Int32, height : Int32)

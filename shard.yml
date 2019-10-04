@@ -5,6 +5,11 @@ authors:
   - Bar Hofesh <bar.hofesh@neuralegion.com>
   - Art Linkov <art.linkov@neuralegion.com>
 
-crystal: 0.24.0+58
+crystal: 0.31.1
+
+development_dependencies:
+  ameba:
+    github: veelenga/ameba
+    version: 0.10.0
 
 license: MIT

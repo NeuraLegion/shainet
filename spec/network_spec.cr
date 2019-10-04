@@ -1,9 +1,6 @@
 require "./spec_helper"
 require "csv"
 
-# Extract train data
-system("cd #{__DIR__}/test_data && tar xvf tests.tar.xz")
-
 describe SHAInet::Network do
   puts "############################################################"
 
@@ -670,7 +667,7 @@ end
 
 # Remove train data
 system("cd #{__DIR__} && rm *.nn")
-system("cd #{__DIR__}/test_data && rm *.csv")
-# File.delete("my_net.nn") rescue nil
-# File.delete("xor.nn") rescue nil
-# File.delete("autosave_epoch_2.nn") rescue nil
+# system("cd #{__DIR__}/test_data && rm *.csv")
+File.delete("my_net.nn") rescue nil
+File.delete("xor.nn") rescue nil
+File.delete("autosave_epoch_2.nn") rescue nil

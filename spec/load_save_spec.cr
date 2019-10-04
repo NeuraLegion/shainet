@@ -1,9 +1,6 @@
 require "./spec_helper"
 require "csv"
 
-# Extract train data
-system("cd #{__DIR__}/test_data && tar xvf tests.tar.xz")
-
 describe SHAInet::Network do
   puts "############################################################"
   it "Saves XOR to a file" do

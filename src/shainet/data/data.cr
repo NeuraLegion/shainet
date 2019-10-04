@@ -64,7 +64,7 @@ module SHAInet
       @inputs.each_with_index do |i_arr, i|
         arr << [@inputs[i], @outputs[i]]
       end
-      return arr
+      arr
     end
 
     def normalize_min_max(data : Array(Array(Float64)))
@@ -77,7 +77,7 @@ module SHAInet
         normalized_data << normalize_inputs(row)
       end
 
-      return normalized_data
+      normalized_data
     end
 
     def normalize_min_max
@@ -101,7 +101,7 @@ module SHAInet
       inputs.each_with_index do |input, i|
         results << normalize(input, @i_min[i], @i_max[i])
       end
-      return results
+      results
     end
 
     def normalize_outputs(outputs : Array(GenNum))
@@ -109,7 +109,7 @@ module SHAInet
       outputs.each_with_index do |output, i|
         results << normalize(output, @o_min[i], @o_max[i])
       end
-      return results
+      results
     end
 
     def normalize(x, xmin, xmax)
@@ -126,7 +126,7 @@ module SHAInet
       outputs.each_with_index do |output, i|
         results << denormalize(output, @o_min[i], @o_max[i])
       end
-      return results
+      results
     end
 
     def denormalize(x, xmin, xmax)
@@ -183,7 +183,7 @@ module SHAInet
     end
 
     def size
-      return @inputs.size
+      @inputs.size
     end
 
     def to_onehot(data : Array(Array(Float64)), vector_size : Int32)
@@ -194,7 +194,7 @@ module SHAInet
         data[i] = one_hot
       end
 
-      return data
+      data
     end
   end
 end

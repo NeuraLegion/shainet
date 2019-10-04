@@ -51,7 +51,7 @@ module SHAInet
       layer_new = Layer.new(layer_old.n_type, layer_old.@l_size, layer_old.activation_function)
 
       layer_new.neurons = layer_old.neurons.clone
-      return layer_new
+      layer_new
     end
 
     # If you don't want neurons to have a blank memory of zeros
@@ -76,7 +76,7 @@ module SHAInet
     end
 
     def size
-      return @l_size
+      @l_size
     end
   end
 end

@@ -39,7 +39,7 @@ module SHAInet
     def vector_to_2d(vector : Array(Float64), window_size : Int32)
       channel = Array(Array(Float64)).new
       vector.each_slice(window_size) { |row| channel << row }
-      return channel
+      channel
     end
   end
 end

@@ -106,7 +106,7 @@ module SHAInet
         puts "Network output is: #{@layers.last.as(FullyConnectedLayer | SoftmaxLayer).output}"
         puts "############################"
       end
-      return @layers.last.as(FullyConnectedLayer | SoftmaxLayer).output
+      @layers.last.as(FullyConnectedLayer | SoftmaxLayer).output
     end
 
     def evaluate(input_data : Array(Array(Array(GenNum))),
@@ -299,7 +299,7 @@ module SHAInet
     end
 
     def output : Array(Float64)
-      return @layers.last.as(FullyConnectedLayer | SoftmaxLayer).output
+      @layers.last.as(FullyConnectedLayer | SoftmaxLayer).output
     end
 
     def propagate_backwards
@@ -346,10 +346,10 @@ module SHAInet
     def get_cost_proc(function_name : String) : CostFunction
       case function_name
       when "mse"
-        return SHAInet.quadratic_cost
+        SHAInet.quadratic_cost
       when "c_ent"
         # raise MathError.new("Cross entropy cost is not implemented fully yet, please use quadratic cost for now.")
-        return SHAInet.cross_entropy_cost
+        SHAInet.cross_entropy_cost
       else
         raise NeuralNetInitalizationError.new("Must choose correct cost function or provide a correct Proc")
       end

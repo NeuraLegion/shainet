@@ -2,7 +2,7 @@
 /lib/
 /bin/
 /.shards/
-/spec/test_data/*.csv
+#/spec/test_data/*.csv
 /spec/*.csv
 *.nn
 /spec/*.nn

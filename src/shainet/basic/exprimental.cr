@@ -59,10 +59,9 @@ module SHAInet
       # Propogate the information through the output layers
       @output_layers.each { |l| l.propagate_forward_exp(@hidden_layers.last) }
 
-      output = @output_layers.last.neurons.map { |neuron| neuron.activation } # return an array of all output neuron activations
+      @output_layers.last.neurons.map { |neuron| neuron.activation } # return an array of all output neuron activations
       # TODO: add support for multiple output layers
 
-      return output
     rescue e : Exception
       raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
     end
