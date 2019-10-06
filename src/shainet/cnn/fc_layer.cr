@@ -69,6 +69,7 @@ module SHAInet
       end
     end
 
+    # ameba:disable Metrics/CyclomaticComplexity
     def update_wb(learn_type : Symbol | String, batch : Bool = false)
       # Update all weights of the layer
       @all_synapses.each do |synapse|

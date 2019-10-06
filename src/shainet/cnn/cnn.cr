@@ -76,7 +76,7 @@ module SHAInet
     end
 
     def add_fconnect(l_size : Int32, activation_function : ActivationFunction = SHAInet.none)
-      @layers << FullyConnectedLayer.new(master = self, @layers.last, l_size, activation_function)
+      @layers << FullyConnectedLayer.new(master_network: self, prev_layer: @layers.last, l_size: l_size, activation_function: activation_function)
     end
 
     def add_softmax(range : Range(Int32, Int32) = (0..-1))
@@ -179,7 +179,7 @@ module SHAInet
             error_avg = @total_error/@layers.last.as(FullyConnectedLayer | SoftmaxLayer).output.size
           end
           sqrd_dists = [] of Float64
-          @error_signal.each { |e| sqrd_dists << (e - error_avg)**2 }
+          @error_signal.each { |error| sqrd_dists << (error - error_avg)**2 }
           sqr_sum = sqrd_dists.reduce { |acc, i| acc + i }
           @mean_error = sqr_sum/@layers.last.as(FullyConnectedLayer | SoftmaxLayer).output.size
 
@@ -197,6 +197,7 @@ module SHAInet
     end
 
     # Batch train, updates weights/biases using a gradient sum from all data points in the batch (using gradient descent)
+    # ameba:disable Metrics/CyclomaticComplexity
     def train_batch(data : Array(CNNPair), # Input structure: data = [[Input = Array(Array(Array(GenNum)))],[Expected result = Array(GenNum)]]
                     # data : Array(NamedTuple(input: Array(Array(Array(Float64))), output: Array(Float64))), # Input structure: data = [[Input = Array(Array(Array(GenNum)))],[Expected result = Array(GenNum)]]
                     training_type : Symbol | String,                       # Type of training: :sgdm, :rprop, :adam
@@ -240,7 +241,7 @@ module SHAInet
           all_errors = [] of Float64
 
           # Go over each data point and collect gradients of weights/biases based on each specific example
-          data_slice.each_with_index do |data_point, index|
+          data_slice.each do |data_point|
             # Update error signal, error gradient and total error at the output layer based on current input
 
             evaluate(data_point[:input], data_point[:output], cost_function)

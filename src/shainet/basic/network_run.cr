@@ -54,7 +54,7 @@ module SHAInet
                  expected_output : Array(GenNum),
                  cost_function : CostFunction = SHAInet.quadratic_cost)
       #
-      actual_output = run(input_data, stealth = true)
+      actual_output = run(input_data, stealth: true)
 
       # Test for NaNs & exploading gradients
       validate_values(actual_output, "actual_output")
@@ -101,6 +101,7 @@ module SHAInet
     end
 
     # Training the model
+    # ameba:disable Metrics/CyclomaticComplexity
     def train(data : Array(Array(Array(GenNum))) | SHAInet::TrainingData,   # Input structure: data = [[Input = [] of Float64],[Expected result = [] of Float64]]
               training_type : Symbol | String,                              # Type of training: :sgdm, :rprop, :adam
               cost_function : Symbol | String | CostFunction = :mse,        # Proc returns the function value and it's derivative
@@ -150,7 +151,7 @@ module SHAInet
         end
 
         # Counters for disply
-        i = 0
+        display_counter = 0
         slices = (data.size.to_f64 / mini_batch_size).ceil.to_i
 
         # For error break condition
@@ -158,7 +159,7 @@ module SHAInet
         epoch_error_sum = Array(Float64).new(@output_layers.last.neurons.size) { 0.0 }
 
         # Iterate over each mini-batch
-        raw_data.each_slice(batch_size, reuse = false) do |data_slice|
+        raw_data.each_slice(batch_size, reuse: false) do |data_slice|
           verify_data(data_slice)
           @time_step += 1 if mini_batch_size # in mini-batch update adam time_step
 
@@ -232,9 +233,9 @@ module SHAInet
 
           @prev_mse = @mse.clone
           # Show training progress of the mini-batches
-          i += 1
+          display_counter += 1
           if counter % log_each == 0
-            @logger.info("  Slice: (#{i} / #{slices}), MSE: #{@mse}") if show_slice
+            @logger.info("  Slice: (#{display_counter} / #{slices}), MSE: #{@mse}") if show_slice
             # @logger.info("@error_signal: #{@error_signal}")
           end
         end
@@ -374,6 +375,7 @@ module SHAInet
     end
 
     # Use evolutionary strategies for network optimization instread of gradient based approach
+    # ameba:disable Metrics/CyclomaticComplexity
     def train_es(data : Array(Array(Array(GenNum))) | SHAInet::TrainingData,   # Input structure: data = [[Input = [] of Float64],[Expected result = [] of Float64]]
                  pool_size : Int32,                                            # How many random direction to try each time
                  learning_rate : Float64,                                      # How much of the noise i used for the parameter update
@@ -423,14 +425,14 @@ module SHAInet
         end
 
         # Counters for disply
-        i = 0
+        display_counter = 0
         slices = (data.size.to_f64 / mini_batch_size).ceil.to_i
 
         # For error break condition
         epoch_mse = 0.0
         epoch_error_sum = Array(Float64).new(@output_layers.last.neurons.size) { 0.0 }
 
-        raw_data.each_slice(batch_size, reuse = false) do |data_slice|
+        raw_data.each_slice(batch_size, reuse: false) do |data_slice|
           verify_data(data_slice)
 
           pool = Pool.new(
@@ -466,9 +468,9 @@ module SHAInet
           pool.pull_params
 
           # Show training progress of the mini-batches
-          i += 1
+          display_counter += 1
           if epoch % log_each == 0
-            @logger.info("  Slice: (#{i} / #{slices}), MSE: #{@mse}") if show_slice
+            @logger.info("  Slice: (#{display_counter} / #{slices}), MSE: #{@mse}") if show_slice
             # @logger.info("@error_signal: #{@error_signal}")
           end
         end

@@ -53,7 +53,7 @@ module SHAInet
 
     def data
       arr = Array(Array(Array(Float64))).new
-      @normalized_inputs.each_with_index do |i_arr, i|
+      @normalized_inputs.each_with_index do |_, i|
         arr << [@normalized_inputs[i], @normalized_outputs[i]]
       end
       arr
@@ -61,7 +61,7 @@ module SHAInet
 
     def raw_data
       arr = Array(Array(Array(Float64))).new
-      @inputs.each_with_index do |i_arr, i|
+      @inputs.each_with_index do |_, i|
         arr << [@inputs[i], @outputs[i]]
       end
       arr

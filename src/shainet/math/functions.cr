@@ -78,7 +78,7 @@ module SHAInet
   # The input array in this case has to be the output array of the softmax function
   def self.softmax_prime(array : Array(GenNum)) : Array(Float64)
     out_array = Array(Float64).new(array.size) { 0.0 }
-    array.each_with_index { |value, i| out_array[i] = array[i]*(1 - array[i]) }
+    array.each_with_index { |_, i| out_array[i] = array[i]*(1 - array[i]) }
     out_array
   end
 
@@ -219,7 +219,7 @@ module SHAInet
       end
       vocabulary_v[vocabulary[x]] = char_v
     end
-    zero_v = Array.new(vocabulary.size) { |i| 0 }
+    zero_v = Array.new(vocabulary.size) { 0 }
 
     # Translate the strings into arrays of char-vectors
     payloads_c.each do |str|
