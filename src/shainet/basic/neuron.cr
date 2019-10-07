@@ -84,7 +84,7 @@ module SHAInet
       neuron_new.m_prev = neuron_old.m_prev
       neuron_new.v_prev = neuron_old.v_prev
 
-      return neuron_new
+      neuron_new
     end
 
     def inspect
@@ -102,31 +102,6 @@ module SHAInet
 
     def update_bias(value : Float64)
       @bias = value
-    end
-
-    # Methods for Pointer matrix implementation - experimental
-    def activation_ptr
-      return pointerof(@activation)
-    end
-
-    def gradient_ptr
-      return pointerof(@gradient)
-    end
-
-    def bias_ptr
-      return pointerof(@bias)
-    end
-
-    def prev_bias_ptr
-      return pointerof(@prev_bias)
-    end
-
-    def input_sum_ptr
-      return pointerof(@input_sum)
-    end
-
-    def sigma_prime_ptr
-      return pointerof(@sigma_prime)
     end
   end
 end

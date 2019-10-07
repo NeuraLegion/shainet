@@ -1,8 +1,5 @@
 require "./spec_helper"
 
-# Extract data
-system("cd #{__DIR__}/test_data && tar xvf tests.tar.xz")
-
 describe SHAInet::Network do
   puts "############################################################"
   it "can pass an integration test predicting >90% on the iris data set" do
@@ -37,6 +34,3 @@ describe SHAInet::Network do
     iris.test(test_set).should be > 0.85
   end
 end
-
-# Remove test data
-system("cd #{__DIR__}/test_data && rm *.csv")

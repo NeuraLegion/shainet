@@ -1,9 +1,6 @@
 require "./spec_helper"
 require "csv"
 
-# Extract train data
-system("cd #{__DIR__}/test_data && tar xvf tests.tar.xz")
-
 describe SHAInet::CNN do
   # it "Check basic cnn features" do
   #   img_data = [
@@ -252,6 +249,3 @@ describe SHAInet::CNN do
   #   puts "Cnn output: #{cnn.output}"
   # end
 end
-
-# Remove train data
-system("cd #{__DIR__}/test_data && rm *.csv")

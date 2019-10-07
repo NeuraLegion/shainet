@@ -30,9 +30,9 @@ module SHAInet
 
       case @source_neuron.n_type
       when "memory"
-        return new_memory
+        new_memory
       when "eraser"
-        return (-1)*new_memory
+        (-1)*new_memory
       else
         raise "Other types of neurons are not supported yet!"
       end
@@ -40,8 +40,7 @@ module SHAInet
 
     # Transfer error from dest_neuron to source_neuron while applying weight and save the synapse gradient
     def propagate_backward : Float64
-      weighted_error = @dest_neuron.gradient*@weight
-      return weighted_error
+      @dest_neuron.gradient*@weight # weighted_error
     end
 
     def randomize_weight
@@ -62,26 +61,13 @@ module SHAInet
       synapse_new.v_current = synapse_old.v_current
       synapse_new.m_prev = synapse_old.m_prev
       synapse_new.v_prev = synapse_old.v_prev
-      return synapse_new
+      synapse_new
     end
 
     def inspect
       pp @weight
       pp @source_neuron
       pp @dest_neuron
-    end
-
-    # Methods for Pointer matrix implementation - experimental
-    def prev_weight_ptr
-      return pointerof(@prev_weight)
-    end
-
-    def weight_ptr
-      return pointerof(@weight)
-    end
-
-    def gradient_ptr
-      return pointerof(@gradient)
     end
   end
 end

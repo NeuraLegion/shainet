@@ -24,7 +24,7 @@ module SHAInet
     # Normalize input to 3D image and change expected outputs to 1-hot vector
     def for_mnist_conv
       @inputs.each_with_index do |raw_input, i|
-        raw_input.each_with_index { |v, i| raw_input[i] = normalize(x: v.as(Float64), xmin: 0, xmax: 255) }
+        raw_input.each_with_index { |v, raw_index| raw_input[raw_index] = normalize(x: v.as(Float64), xmin: 0, xmax: 255) }
         channel = vector_to_2d(vector: raw_input, window_size: 28)
 
         normalized_input = [channel] # Mnist has only one channel
@@ -39,7 +39,7 @@ module SHAInet
     def vector_to_2d(vector : Array(Float64), window_size : Int32)
       channel = Array(Array(Float64)).new
       vector.each_slice(window_size) { |row| channel << row }
-      return channel
+      channel
     end
   end
 end

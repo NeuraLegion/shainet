@@ -1,9 +1,6 @@
 require "./spec_helper"
 require "csv"
 
-# Extract train data
-system("cd #{__DIR__}/test_data && tar xvf tests.tar.xz")
-
 describe SHAInet::Network do
   puts "############################################################"
 
@@ -181,64 +178,64 @@ describe SHAInet::Network do
 
   puts "############################################################"
 
-  it "Works on iris dataset with batch train with Rprop (mini-batch)" do
-    puts "\n"
-    label = {
-      "setosa"     => [0.to_f64, 0.to_f64, 1.to_f64],
-      "versicolor" => [0.to_f64, 1.to_f64, 0.to_f64],
-      "virginica"  => [1.to_f64, 0.to_f64, 0.to_f64],
-    }
-    iris = SHAInet::Network.new
-    iris.add_layer(:input, 4, :memory, SHAInet.sigmoid)
-    iris.add_layer(:hidden, 4, :memory, SHAInet.sigmoid)
-    iris.add_layer(:output, 3, :memory, SHAInet.sigmoid)
-    iris.fully_connect
+  # it "Works on iris dataset with batch train with Rprop (mini-batch)" do
+  #   puts "\n"
+  #   label = {
+  #     "setosa"     => [0.to_f64, 0.to_f64, 1.to_f64],
+  #     "versicolor" => [0.to_f64, 1.to_f64, 0.to_f64],
+  #     "virginica"  => [1.to_f64, 0.to_f64, 0.to_f64],
+  #   }
+  #   iris = SHAInet::Network.new
+  #   iris.add_layer(:input, 4, :memory, SHAInet.sigmoid)
+  #   iris.add_layer(:hidden, 4, :memory, SHAInet.sigmoid)
+  #   iris.add_layer(:output, 3, :memory, SHAInet.sigmoid)
+  #   iris.fully_connect
 
-    outputs = Array(Array(Float64)).new
-    inputs = Array(Array(Float64)).new
-    CSV.each_row(File.read(__DIR__ + "/test_data/iris.csv")) do |row|
-      row_arr = Array(Float64).new
-      row[0..-2].each do |num|
-        row_arr << num.to_f64
-      end
-      inputs << row_arr
-      outputs << label[row[-1]]
-    end
+  #   outputs = Array(Array(Float64)).new
+  #   inputs = Array(Array(Float64)).new
+  #   CSV.each_row(File.read(__DIR__ + "/test_data/iris.csv")) do |row|
+  #     row_arr = Array(Float64).new
+  #     row[0..-2].each do |num|
+  #       row_arr << num.to_f64
+  #     end
+  #     inputs << row_arr
+  #     outputs << label[row[-1]]
+  #   end
 
-    data = SHAInet::TrainingData.new(inputs, outputs)
-    data.normalize_min_max
+  #   data = SHAInet::TrainingData.new(inputs, outputs)
+  #   data.normalize_min_max
 
-    training_data, test_data = data.split(0.75) # Split also shuffles
+  #   training_data, test_data = data.split(0.75) # Split also shuffles
 
-    iris.train(
-      data: training_data,
-      training_type: :rprop,
-      cost_function: :mse,
-      epochs: 5000,
-      error_threshold: 1e-9,
-      mini_batch_size: 4,
-      log_each: 1000,
-      show_slice: false)
+  #   iris.train(
+  #     data: training_data,
+  #     training_type: :rprop,
+  #     cost_function: :mse,
+  #     epochs: 5000,
+  #     error_threshold: 1e-9,
+  #     mini_batch_size: 4,
+  #     log_each: 1000,
+  #     show_slice: false)
 
-    # Test the trained model
-    correct = 0
-    test_data.data.each do |data_point|
-      result = iris.run(data_point[0], stealth: true)
-      expected = data_point[1]
-      # puts "result: \t#{result.map { |x| x.round(5) }}"
-      # puts "expected: \t#{expected}"
-      error_sum = 0.0
-      result.size.times do |i|
-        error_sum += (result[i] - expected[i]).abs
-      end
-      correct += 1 if error_sum < 0.3
-    end
-    accuracy = (correct.to_f64 / test_data.size)
-    puts "Correct answers: #{correct} / #{test_data.size}, Accuracy: #{(accuracy*100).round(3)}%"
-    (accuracy >= 0.6).should eq(true)
-  end
+  #   # Test the trained model
+  #   correct = 0
+  #   test_data.data.each do |data_point|
+  #     result = iris.run(data_point[0], stealth: true)
+  #     expected = data_point[1]
+  #     # puts "result: \t#{result.map { |x| x.round(5) }}"
+  #     # puts "expected: \t#{expected}"
+  #     error_sum = 0.0
+  #     result.size.times do |i|
+  #       error_sum += (result[i] - expected[i]).abs
+  #     end
+  #     correct += 1 if error_sum < 0.3
+  #   end
+  #   accuracy = (correct.to_f64 / test_data.size)
+  #   puts "Correct answers: #{correct} / #{test_data.size}, Accuracy: #{(accuracy*100).round(3)}%"
+  #   (accuracy >= 0.6).should eq(true)
+  # end
 
-  puts "############################################################"
+  # puts "############################################################"
 
   it "Works on iris dataset with mini-batch train with Adam (mini-batch)" do
     puts "\n"
@@ -670,7 +667,7 @@ end
 
 # Remove train data
 system("cd #{__DIR__} && rm *.nn")
-system("cd #{__DIR__}/test_data && rm *.csv")
-# File.delete("my_net.nn") rescue nil
-# File.delete("xor.nn") rescue nil
-# File.delete("autosave_epoch_2.nn") rescue nil
+# system("cd #{__DIR__}/test_data && rm *.csv")
+File.delete("my_net.nn") rescue nil
+File.delete("xor.nn") rescue nil
+File.delete("autosave_epoch_2.nn") rescue nil

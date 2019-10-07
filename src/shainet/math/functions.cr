@@ -72,14 +72,14 @@ module SHAInet
     exp_sum = Float64.new(0.0)
     array.each { |value| exp_sum += Math::E**(value) }
     array.size.times { |i| out_array[i] += (Math::E**array[i])/exp_sum }
-    return out_array
+    out_array
   end
 
   # The input array in this case has to be the output array of the softmax function
   def self.softmax_prime(array : Array(GenNum)) : Array(Float64)
     out_array = Array(Float64).new(array.size) { 0.0 }
-    array.each_with_index { |value, i| out_array[i] = array[i]*(1 - array[i]) }
-    return out_array
+    array.each_with_index { |_, i| out_array[i] = array[i]*(1 - array[i]) }
+    out_array
   end
 
   # Not working yet, do not use
@@ -90,7 +90,7 @@ module SHAInet
     array.each { |value| exp_sum += Math::E**(value - m) }
 
     array.size.times { |i| out_array[i] = (Math::E**(array[i] - m - Math.log(exp_sum, 10))) }
-    return out_array
+    out_array
   end
 
   # # Derivatives of activation functions # #
@@ -147,26 +147,26 @@ module SHAInet
   # # Cost functions  # #
 
   def self._quadratic_cost(expected : Float64, actual : Float64) : Float64
-    return (0.5*(actual - expected)**2).to_f64
+    (0.5*(actual - expected)**2).to_f64
   end
 
   def self._cross_entropy_cost(expected : Float64, actual : Float64) : Float64
     # raise MathError.new("Cross entropy cost is not implemented fully yet, please use quadratic cost for now.")
     if expected == 1.0
       if actual <= 0.000001
-        return 10.0
+        10.0
       elsif actual == 1.0
-        return 0.0
+        0.0
       else
-        return (-1)*Math.log((actual), Math::E)
+        (-1)*Math.log((actual), Math::E)
       end
     elsif expected == 0.0
       if actual >= 0.999999
-        return 10.0
+        10.0
       elsif actual == 0.0
-        return 0.0
+        0.0
       else
-        return (-1)*Math.log((1.0 - actual), Math::E)
+        (-1)*Math.log((1.0 - actual), Math::E)
       end
     else
       raise MathError.new("Expected value must be 0 or 1 for cross entropy cost.")
@@ -175,11 +175,11 @@ module SHAInet
 
   # # Derivatives of cost functions # #
   def self._quadratic_cost_derivative(expected : Float64, actual : Float64) : Float64
-    return (actual - expected).to_f64
+    (actual - expected).to_f64
   end
 
   def self._cross_entropy_cost_derivative(expected : Float64, actual : Float64) : Float64
-    return (actual - expected).to_f64
+    (actual - expected).to_f64
   end
 
   ##################################################################
@@ -219,7 +219,7 @@ module SHAInet
       end
       vocabulary_v[vocabulary[x]] = char_v
     end
-    zero_v = Array.new(vocabulary.size) { |i| 0 }
+    zero_v = Array.new(vocabulary.size) { 0 }
 
     # Translate the strings into arrays of char-vectors
     payloads_c.each do |str|
@@ -245,11 +245,11 @@ module SHAInet
   # Used in Rprop
   def self.sign(input : GenNum)
     if input > 0
-      return +1
+      +1
     elsif input < 0
-      return -1
+      -1
     else
-      return 0
+      0
     end
   end
 end

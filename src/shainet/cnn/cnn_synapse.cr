@@ -44,7 +44,7 @@ module SHAInet
       synapse_new.v_current = synapse_old.v_current
       synapse_new.m_prev = synapse_old.m_prev
       synapse_new.v_prev = synapse_old.v_prev
-      return synapse_new
+      synapse_new
     end
 
     def inspect
