@@ -146,12 +146,13 @@ module SHAInet
 
       # verify_data(data)
       @logger.info("Training started")
-      loop do |e|
-        if e % log_each == 0
-          log_summary(e)
+      epoch = 0
+      loop do
+        if epoch % log_each == 0
+          log_summary(epoch)
         end
-        if e >= epochs || (error_threshold >= @mean_error) && (e > 0)
-          log_summary(e)
+        if epoch >= epochs || (error_threshold >= @mean_error) && (epoch > 0)
+          log_summary(epoch)
           break
         end
 
@@ -190,6 +191,7 @@ module SHAInet
 
           @prev_mean_error = @mean_error
         end
+        epoch += 1
       end
     rescue e : Exception
       @logger.error("Error in training: #{e} #{e.inspect_with_backtrace}")
