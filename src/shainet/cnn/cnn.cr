@@ -219,7 +219,8 @@ module SHAInet
         cost_function = proc
       end
 
-      loop do |epoch|
+      epoch = 0
+      loop do
         slice_num = 1
         if epoch % log_each == 0
           log_summary(epoch)
@@ -279,6 +280,7 @@ module SHAInet
 
           @prev_mean_error = @mean_error
         end
+        epoch += 1
       end
     end
 
@@ -363,6 +365,20 @@ module SHAInet
       when "gradients"
         @layers.each { |layer| layer.inspect("gradients") }
         puts "------------------------------------------------"
+      when "dimensions"
+        puts "Dimensions"
+        puts "layers x width x height x channels"
+        puts "=================================="
+        @layers.each do |layer|
+          filters = layer.filters.size
+          filter = layer.filters.first
+          width = filter.input_surface[0]
+          height = filter.input_surface[1]
+          channels = filter.input_surface[2]
+          puts layer.class.to_s
+          puts "#{filters} x #{width} x #{height} x #{channels}"
+          puts "----------------------------------"
+        end
       end
     end
 
