@@ -2,7 +2,7 @@ require "log"
 
 module SHAInet
   class DropoutLayer
-    LOG = Log.for("DropoutLayer")
+    Log = ::Log.for(self)
 
     getter filters : Array(Filter), drop_percent : Int32, prev_layer : CNNLayer | ConvLayer
 

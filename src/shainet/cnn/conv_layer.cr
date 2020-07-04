@@ -2,7 +2,7 @@ require "log"
 
 module SHAInet
   class ConvLayer
-    LOG = Log.for("ConvLayer")
+    Log = ::Log.for(self)
 
     getter master_network : CNN, prev_layer : CNNLayer | ConvLayer, filters : Array(Filter)
     getter window_size : Int32, stride : Int32, padding : Int32, activation_function : ActivationFunction

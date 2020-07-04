@@ -2,7 +2,7 @@ require "log"
 
 module SHAInet
   class FullyConnectedLayer
-    LOG = Log.for("FullyConnectedLayer")
+    Log = ::Log.for(self)
     getter filters : Array(Filter), prev_layer : CNNLayer | ConvLayer
     getter output : Array(Float64), :all_neurons, :all_synapses
 

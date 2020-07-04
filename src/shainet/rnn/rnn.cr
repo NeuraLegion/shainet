@@ -10,7 +10,7 @@ module SHAInet
 
   # Recurrent Neural Network
   class RNN
-    LOG            = Log.for("RNN")
+    Log            = ::Log.for(self)
     COST_FUNCTIONS = ["mse", "c_ent", "exp", "hel_d", "kld", "gkld", "ita_sai_d"]
 
     # General network parameters
@@ -139,7 +139,7 @@ module SHAInet
               log_each : Int32 = 1000)                                                        # determines what is the step for error printout
 
       # verify_data(data)
-      LOG.info { "Training started" }
+      Log.info { "Training started" }
       loop do |e|
         if e % log_each == 0
           log_summary(e)
@@ -186,7 +186,7 @@ module SHAInet
         end
       end
     rescue e : Exception
-      LOG.error { "Error in training: #{e} #{e.inspect_with_backtrace}" }
+      Log.error { "Error in training: #{e} #{e.inspect_with_backtrace}" }
       raise e
     end
 
@@ -202,7 +202,7 @@ module SHAInet
                     mini_batch_size : Int32 | Nil = nil)
       #
       time_start = Time.new
-      LOG.info { "Training started" }
+      Log.info { "Training started" }
       batch_size = mini_batch_size ? mini_batch_size : data.size
       @time_step = 0
 
@@ -227,7 +227,7 @@ module SHAInet
         data.each_slice(batch_size, reuse: false) do |data_slice|
           verify_data(data_slice)
           time_now = Time.new
-          LOG.info { "Mini-batch # #{slice_num}| Mini-batch size: #{batch_size} | Runtime: #{time_now - time_start}" } if mini_batch_size
+          Log.info { "Mini-batch # #{slice_num}| Mini-batch size: #{batch_size} | Runtime: #{time_now - time_start}" } if mini_batch_size
           slice_num += 1
           @time_step += 1 if mini_batch_size # in mini-batch update adam time_step
 
@@ -329,7 +329,7 @@ module SHAInet
         end
       end
       if message
-        LOG.error { "#{message}: #{data}" }
+        Log.error { "#{message}: #{data}" }
         raise NeuralNetTrainError.new(message)
       end
     end
@@ -361,7 +361,7 @@ module SHAInet
     end
 
     def log_summary(e)
-      LOG.info { "Epoch: #{e}, Total error: #{@total_error}, MSE: #{@mean_error}" }
+      Log.info { "Epoch: #{e}, Total error: #{@total_error}, MSE: #{@mean_error}" }
     end
   end
 end

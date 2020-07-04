@@ -14,7 +14,7 @@ module SHAInet
     # the network, for methods regarding running and training go to network_run.cr
     # ------------
 
-    LOG = Log.for("Network")
+    Log = ::Log.for(self)
 
     LAYER_TYPES      = ["input", "hidden", "output"]
     CONNECTION_TYPES = ["full", "ind_to_ind", "random"]
@@ -180,7 +180,7 @@ module SHAInet
     end
 
     def log_summary(e)
-      LOG.info { "Epoch: #{e}, Total error: #{@total_error}, MSE: #{@mse}" }
+      Log.info { "Epoch: #{e}, Total error: #{@total_error}, MSE: #{@mse}" }
     end
 
     def clean_dead_neurons
@@ -204,7 +204,7 @@ module SHAInet
           end
         end
       end
-      LOG.info("Cleaned #{current_neuron_number - @all_neurons.size} dead neurons")
+      Log.info("Cleaned #{current_neuron_number - @all_neurons.size} dead neurons")
     end
 
     def verify_net_before_train
@@ -272,7 +272,7 @@ module SHAInet
         dump_network << dump_layer
       end
       File.write(file_path, {"layers" => dump_network}.to_json)
-      LOG.info { "Network saved to: #{file_path}" }
+      Log.info { "Network saved to: #{file_path}" }
     end
 
     def load_from_file(file_path : String)
@@ -320,18 +320,18 @@ module SHAInet
           end
         end
       end
-      LOG.info { "Network loaded from: #{file_path}" }
+      Log.info { "Network loaded from: #{file_path}" }
     end
 
     def inspect
-      LOG.info { @input_layers }
-      LOG.info { "--------------------------------" }
-      LOG.info { @hidden_layers }
-      LOG.info { "--------------------------------" }
-      LOG.info { @output_layers }
-      LOG.info { "--------------------------------" }
-      LOG.info { @all_synapses }
-      LOG.info { "--------------------------------" }
+      Log.info { @input_layers }
+      Log.info { "--------------------------------" }
+      Log.info { @hidden_layers }
+      Log.info { "--------------------------------" }
+      Log.info { @output_layers }
+      Log.info { "--------------------------------" }
+      Log.info { @all_synapses }
+      Log.info { "--------------------------------" }
     end
   end
 end

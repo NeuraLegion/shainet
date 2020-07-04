@@ -3,7 +3,7 @@ require "apatite"
 module SHAInet
   class Layer
     include Apatite
-    LOG = Log.for("Layer")
+    Log = ::Log.for(self)
     property :n_type, :neurons
     getter :activation_function, :l_size
     property input_sums : Matrix(Float64), weights : Matrix(Float64), biases : Matrix(Float64)
@@ -63,20 +63,20 @@ module SHAInet
       @neurons.each do |neuron|
         neuron.activation = rand(-1_f64..1_f64)
       end
-      LOG.info { "Layers seeded with random values" }
+      Log.info { "Layers seeded with random values" }
     end
 
     # If you want to change the type of layer including all neuron types within it
     def type_change(new_neuron_type : String)
       raise NeuralNetRunError.new("Must define correct neuron type, if you're not sure choose \"memory\" as a default") if NEURON_TYPES.any? { |x| x == new_neuron_type } == false
       @neurons.each { |neuron| neuron.n_type = new_neuron_type }
-      LOG.info { "Layer type changed from #{@n_type} to #{new_neuron_type}" }
+      Log.info { "Layer type changed from #{@n_type} to #{new_neuron_type}" }
       @n_type = new_neuron_type
     end
 
     def inspect
-      LOG.info { @n_type }
-      LOG.info { @neurons }
+      Log.info { @n_type }
+      Log.info { @neurons }
     end
 
     def size

@@ -2,7 +2,7 @@ require "log"
 
 module SHAInet
   class InputLayer
-    LOG = Log.for("InputLayer")
+    Log = ::Log.for(self)
 
     getter filters : Array(Filter)
 

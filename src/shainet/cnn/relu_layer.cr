@@ -2,7 +2,7 @@ require "log"
 
 module SHAInet
   class ReluLayer
-    LOG = Log.for("ReluLayer")
+    Log = ::Log.for(self)
     getter filters : Array(Filter), l_relu_slope : Float64, prev_layer : CNNLayer | ConvLayer
 
     # Add slope to initialize as leaky relu

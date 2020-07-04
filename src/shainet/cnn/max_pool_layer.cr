@@ -2,7 +2,7 @@ require "log"
 
 module SHAInet
   class MaxPoolLayer
-    LOG = Log.for("MaxPoolLayer")
+    Log = ::Log.for(self)
     getter filters : Array(Filter), pool : Int32, stride : Int32, prev_layer : CNNLayer | ConvLayer
 
     def initialize(@prev_layer : CNNLayer | ConvLayer,

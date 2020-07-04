@@ -2,7 +2,7 @@ require "csv"
 
 module SHAInet
   class Data
-    LOG = Log.for("Data")
+    Log = ::Log.for(self)
 
     @yrange : Int32
     @ymax : Int32
@@ -153,12 +153,12 @@ module SHAInet
 
       # puts training_set
 
-      LOG.info { "Selected #{training_set.size} / #{data.size} rows for training" }
+      Log.info { "Selected #{training_set.size} / #{data.size} rows for training" }
       training_data = SHAInet::TrainingData.new(training_set.map { |el| el[0] }, training_set.map { |el| el[1] })
       training_data.labels = @labels
       training_data.normalize_min_max
 
-      LOG.info { "Selected #{test_set.size} / #{data.size} rows for testing" }
+      Log.info { "Selected #{test_set.size} / #{data.size} rows for testing" }
       test_data = SHAInet::TestData.new(test_set.map { |el| el[0] }, test_set.map { |el| el[1] })
       test_data.labels = @labels
       test_data.normalize_min_max
@@ -169,7 +169,7 @@ module SHAInet
     # Receives an array of labels (String or Symbol) and sets them for this Data object
     def labels=(label_array)
       @labels = label_array.map(&.to_s)
-      LOG.info { "Labels are #{@labels.join(", ")}" } if self.class.name == "SHAInet::Data"
+      Log.info { "Labels are #{@labels.join(", ")}" } if self.class.name == "SHAInet::Data"
     end
 
     # Takes a label as a String and returns the corresponding output array

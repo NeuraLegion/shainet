@@ -2,7 +2,7 @@ require "log"
 
 module SHAInet
   class SoftmaxLayer
-    LOG = Log.for("SoftmaxLayer")
+    Log = ::Log.for(self)
     getter filters : Array(Filter), prev_layer : FullyConnectedLayer | ReluLayer
     getter output : Array(Float64), :all_neurons
 
