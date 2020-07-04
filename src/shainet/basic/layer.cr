@@ -4,6 +4,7 @@ module SHAInet
   class Layer
     include Apatite
     Log = ::Log.for(self)
+
     property :n_type, :neurons
     getter :activation_function, :l_size
     property input_sums : Matrix(Float64), weights : Matrix(Float64), biases : Matrix(Float64)

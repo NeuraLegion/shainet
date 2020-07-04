@@ -3,11 +3,13 @@ require "json"
 module SHAInet
   class NetDump
     include JSON::Serializable
+
     property layers : Array(LayerDump)
   end
 
   class LayerDump
     include JSON::Serializable
+
     property l_type : String
     property neurons : Array(NeuronDump)
     property activation_function : String
@@ -15,6 +17,7 @@ module SHAInet
 
   class NeuronDump
     include JSON::Serializable
+
     property id : String
     property bias : Float64
     property n_type : String
@@ -24,6 +27,7 @@ module SHAInet
 
   class SynapseDump
     include JSON::Serializable
+
     property source : String
     property destination : String
     property weight : Float64
