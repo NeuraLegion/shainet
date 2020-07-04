@@ -45,7 +45,7 @@ module SHAInet
       @o_max = Array(GenNum).new
 
       @labels = Array(String).new # Array of possible data labels
-      @logger = Logger.new(STDOUT)
+      @log = Log.for("Data")
 
       @normalized_inputs = Array(Array(Float64)).new
       @normalized_outputs = Array(Array(Float64)).new
@@ -152,12 +152,12 @@ module SHAInet
 
       # puts training_set
 
-      @logger.info "Selected #{training_set.size} / #{data.size} rows for training"
+      @log.info { "Selected #{training_set.size} / #{data.size} rows for training" }
       training_data = SHAInet::TrainingData.new(training_set.map { |el| el[0] }, training_set.map { |el| el[1] })
       training_data.labels = @labels
       training_data.normalize_min_max
 
-      @logger.info "Selected #{test_set.size} / #{data.size} rows for testing"
+      @log.info { "Selected #{test_set.size} / #{data.size} rows for testing" }
       test_data = SHAInet::TestData.new(test_set.map { |el| el[0] }, test_set.map { |el| el[1] })
       test_data.labels = @labels
       test_data.normalize_min_max
@@ -168,7 +168,7 @@ module SHAInet
     # Receives an array of labels (String or Symbol) and sets them for this Data object
     def labels=(label_array)
       @labels = label_array.map(&.to_s)
-      @logger.info("Labels are #{@labels.join(", ")}") if self.class.name == "SHAInet::Data"
+      @log.info { "Labels are #{@labels.join(", ")}" } if self.class.name == "SHAInet::Data"
     end
 
     # Takes a label as a String and returns the corresponding output array

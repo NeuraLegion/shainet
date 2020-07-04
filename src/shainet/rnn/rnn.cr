@@ -2,17 +2,18 @@ require "log"
 require "./**"
 
 module SHAInet
-  alias CNNLayer = InputLayer | ReluLayer | MaxPoolLayer | FullyConnectedLayer | DropoutLayer | SoftmaxLayer
-  alias CNNPair = {input: Array(Array(Array(Float64))), output: Array(Float64)}
+  alias RNNLayer = InputLayer | ReluLayer | MaxPoolLayer | FullyConnectedLayer | DropoutLayer | SoftmaxLayer
+  alias RNNPair = {input: Array(Array(Array(Float64))), output: Array(Float64)}
 
   # Note: Data is stored within specific classes.
-  # Structure hierarchy: CNN > Layer > Filter > Channel > Row > Neuron/Synapse
+  # Structure hierarchy: RNN > Layer > Filter > Channel > Row > Neuron/Synapse
 
-  class CNN
+  # Recurrent Neural Network
+  class RNN
     COST_FUNCTIONS = ["mse", "c_ent", "exp", "hel_d", "kld", "gkld", "ita_sai_d"]
 
     # General network parameters
-    getter layers : Array(CNNLayer | ConvLayer)                                       # , :all_neurons, :all_synapses
+    getter layers : Array(RNNLayer | ReluLayer)                                       # , :all_neurons, :all_synapses
     getter error_signal : Array(Float64), total_error : Float64, mean_error : Float64 # , w_gradient : Array(Float64), b_gradient : Array(Float64)
 
     # Parameters for SGD + Momentum
@@ -26,8 +27,8 @@ module SHAInet
     property alpha : Float64
     getter beta1 : Float64, beta2 : Float64, epsilon : Float64, time_step : Int32
 
-    def initialize(@log : Log = Log.for("CNN"))
-      @layers = Array(CNNLayer | ConvLayer).new
+    def initialize(@log : Log = Log.info { STDOUT })
+      @layers = Array(RNNLayer | ReluLayer).new
       # @all_neurons = Array(Neuron).new
       # @all_synapses = Array(Synapse | CnnSynapse).new
 
@@ -44,7 +45,7 @@ module SHAInet
       @delta_min = 0.1                           # For iRprop+ , min step size
       @prev_mean_error = rand(0.001..1.0).to_f64 # For iRprop+ , needed for backtracking
 
-      @alpha = 0.001        # For Adam , step size (recomeneded: only change this hyper parameter when fine-tuning)
+      @alpha = 0.001        # For Adam , step size (recommanded: only change this hyper parameter when fine-tuning)
       @beta1 = 0.9          # For Adam , exponential decay rate (not recommended to change value)
       @beta2 = 0.999        # For Adam , exponential decay rate (not recommended to change value)
       @epsilon = 10**(-8.0) # For Adam , prevents exploding gradients (not recommended to change value)
@@ -53,14 +54,6 @@ module SHAInet
 
     def add_input(input_volume : Array(Int32))
       @layers << InputLayer.new(input_volume)
-    end
-
-    def add_conv(filters_num : Int32,
-                 window_size : Int32,
-                 stride : Int32,
-                 padding : Int32,
-                 activation_function : ActivationFunction = SHAInet.none)
-      @layers << ConvLayer.new(self, @layers.last, filters_num, window_size, stride, padding, activation_function)
     end
 
     def add_relu(l_relu_slope : Float64 = 0.0)
@@ -146,13 +139,12 @@ module SHAInet
 
       # verify_data(data)
       @log.info("Training started")
-      epoch = 0
-      loop do
-        if epoch % log_each == 0
-          log_summary(epoch)
+      loop do |e|
+        if e % log_each == 0
+          log_summary(e)
         end
-        if epoch >= epochs || (error_threshold >= @mean_error) && (epoch > 0)
-          log_summary(epoch)
+        if e >= epochs || (error_threshold >= @mean_error) && (e > 0)
+          log_summary(e)
           break
         end
 
@@ -191,7 +183,6 @@ module SHAInet
 
           @prev_mean_error = @mean_error
         end
-        epoch += 1
       end
     rescue e : Exception
       @log.error("Error in training: #{e} #{e.inspect_with_backtrace}")
@@ -221,8 +212,7 @@ module SHAInet
         cost_function = proc
       end
 
-      epoch = 0
-      loop do
+      loop do |epoch|
         slice_num = 1
         if epoch % log_each == 0
           log_summary(epoch)
@@ -282,7 +272,6 @@ module SHAInet
 
           @prev_mean_error = @mean_error
         end
-        epoch += 1
       end
     end
 
@@ -367,20 +356,6 @@ module SHAInet
       when "gradients"
         @layers.each { |layer| layer.inspect("gradients") }
         puts "------------------------------------------------"
-      when "dimensions"
-        puts "Dimensions"
-        puts "layers x width x height x channels"
-        puts "=================================="
-        @layers.each do |layer|
-          filters = layer.filters.size
-          filter = layer.filters.first
-          width = filter.input_surface[0]
-          height = filter.input_surface[1]
-          channels = filter.input_surface[2]
-          puts layer.class.to_s
-          puts "#{filters} x #{width} x #{height} x #{channels}"
-          puts "----------------------------------"
-        end
       end
     end
 

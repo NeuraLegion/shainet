@@ -1,4 +1,4 @@
-require "logger"
+require "log"
 
 module SHAInet
   class FullyConnectedLayer
@@ -9,7 +9,7 @@ module SHAInet
                    @prev_layer : CNNLayer | ConvLayer,
                    l_size : Int32,
                    @activation_function : ActivationFunction = SHAInet.none,
-                   @logger : Logger = Logger.new(STDOUT))
+                   @log : Log = Log.for("FullyConnectedLayer"))
       #
       # since this is similar to a classic layer, we store all neurons in a single array
       filters = height = 1

@@ -1,4 +1,4 @@
-require "logger"
+require "log"
 
 module SHAInet
   # ------------
@@ -39,7 +39,7 @@ module SHAInet
       end
 
       unless stealth # Hide report during training
-        @input_layers.last.activations.show(@logger, "input layer activations:")
+        @input_layers.last.activations.show(@log, "input layer activations:")
       end
 
       # Propogate the information forward through the hidden layers
@@ -51,8 +51,8 @@ module SHAInet
         end
 
         unless stealth # Hide report during training
-          @hidden_layers[l].activations.show(@logger, "hidden layer #{l} activations:")
-          @hidden_layers[l].weights.show(@logger, "hidden layer #{l} weights:")
+          @hidden_layers[l].activations.show(@log, "hidden layer #{l} activations:")
+          @hidden_layers[l].weights.show(@log, "hidden layer #{l} weights:")
         end
       end
 
@@ -82,14 +82,14 @@ module SHAInet
       # msg += "\n  Input:\n  #{input_data}"
       # msg += "\n  Output:\n  #{actual_output}"
       # msg += "\n  Expected:\n  #{expected_output}"
-      # @logger.info(msg)
+      # @log.info(msg)
       # end
 
       # Detect exploading gradiants and NaNs in output
       validate_values(actual_output, "actual_output")
       # actual_output.each do |ar|
       #   if ar.infinite?
-      #     @logger.info("Found an '#{ar}' value, run stopped.")
+      #     @log.info("Found an '#{ar}' value, run stopped.")
       #     puts "output:#{actual_output}"
       #     puts "Output neurons:"
       #     puts @output_layers.last.neurons
@@ -146,7 +146,7 @@ module SHAInet
       # This methods accepts data as either a SHAInet::TrainingData object, or as an Array(Array(Array(GenNum)).
       # In the case of SHAInet::TrainingData, we convert it to an Array(Array(Array(GenNum)) by calling #data on it.
       raw_data = data.is_a?(SHAInet::TrainingData) ? data.data : data
-      @logger.info("Training started")
+      @log.info("Training started")
       start_time = Time.new
       batch_size = mini_batch_size ? mini_batch_size : raw_data.size
 
@@ -162,7 +162,7 @@ module SHAInet
         # Autosave the network
         unless autosave.nil?
           if counter % autosave[:freq] == 0 && (counter > 0)
-            # @logger.info("Network saved.")
+            # @log.info("Network saved.")
             save_to_file("#{autosave[:path]}/autosave_epoch_#{counter}.nn")
           end
         end
@@ -170,7 +170,7 @@ module SHAInet
         # Break condtitions
         if counter >= epochs || (error_threshold >= @mse) && (counter > 1)
           log_summary(counter)
-          @logger.info("Training finished. (Elapsed: #{Time.new - start_time})")
+          @log.info("Training finished. (Elapsed: #{Time.new - start_time})")
           break
         end
 
@@ -223,8 +223,8 @@ module SHAInet
           # Show training progress of the mini-batches
           i += 1
           if counter % log_each == 0
-            @logger.info("  Slice: (#{i} / #{slices}), MSE: #{@mse}") if show_slice
-            # @logger.info("@error_signal: #{@error_signal}")
+            @log.info("  Slice: (#{i} / #{slices}), MSE: #{@mse}") if show_slice
+            # @log.info("@error_signal: #{@error_signal}")
           end
         end
         counter += 1
