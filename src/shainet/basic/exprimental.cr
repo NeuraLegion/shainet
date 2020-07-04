@@ -39,7 +39,7 @@ module SHAInet
       end
 
       unless stealth # Hide report during training
-        @input_layers.last.activations.show(Log, "input layer activations:")
+        @input_layers.last.activations.show("input layer activations:")
       end
 
       # Propogate the information forward through the hidden layers
@@ -51,8 +51,8 @@ module SHAInet
         end
 
         unless stealth # Hide report during training
-          @hidden_layers[l].activations.show(Log, "hidden layer #{l} activations:")
-          @hidden_layers[l].weights.show(Log, "hidden layer #{l} weights:")
+          @hidden_layers[l].activations.show("hidden layer #{l} activations:")
+          @hidden_layers[l].weights.show("hidden layer #{l} weights:")
         end
       end
 
@@ -170,7 +170,7 @@ module SHAInet
         # Break condtitions
         if counter >= epochs || (error_threshold >= @mse) && (counter > 1)
           log_summary(counter)
-          Log.info("Training finished. (Elapsed: #{Time.new - start_time})")
+          Log.info { "Training finished. (Elapsed: #{Time.new - start_time})" }
           break
         end
 
@@ -223,7 +223,7 @@ module SHAInet
           # Show training progress of the mini-batches
           i += 1
           if counter % log_each == 0
-            Log.info("  Slice: (#{i} / #{slices}), MSE: #{@mse}") if show_slice
+            Log.info { "  Slice: (#{i} / #{slices}), MSE: #{@mse}" } if show_slice
             # Log.info("@error_signal: #{@error_signal}")
           end
         end
