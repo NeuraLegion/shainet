@@ -146,7 +146,7 @@ module SHAInet
       # This methods accepts data as either a SHAInet::TrainingData object, or as an Array(Array(Array(GenNum)).
       # In the case of SHAInet::TrainingData, we convert it to an Array(Array(Array(GenNum)) by calling #data on it.
       raw_data = data.is_a?(SHAInet::TrainingData) ? data.data : data
-      Log.info("Training started")
+      Log.info { "Training started" }
       start_time = Time.new
       batch_size = mini_batch_size ? mini_batch_size : raw_data.size
 
