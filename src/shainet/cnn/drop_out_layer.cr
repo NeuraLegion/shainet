@@ -2,12 +2,13 @@ require "log"
 
 module SHAInet
   class DropoutLayer
+    LOG = Log.for("DropoutLayer")
+
     getter filters : Array(Filter), drop_percent : Int32, prev_layer : CNNLayer | ConvLayer
 
     # Drop percent is an Integer, i.e 5 is 5%
     def initialize(@prev_layer : CNNLayer | ConvLayer,
-                   @drop_percent : Int32 = 5,
-                   @log : Log = Log.new(STDOUT))
+                   @drop_percent : Int32 = 5)
       #
       raise CNNInitializationError.new("Drop percent must be Int of 0-100") unless (0..100).includes?(@drop_percent)
       @filters = @prev_layer.filters.clone # Volume of this layer is the same as the previus layer

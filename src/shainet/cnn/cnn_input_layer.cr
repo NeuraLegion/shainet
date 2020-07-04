@@ -2,9 +2,11 @@ require "log"
 
 module SHAInet
   class InputLayer
+    LOG = Log.for("InputLayer")
+
     getter filters : Array(Filter)
 
-    def initialize(input_volume : Array(Int32), @log : Log = Log.for("CNN - Input Layer"))
+    def initialize(input_volume : Array(Int32))
       unless input_volume.size == 3
         raise CNNInitializationError.new("Input volume must be an array of Int32: [width, height, channels].")
       end

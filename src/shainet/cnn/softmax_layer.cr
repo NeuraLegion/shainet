@@ -2,10 +2,11 @@ require "log"
 
 module SHAInet
   class SoftmaxLayer
+    LOG = Log.for("SoftmaxLayer")
     getter filters : Array(Filter), prev_layer : FullyConnectedLayer | ReluLayer
     getter output : Array(Float64), :all_neurons
 
-    def initialize(@prev_layer : FullyConnectedLayer | ReluLayer, @log : Log = Log.for("SoftmaxLayer"), @range : Range(Int32, Int32) = (0..-1))
+    def initialize(@prev_layer : FullyConnectedLayer | ReluLayer, @range : Range(Int32, Int32) = (0..-1))
       #
       @filters = @prev_layer.filters.clone
 

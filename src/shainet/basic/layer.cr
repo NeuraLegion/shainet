@@ -3,12 +3,13 @@ require "apatite"
 module SHAInet
   class Layer
     include Apatite
+    LOG = Log.for("Layer")
     property :n_type, :neurons
     getter :activation_function, :l_size
     property input_sums : Matrix(Float64), weights : Matrix(Float64), biases : Matrix(Float64)
     getter activations : Matrix(Float64), sigma_primes : Matrix(Float64)
 
-    def initialize(@n_type : String, @l_size : Int32, @activation_function : ActivationFunction = SHAInet.sigmoid, @log : Log = Log.for("Layer"))
+    def initialize(@n_type : String, @l_size : Int32, @activation_function : ActivationFunction = SHAInet.sigmoid)
       @neurons = Array(Neuron).new
 
       # ------- Experimental -------
@@ -62,20 +63,20 @@ module SHAInet
       @neurons.each do |neuron|
         neuron.activation = rand(-1_f64..1_f64)
       end
-      @log.info { "Layers seeded with random values" }
+      LOG.info { "Layers seeded with random values" }
     end
 
     # If you want to change the type of layer including all neuron types within it
     def type_change(new_neuron_type : String)
       raise NeuralNetRunError.new("Must define correct neuron type, if you're not sure choose \"memory\" as a default") if NEURON_TYPES.any? { |x| x == new_neuron_type } == false
       @neurons.each { |neuron| neuron.n_type = new_neuron_type }
-      @log.info { "Layer type chaged from #{@n_type} to #{new_neuron_type}" }
+      LOG.info { "Layer type changed from #{@n_type} to #{new_neuron_type}" }
       @n_type = new_neuron_type
     end
 
     def inspect
-      @log.info { @n_type }
-      @log.info { @neurons }
+      LOG.info { @n_type }
+      LOG.info { @neurons }
     end
 
     def size

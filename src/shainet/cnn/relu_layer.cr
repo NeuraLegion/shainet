@@ -2,12 +2,12 @@ require "log"
 
 module SHAInet
   class ReluLayer
+    LOG = Log.for("ReluLayer")
     getter filters : Array(Filter), l_relu_slope : Float64, prev_layer : CNNLayer | ConvLayer
 
     # Add slope to initialize as leaky relu
     def initialize(@prev_layer : CNNLayer | ConvLayer,
-                   @l_relu_slope : Float64 = 0.0,
-                   @log : Log = Log.new(STDOUT))
+                   @l_relu_slope : Float64 = 0.0)
       #
       @filters = @prev_layer.filters.clone # Volume of this layer is the same as the previus layer
     end

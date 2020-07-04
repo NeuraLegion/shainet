@@ -9,6 +9,8 @@ module SHAInet
   # Structure hierarchy: CNN > Layer > Filter > Channel > Row > Neuron/Synapse
 
   class CNN
+    LOG = Log.for("CNN")
+
     COST_FUNCTIONS = ["mse", "c_ent", "exp", "hel_d", "kld", "gkld", "ita_sai_d"]
 
     # General network parameters
@@ -26,7 +28,7 @@ module SHAInet
     property alpha : Float64
     getter beta1 : Float64, beta2 : Float64, epsilon : Float64, time_step : Int32
 
-    def initialize(@log : Log = Log.for("CNN"))
+    def initialize
       @layers = Array(CNNLayer | ConvLayer).new
       # @all_neurons = Array(Neuron).new
       # @all_synapses = Array(Synapse | CnnSynapse).new
@@ -145,7 +147,7 @@ module SHAInet
               log_each : Int32 = 1000)                                                        # determines what is the step for error printout
 
       # verify_data(data)
-      @log.info("Training started")
+      LOG.info { "Training started" }
       epoch = 0
       loop do
         if epoch % log_each == 0
@@ -194,7 +196,7 @@ module SHAInet
         epoch += 1
       end
     rescue e : Exception
-      @log.error("Error in training: #{e} #{e.inspect_with_backtrace}")
+      LOG.error { "Error in training: #{e} #{e.inspect_with_backtrace}" }
       raise e
     end
 
@@ -210,7 +212,7 @@ module SHAInet
                     mini_batch_size : Int32 | Nil = nil)
       #
       time_start = Time.new
-      @log.info("Training started")
+      LOG.info { "Training started" }
       batch_size = mini_batch_size ? mini_batch_size : data.size
       @time_step = 0
 
@@ -236,7 +238,7 @@ module SHAInet
         data.each_slice(batch_size, reuse: false) do |data_slice|
           verify_data(data_slice)
           time_now = Time.new
-          @log.info("Mini-batch # #{slice_num}| Mini-batch size: #{batch_size} | Runtime: #{time_now - time_start}") if mini_batch_size
+          LOG.info { "Mini-batch # #{slice_num}| Mini-batch size: #{batch_size} | Runtime: #{time_now - time_start}" } if mini_batch_size
           slice_num += 1
           @time_step += 1 if mini_batch_size # in mini-batch update adam time_step
 
@@ -339,7 +341,7 @@ module SHAInet
         end
       end
       if message
-        @log.error("#{message}: #{data}")
+        LOG.error { "#{message}: #{data}" }
         raise NeuralNetTrainError.new(message)
       end
     end
@@ -385,7 +387,7 @@ module SHAInet
     end
 
     def log_summary(e)
-      @log.info("Epoch: #{e}, Total error: #{@total_error}, MSE: #{@mean_error}")
+      LOG.info { "Epoch: #{e}, Total error: #{@total_error}, MSE: #{@mean_error}" }
     end
   end
 end

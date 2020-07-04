@@ -2,14 +2,14 @@ require "log"
 
 module SHAInet
   class FullyConnectedLayer
+    LOG = Log.for("FullyConnectedLayer")
     getter filters : Array(Filter), prev_layer : CNNLayer | ConvLayer
     getter output : Array(Float64), :all_neurons, :all_synapses
 
     def initialize(@master_network : CNN,
                    @prev_layer : CNNLayer | ConvLayer,
                    l_size : Int32,
-                   @activation_function : ActivationFunction = SHAInet.none,
-                   @log : Log = Log.for("FullyConnectedLayer"))
+                   @activation_function : ActivationFunction = SHAInet.none)
       #
       # since this is similar to a classic layer, we store all neurons in a single array
       filters = height = 1

@@ -14,6 +14,8 @@ module SHAInet
     # the network, for methods regarding running and training go to network_run.cr
     # ------------
 
+    LOG = Log.for("Network")
+
     LAYER_TYPES      = ["input", "hidden", "output"]
     CONNECTION_TYPES = ["full", "ind_to_ind", "random"]
     COST_FUNCTIONS   = ["mse", "c_ent"] # , "exp", "hel_d", "kld", "gkld", "ita_sai_d"]
@@ -34,7 +36,7 @@ module SHAInet
     getter beta1 : Float64, beta2 : Float64, epsilon : Float64, time_step : Int32
 
     # First creates an empty shell of the entire network
-    def initialize(@log : Log = Log.for("Network"))
+    def initialize
       @input_layers = Array(Layer).new
       @output_layers = Array(Layer).new
       @hidden_layers = Array(Layer).new
@@ -67,7 +69,7 @@ module SHAInet
     # l_size = how many neurons in the layer
     # n_type = advanced option for different neuron types
     def add_layer(l_type : Symbol | String, l_size : Int32, n_type : Symbol | String = "memory", activation_function : ActivationFunction = SHAInet.sigmoid)
-      layer = Layer.new(n_type.to_s, l_size, activation_function, @log)
+      layer = Layer.new(n_type.to_s, l_size, activation_function)
       layer.neurons.each do |neuron|
         @all_neurons << neuron # To easily access neurons later
       end
@@ -178,7 +180,7 @@ module SHAInet
     end
 
     def log_summary(e)
-      @log.info { "Epoch: #{e}, Total error: #{@total_error}, MSE: #{@mse}" }
+      LOG.info { "Epoch: #{e}, Total error: #{@total_error}, MSE: #{@mse}" }
     end
 
     def clean_dead_neurons
@@ -202,7 +204,7 @@ module SHAInet
           end
         end
       end
-      @log.info("Cleaned #{current_neuron_number - @all_neurons.size} dead neurons")
+      LOG.info("Cleaned #{current_neuron_number - @all_neurons.size} dead neurons")
     end
 
     def verify_net_before_train
@@ -270,7 +272,7 @@ module SHAInet
         dump_network << dump_layer
       end
       File.write(file_path, {"layers" => dump_network}.to_json)
-      @log.info { "Network saved to: #{file_path}" }
+      LOG.info { "Network saved to: #{file_path}" }
     end
 
     def load_from_file(file_path : String)
@@ -318,18 +320,18 @@ module SHAInet
           end
         end
       end
-      @log.info { "Network loaded from: #{file_path}" }
+      LOG.info { "Network loaded from: #{file_path}" }
     end
 
     def inspect
-      @log.info { @input_layers }
-      @log.info { "--------------------------------" }
-      @log.info { @hidden_layers }
-      @log.info { "--------------------------------" }
-      @log.info { @output_layers }
-      @log.info { "--------------------------------" }
-      @log.info { @all_synapses }
-      @log.info { "--------------------------------" }
+      LOG.info { @input_layers }
+      LOG.info { "--------------------------------" }
+      LOG.info { @hidden_layers }
+      LOG.info { "--------------------------------" }
+      LOG.info { @output_layers }
+      LOG.info { "--------------------------------" }
+      LOG.info { @all_synapses }
+      LOG.info { "--------------------------------" }
     end
   end
 end
