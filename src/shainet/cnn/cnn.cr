@@ -211,7 +211,7 @@ module SHAInet
                     log_each : Int32 = 1000,                               # determines what is the step for error printout
                     mini_batch_size : Int32 | Nil = nil)
       #
-      time_start = Time.new
+      time_start = Time.monotonic
       Log.info { "Training started" }
       batch_size = mini_batch_size ? mini_batch_size : data.size
       @time_step = 0
@@ -237,7 +237,7 @@ module SHAInet
 
         data.each_slice(batch_size, reuse: false) do |data_slice|
           verify_data(data_slice)
-          time_now = Time.new
+          time_now = Time.monotonic
           Log.info { "Mini-batch # #{slice_num}| Mini-batch size: #{batch_size} | Runtime: #{time_now - time_start}" } if mini_batch_size
           slice_num += 1
           @time_step += 1 if mini_batch_size # in mini-batch update adam time_step

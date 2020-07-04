@@ -147,7 +147,7 @@ module SHAInet
       # In the case of SHAInet::TrainingData, we convert it to an Array(Array(Array(GenNum)) by calling #data on it.
       raw_data = data.is_a?(SHAInet::TrainingData) ? data.data : data
       Log.info { "Training started" }
-      start_time = Time.new
+      start_time = Time.monotonic
       batch_size = mini_batch_size ? mini_batch_size : raw_data.size
 
       # Change String/Symbol into the corrent proc of the cost function
@@ -170,7 +170,7 @@ module SHAInet
         # Break condtitions
         if counter >= epochs || (error_threshold >= @mse) && (counter > 1)
           log_summary(counter)
-          Log.info { "Training finished. (Elapsed: #{Time.new - start_time})" }
+          Log.info { "Training finished. (Elapsed: #{Time.monotonic - start_time})" }
           break
         end
 
