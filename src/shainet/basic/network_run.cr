@@ -132,7 +132,7 @@ module SHAInet
         # Autosave the network
         unless autosave.nil?
           if counter % autosave[:freq] == 0 && (counter > 0)
-            # Log.info("Network saved.")
+            # Log.info { "Network saved." }
             save_to_file("#{autosave[:path]}/autosave_epoch_#{counter}.nn")
           end
         end
@@ -236,7 +236,7 @@ module SHAInet
           display_counter += 1
           if counter % log_each == 0
             Log.info { "  Slice: (#{display_counter} / #{slices}), MSE: #{@mse}" } if show_slice
-            # Log.info("@error_signal: #{@error_signal}")
+            # Log.info { "@error_signal: #{@error_signal}" }
           end
         end
 
@@ -406,7 +406,7 @@ module SHAInet
         # Autosave the network
         unless autosave.nil?
           if epoch % autosave[:freq] == 0 && (epoch > 0)
-            # Log.info("Network saved.")
+            # Log.info { "Network saved." }
             save_to_file("#{autosave[:path]}/autosave_epoch_#{epoch}.nn")
           end
         end
@@ -471,7 +471,7 @@ module SHAInet
           display_counter += 1
           if epoch % log_each == 0
             Log.info { "  Slice: (#{display_counter} / #{slices}), MSE: #{@mse}" } if show_slice
-            # Log.info("@error_signal: #{@error_signal}")
+            # Log.info { "@error_signal: #{@error_signal}" }
           end
         end
         # Update epoch status

@@ -204,7 +204,7 @@ module SHAInet
           end
         end
       end
-      Log.info("Cleaned #{current_neuron_number - @all_neurons.size} dead neurons")
+      Log.info { "Cleaned #{current_neuron_number - @all_neurons.size} dead neurons" }
     end
 
     def verify_net_before_train
