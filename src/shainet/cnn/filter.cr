@@ -1,4 +1,4 @@
-require "logger"
+require "log"
 
 module SHAInet
   class Filter

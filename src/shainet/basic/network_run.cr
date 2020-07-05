@@ -1,4 +1,4 @@
-require "logger"
+require "log"
 require "json"
 
 module SHAInet
@@ -41,7 +41,7 @@ module SHAInet
       # TODO: add support for multiple output layers
 
       unless stealth # Hide output report during training
-        @logger.info("Input => #{input}, network output => #{output}")
+        Log.info { "Input => #{input}, network output => #{output}" }
       end
       output
     rescue e : Exception
@@ -115,8 +115,8 @@ module SHAInet
       # This methods accepts data as either a SHAInet::TrainingData object, or as an Array(Array(Array(GenNum)).
       # In the case of SHAInet::TrainingData, we convert it to an Array(Array(Array(GenNum)) by calling #data on it.
       raw_data = data.is_a?(SHAInet::TrainingData) ? data.data : data
-      @logger.info("Training started")
-      start_time = Time.new
+      Log.info { "Training started" }
+      start_time = Time.monotonic
       batch_size = mini_batch_size ? mini_batch_size : raw_data.size
       @time_step = 0
 
@@ -132,7 +132,7 @@ module SHAInet
         # Autosave the network
         unless autosave.nil?
           if counter % autosave[:freq] == 0 && (counter > 0)
-            # @logger.info("Network saved.")
+            # Log.info { "Network saved." }
             save_to_file("#{autosave[:path]}/autosave_epoch_#{counter}.nn")
           end
         end
@@ -140,7 +140,7 @@ module SHAInet
         # Break condtitions
         if counter >= epochs || (error_threshold >= @mse) && (counter > 1)
           log_summary(counter)
-          @logger.info("Training finished. (Elapsed: #{Time.new - start_time})")
+          Log.info { "Training finished. (Elapsed: #{Time.monotonic - start_time})" }
           break
         end
 
@@ -235,8 +235,8 @@ module SHAInet
           # Show training progress of the mini-batches
           display_counter += 1
           if counter % log_each == 0
-            @logger.info("  Slice: (#{display_counter} / #{slices}), MSE: #{@mse}") if show_slice
-            # @logger.info("@error_signal: #{@error_signal}")
+            Log.info { "  Slice: (#{display_counter} / #{slices}), MSE: #{@mse}" } if show_slice
+            # Log.info { "@error_signal: #{@error_signal}" }
           end
         end
 
@@ -390,8 +390,8 @@ module SHAInet
       # This methods accepts data as either a SHAInet::TrainingData object, or as an Array(Array(Array(GenNum)).
       # In the case of SHAInet::TrainingData, we convert it to an Array(Array(Array(GenNum)) by calling #data on it.
       raw_data = data.is_a?(SHAInet::TrainingData) ? data.data : data
-      @logger.info("Training started")
-      start_time = Time.new
+      Log.info { "Training started" }
+      start_time = Time.monotonic
       batch_size = mini_batch_size ? mini_batch_size : raw_data.size
 
       # Change String/Symbol into the corrent proc of the cost function
@@ -406,7 +406,7 @@ module SHAInet
         # Autosave the network
         unless autosave.nil?
           if epoch % autosave[:freq] == 0 && (epoch > 0)
-            # @logger.info("Network saved.")
+            # Log.info { "Network saved." }
             save_to_file("#{autosave[:path]}/autosave_epoch_#{epoch}.nn")
           end
         end
@@ -414,7 +414,7 @@ module SHAInet
         # Break condtitions
         if epoch >= epochs || (error_threshold >= @mse) && (epoch > 1)
           log_summary(epoch)
-          @logger.info("Training finished. (Elapsed: #{Time.new - start_time})")
+          Log.info { "Training finished. (Elapsed: #{Time.monotonic - start_time})" }
           break
         end
 
@@ -470,8 +470,8 @@ module SHAInet
           # Show training progress of the mini-batches
           display_counter += 1
           if epoch % log_each == 0
-            @logger.info("  Slice: (#{display_counter} / #{slices}), MSE: #{@mse}") if show_slice
-            # @logger.info("@error_signal: #{@error_signal}")
+            Log.info { "  Slice: (#{display_counter} / #{slices}), MSE: #{@mse}" } if show_slice
+            # Log.info { "@error_signal: #{@error_signal}" }
           end
         end
         # Update epoch status
@@ -500,7 +500,7 @@ module SHAInet
         end
       end
       if message
-        @logger.error("#{message}: #{data}")
+        Log.error { "#{message}: #{data}" }
         raise NeuralNetTrainError.new(message)
       end
     end
@@ -509,7 +509,7 @@ module SHAInet
       # Detect exploading gradiants in output
       array.each do |ar|
         if ar.infinite?
-          @logger.info("Found an '#{ar}' value, run stopped.")
+          Log.info { "Found an '#{ar}' value, run stopped." }
           puts "#{location}: #{array}"
           puts "Output neurons:"
           puts @output_layers.last.neurons
@@ -546,7 +546,7 @@ module SHAInet
           incorrect += 1
         end
       end
-      @logger.info("Predicted #{correct} out of #{correct + incorrect} (#{(correct.to_f/(correct + incorrect).to_f)*100}% accuracy)")
+      Log.info { "Predicted #{correct} out of #{correct + incorrect} (#{(correct.to_f/(correct + incorrect).to_f)*100}% accuracy)" }
       correct.to_f/(correct + incorrect).to_f
     end
   end

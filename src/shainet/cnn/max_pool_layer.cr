@@ -1,13 +1,14 @@
-require "logger"
+require "log"
 
 module SHAInet
   class MaxPoolLayer
+    Log = ::Log.for(self)
+
     getter filters : Array(Filter), pool : Int32, stride : Int32, prev_layer : CNNLayer | ConvLayer
 
     def initialize(@prev_layer : CNNLayer | ConvLayer,
                    @pool : Int32,
-                   @stride : Int32,
-                   @logger : Logger = Logger.new(STDOUT))
+                   @stride : Int32)
       #
       prev_w = prev_layer.filters.first.neurons.size # Assumes row == height
       new_w = ((prev_w.to_f64 - @pool.to_f64)/@stride.to_f64 + 1).to_f64

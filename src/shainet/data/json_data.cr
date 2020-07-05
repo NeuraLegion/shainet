@@ -2,34 +2,34 @@ require "json"
 
 module SHAInet
   class NetDump
-    JSON.mapping({
-      layers: Array(LayerDump),
-    })
+    include JSON::Serializable
+
+    property layers : Array(LayerDump)
   end
 
   class LayerDump
-    JSON.mapping({
-      l_type:              String,
-      neurons:             Array(NeuronDump),
-      activation_function: String,
-    })
+    include JSON::Serializable
+
+    property l_type : String
+    property neurons : Array(NeuronDump)
+    property activation_function : String
   end
 
   class NeuronDump
-    JSON.mapping({
-      id:           String,
-      bias:         Float64,
-      n_type:       String,
-      synapses_in:  Array(SynapseDump),
-      synapses_out: Array(SynapseDump),
-    })
+    include JSON::Serializable
+
+    property id : String
+    property bias : Float64
+    property n_type : String
+    property synapses_in : Array(SynapseDump)
+    property synapses_out : Array(SynapseDump)
   end
 
   class SynapseDump
-    JSON.mapping({
-      source:      String,
-      destination: String,
-      weight:      Float64,
-    })
+    include JSON::Serializable
+
+    property source : String
+    property destination : String
+    property weight : Float64
   end
 end
