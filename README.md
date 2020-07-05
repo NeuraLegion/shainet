@@ -317,4 +317,5 @@ label = {
 - [bararchy](https://github.com/bararchy) - creator, maintainer
 - [drujensen](https://github.com/drujensen) - contributor
 - [hugoabonizio](https://github.com/hugoabonizio) - contributor
+- [Rémy Marronnier](https://github.com/rmarronnier) - contributor
 - [psikoz](https://github.com/psikoz) - logo desgin
