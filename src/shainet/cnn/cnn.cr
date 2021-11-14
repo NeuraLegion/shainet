@@ -1,4 +1,4 @@
-require "logger"
+require "log"
 require "./**"
 
 module SHAInet
@@ -26,7 +26,7 @@ module SHAInet
     property alpha : Float64
     getter beta1 : Float64, beta2 : Float64, epsilon : Float64, time_step : Int32
 
-    def initialize(@logger : Logger = Logger.new(STDOUT))
+    def initialize
       @layers = Array(CNNLayer | ConvLayer).new
       # @all_neurons = Array(Neuron).new
       # @all_synapses = Array(Synapse | CnnSynapse).new
@@ -145,7 +145,7 @@ module SHAInet
               log_each : Int32 = 1000)                                                        # determines what is the step for error printout
 
       # verify_data(data)
-      @logger.info("Training started")
+      Log.info("Training started")
       loop do |e|
         if e % log_each == 0
           log_summary(e)
@@ -192,7 +192,7 @@ module SHAInet
         end
       end
     rescue e : Exception
-      @logger.error("Error in training: #{e} #{e.inspect_with_backtrace}")
+      Log.error("Error in training: #{e} #{e.inspect_with_backtrace}")
       raise e
     end
 
@@ -208,7 +208,7 @@ module SHAInet
                     mini_batch_size : Int32 | Nil = nil)
       #
       time_start = Time.new
-      @logger.info("Training started")
+      Log.info("Training started")
       batch_size = mini_batch_size ? mini_batch_size : data.size
       @time_step = 0
 
@@ -234,7 +234,7 @@ module SHAInet
         data.each_slice(batch_size, reuse: false) do |data_slice|
           verify_data(data_slice)
           time_now = Time.new
-          @logger.info("Mini-batch # #{slice_num}| Mini-batch size: #{batch_size} | Runtime: #{time_now - time_start}") if mini_batch_size
+          Log.info("Mini-batch # #{slice_num}| Mini-batch size: #{batch_size} | Runtime: #{time_now - time_start}") if mini_batch_size
           slice_num += 1
           @time_step += 1 if mini_batch_size # in mini-batch update adam time_step
 
@@ -337,7 +337,7 @@ module SHAInet
         end
       end
       if message
-        @logger.error("#{message}: #{data}")
+        Log.error("#{message}: #{data}")
         raise NeuralNetTrainError.new(message)
       end
     end
@@ -383,7 +383,7 @@ module SHAInet
     end
 
     def log_summary(e)
-      @logger.info("Epoch: #{e}, Total error: #{@total_error}, MSE: #{@mean_error}")
+      Log.info("Epoch: #{e}, Total error: #{@total_error}, MSE: #{@mean_error}")
     end
   end
 end

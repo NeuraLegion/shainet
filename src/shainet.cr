@@ -1,4 +1,3 @@
-require "logger"
 require "./shainet/**"
 require "apatite"
 

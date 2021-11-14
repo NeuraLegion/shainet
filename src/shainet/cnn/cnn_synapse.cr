@@ -1,5 +1,3 @@
-require "logger"
-
 module SHAInet
   class CnnSynapse
     property weight : Float64, gradient : Float64, gradient_sum : Float64, gradient_batch : Float64, prev_weight : Float64

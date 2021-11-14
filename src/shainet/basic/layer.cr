@@ -8,7 +8,7 @@ module SHAInet
     property input_sums : Matrix(Float64), weights : Matrix(Float64), biases : Matrix(Float64)
     getter activations : Matrix(Float64), sigma_primes : Matrix(Float64)
 
-    def initialize(@n_type : String, @l_size : Int32, @activation_function : ActivationFunction = SHAInet.sigmoid, @logger : Logger = Logger.new(STDOUT))
+    def initialize(@n_type : String, @l_size : Int32, @activation_function : ActivationFunction = SHAInet.sigmoid)
       @neurons = Array(Neuron).new
 
       # ------- Experimental -------

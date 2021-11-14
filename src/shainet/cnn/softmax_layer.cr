@@ -1,11 +1,9 @@
-require "logger"
-
 module SHAInet
   class SoftmaxLayer
     getter filters : Array(Filter), prev_layer : FullyConnectedLayer | ReluLayer
     getter output : Array(Float64), :all_neurons
 
-    def initialize(@prev_layer : FullyConnectedLayer | ReluLayer, @logger : Logger = Logger.new(STDOUT), @range : Range(Int32, Int32) = (0..-1))
+    def initialize(@prev_layer : FullyConnectedLayer | ReluLayer, @range : Range(Int32, Int32) = (0..-1))
       #
       @filters = @prev_layer.filters.clone
 

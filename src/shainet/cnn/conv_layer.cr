@@ -1,5 +1,3 @@
-require "logger"
-
 module SHAInet
   class ConvLayer
     getter master_network : CNN, prev_layer : CNNLayer | ConvLayer, filters : Array(Filter)
@@ -11,9 +9,7 @@ module SHAInet
                    @window_size : Int32 = 1,
                    @stride : Int32 = 1,
                    @padding : Int32 = 0,
-                   @activation_function : ActivationFunction = SHAInet.none,
-                   @logger : Logger = Logger.new(STDOUT))
-      #
+                   @activation_function : ActivationFunction = SHAInet.none)
       raise CNNInitializationError.new("ConvLayer must have at least one filter") if filters_num < 1
       raise CNNInitializationError.new("Padding value must be Int32 >= 0") if @padding < 0
       raise CNNInitializationError.new("Window size value must be Int32 >= 1") if @window_size < 1

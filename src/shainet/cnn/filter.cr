@@ -1,5 +1,3 @@
-require "logger"
-
 module SHAInet
   class Filter
     getter input_surface : Array(Int32), window_size : Int32, stride : Int32, padding : Int32, activation_function : ActivationFunction
@@ -72,7 +70,6 @@ module SHAInet
               if input_row < 0
                 rows << Array(Neuron).new(@window_size) { @blank_neuron }
                 # puts "top pad"
-
                 # When dealing with bottom padding
               elsif input_row > (input_channel.size - 1)
                 rows << Array(Neuron).new(@window_size) { @blank_neuron }
@@ -152,7 +149,6 @@ module SHAInet
               if input_row < 0
                 rows << Array(Neuron).new(@window_size) { @blank_neuron }
                 # puts "top pad"
-
                 # When dealing with bottom padding
               elsif input_row > (input_channel.size - 1)
                 rows << Array(Neuron).new(@window_size) { @blank_neuron }
