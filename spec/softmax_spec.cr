@@ -22,14 +22,13 @@ describe SHAInet::CNN do
        [6.0, 6.0, 6.0, 6.0, 6.0, 6.0, 6.0],
        [7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0]],
     ]
-    expected_output = [0.0, 0.0, 0.0, 0.0, 1.0]
 
     cnn = SHAInet::CNN.new
-    cnn.add_input(volume = [height = 7, width = 7, channels = 2])
+    cnn.add_input(volume = [7, 7, 2])
 
-    cnn.add_fconnect(l_size = 10, SHAInet.sigmoid)
+    cnn.add_fconnect(10, SHAInet.sigmoid)
     cnn.add_softmax((0..-3))
 
-    cnn.run(img_data, stealth = false)
+    cnn.run(img_data, stealth: false)
   end
 end

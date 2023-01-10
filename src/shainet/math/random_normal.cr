@@ -6,7 +6,7 @@ module SHAInet
     def pdf(x : Float64, mu : Float64, sigma : Float64)
       max_y = Float64.new((1 / Math.sqrt(2 * Math::PI * sigma**2)))
       exp = Float64.new(Math::E**(-1 * (x - mu)**2 / (2 * sigma**2)))
-      return max_y*exp
+      max_y * exp
     end
 
     # Sampling n points from a normal distribution with mu & sigma,
@@ -34,11 +34,11 @@ module SHAInet
         points << r
       end
 
-      return points
+      points
     end
 
     def sample(n : Int32 = 1, mu : Float64 = 0.0, sigma : Float64 = 1.0)
-      return metropolis(n: n, mu: mu, sigma: sigma)
+      metropolis(n: n, mu: mu, sigma: sigma)
     end
   end
 end

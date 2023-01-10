@@ -72,7 +72,6 @@ module SHAInet
               if input_row < 0
                 rows << Array(Neuron).new(@window_size) { @blank_neuron }
                 # puts "top pad"
-
                 # When dealing with bottom padding
               elsif input_row > (input_channel.size - 1)
                 rows << Array(Neuron).new(@window_size) { @blank_neuron }
@@ -152,7 +151,6 @@ module SHAInet
               if input_row < 0
                 rows << Array(Neuron).new(@window_size) { @blank_neuron }
                 # puts "top pad"
-
                 # When dealing with bottom padding
               elsif input_row > (input_channel.size - 1)
                 rows << Array(Neuron).new(@window_size) { @blank_neuron }

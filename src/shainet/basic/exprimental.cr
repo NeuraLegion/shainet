@@ -57,9 +57,9 @@ module SHAInet
       end
 
       # Propogate the information through the output layers
-      @output_layers.each { |l| l.propagate_forward_exp(@hidden_layers.last) }
+      @output_layers.each(&.propagate_forward_exp(@hidden_layers.last))
 
-      @output_layers.last.neurons.map { |neuron| neuron.activation } # return an array of all output neuron activations
+      @output_layers.last.neurons.map(&.activation) # return an array of all output neuron activations
       # TODO: add support for multiple output layers
 
 
@@ -184,7 +184,7 @@ module SHAInet
         i = 0
         slices = (data.size.to_f64 / mini_batch_size).ceil.to_i
 
-        raw_data.each_slice(batch_size, reuse = false) do |data_slice|
+        raw_data.each_slice(batch_size, reuse: false) do |data_slice|
           verify_data(data_slice)
 
           pool = Pool.new(
@@ -207,7 +207,7 @@ module SHAInet
               evaluate_exp(data_point[0], data_point[1], cost_function)
               update_mse
               batch_mse_sum += @mse
-              @error_signal.size.times { |i| batch_errors_sum[i] += @error_signal[i] }
+              @error_signal.size.times { |count| batch_errors_sum[count] += @error_signal[count] }
             end
 
             @mse = (batch_mse_sum / mini_batch_size) # Update MSE of the batch

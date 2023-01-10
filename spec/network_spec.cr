@@ -120,7 +120,7 @@ describe SHAInet::Network do
     xor = SHAInet::Network.new
 
     xor.add_layer(:input, 2, "memory", SHAInet.sigmoid)
-    1.times { |x| xor.add_layer(:hidden, 3, "memory", SHAInet.sigmoid) }
+    xor.add_layer(:hidden, 3, "memory", SHAInet.sigmoid)
     xor.add_layer(:output, 1, "memory", SHAInet.sigmoid)
     xor.fully_connect
 
@@ -155,7 +155,7 @@ describe SHAInet::Network do
 
     xor = SHAInet::Network.new
     xor.add_layer("input", 2, "memory", SHAInet.sigmoid)
-    1.times { |x| xor.add_layer("hidden", 3, "memory", SHAInet.sigmoid) }
+    xor.add_layer("hidden", 3, "memory", SHAInet.sigmoid)
     xor.add_layer("output", 1, "memory", SHAInet.sigmoid)
     xor.fully_connect
 
@@ -374,7 +374,7 @@ describe SHAInet::Network do
 
     xor = SHAInet::Network.new
     xor.add_layer(:input, 2, "memory", SHAInet.sigmoid)
-    1.times { |x| xor.add_layer(:hidden, 3, "memory", SHAInet.sigmoid) }
+    xor.add_layer(:hidden, 3, "memory", SHAInet.sigmoid)
     xor.add_layer(:output, 1, "memory", SHAInet.sigmoid)
     xor.fully_connect
 
