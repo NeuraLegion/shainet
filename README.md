@@ -1,8 +1,6 @@
 <p align="center"><img src="logo/logotype_vertical.png" alt="shainet" height="200px"></p>
 
-
-[![Build Status](https://travis-ci.org/NeuraLegion/shainet.svg?branch=master)](https://travis-ci.org/NeuraLegion/shainet)
-[![Join the chat at https://gitter.im/shainet/Lobby](https://badges.gitter.im/shainet/Lobby.svg)](https://gitter.im/shainet/Lobby?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
+[![Crystal CI](https://github.com/NeuraLegion/shainet/actions/workflows/crystal.yml/badge.svg)](https://github.com/NeuraLegion/shainet/actions/workflows/crystal.yml)
 
 
 SHAInet - stands for Super Human Artificial Intelligence network
