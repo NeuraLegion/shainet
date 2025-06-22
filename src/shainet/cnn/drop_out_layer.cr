@@ -6,7 +6,7 @@ module SHAInet
 
     getter filters : Array(Filter), drop_percent : Int32, prev_layer : CNNLayer | ConvLayer
 
-    # Drop percent is an Integer, i.e 5 is 5%
+    # Drop percent represents an exact percentage, i.e 5 is 5%
     def initialize(@prev_layer : CNNLayer | ConvLayer,
                    @drop_percent : Int32 = 5)
       #
@@ -19,7 +19,7 @@ module SHAInet
       @filters.size.times do |filter|
         @filters[filter].neurons.size.times do |row|
           @filters[filter].neurons[row].size.times do |neuron|
-            x = rand(0..100)
+            x = rand(0...100)
             if x <= @drop_percent
               @filters[filter].neurons[row][neuron].activation = 0.0
             else
