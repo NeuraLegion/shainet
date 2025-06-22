@@ -115,6 +115,7 @@ module SHAInet
 
     def normalize(x, xmin, xmax)
       range = xmax - xmin
+      return @ymax.to_f64 if range == 0
       adj_x = x.to_f64 - (xmin + @ymin)
       norm = (@yrange / range)
       value = adj_x * norm
@@ -132,6 +133,7 @@ module SHAInet
 
     def denormalize(x, xmin, xmax)
       range = xmax - xmin
+      return xmin.to_f64 if range == 0
       denorm = x.to_f64 * (range / @yrange)
       adj_x = @ymin + xmin
       value = denorm + adj_x

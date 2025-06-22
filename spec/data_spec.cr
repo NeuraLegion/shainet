@@ -78,4 +78,27 @@ describe SHAInet::Data do
     data.denormalize_outputs([0.5]).should eq([2.0])
     data.denormalize_outputs([1.0]).should eq([3.0])
   end
+
+  puts "############################################################"
+  it "should handle constant input columns" do
+    puts "\n"
+    inputs = [
+      [1.0, 5.0],
+      [2.0, 5.0],
+      [3.0, 5.0],
+    ]
+    outputs = [
+      [1.0],
+      [2.0],
+      [3.0],
+    ]
+
+    data = SHAInet::Data.new(inputs, outputs)
+    data.normalize_min_max
+    data.normalized_inputs.should eq([
+      [0.0, 1.0],
+      [0.5, 1.0],
+      [1.0, 1.0],
+    ])
+  end
 end
