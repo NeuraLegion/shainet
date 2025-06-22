@@ -73,6 +73,8 @@ module SHAInet
       @layers << MaxPoolLayer.new(@layers.last, pool, stride)
     end
 
+    # Adds a dropout layer that deactivates exactly `drop_percent` percent of
+    # the neurons in the previous layer during each activation.
     def add_dropout(drop_percent : Int32 = 5)
       @layers << DropoutLayer.new(@layers.last, drop_percent)
     end
