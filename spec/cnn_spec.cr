@@ -248,4 +248,14 @@ describe SHAInet::CNN do
   #   puts "We managed #{correct_answers} out of #{test_data.data_pairs.size} total"
   #   puts "Cnn output: #{cnn.output}"
   # end
+
+  it "raises NeuralNetRunError when gradients array size mismatches" do
+    cnn = SHAInet::CNN.new
+    cnn.add_input([1, 1, 1])
+    cnn.add_fconnect(2)
+
+    expect_raises(SHAInet::NeuralNetRunError) do
+      cnn.update_output_gradients([0.1])
+    end
+  end
 end

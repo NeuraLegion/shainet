@@ -315,8 +315,8 @@ module SHAInet
     def update_output_gradients(cost_function_derivatives : Array(Float64))
       output_neurons = @layers.last.as(FullyConnectedLayer | SoftmaxLayer).all_neurons
 
-      unless new_gradients.size == output_neurons.size
-        raise NeuralNetRunError.new("New gradients array must be the same size as the output layer.")
+      unless cost_function_derivatives.size == output_neurons.size
+        raise NeuralNetRunError.new("Cost function derivatives array must be the same size as the output layer.")
       end
 
       output_neurons.each_with_index do |neuron, i|
