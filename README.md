@@ -285,13 +285,25 @@ label = {
 ### Advanced Features
   - [x] Support activation functions as Proc
   - [x] Support cost functions as Proc
-  - [x] Convolutional Neural Net.  
-  - [ ] Add support for multiple neuron types.  
-  - [ ] Bind and use CUDA (GPU acceleration)  
-  - [ ] graphic printout of network architecture.  
+  - [x] Convolutional Neural Net.
+  - [x] Simple recurrent layers
+  - [ ] Add support for multiple neuron types.
+  - [ ] Bind and use CUDA (GPU acceleration)
+  - [ ] graphic printout of network architecture.
+
+Example use of a recurrent layer:
+
+```crystal
+net = SHAInet::Network.new
+net.add_layer(:input, 1)
+net.add_layer(:recurrent, 2)
+net.add_layer(:output, 1)
+net.fully_connect
+output = net.run([[1.0], [2.0], [3.0]]).last
+```
   
 ### Possible Future Features
-  - [ ] RNN (recurant neural network)
+  - [x] RNN (recurant neural network)
   - [ ] LSTM (long-short term memory)
   - [ ] GNG (growing neural gas).  
   - [ ] SOM (self organizing maps).  
