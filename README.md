@@ -288,6 +288,7 @@ label = {
   - [x] Convolutional Neural Net.
   - [x] Simple recurrent layers
   - [x] LSTM layers
+  - [x] Embedding layers
   - [ ] Add support for multiple neuron types.
   - [ ] Bind and use CUDA (GPU acceleration)
   - [ ] graphic printout of network architecture.
@@ -312,6 +313,23 @@ net.add_layer(:lstm, 2)
 net.add_layer(:output, 1)
 net.fully_connect
 output = net.run([[1.0], [2.0], [3.0]]).last
+```
+
+Example use of an embedding layer followed by an LSTM:
+
+```crystal
+tokenizer = SHAInet::Tokenizer.new
+ids = tokenizer.encode("hello world hello")
+
+net = SHAInet::Network.new
+net.add_layer(:input, 1)
+net.add_layer(:embedding, 8) # 8 dimensional embeddings
+net.add_layer(:lstm, 4)
+net.add_layer(:output, 1)
+net.fully_connect
+
+sequence = ids.map { |id| [id.to_f64] }
+output = net.run(sequence).last
 ```
   
 ### Possible Future Features

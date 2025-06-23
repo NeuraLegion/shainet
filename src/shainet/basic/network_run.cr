@@ -33,6 +33,9 @@ module SHAInet
           l.as(RecurrentLayer).activate_step
         elsif l.is_a?(LSTMLayer)
           l.as(LSTMLayer).activate_step
+        elsif l.is_a?(EmbeddingLayer)
+          token = @input_layers.first.neurons.first.activation.to_i
+          l.as(EmbeddingLayer).embed(token)
         else
           l.neurons.each { |neuron| neuron.activate(l.activation_function) }
         end
@@ -70,6 +73,9 @@ module SHAInet
             l.as(RecurrentLayer).activate_step
           elsif l.is_a?(LSTMLayer)
             l.as(LSTMLayer).activate_step
+          elsif l.is_a?(EmbeddingLayer)
+            token = @input_layers.first.neurons.first.activation.to_i
+            l.as(EmbeddingLayer).embed(token)
           else
             l.neurons.each { |neuron| neuron.activate(l.activation_function) }
           end
@@ -116,6 +122,8 @@ module SHAInet
 
       # puts "@error_signal: #{@error_signal}"
       # puts "@total_error: #{@total_error}"
+
+
     rescue e : Exception
       raise NeuralNetRunError.new("Error in evaluate: #{e}")
     end
@@ -125,10 +133,10 @@ module SHAInet
                           cost_function : CostFunction = SHAInet.quadratic_cost)
       seq = input_data.map { |x| x.map(&.to_f64) }
       actual_output = run(seq, stealth: true).last
-      
+
       # Test for NaNs & exploading gradients
       validate_values(actual_output, "actual_output")
-      
+
       # Get the error signal for the final layer, based on the cost function (error gradient is stored in the output neurons)
       @error_signal = [] of Float64 # Collect all the errors for current run
 
@@ -172,7 +180,7 @@ module SHAInet
 
     # Training the model
     # ameba:disable Metrics/CyclomaticComplexity
-    def train(data : Array(Array) | SHAInet::TrainingData,   # Input may contain sequences
+    def train(data : Array(Array) | SHAInet::TrainingData,                  # Input may contain sequences
               training_type : Symbol | String,                              # Type of training: :sgdm, :rprop, :adam
               cost_function : Symbol | String | CostFunction = :mse,        # Proc returns the function value and it's derivative
               epochs : Int32 = 1,                                           # a criteria of when to stop the training
