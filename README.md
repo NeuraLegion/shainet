@@ -287,6 +287,7 @@ label = {
   - [x] Support cost functions as Proc
   - [x] Convolutional Neural Net.
   - [x] Simple recurrent layers
+  - [x] LSTM layers
   - [ ] Add support for multiple neuron types.
   - [ ] Bind and use CUDA (GPU acceleration)
   - [ ] graphic printout of network architecture.
@@ -301,11 +302,22 @@ net.add_layer(:output, 1)
 net.fully_connect
 output = net.run([[1.0], [2.0], [3.0]]).last
 ```
+
+Example use of an LSTM layer:
+
+```crystal
+net = SHAInet::Network.new
+net.add_layer(:input, 1)
+net.add_layer(:lstm, 2)
+net.add_layer(:output, 1)
+net.fully_connect
+output = net.run([[1.0], [2.0], [3.0]]).last
+```
   
 ### Possible Future Features
   - [x] RNN (recurant neural network)
-  - [ ] LSTM (long-short term memory)
-  - [ ] GNG (growing neural gas).  
+  - [x] LSTM (long-short term memory)
+  - [ ] GNG (growing neural gas).
   - [ ] SOM (self organizing maps).  
   - [ ] DBM (deep belief network).  
 

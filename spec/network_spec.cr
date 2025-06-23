@@ -27,8 +27,15 @@ describe SHAInet::Network do
 
   it "Loads from file" do
     puts "\n"
+    filename = "#{__DIR__}/my_net.nn"
+    setup = SHAInet::Network.new
+    setup.add_layer(:input, 2, :memory, SHAInet.sigmoid)
+    setup.add_layer(:output, 2, :memory, SHAInet.sigmoid)
+    setup.fully_connect
+    setup.save_to_file(filename)
+
     nn = SHAInet::Network.new
-    nn.load_from_file("#{__DIR__}/my_net.nn")
+    nn.load_from_file(filename)
     (nn.all_neurons.size > 0).should eq(true)
   end
 

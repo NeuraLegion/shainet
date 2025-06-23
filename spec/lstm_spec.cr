@@ -1,0 +1,19 @@
+require "./spec_helper"
+
+describe SHAInet::LSTMLayer do
+  it "runs forward and backward through a simple sequence" do
+    net = SHAInet::Network.new
+    net.add_layer(:input, 1, :memory, SHAInet.none)
+    net.add_layer(:lstm, 1)
+    net.add_layer(:output, 1, :memory, SHAInet.sigmoid)
+    net.fully_connect
+
+    seq = [[1.0], [2.0], [3.0]]
+    before = net.all_synapses.first.weight
+    net.train([ [seq, [0.5]] ], training_type: :sgdm, epochs: 1, mini_batch_size: 1, log_each: 1)
+    after = net.all_synapses.first.weight
+    (before != after).should eq(true)
+    outputs = net.run(seq)
+    outputs.size.should eq(3)
+  end
+end
