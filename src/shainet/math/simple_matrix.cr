@@ -1,0 +1,93 @@
+module SHAInet
+  class SimpleMatrix
+    property rows : Int32
+    property cols : Int32
+    getter data : Array(Float64)
+
+    def initialize(@rows : Int32, @cols : Int32, init : Float64 = 0.0)
+      @data = Array(Float64).new(@rows * @cols, init)
+    end
+
+    def self.zeros(rows : Int32, cols : Int32)
+      new(rows, cols, 0.0)
+    end
+
+    def self.ones(rows : Int32, cols : Int32)
+      new(rows, cols, 1.0)
+    end
+
+    def [](r : Int32, c : Int32)
+      @data[r * @cols + c]
+    end
+
+    def []=(r : Int32, c : Int32, v : Float64)
+      @data[r * @cols + c] = v
+    end
+
+    def +(other : SimpleMatrix)
+      raise ArgumentError.new("size mismatch") unless @rows == other.rows && @cols == other.cols
+      result = SimpleMatrix.new(@rows, @cols)
+      @rows.times do |i|
+        @cols.times do |j|
+          result[i, j] = self[i, j] + other[i, j]
+        end
+      end
+      result
+    end
+
+    def -(other : SimpleMatrix)
+      raise ArgumentError.new("size mismatch") unless @rows == other.rows && @cols == other.cols
+      result = SimpleMatrix.new(@rows, @cols)
+      @rows.times do |i|
+        @cols.times do |j|
+          result[i, j] = self[i, j] - other[i, j]
+        end
+      end
+      result
+    end
+
+    def *(other : SimpleMatrix)
+      raise ArgumentError.new("size mismatch") unless @cols == other.rows
+      result = SimpleMatrix.new(@rows, other.cols)
+      @rows.times do |i|
+        other.cols.times do |j|
+          sum = 0.0
+          @cols.times do |k|
+            sum += self[i, k] * other[k, j]
+          end
+          result[i, j] = sum
+        end
+      end
+      result
+    end
+
+    def *(scalar : Number)
+      result = SimpleMatrix.new(@rows, @cols)
+      @rows.times do |i|
+        @cols.times do |j|
+          result[i, j] = self[i, j] * scalar.to_f64
+        end
+      end
+      result
+    end
+
+    def transpose
+      result = SimpleMatrix.new(@cols, @rows)
+      @rows.times do |i|
+        @cols.times do |j|
+          result[j, i] = self[i, j]
+        end
+      end
+      result
+    end
+
+    def to_a
+      Array.new(@rows) do |i|
+        Array.new(@cols) do |j|
+          self[i, j]
+        end
+      end
+    end
+  end
+end
+
