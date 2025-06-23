@@ -1,5 +1,6 @@
 require "log"
 require "json"
+require "../math/simple_matrix"
 
 module SHAInet
   class Network
@@ -23,6 +24,7 @@ module SHAInet
     # General network parameters
     getter :input_layers, :output_layers, :hidden_layers, :recurrent_layers, :lstm_layers, :all_neurons, :all_synapses
     getter :transformer_layers
+    getter transformer_error : SimpleMatrix
     getter error_signal : Array(Float64), total_error : Float64, :mse, w_gradient : Array(Float64), b_gradient : Array(Float64)
 
     # Parameters for SGD + Momentum
@@ -66,6 +68,7 @@ module SHAInet
       @beta2 = 0.999_f64   # For Adam , exponential decay rate (not recommended to change value)
       @epsilon = 10e-8_f64 # For Adam , prevents exploding gradients (not recommended to change value)
       @time_step = 0_i32   # For Adam
+      @transformer_error = SimpleMatrix.zeros(1, 1)
     end
 
     # Create and populate a layer with neurons
