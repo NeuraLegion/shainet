@@ -29,7 +29,13 @@ module SHAInet
       # Propogate the information forward through the hidden layers
 
       @hidden_layers.each do |l|
-        l.neurons.each { |neuron| neuron.activate(l.activation_function) }
+        if l.is_a?(RecurrentLayer)
+          l.as(RecurrentLayer).activate_step
+        elsif l.is_a?(LSTMLayer)
+          l.as(LSTMLayer).activate_step
+        else
+          l.neurons.each { |neuron| neuron.activate(l.activation_function) }
+        end
       end
 
       # Propogate the information through the output layers
@@ -62,6 +68,8 @@ module SHAInet
         @hidden_layers.each do |l|
           if l.is_a?(RecurrentLayer)
             l.as(RecurrentLayer).activate_step
+          elsif l.is_a?(LSTMLayer)
+            l.as(LSTMLayer).activate_step
           else
             l.neurons.each { |neuron| neuron.activate(l.activation_function) }
           end
