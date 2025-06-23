@@ -78,22 +78,49 @@ module SHAInet
 
     # Quantifies how good the network performed for a single input compared to the expected output
     # This function returns the actual output and updates the error gradient for the output layer
-    def evaluate(input_data : Array(GenNum) | Array(Array(GenNum)),
+    def evaluate(input_data : Array(GenNum),
                  expected_output : Array(GenNum),
                  cost_function : CostFunction = SHAInet.quadratic_cost)
-      sequential = input_data.as(Array).first.is_a?(Array)
-      actual_output = if sequential
-                        seq_tmp = input_data.as(Array).map { |x| x.as(Array).map(&.to_f64).as(Array(Float64)) }
-                        seq = seq_tmp.as(Array(Array(Float64)))
-                        run(seq, stealth: true).last
-                      else
-                        input_tmp = input_data.as(Array).map(&.to_f64)
-                        run(input_tmp.as(Array(Float64)), stealth: true)
-                      end
+      actual_output = run(input_data.map(&.to_f64), stealth: true)
 
       # Test for NaNs & exploading gradients
       validate_values(actual_output, "actual_output")
 
+      # Get the error signal for the final layer, based on the cost function (error gradient is stored in the output neurons)
+      @error_signal = [] of Float64 # Collect all the errors for current run
+
+      actual_output.size.times do |i|
+        neuron = @output_layers.last.neurons[i] # Update error of all neurons in the output layer based on the actual result
+        cost = cost_function.call(expected_output[i], actual_output[i])
+        neuron.gradient = cost[:derivative]*neuron.sigma_prime
+        @error_signal << cost[:value] # Store the output error based on cost function
+
+        # puts "Actual output: #{actual_output}"
+        # puts "Cost value: #{cost[:value]}"
+        # puts "Cost derivative: #{cost[:derivative]}"
+        # puts "Neuron.sigma_prime: #{neuron.sigma_prime}"
+        # puts "---"
+      end
+
+      # Test for NaNs & exploading gradients
+      validate_values(@error_signal, "error_signal")
+      @total_error = @error_signal.reduce(0.0) { |acc, i| acc + i } # Sum up all the errors from output layer
+
+      # puts "@error_signal: #{@error_signal}"
+      # puts "@total_error: #{@total_error}"
+    rescue e : Exception
+      raise NeuralNetRunError.new("Error in evaluate: #{e}")
+    end
+
+    def evaluate_sequence(input_data : Array(Array(GenNum)),
+                          expected_output : Array(GenNum),
+                          cost_function : CostFunction = SHAInet.quadratic_cost)
+      seq = input_data.map { |x| x.map(&.to_f64) }
+      actual_output = run(seq, stealth: true).last
+      
+      # Test for NaNs & exploading gradients
+      validate_values(actual_output, "actual_output")
+      
       # Get the error signal for the final layer, based on the cost function (error gradient is stored in the output neurons)
       @error_signal = [] of Float64 # Collect all the errors for current run
 
@@ -212,7 +239,28 @@ module SHAInet
           data_slice.each do |data_point|
             input_d = data_point[0]
             output_d = data_point[1]
-            evaluate(input_d, output_d.as(Array).flatten.map(&.to_f64), cost_function) # Get error gradient from output layer based on current input
+            output_arr = [] of Float64
+            if output_d.is_a?(Array)
+              output_d.as(Array).each do |v|
+                if v.is_a?(Number)
+                  output_arr << v.to_f64
+                end
+              end
+            else
+              output_arr << output_d.to_f64
+            end
+            if input_d.is_a?(Array) && input_d.as(Array).first.is_a?(Array)
+              seq_in = (input_d.as(Array).map { |x| x.as(Array).map(&.to_f64).as(Array(Float64)) }).as(Array(Array(Float64)))
+              evaluate_sequence(seq_in, output_arr.map(&.to_f64), cost_function)
+            else
+              input_arr = [] of Float64
+              input_d.as(Array).each do |v|
+                if v.is_a?(Number)
+                  input_arr << v.to_f64
+                end
+              end
+              evaluate(input_arr, output_arr.map(&.to_f64), cost_function)
+            end
             # all_errors << @total_error
             all_errors += @total_error
 
@@ -491,7 +539,28 @@ module SHAInet
               # Update error signal in output layer
               input_d = data_point[0]
               output_d = data_point[1]
-              evaluate(input_d, output_d.as(Array).flatten.map(&.to_f64), cost_function)
+              output_arr = [] of Float64
+              if output_d.is_a?(Array)
+                output_d.as(Array).each do |v|
+                  if v.is_a?(Number)
+                    output_arr << v.to_f64
+                  end
+                end
+              else
+                output_arr << output_d.to_f64
+              end
+              if input_d.is_a?(Array) && input_d.as(Array).first.is_a?(Array)
+                seq_in = (input_d.as(Array).map { |x| x.as(Array).map(&.to_f64).as(Array(Float64)) }).as(Array(Array(Float64)))
+                evaluate_sequence(seq_in, output_arr.map(&.to_f64), cost_function)
+              else
+                input_arr = [] of Float64
+                input_d.as(Array).each do |v|
+                  if v.is_a?(Number)
+                    input_arr << v.to_f64
+                  end
+                end
+                evaluate(input_arr, output_arr.map(&.to_f64), cost_function)
+              end
               update_mse
               batch_mse_sum += @mse
               @error_signal.size.times { |i| batch_errors_sum[i] += @error_signal[i] }
