@@ -48,17 +48,79 @@ module SHAInet
       raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
     end
 
+    def run(input : Array(Array(GenNum)), stealth : Bool = false) : Array(Array(Float64))
+      verify_net_before_train
+      input.each do |step|
+        raise NeuralNetRunError.new("Error input data size: #{step.size} doesn't fit input layer size: #{@input_layers.first.neurons.size}.") unless step.size == @input_layers.first.neurons.size
+      end
+      reset_recurrent_state
+      outputs = [] of Array(Float64)
+      input.each do |step|
+        step.each_with_index do |data, i|
+          @input_layers.first.neurons[i].activation = data.to_f64
+        end
+        @hidden_layers.each do |l|
+          if l.is_a?(RecurrentLayer)
+            l.as(RecurrentLayer).activate_step
+          else
+            l.neurons.each { |neuron| neuron.activate(l.activation_function) }
+          end
+        end
+        @output_layers.each do |l|
+          l.neurons.each { |neuron| neuron.activate(l.activation_function) }
+        end
+        outputs << @output_layers.last.neurons.map { |neuron| neuron.activation }
+      end
+      outputs
+    rescue e : Exception
+      raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
+    end
+
     # Quantifies how good the network performed for a single input compared to the expected output
     # This function returns the actual output and updates the error gradient for the output layer
     def evaluate(input_data : Array(GenNum),
                  expected_output : Array(GenNum),
                  cost_function : CostFunction = SHAInet.quadratic_cost)
-      #
-      actual_output = run(input_data, stealth: true)
+      actual_output = run(input_data.map(&.to_f64), stealth: true)
 
       # Test for NaNs & exploading gradients
       validate_values(actual_output, "actual_output")
 
+      # Get the error signal for the final layer, based on the cost function (error gradient is stored in the output neurons)
+      @error_signal = [] of Float64 # Collect all the errors for current run
+
+      actual_output.size.times do |i|
+        neuron = @output_layers.last.neurons[i] # Update error of all neurons in the output layer based on the actual result
+        cost = cost_function.call(expected_output[i], actual_output[i])
+        neuron.gradient = cost[:derivative]*neuron.sigma_prime
+        @error_signal << cost[:value] # Store the output error based on cost function
+
+        # puts "Actual output: #{actual_output}"
+        # puts "Cost value: #{cost[:value]}"
+        # puts "Cost derivative: #{cost[:derivative]}"
+        # puts "Neuron.sigma_prime: #{neuron.sigma_prime}"
+        # puts "---"
+      end
+
+      # Test for NaNs & exploading gradients
+      validate_values(@error_signal, "error_signal")
+      @total_error = @error_signal.reduce(0.0) { |acc, i| acc + i } # Sum up all the errors from output layer
+
+      # puts "@error_signal: #{@error_signal}"
+      # puts "@total_error: #{@total_error}"
+    rescue e : Exception
+      raise NeuralNetRunError.new("Error in evaluate: #{e}")
+    end
+
+    def evaluate_sequence(input_data : Array(Array(GenNum)),
+                          expected_output : Array(GenNum),
+                          cost_function : CostFunction = SHAInet.quadratic_cost)
+      seq = input_data.map { |x| x.map(&.to_f64) }
+      actual_output = run(seq, stealth: true).last
+      
+      # Test for NaNs & exploading gradients
+      validate_values(actual_output, "actual_output")
+      
       # Get the error signal for the final layer, based on the cost function (error gradient is stored in the output neurons)
       @error_signal = [] of Float64 # Collect all the errors for current run
 
@@ -102,7 +164,7 @@ module SHAInet
 
     # Training the model
     # ameba:disable Metrics/CyclomaticComplexity
-    def train(data : Array(Array(Array(GenNum))) | SHAInet::TrainingData,   # Input structure: data = [[Input = [] of Float64],[Expected result = [] of Float64]]
+    def train(data : Array(Array) | SHAInet::TrainingData,   # Input may contain sequences
               training_type : Symbol | String,                              # Type of training: :sgdm, :rprop, :adam
               cost_function : Symbol | String | CostFunction = :mse,        # Proc returns the function value and it's derivative
               epochs : Int32 = 1,                                           # a criteria of when to stop the training
@@ -175,7 +237,30 @@ module SHAInet
           # Go over each data point and collect gradients of weights/biases
           # based on each specific example
           data_slice.each do |data_point|
-            evaluate(data_point[0], data_point[1], cost_function) # Get error gradient from output layer based on current input
+            input_d = data_point[0]
+            output_d = data_point[1]
+            output_arr = [] of Float64
+            if output_d.is_a?(Array)
+              output_d.as(Array).each do |v|
+                if v.is_a?(Number)
+                  output_arr << v.to_f64
+                end
+              end
+            else
+              output_arr << output_d.to_f64
+            end
+            if input_d.is_a?(Array) && input_d.as(Array).first.is_a?(Array)
+              seq_in = (input_d.as(Array).map { |x| x.as(Array).map(&.to_f64).as(Array(Float64)) }).as(Array(Array(Float64)))
+              evaluate_sequence(seq_in, output_arr.map(&.to_f64), cost_function)
+            else
+              input_arr = [] of Float64
+              input_d.as(Array).each do |v|
+                if v.is_a?(Number)
+                  input_arr << v.to_f64
+                end
+              end
+              evaluate(input_arr, output_arr.map(&.to_f64), cost_function)
+            end
             # all_errors << @total_error
             all_errors += @total_error
 
@@ -249,7 +334,7 @@ module SHAInet
 
     # This method is kept for matching syntax of previous versions.
     # It is possible to use the "train" method instead
-    def train_batch(data : Array(Array(Array(GenNum))) | SHAInet::TrainingData,
+    def train_batch(data : Array(Array) | SHAInet::TrainingData,
                     training_type : Symbol | String = :sgdm,
                     cost_function : Symbol | String | CostFunction = :mse,
                     epochs : Int32 = 1,
@@ -452,7 +537,30 @@ module SHAInet
 
             data_slice.each do |data_point|
               # Update error signal in output layer
-              evaluate(data_point[0], data_point[1], cost_function)
+              input_d = data_point[0]
+              output_d = data_point[1]
+              output_arr = [] of Float64
+              if output_d.is_a?(Array)
+                output_d.as(Array).each do |v|
+                  if v.is_a?(Number)
+                    output_arr << v.to_f64
+                  end
+                end
+              else
+                output_arr << output_d.to_f64
+              end
+              if input_d.is_a?(Array) && input_d.as(Array).first.is_a?(Array)
+                seq_in = (input_d.as(Array).map { |x| x.as(Array).map(&.to_f64).as(Array(Float64)) }).as(Array(Array(Float64)))
+                evaluate_sequence(seq_in, output_arr.map(&.to_f64), cost_function)
+              else
+                input_arr = [] of Float64
+                input_d.as(Array).each do |v|
+                  if v.is_a?(Number)
+                    input_arr << v.to_f64
+                  end
+                end
+                evaluate(input_arr, output_arr.map(&.to_f64), cost_function)
+              end
               update_mse
               batch_mse_sum += @mse
               @error_signal.size.times { |i| batch_errors_sum[i] += @error_signal[i] }
@@ -481,15 +589,21 @@ module SHAInet
       end
     end
 
-    def verify_data(data : Array(Array(Array(GenNum))))
+    def verify_data(data : Array(Array))
       message = nil
       if data.sample.size != 2
         message = "Train data must have two arrays, one for input one for output"
       end
-      random_input = data.sample.first.size
+      sample_input = data.sample.first
+      if sample_input.is_a?(Array) && sample_input.as(Array).first.is_a?(Array)
+        return
+      end
+      sample_input_arr = sample_input.is_a?(Array) ? sample_input.as(Array) : [sample_input]
+      random_input = sample_input_arr.size
       random_output = data.sample.last.size
       data.each_with_index do |test, i|
-        if (test.first.size != random_input)
+        inp = test.first
+        if inp.as(Array).size != random_input
           message = "Input data sizes are inconsistent"
         end
         if (test.last.size != random_output)
