@@ -331,6 +331,15 @@ net.fully_connect
 sequence = ids.map { |id| [id.to_f64] }
 output = net.run(sequence).last
 ```
+
+Example of a Byte-Pair Encoding tokenizer:
+
+```crystal
+tokenizer = SHAInet::BPETokenizer.new
+tokenizer.train("hello world hello world", 30)
+ids = tokenizer.encode("hello world")
+text = tokenizer.decode(ids)
+```
   
 ### Possible Future Features
   - [x] RNN (recurant neural network)
