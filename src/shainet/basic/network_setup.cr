@@ -244,6 +244,7 @@ module SHAInet
       elsif @output_layers.empty?
         raise NeuralNetRunError.new("No output layers defined")
       end
+      @lstm_layers.each &.setup_gate_params
     end
 
     def randomize_all_weights
