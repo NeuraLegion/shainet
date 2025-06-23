@@ -49,7 +49,7 @@ module SHAInet
       @out
     end
 
-    def backward(d_out : SimpleMatrix, lr : Float64)
+    def backward(d_out : SimpleMatrix)
       dh = d_out * @w2.transpose
       @g_w2 = @g_w2 + (@h.transpose * d_out)
       db2 = SimpleMatrix.zeros(1, d_out.cols)
@@ -69,15 +69,21 @@ module SHAInet
       end
       @g_b1 = @g_b1 + db1
       d_input = drelu * @w1.transpose
-      update_params(lr)
       d_input
     end
 
-    private def update_params(lr : Float64)
+    def apply_gradients(lr : Float64)
       @w1 = @w1 - @g_w1 * lr
       @b1 = @b1 - @g_b1 * lr
       @w2 = @w2 - @g_w2 * lr
       @b2 = @b2 - @g_b2 * lr
+      @g_w1 = SimpleMatrix.zeros(@w1.rows, @w1.cols)
+      @g_w2 = SimpleMatrix.zeros(@w2.rows, @w2.cols)
+      @g_b1 = SimpleMatrix.zeros(@b1.rows, @b1.cols)
+      @g_b2 = SimpleMatrix.zeros(@b2.rows, @b2.cols)
+    end
+
+    def zero_gradients
       @g_w1 = SimpleMatrix.zeros(@w1.rows, @w1.cols)
       @g_w2 = SimpleMatrix.zeros(@w2.rows, @w2.cols)
       @g_b1 = SimpleMatrix.zeros(@b1.rows, @b1.cols)

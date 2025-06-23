@@ -2,6 +2,7 @@ require "./spec_helper"
 
 describe SHAInet::LSTMLayer do
   it "runs forward and backward through a simple sequence" do
+    Random::DEFAULT.new_seed(42_u64, 54_u64)
     net = SHAInet::Network.new
     net.add_layer(:input, 1, :memory, SHAInet.none)
     net.add_layer(:lstm, 1)
@@ -20,6 +21,7 @@ describe SHAInet::LSTMLayer do
   end
 
   it "learns to predict the last value of a sequence" do
+    Random::DEFAULT.new_seed(42_u64, 54_u64)
     net = SHAInet::Network.new
     net.add_layer(:input, 1, :memory, SHAInet.none)
     net.add_layer(:lstm, 1)

@@ -15,10 +15,20 @@ module SHAInet
       ff_out
     end
 
-    def backward(d_out : SimpleMatrix, lr : Float64)
-      d_attn = @ffn.backward(d_out, lr)
-      d_in = @mha.backward(d_attn, lr)
+    def backward(d_out : SimpleMatrix)
+      d_attn = @ffn.backward(d_out)
+      d_in = @mha.backward(d_attn)
       d_in
+    end
+
+    def apply_gradients(lr : Float64)
+      @ffn.apply_gradients(lr)
+      @mha.apply_gradients(lr)
+    end
+
+    def zero_gradients
+      @ffn.zero_gradients
+      @mha.zero_gradients
     end
 
     def neurons

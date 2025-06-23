@@ -75,7 +75,7 @@ module SHAInet
       @out
     end
 
-    def backward(d_out : SimpleMatrix, lr : Float64)
+    def backward(d_out : SimpleMatrix)
       # Gradients for output projection
       @grads_w_o = (@q_heads.size == 0 ? SimpleMatrix.zeros(@d_model, @d_model) : @grads_w_o)
       @grads_w_o = @grads_w_o + ((@out.clone.transpose * d_out))
@@ -120,15 +120,21 @@ module SHAInet
 
       d_input = d_q_total * @w_q.transpose + d_k_total * @w_k.transpose + d_v_total * @w_v.transpose
 
-      update_params(lr)
       d_input
     end
 
-    private def update_params(lr : Float64)
+    def apply_gradients(lr : Float64)
       @w_q = @w_q - @grads_w_q * lr
       @w_k = @w_k - @grads_w_k * lr
       @w_v = @w_v - @grads_w_v * lr
       @w_o = @w_o - @grads_w_o * lr
+      @grads_w_q = SimpleMatrix.zeros(@d_model, @d_model)
+      @grads_w_k = SimpleMatrix.zeros(@d_model, @d_model)
+      @grads_w_v = SimpleMatrix.zeros(@d_model, @d_model)
+      @grads_w_o = SimpleMatrix.zeros(@d_model, @d_model)
+    end
+
+    def zero_gradients
       @grads_w_q = SimpleMatrix.zeros(@d_model, @d_model)
       @grads_w_k = SimpleMatrix.zeros(@d_model, @d_model)
       @grads_w_v = SimpleMatrix.zeros(@d_model, @d_model)
