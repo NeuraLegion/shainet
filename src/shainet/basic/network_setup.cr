@@ -101,6 +101,8 @@ module SHAInet
       when "lstm"
         @hidden_layers << layer
         @lstm_layers << layer.as(LSTMLayer)
+      when "embedding"
+        @hidden_layers << layer
       when "output"
         if @output_layers.empty?
           @output_layers << layer

@@ -292,6 +292,13 @@ module SHAInet
               l.neurons.each { |neuron| neuron.hidden_error_prop }
             end
 
+            # Collect gradients for embedding layers before summing
+            @hidden_layers.each do |l|
+              if l.is_a?(EmbeddingLayer)
+                l.as(EmbeddingLayer).accumulate_gradient
+              end
+            end
+
             # Sum all gradients from each data point for the batch update
             @all_synapses.each_with_index { |synapse, i| @w_gradient[i] += (synapse.source_neuron.activation)*(synapse.dest_neuron.gradient) }
             @all_neurons.each_with_index { |neuron, i| @b_gradient[i] += neuron.gradient }
@@ -471,6 +478,13 @@ module SHAInet
 
           neuron.m_prev = neuron.m_current
           neuron.v_prev = neuron.v_current
+        end
+      end
+
+      # Update embeddings after using neuron gradients
+      @hidden_layers.each do |layer|
+        if layer.is_a?(EmbeddingLayer)
+          layer.as(EmbeddingLayer).apply_gradients(@learning_rate)
         end
       end
     end
