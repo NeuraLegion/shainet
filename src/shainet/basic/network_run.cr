@@ -1,5 +1,6 @@
 require "log"
 require "json"
+require "../math/simple_matrix"
 
 module SHAInet
   class Network
@@ -19,55 +20,28 @@ module SHAInet
       raise NeuralNetRunError.new(
         "Error input data size: #{input.size} doesn't fit input layer size: #{@input_layers.first.neurons.size}.") unless input.size == @input_layers.first.neurons.size
 
-      # Insert the input data into the input layer
-      input.each_with_index do |data, i|
-        # Inserts the input information into the input layers
-        # TODO: add support for multiple input layers
-        @input_layers.first.neurons[i].activation = data.to_f64
-      end
-
-      # Propogate the information forward through the hidden layers
-
-      @hidden_layers.each do |l|
-        if l.is_a?(RecurrentLayer)
-          l.as(RecurrentLayer).activate_step
-        elsif l.is_a?(LSTMLayer)
-          l.as(LSTMLayer).activate_step
-        elsif l.is_a?(EmbeddingLayer)
-          token = @input_layers.first.neurons.first.activation.to_i
-          l.as(EmbeddingLayer).embed(token)
-        else
-          l.neurons.each { |neuron| neuron.activate(l.activation_function) }
+      if @hidden_layers.any? &.is_a?(TransformerLayer)
+        matrix = SimpleMatrix.from_a([input.map(&.to_f64)])
+        @hidden_layers.each do |l|
+          if l.is_a?(TransformerLayer)
+            matrix = l.as(TransformerLayer).forward(matrix)
+          end
         end
-      end
-
-      # Propogate the information through the output layers
-      @output_layers.each do |l|
-        l.neurons.each { |neuron| neuron.activate(l.activation_function) }
-      end
-
-      output = @output_layers.last.neurons.map { |neuron| neuron.activation } # return an array of all output neuron activations
-      # TODO: add support for multiple output layers
-
-      unless stealth # Hide output report during training
-        Log.info { "Input => #{input}, network output => #{output}" }
-      end
-      output
-    rescue e : Exception
-      raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
-    end
-
-    def run(input : Array(Array(GenNum)), stealth : Bool = false) : Array(Array(Float64))
-      verify_net_before_train
-      input.each do |step|
-        raise NeuralNetRunError.new("Error input data size: #{step.size} doesn't fit input layer size: #{@input_layers.first.neurons.size}.") unless step.size == @input_layers.first.neurons.size
-      end
-      reset_recurrent_state
-      outputs = [] of Array(Float64)
-      input.each do |step|
-        step.each_with_index do |data, i|
+        output = matrix.to_a.first
+        unless stealth
+          Log.info { "Input => #{input}, network output => #{output}" }
+        end
+        output
+      else
+        # Insert the input data into the input layer
+        input.each_with_index do |data, i|
+          # Inserts the input information into the input layers
+          # TODO: add support for multiple input layers
           @input_layers.first.neurons[i].activation = data.to_f64
         end
+
+        # Propogate the information forward through the hidden layers
+
         @hidden_layers.each do |l|
           if l.is_a?(RecurrentLayer)
             l.as(RecurrentLayer).activate_step
@@ -80,12 +54,61 @@ module SHAInet
             l.neurons.each { |neuron| neuron.activate(l.activation_function) }
           end
         end
+
+        # Propogate the information through the output layers
         @output_layers.each do |l|
           l.neurons.each { |neuron| neuron.activate(l.activation_function) }
         end
-        outputs << @output_layers.last.neurons.map { |neuron| neuron.activation }
+
+        output = @output_layers.last.neurons.map { |neuron| neuron.activation }
+        unless stealth
+          Log.info { "Input => #{input}, network output => #{output}" }
+        end
+        output
       end
-      outputs
+    rescue e : Exception
+      raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
+    end
+
+    def run(input : Array(Array(GenNum)), stealth : Bool = false) : Array(Array(Float64))
+      verify_net_before_train
+      input.each do |step|
+        raise NeuralNetRunError.new("Error input data size: #{step.size} doesn't fit input layer size: #{@input_layers.first.neurons.size}.") unless step.size == @input_layers.first.neurons.size
+      end
+      if @hidden_layers.any? &.is_a?(TransformerLayer)
+        matrix = SimpleMatrix.from_a(input.map { |x| x.map(&.to_f64) })
+        @hidden_layers.each do |l|
+          if l.is_a?(TransformerLayer)
+            matrix = l.as(TransformerLayer).forward(matrix)
+          end
+        end
+        matrix.to_a
+      else
+        reset_recurrent_state
+        outputs = [] of Array(Float64)
+        input.each do |step|
+          step.each_with_index do |data, i|
+            @input_layers.first.neurons[i].activation = data.to_f64
+          end
+          @hidden_layers.each do |l|
+            if l.is_a?(RecurrentLayer)
+              l.as(RecurrentLayer).activate_step
+            elsif l.is_a?(LSTMLayer)
+              l.as(LSTMLayer).activate_step
+            elsif l.is_a?(EmbeddingLayer)
+              token = @input_layers.first.neurons.first.activation.to_i
+              l.as(EmbeddingLayer).embed(token)
+            else
+              l.neurons.each { |neuron| neuron.activate(l.activation_function) }
+            end
+          end
+          @output_layers.each do |l|
+            l.neurons.each { |neuron| neuron.activate(l.activation_function) }
+          end
+          outputs << @output_layers.last.neurons.map { |neuron| neuron.activation }
+        end
+        outputs
+      end
     rescue e : Exception
       raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
     end
@@ -104,10 +127,10 @@ module SHAInet
       @error_signal = [] of Float64 # Collect all the errors for current run
 
       actual_output.size.times do |i|
-        neuron = @output_layers.last.neurons[i] # Update error of all neurons in the output layer based on the actual result
+        neuron = @output_layers.last.neurons[i]
         cost = cost_function.call(expected_output[i], actual_output[i])
         neuron.gradient = cost[:derivative]*neuron.sigma_prime
-        @error_signal << cost[:value] # Store the output error based on cost function
+        @error_signal << cost[:value]
 
         # puts "Actual output: #{actual_output}"
         # puts "Cost value: #{cost[:value]}"
@@ -118,7 +141,13 @@ module SHAInet
 
       # Test for NaNs & exploading gradients
       validate_values(@error_signal, "error_signal")
-      @total_error = @error_signal.reduce(0.0) { |acc, i| acc + i } # Sum up all the errors from output layer
+      @total_error = @error_signal.reduce(0.0) { |acc, i| acc + i }
+
+      if @hidden_layers.any? &.is_a?(TransformerLayer)
+        exp = SimpleMatrix.from_a([expected_output.map(&.to_f64)])
+        act = SimpleMatrix.from_a([actual_output])
+        @transformer_error = act - exp
+      end
 
       # puts "@error_signal: #{@error_signal}"
       # puts "@total_error: #{@total_error}"
@@ -141,10 +170,10 @@ module SHAInet
       @error_signal = [] of Float64 # Collect all the errors for current run
 
       actual_output.size.times do |i|
-        neuron = @output_layers.last.neurons[i] # Update error of all neurons in the output layer based on the actual result
+        neuron = @output_layers.last.neurons[i]
         cost = cost_function.call(expected_output[i], actual_output[i])
         neuron.gradient = cost[:derivative]*neuron.sigma_prime
-        @error_signal << cost[:value] # Store the output error based on cost function
+        @error_signal << cost[:value]
 
         # puts "Actual output: #{actual_output}"
         # puts "Cost value: #{cost[:value]}"
@@ -155,7 +184,13 @@ module SHAInet
 
       # Test for NaNs & exploading gradients
       validate_values(@error_signal, "error_signal")
-      @total_error = @error_signal.reduce(0.0) { |acc, i| acc + i } # Sum up all the errors from output layer
+      @total_error = @error_signal.reduce(0.0) { |acc, i| acc + i }
+
+      if @hidden_layers.any? &.is_a?(TransformerLayer)
+        exp = SimpleMatrix.from_a([expected_output.map(&.to_f64)])
+        act = SimpleMatrix.from_a([actual_output])
+        @transformer_error = act - exp
+      end
 
       # puts "@error_signal: #{@error_signal}"
       # puts "@total_error: #{@total_error}"
@@ -283,8 +318,11 @@ module SHAInet
 
             # Propogate the errors backwards through the hidden layers
             @hidden_layers.reverse_each do |l|
-              # Update neuron error based on errors*weights of neurons from the next layer
-              l.neurons.each { |neuron| neuron.hidden_error_prop }
+              if l.is_a?(TransformerLayer)
+                l.as(TransformerLayer).backward(@transformer_error, @learning_rate)
+              else
+                l.neurons.each { |neuron| neuron.hidden_error_prop }
+              end
             end
 
             # Propogate the errors backwards through the input layers
@@ -481,7 +519,7 @@ module SHAInet
 
           neuron.m_prev = neuron.m_current
 
-        neuron.v_prev = neuron.v_current
+          neuron.v_prev = neuron.v_current
         end
       end
 
