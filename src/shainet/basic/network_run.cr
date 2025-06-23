@@ -249,6 +249,7 @@ module SHAInet
           # Save gradients from entire batch before updating weights & biases
           @w_gradient = Array(Float64).new(@all_synapses.size) { 0.0 }
           @b_gradient = Array(Float64).new(@all_neurons.size) { 0.0 }
+          @lstm_layers.each &.zero_gate_gradients
 
           # Go over each data point and collect gradients of weights/biases
           # based on each specific example
@@ -295,6 +296,7 @@ module SHAInet
             # Sum all gradients from each data point for the batch update
             @all_synapses.each_with_index { |synapse, i| @w_gradient[i] += (synapse.source_neuron.activation)*(synapse.dest_neuron.gradient) }
             @all_neurons.each_with_index { |neuron, i| @b_gradient[i] += neuron.gradient }
+            @lstm_layers.each &.accumulate_gate_gradients
 
             # Calculate MSE per data point
             if @error_signal.size == 1
@@ -327,6 +329,7 @@ module SHAInet
           @time_step += 1 unless mini_batch_size # Based on how many epochs have passed in current training run, needed for Adam
           update_weights(training_type)
           update_biases(training_type)
+          update_lstm_gates(training_type)
 
           # Update epoch status
           epoch_mse += @mse
@@ -470,8 +473,15 @@ module SHAInet
           neuron.bias -= (@alpha*m_hat)/(v_hat**0.5 + @epsilon)
 
           neuron.m_prev = neuron.m_current
-          neuron.v_prev = neuron.v_current
+
+        neuron.v_prev = neuron.v_current
         end
+      end
+    end
+
+    def update_lstm_gates(learn_type : Symbol | String)
+      @lstm_layers.each do |layer|
+        layer.update_gate_params(@learning_rate)
       end
     end
 
