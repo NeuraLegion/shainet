@@ -76,6 +76,8 @@ module SHAInet
                 RecurrentLayer.new(n_type.to_s, l_size, activation_function)
               when "lstm"
                 LSTMLayer.new(n_type.to_s, l_size, activation_function)
+              when "embedding"
+                EmbeddingLayer.new(l_size, activation_function)
               else
                 Layer.new(n_type.to_s, l_size, activation_function)
               end
@@ -108,7 +110,7 @@ module SHAInet
           connect_ltl(@hidden_layers.last, @output_layers.first, :full)
         end
       else
-        raise NeuralNetRunError.new("Must define correct layer type (:input, :hidden, :recurrent, :lstm, :output).")
+        raise NeuralNetRunError.new("Must define correct layer type (:input, :hidden, :recurrent, :lstm, :embedding, :output).")
       end
     end
 
