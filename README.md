@@ -351,7 +351,17 @@ tokenizer.train("hello world hello world", 30)
 ids = tokenizer.encode("hello world")
 text = tokenizer.decode(ids)
 ```
-  
+
+### LLM sample
+
+The file `examples/llm_sample.cr` shows how to tokenize text with
+`BPETokenizer`, build a small LSTM based network and train it using
+cross‑entropy loss.
+
+```bash
+crystal run examples/llm_sample.cr
+```
+
 ### Possible Future Features
   - [x] RNN (recurant neural network)
   - [x] LSTM (long-short term memory)
