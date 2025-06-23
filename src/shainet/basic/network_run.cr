@@ -285,6 +285,7 @@ module SHAInet
           @w_gradient = Array(Float64).new(@all_synapses.size) { 0.0 }
           @b_gradient = Array(Float64).new(@all_neurons.size) { 0.0 }
           @lstm_layers.each &.zero_gate_gradients
+          @transformer_layers.each &.zero_gradients
 
           # Go over each data point and collect gradients of weights/biases
           # based on each specific example
@@ -319,7 +320,7 @@ module SHAInet
             # Propogate the errors backwards through the hidden layers
             @hidden_layers.reverse_each do |l|
               if l.is_a?(TransformerLayer)
-                l.as(TransformerLayer).backward(@transformer_error, @learning_rate)
+                l.as(TransformerLayer).backward(@transformer_error)
               else
                 l.neurons.each { |neuron| neuron.hidden_error_prop }
               end
@@ -375,6 +376,7 @@ module SHAInet
           update_weights(training_type)
           update_biases(training_type)
           update_lstm_gates(training_type)
+          update_transformer_layers
 
           # Update epoch status
           epoch_mse += @mse
@@ -534,6 +536,12 @@ module SHAInet
     def update_lstm_gates(learn_type : Symbol | String)
       @lstm_layers.each do |layer|
         layer.update_gate_params(@learning_rate)
+      end
+    end
+
+    def update_transformer_layers
+      @transformer_layers.each do |layer|
+        layer.apply_gradients(@learning_rate)
       end
     end
 
