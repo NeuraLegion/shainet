@@ -1,5 +1,6 @@
 require "log"
 require "json"
+require "../math/simple_matrix"
 
 module SHAInet
   class Network
@@ -19,31 +20,95 @@ module SHAInet
       raise NeuralNetRunError.new(
         "Error input data size: #{input.size} doesn't fit input layer size: #{@input_layers.first.neurons.size}.") unless input.size == @input_layers.first.neurons.size
 
-      # Insert the input data into the input layer
-      input.each_with_index do |data, i|
-        # Inserts the input information into the input layers
-        # TODO: add support for multiple input layers
-        @input_layers.first.neurons[i].activation = data.to_f64
+      if @hidden_layers.any? &.is_a?(TransformerLayer)
+        matrix = SimpleMatrix.from_a([input.map(&.to_f64)])
+        @hidden_layers.each do |l|
+          if l.is_a?(TransformerLayer)
+            matrix = l.as(TransformerLayer).forward(matrix)
+          end
+        end
+        output = matrix.to_a.first
+        unless stealth
+          Log.info { "Input => #{input}, network output => #{output}" }
+        end
+        output
+      else
+        # Insert the input data into the input layer
+        input.each_with_index do |data, i|
+          # Inserts the input information into the input layers
+          # TODO: add support for multiple input layers
+          @input_layers.first.neurons[i].activation = data.to_f64
+        end
+
+        # Propogate the information forward through the hidden layers
+
+        @hidden_layers.each do |l|
+          if l.is_a?(RecurrentLayer)
+            l.as(RecurrentLayer).activate_step
+          elsif l.is_a?(LSTMLayer)
+            l.as(LSTMLayer).activate_step
+          elsif l.is_a?(EmbeddingLayer)
+            token = @input_layers.first.neurons.first.activation.to_i
+            l.as(EmbeddingLayer).embed(token)
+          else
+            l.neurons.each { |neuron| neuron.activate(l.activation_function) }
+          end
+        end
+
+        # Propogate the information through the output layers
+        @output_layers.each do |l|
+          l.neurons.each { |neuron| neuron.activate(l.activation_function) }
+        end
+
+        output = @output_layers.last.neurons.map { |neuron| neuron.activation }
+        unless stealth
+          Log.info { "Input => #{input}, network output => #{output}" }
+        end
+        output
       end
+    rescue e : Exception
+      raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
+    end
 
-      # Propogate the information forward through the hidden layers
-
-      @hidden_layers.each do |l|
-        l.neurons.each { |neuron| neuron.activate(l.activation_function) }
+    def run(input : Array(Array(GenNum)), stealth : Bool = false) : Array(Array(Float64))
+      verify_net_before_train
+      input.each do |step|
+        raise NeuralNetRunError.new("Error input data size: #{step.size} doesn't fit input layer size: #{@input_layers.first.neurons.size}.") unless step.size == @input_layers.first.neurons.size
       end
-
-      # Propogate the information through the output layers
-      @output_layers.each do |l|
-        l.neurons.each { |neuron| neuron.activate(l.activation_function) }
+      if @hidden_layers.any? &.is_a?(TransformerLayer)
+        matrix = SimpleMatrix.from_a(input.map { |x| x.map(&.to_f64) })
+        @hidden_layers.each do |l|
+          if l.is_a?(TransformerLayer)
+            matrix = l.as(TransformerLayer).forward(matrix)
+          end
+        end
+        matrix.to_a
+      else
+        reset_recurrent_state
+        outputs = [] of Array(Float64)
+        input.each do |step|
+          step.each_with_index do |data, i|
+            @input_layers.first.neurons[i].activation = data.to_f64
+          end
+          @hidden_layers.each do |l|
+            if l.is_a?(RecurrentLayer)
+              l.as(RecurrentLayer).activate_step
+            elsif l.is_a?(LSTMLayer)
+              l.as(LSTMLayer).activate_step
+            elsif l.is_a?(EmbeddingLayer)
+              token = @input_layers.first.neurons.first.activation.to_i
+              l.as(EmbeddingLayer).embed(token)
+            else
+              l.neurons.each { |neuron| neuron.activate(l.activation_function) }
+            end
+          end
+          @output_layers.each do |l|
+            l.neurons.each { |neuron| neuron.activate(l.activation_function) }
+          end
+          outputs << @output_layers.last.neurons.map { |neuron| neuron.activation }
+        end
+        outputs
       end
-
-      output = @output_layers.last.neurons.map { |neuron| neuron.activation } # return an array of all output neuron activations
-      # TODO: add support for multiple output layers
-
-      unless stealth # Hide output report during training
-        Log.info { "Input => #{input}, network output => #{output}" }
-      end
-      output
     rescue e : Exception
       raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
     end
@@ -53,8 +118,7 @@ module SHAInet
     def evaluate(input_data : Array(GenNum),
                  expected_output : Array(GenNum),
                  cost_function : CostFunction = SHAInet.quadratic_cost)
-      #
-      actual_output = run(input_data, stealth: true)
+      actual_output = run(input_data.map(&.to_f64), stealth: true)
 
       # Test for NaNs & exploading gradients
       validate_values(actual_output, "actual_output")
@@ -63,10 +127,10 @@ module SHAInet
       @error_signal = [] of Float64 # Collect all the errors for current run
 
       actual_output.size.times do |i|
-        neuron = @output_layers.last.neurons[i] # Update error of all neurons in the output layer based on the actual result
+        neuron = @output_layers.last.neurons[i]
         cost = cost_function.call(expected_output[i], actual_output[i])
         neuron.gradient = cost[:derivative]*neuron.sigma_prime
-        @error_signal << cost[:value] # Store the output error based on cost function
+        @error_signal << cost[:value]
 
         # puts "Actual output: #{actual_output}"
         # puts "Cost value: #{cost[:value]}"
@@ -77,7 +141,56 @@ module SHAInet
 
       # Test for NaNs & exploading gradients
       validate_values(@error_signal, "error_signal")
-      @total_error = @error_signal.reduce(0.0) { |acc, i| acc + i } # Sum up all the errors from output layer
+      @total_error = @error_signal.reduce(0.0) { |acc, i| acc + i }
+
+      if @hidden_layers.any? &.is_a?(TransformerLayer)
+        exp = SimpleMatrix.from_a([expected_output.map(&.to_f64)])
+        act = SimpleMatrix.from_a([actual_output])
+        @transformer_error = act - exp
+      end
+
+      # puts "@error_signal: #{@error_signal}"
+      # puts "@total_error: #{@total_error}"
+
+
+    rescue e : Exception
+      raise NeuralNetRunError.new("Error in evaluate: #{e}")
+    end
+
+    def evaluate_sequence(input_data : Array(Array(GenNum)),
+                          expected_output : Array(GenNum),
+                          cost_function : CostFunction = SHAInet.quadratic_cost)
+      seq = input_data.map { |x| x.map(&.to_f64) }
+      actual_output = run(seq, stealth: true).last
+
+      # Test for NaNs & exploading gradients
+      validate_values(actual_output, "actual_output")
+
+      # Get the error signal for the final layer, based on the cost function (error gradient is stored in the output neurons)
+      @error_signal = [] of Float64 # Collect all the errors for current run
+
+      actual_output.size.times do |i|
+        neuron = @output_layers.last.neurons[i]
+        cost = cost_function.call(expected_output[i], actual_output[i])
+        neuron.gradient = cost[:derivative]*neuron.sigma_prime
+        @error_signal << cost[:value]
+
+        # puts "Actual output: #{actual_output}"
+        # puts "Cost value: #{cost[:value]}"
+        # puts "Cost derivative: #{cost[:derivative]}"
+        # puts "Neuron.sigma_prime: #{neuron.sigma_prime}"
+        # puts "---"
+      end
+
+      # Test for NaNs & exploading gradients
+      validate_values(@error_signal, "error_signal")
+      @total_error = @error_signal.reduce(0.0) { |acc, i| acc + i }
+
+      if @hidden_layers.any? &.is_a?(TransformerLayer)
+        exp = SimpleMatrix.from_a([expected_output.map(&.to_f64)])
+        act = SimpleMatrix.from_a([actual_output])
+        @transformer_error = act - exp
+      end
 
       # puts "@error_signal: #{@error_signal}"
       # puts "@total_error: #{@total_error}"
@@ -102,7 +215,7 @@ module SHAInet
 
     # Training the model
     # ameba:disable Metrics/CyclomaticComplexity
-    def train(data : Array(Array(Array(GenNum))) | SHAInet::TrainingData,   # Input structure: data = [[Input = [] of Float64],[Expected result = [] of Float64]]
+    def train(data : Array(Array) | SHAInet::TrainingData,                  # Input may contain sequences
               training_type : Symbol | String,                              # Type of training: :sgdm, :rprop, :adam
               cost_function : Symbol | String | CostFunction = :mse,        # Proc returns the function value and it's derivative
               epochs : Int32 = 1,                                           # a criteria of when to stop the training
@@ -171,18 +284,46 @@ module SHAInet
           # Save gradients from entire batch before updating weights & biases
           @w_gradient = Array(Float64).new(@all_synapses.size) { 0.0 }
           @b_gradient = Array(Float64).new(@all_neurons.size) { 0.0 }
+          @lstm_layers.each &.zero_gate_gradients
+          @transformer_layers.each &.zero_gradients
 
           # Go over each data point and collect gradients of weights/biases
           # based on each specific example
           data_slice.each do |data_point|
-            evaluate(data_point[0], data_point[1], cost_function) # Get error gradient from output layer based on current input
+            input_d = data_point[0]
+            output_d = data_point[1]
+            output_arr = [] of Float64
+            if output_d.is_a?(Array)
+              output_d.as(Array).each do |v|
+                if v.is_a?(Number)
+                  output_arr << v.to_f64
+                end
+              end
+            else
+              output_arr << output_d.to_f64
+            end
+            if input_d.is_a?(Array) && input_d.as(Array).first.is_a?(Array)
+              seq_in = (input_d.as(Array).map { |x| x.as(Array).map(&.to_f64).as(Array(Float64)) }).as(Array(Array(Float64)))
+              evaluate_sequence(seq_in, output_arr.map(&.to_f64), cost_function)
+            else
+              input_arr = [] of Float64
+              input_d.as(Array).each do |v|
+                if v.is_a?(Number)
+                  input_arr << v.to_f64
+                end
+              end
+              evaluate(input_arr, output_arr.map(&.to_f64), cost_function)
+            end
             # all_errors << @total_error
             all_errors += @total_error
 
             # Propogate the errors backwards through the hidden layers
             @hidden_layers.reverse_each do |l|
-              # Update neuron error based on errors*weights of neurons from the next layer
-              l.neurons.each { |neuron| neuron.hidden_error_prop }
+              if l.is_a?(TransformerLayer)
+                l.as(TransformerLayer).backward(@transformer_error)
+              else
+                l.neurons.each { |neuron| neuron.hidden_error_prop }
+              end
             end
 
             # Propogate the errors backwards through the input layers
@@ -191,9 +332,17 @@ module SHAInet
               l.neurons.each { |neuron| neuron.hidden_error_prop }
             end
 
+            # Collect gradients for embedding layers before summing
+            @hidden_layers.each do |l|
+              if l.is_a?(EmbeddingLayer)
+                l.as(EmbeddingLayer).accumulate_gradient
+              end
+            end
+
             # Sum all gradients from each data point for the batch update
             @all_synapses.each_with_index { |synapse, i| @w_gradient[i] += (synapse.source_neuron.activation)*(synapse.dest_neuron.gradient) }
             @all_neurons.each_with_index { |neuron, i| @b_gradient[i] += neuron.gradient }
+            @lstm_layers.each &.accumulate_gate_gradients
 
             # Calculate MSE per data point
             if @error_signal.size == 1
@@ -226,6 +375,8 @@ module SHAInet
           @time_step += 1 unless mini_batch_size # Based on how many epochs have passed in current training run, needed for Adam
           update_weights(training_type)
           update_biases(training_type)
+          update_lstm_gates(training_type)
+          update_transformer_layers
 
           # Update epoch status
           epoch_mse += @mse
@@ -249,7 +400,7 @@ module SHAInet
 
     # This method is kept for matching syntax of previous versions.
     # It is possible to use the "train" method instead
-    def train_batch(data : Array(Array(Array(GenNum))) | SHAInet::TrainingData,
+    def train_batch(data : Array(Array) | SHAInet::TrainingData,
                     training_type : Symbol | String = :sgdm,
                     cost_function : Symbol | String | CostFunction = :mse,
                     epochs : Int32 = 1,
@@ -369,8 +520,28 @@ module SHAInet
           neuron.bias -= (@alpha*m_hat)/(v_hat**0.5 + @epsilon)
 
           neuron.m_prev = neuron.m_current
+
           neuron.v_prev = neuron.v_current
         end
+      end
+
+      # Update embeddings after using neuron gradients
+      @hidden_layers.each do |layer|
+        if layer.is_a?(EmbeddingLayer)
+          layer.as(EmbeddingLayer).apply_gradients(@learning_rate)
+        end
+      end
+    end
+
+    def update_lstm_gates(learn_type : Symbol | String)
+      @lstm_layers.each do |layer|
+        layer.update_gate_params(@learning_rate)
+      end
+    end
+
+    def update_transformer_layers
+      @transformer_layers.each do |layer|
+        layer.apply_gradients(@learning_rate)
       end
     end
 
@@ -452,7 +623,30 @@ module SHAInet
 
             data_slice.each do |data_point|
               # Update error signal in output layer
-              evaluate(data_point[0], data_point[1], cost_function)
+              input_d = data_point[0]
+              output_d = data_point[1]
+              output_arr = [] of Float64
+              if output_d.is_a?(Array)
+                output_d.as(Array).each do |v|
+                  if v.is_a?(Number)
+                    output_arr << v.to_f64
+                  end
+                end
+              else
+                output_arr << output_d.to_f64
+              end
+              if input_d.is_a?(Array) && input_d.as(Array).first.is_a?(Array)
+                seq_in = (input_d.as(Array).map { |x| x.as(Array).map(&.to_f64).as(Array(Float64)) }).as(Array(Array(Float64)))
+                evaluate_sequence(seq_in, output_arr.map(&.to_f64), cost_function)
+              else
+                input_arr = [] of Float64
+                input_d.as(Array).each do |v|
+                  if v.is_a?(Number)
+                    input_arr << v.to_f64
+                  end
+                end
+                evaluate(input_arr, output_arr.map(&.to_f64), cost_function)
+              end
               update_mse
               batch_mse_sum += @mse
               @error_signal.size.times { |i| batch_errors_sum[i] += @error_signal[i] }
@@ -481,15 +675,21 @@ module SHAInet
       end
     end
 
-    def verify_data(data : Array(Array(Array(GenNum))))
+    def verify_data(data : Array(Array))
       message = nil
       if data.sample.size != 2
         message = "Train data must have two arrays, one for input one for output"
       end
-      random_input = data.sample.first.size
+      sample_input = data.sample.first
+      if sample_input.is_a?(Array) && sample_input.as(Array).first.is_a?(Array)
+        return
+      end
+      sample_input_arr = sample_input.is_a?(Array) ? sample_input.as(Array) : [sample_input]
+      random_input = sample_input_arr.size
       random_output = data.sample.last.size
       data.each_with_index do |test, i|
-        if (test.first.size != random_input)
+        inp = test.first
+        if inp.as(Array).size != random_input
           message = "Input data sizes are inconsistent"
         end
         if (test.last.size != random_output)

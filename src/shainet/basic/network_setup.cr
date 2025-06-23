@@ -1,5 +1,6 @@
 require "log"
 require "json"
+require "../math/simple_matrix"
 
 module SHAInet
   class Network
@@ -16,12 +17,14 @@ module SHAInet
 
     Log = ::Log.for(self)
 
-    LAYER_TYPES      = ["input", "hidden", "output"]
+    LAYER_TYPES      = ["input", "hidden", "recurrent", "output"]
     CONNECTION_TYPES = ["full", "ind_to_ind", "random"]
     COST_FUNCTIONS   = ["mse", "c_ent"] # , "exp", "hel_d", "kld", "gkld", "ita_sai_d"]
 
     # General network parameters
-    getter :input_layers, :output_layers, :hidden_layers, :all_neurons, :all_synapses
+    getter :input_layers, :output_layers, :hidden_layers, :recurrent_layers, :lstm_layers, :all_neurons, :all_synapses
+    getter :transformer_layers
+    getter transformer_error : SimpleMatrix
     getter error_signal : Array(Float64), total_error : Float64, :mse, w_gradient : Array(Float64), b_gradient : Array(Float64)
 
     # Parameters for SGD + Momentum
@@ -40,6 +43,9 @@ module SHAInet
       @input_layers = Array(Layer).new
       @output_layers = Array(Layer).new
       @hidden_layers = Array(Layer).new
+      @recurrent_layers = Array(RecurrentLayer).new
+      @lstm_layers = Array(LSTMLayer).new
+      @transformer_layers = Array(TransformerLayer).new
       @all_neurons = Array(Neuron).new   # Array of all current neurons in the network
       @all_synapses = Array(Synapse).new # Array of all current synapses in the network
       @error_signal = Array(Float64).new # Array of errors for each neuron in the output layers, based on specific input
@@ -62,6 +68,7 @@ module SHAInet
       @beta2 = 0.999_f64   # For Adam , exponential decay rate (not recommended to change value)
       @epsilon = 10e-8_f64 # For Adam , prevents exploding gradients (not recommended to change value)
       @time_step = 0_i32   # For Adam
+      @transformer_error = SimpleMatrix.zeros(1, 1)
     end
 
     # Create and populate a layer with neurons
@@ -69,9 +76,27 @@ module SHAInet
     # l_size = how many neurons in the layer
     # n_type = advanced option for different neuron types
     def add_layer(l_type : Symbol | String, l_size : Int32, n_type : Symbol | String = "memory", activation_function : ActivationFunction = SHAInet.sigmoid)
-      layer = Layer.new(n_type.to_s, l_size, activation_function)
-      layer.neurons.each do |neuron|
-        @all_neurons << neuron # To easily access neurons later
+      layer = case l_type.to_s
+              when "recurrent"
+                RecurrentLayer.new(n_type.to_s, l_size, activation_function)
+              when "lstm"
+                LSTMLayer.new(n_type.to_s, l_size, activation_function)
+              when "embedding"
+                EmbeddingLayer.new(l_size, activation_function)
+              when "transformer"
+                TransformerLayer.new(l_size, 1, l_size*4)
+              else
+                Layer.new(n_type.to_s, l_size, activation_function)
+              end
+      unless layer.is_a?(TransformerLayer)
+        layer.neurons.each do |neuron|
+          @all_neurons << neuron # To easily access neurons later
+        end
+      end
+      if layer.is_a?(RecurrentLayer) || layer.is_a?(LSTMLayer)
+        layer.neurons.each do |neuron|
+          neuron.synapses_in.each { |s| @all_synapses << s }
+        end
       end
 
       case l_type.to_s
@@ -79,6 +104,17 @@ module SHAInet
         @input_layers << layer
       when "hidden"
         @hidden_layers << layer
+      when "recurrent"
+        @hidden_layers << layer
+        @recurrent_layers << layer.as(RecurrentLayer)
+      when "lstm"
+        @hidden_layers << layer
+        @lstm_layers << layer.as(LSTMLayer)
+      when "embedding"
+        @hidden_layers << layer
+      when "transformer"
+        @hidden_layers << layer
+        @transformer_layers << layer.as(TransformerLayer)
       when "output"
         if @output_layers.empty?
           @output_layers << layer
@@ -88,7 +124,7 @@ module SHAInet
           connect_ltl(@hidden_layers.last, @output_layers.first, :full)
         end
       else
-        raise NeuralNetRunError.new("Must define correct layer type (:input, :hidden, :output).")
+        raise NeuralNetRunError.new("Must define correct layer type (:input, :hidden, :recurrent, :lstm, :embedding, :transformer, :output).")
       end
     end
 
@@ -183,6 +219,11 @@ module SHAInet
       Log.info { "Epoch: #{e}, Total error: #{@total_error}, MSE: #{@mse}" }
     end
 
+    def reset_recurrent_state
+      @recurrent_layers.each(&.reset_state)
+      @lstm_layers.each(&.reset_state)
+    end
+
     def clean_dead_neurons
       current_neuron_number = @all_neurons.size
       @hidden_layers.each do |h_l|
@@ -215,6 +256,7 @@ module SHAInet
       elsif @output_layers.empty?
         raise NeuralNetRunError.new("No output layers defined")
       end
+      @lstm_layers.each &.setup_gate_params
     end
 
     def randomize_all_weights

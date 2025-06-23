@@ -285,15 +285,87 @@ label = {
 ### Advanced Features
   - [x] Support activation functions as Proc
   - [x] Support cost functions as Proc
-  - [x] Convolutional Neural Net.  
-  - [ ] Add support for multiple neuron types.  
-  - [ ] Bind and use CUDA (GPU acceleration)  
-  - [ ] graphic printout of network architecture.  
-  
+  - [x] Convolutional Neural Net.
+  - [x] Simple recurrent layers
+  - [x] LSTM layers
+  - [x] Embedding layers
+  - [ ] Add support for multiple neuron types.
+  - [ ] Bind and use CUDA (GPU acceleration)
+  - [ ] graphic printout of network architecture.
+
+Example use of a recurrent layer:
+
+```crystal
+net = SHAInet::Network.new
+net.add_layer(:input, 1)
+net.add_layer(:recurrent, 2)
+net.add_layer(:output, 1)
+net.fully_connect
+output = net.run([[1.0], [2.0], [3.0]]).last
+```
+
+Example use of an LSTM layer:
+
+```crystal
+net = SHAInet::Network.new
+net.add_layer(:input, 1)
+net.add_layer(:lstm, 2)
+net.add_layer(:output, 1)
+net.fully_connect
+output = net.run([[1.0], [2.0], [3.0]]).last
+```
+
+Example use of an embedding layer followed by an LSTM:
+
+```crystal
+tokenizer = SHAInet::Tokenizer.new
+ids = tokenizer.encode("hello world hello")
+
+net = SHAInet::Network.new
+net.add_layer(:input, 1)
+net.add_layer(:embedding, 8) # 8 dimensional embeddings
+net.add_layer(:lstm, 4)
+net.add_layer(:output, 1)
+net.fully_connect
+
+sequence = ids.map { |id| [id.to_f64] }
+output = net.run(sequence).last
+```
+
+Example use of a Transformer layer:
+
+```crystal
+net = SHAInet::Network.new
+net.add_layer(:input, 4)
+net.add_layer(:transformer, 4)
+net.add_layer(:output, 4)
+net.fully_connect
+out = net.run([[1.0, 0.0, 0.0, 0.0]]).first
+```
+
+Example of a Byte-Pair Encoding tokenizer:
+
+```crystal
+tokenizer = SHAInet::BPETokenizer.new
+tokenizer.train("hello world hello world", 30)
+ids = tokenizer.encode("hello world")
+text = tokenizer.decode(ids)
+```
+
+### LLM sample
+
+The file `examples/llm_sample.cr` shows how to tokenize text with
+`BPETokenizer`, build a small LSTM based network and train it using
+cross‑entropy loss.
+
+```bash
+crystal run examples/llm_sample.cr
+```
+
 ### Possible Future Features
-  - [ ] RNN (recurant neural network)
-  - [ ] LSTM (long-short term memory)
-  - [ ] GNG (growing neural gas).  
+  - [x] RNN (recurant neural network)
+  - [x] LSTM (long-short term memory)
+  - [ ] GNG (growing neural gas).
   - [ ] SOM (self organizing maps).  
   - [ ] DBM (deep belief network).  
 
