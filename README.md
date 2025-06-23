@@ -332,6 +332,17 @@ sequence = ids.map { |id| [id.to_f64] }
 output = net.run(sequence).last
 ```
 
+Example use of a Transformer layer:
+
+```crystal
+net = SHAInet::Network.new
+net.add_layer(:input, 4)
+net.add_layer(:transformer, 4)
+net.add_layer(:output, 4)
+net.fully_connect
+out = net.run([[1.0, 0.0, 0.0, 0.0]]).first
+```
+
 Example of a Byte-Pair Encoding tokenizer:
 
 ```crystal

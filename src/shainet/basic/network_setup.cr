@@ -22,6 +22,7 @@ module SHAInet
 
     # General network parameters
     getter :input_layers, :output_layers, :hidden_layers, :recurrent_layers, :lstm_layers, :all_neurons, :all_synapses
+    getter :transformer_layers
     getter error_signal : Array(Float64), total_error : Float64, :mse, w_gradient : Array(Float64), b_gradient : Array(Float64)
 
     # Parameters for SGD + Momentum
@@ -42,6 +43,7 @@ module SHAInet
       @hidden_layers = Array(Layer).new
       @recurrent_layers = Array(RecurrentLayer).new
       @lstm_layers = Array(LSTMLayer).new
+      @transformer_layers = Array(TransformerLayer).new
       @all_neurons = Array(Neuron).new   # Array of all current neurons in the network
       @all_synapses = Array(Synapse).new # Array of all current synapses in the network
       @error_signal = Array(Float64).new # Array of errors for each neuron in the output layers, based on specific input
@@ -78,11 +80,15 @@ module SHAInet
                 LSTMLayer.new(n_type.to_s, l_size, activation_function)
               when "embedding"
                 EmbeddingLayer.new(l_size, activation_function)
+              when "transformer"
+                TransformerLayer.new(l_size, 1, l_size*4)
               else
                 Layer.new(n_type.to_s, l_size, activation_function)
               end
-      layer.neurons.each do |neuron|
-        @all_neurons << neuron # To easily access neurons later
+      unless layer.is_a?(TransformerLayer)
+        layer.neurons.each do |neuron|
+          @all_neurons << neuron # To easily access neurons later
+        end
       end
       if layer.is_a?(RecurrentLayer) || layer.is_a?(LSTMLayer)
         layer.neurons.each do |neuron|
@@ -103,6 +109,9 @@ module SHAInet
         @lstm_layers << layer.as(LSTMLayer)
       when "embedding"
         @hidden_layers << layer
+      when "transformer"
+        @hidden_layers << layer
+        @transformer_layers << layer.as(TransformerLayer)
       when "output"
         if @output_layers.empty?
           @output_layers << layer
@@ -112,7 +121,7 @@ module SHAInet
           connect_ltl(@hidden_layers.last, @output_layers.first, :full)
         end
       else
-        raise NeuralNetRunError.new("Must define correct layer type (:input, :hidden, :recurrent, :lstm, :embedding, :output).")
+        raise NeuralNetRunError.new("Must define correct layer type (:input, :hidden, :recurrent, :lstm, :embedding, :transformer, :output).")
       end
     end
 

@@ -88,6 +88,60 @@ module SHAInet
         end
       end
     end
+
+    # Construct a matrix from a nested Array
+    def self.from_a(array : Array(Array(GenNum)))
+      rows = array.size
+      cols = array.first.size
+      m = SimpleMatrix.new(rows, cols)
+      rows.times do |i|
+        cols.times do |j|
+          m[i, j] = array[i][j].to_f64
+        end
+      end
+      m
+    end
+
+    # Fill the matrix with random values in the given range
+    def random_fill!(min : Float64 = -0.1, max : Float64 = 0.1)
+      @rows.times do |i|
+        @cols.times do |j|
+          self[i, j] = rand(min..max)
+        end
+      end
+      self
+    end
+
+    # Slice a range of columns from the matrix
+    def slice_cols(start_col : Int32, length : Int32)
+      result = SimpleMatrix.new(@rows, length)
+      @rows.times do |i|
+        length.times do |j|
+          result[i, j] = self[i, start_col + j]
+        end
+      end
+      result
+    end
+
+    # Set a range of columns in-place from another matrix
+    def set_cols!(start_col : Int32, other : SimpleMatrix)
+      raise ArgumentError.new("row mismatch") unless other.rows == @rows
+      other.cols.times do |j|
+        @rows.times do |i|
+          self[i, start_col + j] = other[i, j]
+        end
+      end
+    end
+
+    def clone
+      dup = SimpleMatrix.new(@rows, @cols)
+      @rows.times do |i|
+        @cols.times do |j|
+          dup[i, j] = self[i, j]
+        end
+      end
+      dup
+    end
   end
 end
 
