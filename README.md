@@ -381,8 +381,9 @@ crystal run examples/transformer_pe.cr
 
 ### Loading a PyTorch model
 
-SHAInet can import simple sequential models exported from PyTorch as TorchScript.
-First export your model from Python:
+SHAInet can import simple sequential models or a tiny Transformer
+exported from PyTorch as TorchScript. First export your model from
+Python:
 
 ```python
 import torch
@@ -403,6 +404,21 @@ Then load the file in Crystal:
 net = SHAInet::Network.new
 net.load_from_pt("model.pt")
 output = net.run([1.0, 2.0])
+```
+
+To create a tiny Transformer model for import you can use the helper
+script:
+
+```bash
+python3 scripts/build_transformer_model.py transformer.pt
+```
+
+Then load it the same way (input is a token id):
+
+```crystal
+net = SHAInet::Network.new
+net.load_from_pt("transformer.pt")
+out = net.run([1])
 ```
 
 ### Possible Future Features
