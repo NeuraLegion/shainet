@@ -6,13 +6,18 @@ module SHAInet
     getter norm2 : LayerNorm
     property positional_encoding : SimpleMatrix?
 
-    def initialize(d_model : Int32, num_heads : Int32, ff_hidden : Int32)
+    # Percentage of units to drop (0-100)
+    property drop_percent : Int32
+
+    def initialize(d_model : Int32, num_heads : Int32, ff_hidden : Int32,
+                   drop_percent : Int32 = 0)
       super("memory", d_model, SHAInet.none)
       @mha = MultiHeadAttention.new(d_model, num_heads)
       @ffn = PositionWiseFF.new(d_model, ff_hidden)
       @norm1 = LayerNorm.new(d_model)
       @norm2 = LayerNorm.new(d_model)
       @positional_encoding = nil
+      @drop_percent = drop_percent
     end
 
     def forward(x : SimpleMatrix, pe : SimpleMatrix? = nil, mask : SimpleMatrix? = nil)
@@ -22,9 +27,11 @@ module SHAInet
               else
                 x
               end
-      attn_out = @mha.forward(input, mask)
+      attn = @mha.forward(input, mask)
+      attn_out = @drop_percent > 0 ? TransformerDropout.apply(attn, @drop_percent) : attn
       normed = @norm1.forward(attn_out)
-      ff_out = @ffn.forward(normed)
+      ff = @ffn.forward(normed)
+      ff_out = @drop_percent > 0 ? TransformerDropout.apply(ff, @drop_percent) : ff
       @norm2.forward(ff_out)
     end
 

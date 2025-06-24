@@ -1,5 +1,7 @@
 module SHAInet
   class LSTMLayer < Layer
+    # Percentage of units to drop (0-100)
+    property drop_percent : Int32
     property hidden_state : Array(Float64)
     property cell_state : Array(Float64)
     property recurrent_synapses : Array(Array(Synapse))
@@ -17,8 +19,11 @@ module SHAInet
     property output_b_grad : Array(Float64)
     @gate_setup : Bool = false
 
-    def initialize(n_type : String, l_size : Int32, activation_function : ActivationFunction = SHAInet.tanh)
+    def initialize(n_type : String, l_size : Int32,
+                   activation_function : ActivationFunction = SHAInet.tanh,
+                   drop_percent : Int32 = 0)
       super(n_type, l_size, activation_function)
+      @drop_percent = drop_percent
       @hidden_state = Array(Float64).new(l_size, 0.0)
       @cell_state = Array(Float64).new(l_size, 0.0)
       @recurrent_synapses = Array(Array(Synapse)).new(l_size) { Array(Synapse).new }
@@ -131,14 +136,16 @@ module SHAInet
         gate_o, _ = SHAInet.sigmoid.call(sum_out + @output_bias[i])
         cell_in, _ = @activation_function.call(sum_in)
 
-        c = gate_f * @cell_state[i] + gate_i * cell_in
-        h = gate_o * Math.tanh(c)
+      c = gate_f * @cell_state[i] + gate_i * cell_in
+      h = gate_o * Math.tanh(c)
 
         neuron.input_sum = h
         neuron.sigma_prime = 1.0
         new_cell[i] = c
         new_hidden[i] = h
       end
+
+      new_hidden = RNNDropout.apply(new_hidden, @drop_percent) if @drop_percent > 0
 
       @neurons.each_with_index do |neuron, i|
         neuron.activation = new_hidden[i]
