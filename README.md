@@ -51,6 +51,7 @@ xor.fully_connect
 # Adjust network parameters
 xor.learning_rate = 0.7
 xor.momentum = 0.3
+xor.clip_threshold = 5.0
 
 # data, training_type, cost_function, activation_function, epochs, error_threshold (sum of errors), learning_rate, momentum)
 xor.train(
@@ -86,6 +87,7 @@ iris.fully_connect
 # Adjust network parameters
 xor.learning_rate = 0.7
 xor.momentum = 0.3
+xor.clip_threshold = 5.0
 
 # Train the network
 iris.train_batch(
