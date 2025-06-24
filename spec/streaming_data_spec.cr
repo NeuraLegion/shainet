@@ -2,6 +2,7 @@ require "./spec_helper"
 
 describe SHAInet::StreamingData do
   it "streams batches from disk during training" do
+    ENV["SHAINET_DISABLE_CUDA"] = "1"
     File.open("/tmp/stream.txt", "w") do |f|
       f.puts "[[0,0],[0]]"
       f.puts "[[1,0],[1]]"
