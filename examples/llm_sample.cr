@@ -21,7 +21,7 @@ net = SHAInet::Network.new
 net.add_layer(:input, 1, :memory, SHAInet.none)
 net.add_layer(:embedding, 8, :memory, SHAInet.none)
 net.add_layer(:lstm, 16)
-net.add_layer(:output, token_count, :memory, SHAInet.softmax)
+net.add_layer(:output, token_count, :memory, SHAInet.sigmoid)
 net.fully_connect
 
 # Helper to create one-hot vectors
@@ -39,8 +39,11 @@ training = [] of Tuple(Array(Array(Float64)), Array(Float64))
   training << {input, expected}
 end
 
+# Convert tuples to arrays for training
+train_data = training.map { |seq, target| [seq, target] }
+
 net.learning_rate = 0.1
-net.train(data: training,
+net.train(data: train_data,
   training_type: :sgdm,
   cost_function: :c_ent,
   epochs: 200,

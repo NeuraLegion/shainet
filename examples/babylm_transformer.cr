@@ -29,7 +29,8 @@ net = SHAInet::Network.new
 net.add_layer(:input, 1, :memory, SHAInet.none)
 net.add_layer(:embedding, d_model, :memory, SHAInet.none)
 4.times { net.add_layer(:transformer, d_model) }
-net.add_layer(:output, token_count, :memory, SHAInet.softmax)
+# Use a sigmoid output so cross-entropy can be applied per token
+net.add_layer(:output, token_count, :memory, SHAInet.sigmoid)
 net.fully_connect
 
 # Positional encoding shared across layers
@@ -45,9 +46,9 @@ end
 
 # Build training/validation splits and helper to create pairs
 def build_pairs(ids, seq_len, vocab_size)
-  pairs = [] of Tuple(Array(Array(Int32)), Array(Float64))
+  pairs = [] of Tuple(Array(Array(Float64)), Array(Float64))
   (0...(ids.size - seq_len)).each do |i|
-    seq = ids[i, seq_len].map { |id| [id] }
+    seq = ids[i, seq_len].map { |id| [id.to_f64] }
     target = Array(Float64).new(vocab_size, 0.0)
     target[ids[i + seq_len]] = 1.0
     pairs << {seq, target}
@@ -62,13 +63,18 @@ val_ids = ids[split - seq_len, ids.size - (split - seq_len)]
 training = build_pairs(train_ids, seq_len, token_count)
 validation = build_pairs(val_ids, seq_len, token_count)
 
+# Convert tuples to arrays as expected by `net.train`
+train_data = training.map { |seq, target| [seq, target] }
+val_data = validation.map { |seq, target| [seq, target] }
+
 epochs = 10
 batch = 32
 net.learning_rate = 0.001
 
 epochs.times do |epoch|
   training.shuffle!
-  net.train(data: training,
+  train_data.shuffle!
+  net.train(data: train_data,
     training_type: :adam,
     cost_function: :c_ent,
     epochs: 1,
@@ -87,6 +93,6 @@ end
 
 # Predict the token following the first token in the dataset
 first_id = ids.first
-output = net.run([[first_id]]).last
+output = net.run([[first_id.to_f64]]).last
 pred_id = output.index(output.max) || 0
 puts "Prediction -> #{tokenizer.decode([pred_id])}"
