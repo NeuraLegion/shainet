@@ -362,6 +362,32 @@ cross‑entropy loss.
 crystal run examples/llm_sample.cr
 ```
 
+### Loading a PyTorch model
+
+SHAInet can import simple sequential models exported from PyTorch as TorchScript.
+First export your model from Python:
+
+```python
+import torch
+
+model = torch.nn.Sequential(
+    torch.nn.Linear(2, 3),
+    torch.nn.ReLU(),
+    torch.nn.Linear(3, 1)
+)
+example = torch.randn(1, 2)
+traced = torch.jit.trace(model, example)
+traced.save("model.pt")
+```
+
+Then load the file in Crystal:
+
+```crystal
+net = SHAInet::Network.new
+net.load_from_pt("model.pt")
+output = net.run([1.0, 2.0])
+```
+
 ### Possible Future Features
   - [x] RNN (recurant neural network)
   - [x] LSTM (long-short term memory)

@@ -33,6 +33,10 @@ module SHAInet
     ->(value : GenNum) { {_l_relu(value), _l_relu_prime(value)} }
   end
 
+  def self.identity : ActivationFunction # Output range (-inf..inf)
+    ->(value : GenNum) { {value.to_f64, 1.0} }
+  end
+
   # # Activation functions # #
 
   def self._sigmoid(value : GenNum) : Float64 # Output range (0..1)
