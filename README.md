@@ -429,6 +429,28 @@ An additional example `examples/transformer_pe.cr` demonstrates using a
 crystal run examples/transformer_pe.cr
 ```
 
+#### Streaming token batches
+`StreamingData` can also stream batches of token ids produced by
+`BPETokenizer`. Each line in the data file should contain a JSON array
+describing the tokenized input sequence and expected token:
+
+```crystal
+tokenizer = SHAInet::BPETokenizer.new
+tokenizer.train("hello world hello world", 30)
+ids = tokenizer.encode("hello world hello world")
+
+File.open("tokens.txt", "w") do |f|
+  (0...ids.size - 1).each do |i|
+    pair = [[[ids[i]]], [ids[i + 1]]]
+    f.puts pair.to_json
+  end
+end
+
+stream = SHAInet::StreamingData.new("tokens.txt", shuffle: true)
+batch = stream.next_batch(2)
+stream.rewind # start a new shuffled epoch
+```
+
 ### Loading a PyTorch model
 
 SHAInet can import simple sequential models or a tiny Transformer

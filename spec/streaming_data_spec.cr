@@ -31,4 +31,23 @@ describe SHAInet::StreamingData do
 
     (net.run(input: [0, 0], stealth: true).first < 0.2).should be_true
   end
+
+  it "reads tokenized data and reshuffles each epoch" do
+    Random::DEFAULT.new_seed(42_u64, 13_u64)
+    File.open("/tmp/stream_tok.txt", "w") do |f|
+      f.puts "[[[1]], [2]]"
+      f.puts "[[[3]], [4]]"
+      f.puts "[[[5]], [6]]"
+    end
+
+    data = SHAInet::StreamingData.new("/tmp/stream_tok.txt", shuffle: true)
+
+    first_epoch = data.next_batch(3)
+    first_epoch.size.should eq(3)
+    first_epoch.first[0].is_a?(Array).should be_true
+
+    data.rewind
+    second_epoch = data.next_batch(3)
+    second_epoch.size.should eq(3)
+  end
 end
