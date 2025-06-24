@@ -148,6 +148,39 @@ describe SHAInet::Network do
     (xor.run(input: [1, 1], stealth: false).first < 0.1).should eq(true)
   end
 
+  it "Figure out XOR with amplifier neurons" do
+    puts "\n"
+    training_data = [
+      [[0, 0], [0]],
+      [[1, 0], [1]],
+      [[0, 1], [1]],
+      [[1, 1], [0]],
+    ]
+
+    xor = SHAInet::Network.new
+
+    xor.add_layer(:input, 2, "amplifier", SHAInet.sigmoid)
+    xor.add_layer(:hidden, 3, "amplifier", SHAInet.sigmoid)
+    xor.add_layer(:output, 1, "amplifier", SHAInet.sigmoid)
+    xor.fully_connect
+
+    xor.learning_rate = 0.7
+    xor.momentum = 0.3
+
+    xor.train(
+      data: training_data,
+      training_type: :sgdm,
+      cost_function: :mse,
+      epochs: 5000,
+      error_threshold: 1e-9,
+      log_each: 1000)
+
+    (xor.run(input: [0, 0], stealth: true).first < 0.1).should eq(true)
+    (xor.run(input: [1, 0], stealth: true).first > 0.9).should eq(true)
+    (xor.run(input: [0, 1], stealth: true).first > 0.9).should eq(true)
+    (xor.run(input: [1, 1], stealth: true).first < 0.1).should eq(true)
+  end
+
   puts "############################################################"
 
   it "Supports both Symbols or Strings as input params" do
