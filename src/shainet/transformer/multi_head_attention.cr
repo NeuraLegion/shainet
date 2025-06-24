@@ -40,7 +40,7 @@ module SHAInet
       @out = SimpleMatrix.zeros(1,1)
     end
 
-    def forward(x : SimpleMatrix)
+    def forward(x : SimpleMatrix, mask : SimpleMatrix? = nil)
       @x = x
       q = x * @w_q
       k = x * @w_k
@@ -61,6 +61,10 @@ module SHAInet
         @v_heads << vs
 
         scores = qs * ks.transpose * (1.0 / Math.sqrt(@head_dim.to_f))
+        if m = mask
+          raise "mask size mismatch" unless m.rows == scores.rows && m.cols == scores.cols
+          scores = scores + m
+        end
         attn = softmax_rows(scores)
         @attn << attn
         outputs << (attn * vs)

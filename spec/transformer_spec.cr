@@ -37,6 +37,20 @@ describe SHAInet::MultiHeadAttention do
     out[0, 0].should be_close(1.0, 0.1)
     out[1, 1].should be_close(1.0, 0.1)
   end
+
+  it "respects an attention mask" do
+    Random::DEFAULT.new_seed(42_u64, 54_u64)
+    attn = SHAInet::MultiHeadAttention.new(2, 1)
+    input = SHAInet::SimpleMatrix.from_a([[1.0, 0.0], [0.0, 1.0]])
+    mask = SHAInet::SimpleMatrix.from_a([[0.0, -1e9], [-1e9, 0.0]])
+    out = attn.forward(input, mask)
+    expected = (input * attn.w_v) * attn.w_o
+    out.rows.times do |i|
+      out.cols.times do |j|
+        out[i, j].should be_close(expected[i, j], 1e-6)
+      end
+    end
+  end
 end
 
 describe SHAInet::PositionalEncoding do

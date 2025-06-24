@@ -15,14 +15,14 @@ module SHAInet
       @positional_encoding = nil
     end
 
-    def forward(x : SimpleMatrix, pe : SimpleMatrix? = nil)
+    def forward(x : SimpleMatrix, pe : SimpleMatrix? = nil, mask : SimpleMatrix? = nil)
       input = if enc = (pe || @positional_encoding)
                 raise "positional encoding size mismatch" unless enc.rows == x.rows && enc.cols == x.cols
                 x + enc
               else
                 x
               end
-      attn_out = @mha.forward(input)
+      attn_out = @mha.forward(input, mask)
       normed = @norm1.forward(attn_out)
       ff_out = @ffn.forward(normed)
       @norm2.forward(ff_out)
