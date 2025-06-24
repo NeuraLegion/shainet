@@ -362,6 +362,13 @@ cross‑entropy loss.
 crystal run examples/llm_sample.cr
 ```
 
+An additional example `examples/transformer_pe.cr` demonstrates using a
+`TransformerLayer` with sinusoidal positional encodings.
+
+```bash
+crystal run examples/transformer_pe.cr
+```
+
 ### Loading a PyTorch model
 
 SHAInet can import simple sequential models exported from PyTorch as TorchScript.
