@@ -1,5 +1,6 @@
 require "log"
 require "json"
+require "../pytorch_import"
 require "../math/simple_matrix"
 
 module SHAInet
@@ -363,6 +364,39 @@ module SHAInet
         end
       end
       Log.info { "Network loaded from: #{file_path}" }
+    end
+
+    # Load a network from a TorchScript file exported via PyTorch.
+    # Only sequential Linear layers are currently supported.
+    def load_from_pt(file_path : String)
+      data = PyTorchImport.load(file_path)
+      layers = data["layers"].as_a
+
+      input_size = layers.first["weight"].as_a.first.as_a.size
+      add_layer(:input, input_size)
+
+      layers.each_with_index do |l, idx|
+        out_size = l["weight"].as_a.size
+        if idx == layers.size - 1
+          add_layer(:output, out_size, activation_function: SHAInet.identity)
+        else
+          add_layer(:hidden, out_size, activation_function: SHAInet.relu)
+        end
+      end
+      fully_connect
+
+      target_layers = @hidden_layers + @output_layers
+      layers.each_with_index do |l, idx|
+        weights = l["weight"].as_a
+        bias = l["bias"].as_a
+        target = target_layers[idx]
+        target.neurons.each_with_index do |neuron, i|
+          neuron.bias = bias[i].as_f
+          neuron.synapses_in.each_with_index do |syn, j|
+            syn.weight = weights[i].as_a[j].as_f
+          end
+        end
+      end
     end
 
     def inspect
