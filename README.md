@@ -371,6 +371,8 @@ Example use of an embedding layer followed by an LSTM:
 ```crystal
 tokenizer = SHAInet::Tokenizer.new
 ids = tokenizer.encode("hello world hello")
+# Convert directly to a matrix, using the GPU when available
+ids_matrix = tokenizer.encode_matrix("hello world hello")
 
 net = SHAInet::Network.new
 net.add_layer(:input, 1)
