@@ -31,6 +31,24 @@ automatically detect these libraries at runtime and switch to GPU matrices when
 available. When CUDA cannot be loaded, training falls back to the CPU
 implementation.
 
+Verify CUDA support with:
+
+```crystal
+require "shainet"
+puts "CUDA available: #{SHAInet::CUDA.available?}"
+puts "CUDA version: #{SHAInet::CUDA.version || "unknown"}"
+```
+
+If the libraries are installed in a non-standard location set
+`LD_LIBRARY_PATH` accordingly before running the specs or your program:
+
+```bash
+export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+```
+
+No additional build flags are required as the CUDA and cuBLAS libraries are
+dynamically loaded at runtime.
+
 ## Usage
 
 More usage examples can be found in the specs
