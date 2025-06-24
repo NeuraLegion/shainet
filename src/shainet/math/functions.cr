@@ -155,26 +155,11 @@ module SHAInet
   end
 
   def self._cross_entropy_cost(expected : Float64, actual : Float64) : Float64
-    # raise MathError.new("Cross entropy cost is not implemented fully yet, please use quadratic cost for now.")
-    if expected == 1.0
-      if actual <= 0.000001
-        10.0
-      elsif actual == 1.0
-        0.0
-      else
-        (-1)*Math.log((actual), Math::E)
-      end
-    elsif expected == 0.0
-      if actual >= 0.999999
-        10.0
-      elsif actual == 0.0
-        0.0
-      else
-        (-1)*Math.log((1.0 - actual), Math::E)
-      end
-    else
-      raise MathError.new("Expected value must be 0 or 1 for cross entropy cost.")
-    end
+    # Standard binary cross entropy
+    # Clamp actual to avoid log(0) which would yield NaN
+    a = actual.clamp(1e-15, 1.0 - 1e-15)
+    e = expected.clamp(0.0, 1.0)
+    (-e * Math.log(a, Math::E) - (1.0 - e) * Math.log(1.0 - a, Math::E)).to_f64
   end
 
   # # Derivatives of cost functions # #
@@ -183,7 +168,9 @@ module SHAInet
   end
 
   def self._cross_entropy_cost_derivative(expected : Float64, actual : Float64) : Float64
-    (actual - expected).to_f64
+    a = actual.clamp(1e-15, 1.0 - 1e-15)
+    e = expected.clamp(0.0, 1.0)
+    ((1.0 - e) / (1.0 - a) - e / a).to_f64
   end
 
   ##################################################################
