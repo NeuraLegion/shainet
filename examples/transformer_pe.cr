@@ -12,14 +12,20 @@ input = SHAInet::SimpleMatrix.from_a([[1.0, 0.0], [0.0, 1.0]])
 pos_enc = SHAInet::PositionalEncoding.sinusoidal(input.rows, input.cols)
 layer.positional_encoding = pos_enc
 
+# Causal mask so each position attends only to itself and previous ones
+mask = SHAInet::SimpleMatrix.from_a([
+  [0.0, -1e9],
+  [0.0, 0.0]
+])
+
 # Train the layer to output ones
 target = SHAInet::SimpleMatrix.ones(2, 2)
 1000.times do
-  out = layer.forward(input)
+  out = layer.forward(input, nil, mask)
   diff = out - target
   layer.backward(diff)
   layer.apply_gradients(0.05)
 end
 
 puts "Output after training:"
-pp layer.forward(input).to_a
+pp layer.forward(input, nil, mask).to_a
