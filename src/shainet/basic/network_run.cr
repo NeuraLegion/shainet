@@ -23,7 +23,12 @@ module SHAInet
       if @hidden_layers.any? &.is_a?(TransformerLayer)
         matrix = SimpleMatrix.from_a([input.map(&.to_f64)])
         @hidden_layers.each do |l|
-          if l.is_a?(TransformerLayer)
+          case l
+          when EmbeddingLayer
+            token = input.first.to_i
+            vec = l.as(EmbeddingLayer).lookup(token)
+            matrix = SimpleMatrix.from_a([vec])
+          when TransformerLayer
             matrix = l.as(TransformerLayer).forward(matrix)
           end
         end
