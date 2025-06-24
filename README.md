@@ -23,6 +23,14 @@ dependencies:
     github: NeuraLegion/shainet
 ```
 
+### Optional CUDA setup
+
+To enable GPU acceleration install the CUDA Toolkit so that `libcudart.so` and
+`libcublas.so` are reachable in your `LD_LIBRARY_PATH`. SHAInet will
+automatically detect these libraries at runtime and switch to GPU matrices when
+available. When CUDA cannot be loaded, training falls back to the CPU
+implementation.
+
 ## Usage
 
 More usage examples can be found in the specs
