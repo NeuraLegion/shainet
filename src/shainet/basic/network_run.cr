@@ -1,6 +1,8 @@
 require "log"
 require "json"
+require "../cuda"
 require "../math/simple_matrix"
+require "../math/cuda_matrix"
 
 module SHAInet
   class Network
@@ -21,13 +23,14 @@ module SHAInet
         "Error input data size: #{input.size} doesn't fit input layer size: #{@input_layers.first.neurons.size}.") unless input.size == @input_layers.first.neurons.size
 
       if @hidden_layers.any? &.is_a?(TransformerLayer)
-        matrix = SimpleMatrix.from_a([input.map(&.to_f64)])
+        mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
+        matrix = mat_klass.from_a([input.map(&.to_f64)])
         @hidden_layers.each do |l|
           case l
           when EmbeddingLayer
             token = input.first.to_i
             vec = l.as(EmbeddingLayer).lookup(token)
-            matrix = SimpleMatrix.from_a([vec])
+            matrix = mat_klass.from_a([vec])
           when TransformerLayer
             matrix = l.as(TransformerLayer).forward(matrix)
           end
@@ -81,7 +84,8 @@ module SHAInet
         raise NeuralNetRunError.new("Error input data size: #{step.size} doesn't fit input layer size: #{@input_layers.first.neurons.size}.") unless step.size == @input_layers.first.neurons.size
       end
       if @hidden_layers.any? &.is_a?(TransformerLayer)
-        matrix = SimpleMatrix.from_a(input.map { |x| x.map(&.to_f64) })
+        mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
+        matrix = mat_klass.from_a(input.map { |x| x.map(&.to_f64) })
         @hidden_layers.each do |l|
           if l.is_a?(TransformerLayer)
             matrix = l.as(TransformerLayer).forward(matrix)
@@ -149,8 +153,9 @@ module SHAInet
       @total_error = @error_signal.reduce(0.0) { |acc, i| acc + i }
 
       if @hidden_layers.any? &.is_a?(TransformerLayer)
-        exp = SimpleMatrix.from_a([expected_output.map(&.to_f64)])
-        act = SimpleMatrix.from_a([actual_output])
+        mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
+        exp = mat_klass.from_a([expected_output.map(&.to_f64)])
+        act = mat_klass.from_a([actual_output])
         @transformer_error = act - exp
       end
 
@@ -192,8 +197,9 @@ module SHAInet
       @total_error = @error_signal.reduce(0.0) { |acc, i| acc + i }
 
       if @hidden_layers.any? &.is_a?(TransformerLayer)
-        exp = SimpleMatrix.from_a([expected_output.map(&.to_f64)])
-        act = SimpleMatrix.from_a([actual_output])
+        mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
+        exp = mat_klass.from_a([expected_output.map(&.to_f64)])
+        act = mat_klass.from_a([actual_output])
         @transformer_error = act - exp
       end
 
@@ -233,14 +239,17 @@ module SHAInet
       # This methods accepts data as either a SHAInet::TrainingData object, an Array(Array(Array(GenNum))),
       # or a SHAInet::StreamingData instance.
       raw_data = nil
+      use_gpu = CUDA.available?
       if data.is_a?(SHAInet::StreamingData)
         Log.info { "Training started" }
+        Log.info { "CUDA available: #{use_gpu}" }
         start_time = Time.monotonic
         batch_size = mini_batch_size
         @time_step = 0
       else
         raw_data = data.is_a?(SHAInet::TrainingData) ? data.data : data
         Log.info { "Training started" }
+        Log.info { "CUDA available: #{use_gpu}" }
         start_time = Time.monotonic
         batch_size = mini_batch_size ? mini_batch_size : raw_data.size
         @time_step = 0
