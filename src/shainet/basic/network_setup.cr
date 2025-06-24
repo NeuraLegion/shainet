@@ -38,6 +38,7 @@ module SHAInet
     # Parameters for Adam
     property alpha : Float64
     getter beta1 : Float64, beta2 : Float64, epsilon : Float64, time_step : Int32
+    property clip_threshold : Float64
 
     # First creates an empty shell of the entire network
     def initialize
@@ -70,6 +71,7 @@ module SHAInet
       @epsilon = 10e-8_f64 # For Adam , prevents exploding gradients (not recommended to change value)
       @time_step = 0_i32   # For Adam
       @transformer_error = SimpleMatrix.zeros(1, 1)
+      @clip_threshold = Float64::INFINITY
     end
 
     # Create and populate a layer with neurons

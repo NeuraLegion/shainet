@@ -424,7 +424,9 @@ module SHAInet
     def update_weights(learn_type : Symbol | String, batch : Bool = false)
       @all_synapses.each_with_index do |synapse, i|
         # Get current gradient (needed for mini-batch)
-        synapse.gradient = @w_gradient.not_nil![i]
+        grad = @w_gradient.not_nil![i]
+        grad = grad.clamp(-@clip_threshold, @clip_threshold)
+        synapse.gradient = grad
 
         case learn_type.to_s
         # Update weights based on the gradients and delta rule (including momentum)
@@ -476,7 +478,9 @@ module SHAInet
     def update_biases(learn_type : Symbol | String, batch : Bool = false)
       @all_neurons.each_with_index do |neuron, i|
         # Get current gradient (needed for mini-batch)
-        neuron.gradient = @b_gradient.not_nil![i]
+        grad = @b_gradient.not_nil![i]
+        grad = grad.clamp(-@clip_threshold, @clip_threshold)
+        neuron.gradient = grad
 
         case learn_type.to_s
         # Update biases based on the gradients and delta rule (including momentum)
