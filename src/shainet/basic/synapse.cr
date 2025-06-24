@@ -33,6 +33,12 @@ module SHAInet
         new_memory
       when "eraser"
         (-1)*new_memory
+      when "amplifier"
+        new_memory*2
+      when "fader"
+        new_memory*0.5
+      when "sensor"
+        @source_neuron.activation
       else
         raise "Other types of neurons are not supported yet!"
       end
