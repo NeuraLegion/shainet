@@ -365,6 +365,13 @@ cross‑entropy loss.
 crystal run examples/llm_sample.cr
 ```
 
+The example `examples/transformer_lm.cr` trains a small Transformer based
+language model.
+
+```bash
+crystal run examples/transformer_lm.cr
+```
+
 An additional example `examples/transformer_pe.cr` demonstrates using a
 `TransformerLayer` with sinusoidal positional encodings.
 
