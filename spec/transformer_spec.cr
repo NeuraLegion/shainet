@@ -1,5 +1,26 @@
 require "./spec_helper"
 
+describe SHAInet::LayerNorm do
+  it "normalizes rows" do
+    ln = SHAInet::LayerNorm.new(2)
+    x = SHAInet::SimpleMatrix.from_a([[1.0, 3.0], [2.0, 0.0]])
+    out = ln.forward(x)
+    out.rows.times do |i|
+      mean = 0.0
+      var = 0.0
+      out.cols.times { |j| mean += out[i, j] }
+      mean /= out.cols
+      out.cols.times do |j|
+        diff = out[i, j] - mean
+        var += diff*diff
+      end
+      var /= out.cols
+      mean.should be_close(0.0, 1e-6)
+      var.should be_close(1.0, 1e-4)
+    end
+  end
+end
+
 describe SHAInet::MultiHeadAttention do
   it "trains to output constant values" do
     Random::DEFAULT.new_seed(42_u64, 54_u64)

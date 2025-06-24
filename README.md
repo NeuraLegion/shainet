@@ -289,6 +289,7 @@ label = {
   - [x] Simple recurrent layers
   - [x] LSTM layers
   - [x] Embedding layers
+  - [x] Layer normalization for transformer layers
   - [ ] Add support for multiple neuron types.
   - [ ] Bind and use CUDA (GPU acceleration)
   - [ ] graphic printout of network architecture.
