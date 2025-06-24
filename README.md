@@ -102,6 +102,28 @@ iris.train_batch(
 iris.test(test_set)
 ```
 
+### Training with StreamingData
+`StreamingData` reads batches lazily from disk. Each line in the data file
+should contain a JSON array describing the input and expected output:
+`[[1,0],[1]]`.
+
+```crystal
+stream = SHAInet::StreamingData.new("data.txt")
+
+net = SHAInet::Network.new
+net.add_layer(:input, 2, :memory, SHAInet.sigmoid)
+net.add_layer(:hidden, 3, :memory, SHAInet.sigmoid)
+net.add_layer(:output, 1, :memory, SHAInet.sigmoid)
+net.fully_connect
+
+net.train(
+  data: stream,
+  training_type: :sgdm,
+  epochs: 5000,
+  mini_batch_size: 2,
+  log_each: 1000)
+```
+
 ### Using convolutional network
 ```crystal
 

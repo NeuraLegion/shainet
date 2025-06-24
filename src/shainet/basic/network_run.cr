@@ -220,23 +220,31 @@ module SHAInet
 
     # Training the model
     # ameba:disable Metrics/CyclomaticComplexity
-    def train(data : Array(Array) | SHAInet::TrainingData,                  # Input may contain sequences
-              training_type : Symbol | String,                              # Type of training: :sgdm, :rprop, :adam
-              cost_function : Symbol | String | CostFunction = :mse,        # Proc returns the function value and it's derivative
-              epochs : Int32 = 1,                                           # a criteria of when to stop the training
-              error_threshold : Float64 = 0.00000001,                       # a criteria of when to stop the training
-              mini_batch_size : Int32 = 1,                                  # Size of mini-batches to train with
-              log_each : Int32 = 1000,                                      # determines what is the step for error printout
-              show_slice : Bool = false,                                    # Show progress of each mini-batch slice
-              autosave : NamedTuple(freq: Int32, path: String) | Nil = nil) # Save the network each X epochs
+    def train(data : Array(Array) | SHAInet::TrainingData | SHAInet::StreamingData, # Input may contain sequences
+              training_type : Symbol | String,                                      # Type of training: :sgdm, :rprop, :adam
+              cost_function : Symbol | String | CostFunction = :mse,                # Proc returns the function value and it's derivative
+              epochs : Int32 = 1,                                                   # a criteria of when to stop the training
+              error_threshold : Float64 = 0.00000001,                               # a criteria of when to stop the training
+              mini_batch_size : Int32 = 1,                                          # Size of mini-batches to train with
+              log_each : Int32 = 1000,                                              # determines what is the step for error printout
+              show_slice : Bool = false,                                            # Show progress of each mini-batch slice
+              autosave : NamedTuple(freq: Int32, path: String) | Nil = nil)         # Save the network each X epochs
 
-      # This methods accepts data as either a SHAInet::TrainingData object, or as an Array(Array(Array(GenNum)).
-      # In the case of SHAInet::TrainingData, we convert it to an Array(Array(Array(GenNum)) by calling #data on it.
-      raw_data = data.is_a?(SHAInet::TrainingData) ? data.data : data
-      Log.info { "Training started" }
-      start_time = Time.monotonic
-      batch_size = mini_batch_size ? mini_batch_size : raw_data.size
-      @time_step = 0
+      # This methods accepts data as either a SHAInet::TrainingData object, an Array(Array(Array(GenNum))),
+      # or a SHAInet::StreamingData instance.
+      raw_data = nil
+      if data.is_a?(SHAInet::StreamingData)
+        Log.info { "Training started" }
+        start_time = Time.monotonic
+        batch_size = mini_batch_size
+        @time_step = 0
+      else
+        raw_data = data.is_a?(SHAInet::TrainingData) ? data.data : data
+        Log.info { "Training started" }
+        start_time = Time.monotonic
+        batch_size = mini_batch_size ? mini_batch_size : raw_data.size
+        @time_step = 0
+      end
 
       # Change String/Symbol into the corrent proc of the cost function
       if cost_function.is_a?(Symbol) || cost_function.is_a?(String)
@@ -270,129 +278,216 @@ module SHAInet
 
         # Counters for disply
         display_counter = 0
-        slices = (data.size.to_f64 / mini_batch_size).ceil.to_i
+        slices = 0
 
         # For error break condition
         epoch_mse = 0.0
         epoch_error_sum = Array(Float64).new(@output_layers.last.neurons.size) { 0.0 }
 
         # Iterate over each mini-batch
-        raw_data.each_slice(batch_size, reuse: false) do |data_slice|
-          verify_data(data_slice)
-          @time_step += 1 if mini_batch_size # in mini-batch update adam time_step
-
-          # batch_mean = [] of Float64
-          # all_errors = [] of Float64
-          batch_mean = 0.0_f64
-          all_errors = 0.0_f64
-
-          # Save gradients from entire batch before updating weights & biases
-          @w_gradient = Array(Float64).new(@all_synapses.size) { 0.0 }
-          @b_gradient = Array(Float64).new(@all_neurons.size) { 0.0 }
-          @lstm_layers.each &.zero_gate_gradients
-          @transformer_layers.each &.zero_gradients
-
-          # Go over each data point and collect gradients of weights/biases
-          # based on each specific example
-          data_slice.each do |data_point|
-            input_d = data_point[0]
-            output_d = data_point[1]
-            output_arr = [] of Float64
-            if output_d.is_a?(Array)
-              output_d.as(Array).each do |v|
-                if v.is_a?(Number)
-                  output_arr << v.to_f64
+        if data.is_a?(SHAInet::StreamingData)
+          while (data_slice = data.next_batch(batch_size)).size > 0
+            slices += 1
+            verify_data(data_slice)
+            @time_step += 1 if mini_batch_size
+            batch_mean = 0.0_f64
+            all_errors = 0.0_f64
+            @w_gradient = Array(Float64).new(@all_synapses.size) { 0.0 }
+            @b_gradient = Array(Float64).new(@all_neurons.size) { 0.0 }
+            @lstm_layers.each &.zero_gate_gradients
+            @transformer_layers.each &.zero_gradients
+            data_slice.each do |data_point|
+              input_d = data_point[0]
+              output_d = data_point[1]
+              output_arr = [] of Float64
+              if output_d.is_a?(Array)
+                output_d.as(Array).each do |v|
+                  if v.is_a?(Number)
+                    output_arr << v.to_f64
+                  end
                 end
-              end
-            else
-              output_arr << output_d.to_f64
-            end
-            if input_d.is_a?(Array) && input_d.as(Array).first.is_a?(Array)
-              seq_in = (input_d.as(Array).map { |x| x.as(Array).map(&.to_f64).as(Array(Float64)) }).as(Array(Array(Float64)))
-              evaluate_sequence(seq_in, output_arr.map(&.to_f64), cost_function)
-            else
-              input_arr = [] of Float64
-              input_d.as(Array).each do |v|
-                if v.is_a?(Number)
-                  input_arr << v.to_f64
-                end
-              end
-              evaluate(input_arr, output_arr.map(&.to_f64), cost_function)
-            end
-            # all_errors << @total_error
-            all_errors += @total_error
-
-            # Propogate the errors backwards through the hidden layers
-            @hidden_layers.reverse_each do |l|
-              if l.is_a?(TransformerLayer)
-                l.as(TransformerLayer).backward(@transformer_error)
               else
+                output_arr << output_d.to_f64
+              end
+              if input_d.is_a?(Array) && input_d.as(Array).first.is_a?(Array)
+                seq_in = (input_d.as(Array).map { |x| x.as(Array).map(&.to_f64).as(Array(Float64)) }).as(Array(Array(Float64)))
+                evaluate_sequence(seq_in, output_arr.map(&.to_f64), cost_function)
+              else
+                input_arr = [] of Float64
+                input_d.as(Array).each do |v|
+                  if v.is_a?(Number)
+                    input_arr << v.to_f64
+                  end
+                end
+                evaluate(input_arr, output_arr.map(&.to_f64), cost_function)
+              end
+              all_errors += @total_error
+              @hidden_layers.reverse_each do |l|
+                if l.is_a?(TransformerLayer)
+                  l.as(TransformerLayer).backward(@transformer_error)
+                else
+                  l.neurons.each { |neuron| neuron.hidden_error_prop }
+                end
+              end
+              @input_layers.reverse_each do |l|
                 l.neurons.each { |neuron| neuron.hidden_error_prop }
               end
-            end
-
-            # Propogate the errors backwards through the input layers
-            @input_layers.reverse_each do |l|
-              # Update neuron error based on errors*weights of neurons from the next layer
-              l.neurons.each { |neuron| neuron.hidden_error_prop }
-            end
-
-            # Collect gradients for embedding layers before summing
-            @hidden_layers.each do |l|
-              if l.is_a?(EmbeddingLayer)
-                l.as(EmbeddingLayer).accumulate_gradient
+              @hidden_layers.each do |l|
+                if l.is_a?(EmbeddingLayer)
+                  l.as(EmbeddingLayer).accumulate_gradient
+                end
               end
+              @all_synapses.each_with_index { |synapse, i| @w_gradient[i] += (synapse.source_neuron.activation)*(synapse.dest_neuron.gradient) }
+              @all_neurons.each_with_index { |neuron, i| @b_gradient[i] += neuron.gradient }
+              @lstm_layers.each &.accumulate_gate_gradients
+              if @error_signal.size == 1
+                error_avg = 0.0_f64
+              else
+                error_avg = @total_error/@output_layers.last.neurons.size
+              end
+              sqrd_dists = 0.0_f64
+              @error_signal.each { |e| sqrd_dists += (e - error_avg)**2 }
+              @mse = sqrd_dists / @output_layers.last.neurons.size
+              batch_mean += @mse
             end
 
-            # Sum all gradients from each data point for the batch update
-            @all_synapses.each_with_index { |synapse, i| @w_gradient[i] += (synapse.source_neuron.activation)*(synapse.dest_neuron.gradient) }
-            @all_neurons.each_with_index { |neuron, i| @b_gradient[i] += neuron.gradient }
-            @lstm_layers.each &.accumulate_gate_gradients
-
-            # Calculate MSE per data point
-            if @error_signal.size == 1
-              error_avg = 0.0_f64
-            else
-              error_avg = @total_error/@output_layers.last.neurons.size
+            @total_error = all_errors
+            batch_mean /= data_slice.size
+            @mse = batch_mean
+            @time_step += 1 unless mini_batch_size
+            update_weights(training_type)
+            update_biases(training_type)
+            update_lstm_gates(training_type)
+            update_transformer_layers
+            epoch_mse += @mse
+            @error_signal.size.times { |i| epoch_error_sum[i] += @error_signal[i] }
+            @prev_mse = @mse.clone
+            display_counter += 1
+            if counter % log_each == 0
+              Log.info { "  Slice: (#{display_counter}), MSE: #{@mse}" } if show_slice
             end
-            # sqrd_dists = [] of Float64
-            # @error_signal.each { |e| sqrd_dists << (e - error_avg)**2 }
-            sqrd_dists = 0.0_f64
-            @error_signal.each { |e| sqrd_dists += (e - error_avg)**2 }
-
-            # @mse = (sqrd_dists.reduce { |acc, i| acc + i })/@output_layers.last.neurons.size
-            # batch_mean << @mse
-            @mse = sqrd_dists / @output_layers.last.neurons.size
-            batch_mean += @mse
           end
+          # end streaming while loop
+          data.rewind
+        else
+          raw_data.not_nil!.each_slice(batch_size, reuse: false) do |data_slice|
+            slices += 1
+            verify_data(data_slice)
+            @time_step += 1 if mini_batch_size # in mini-batch update adam time_step
 
-          # Total error per batch
-          # @total_error = all_errors.reduce { |acc, i| acc + i }
-          @total_error = all_errors
+            # batch_mean = [] of Float64
+            # all_errors = [] of Float64
+            batch_mean = 0.0_f64
+            all_errors = 0.0_f64
 
-          # Calculate MSE per batch
-          # batch_mean = (batch_mean.reduce { |acc, i| acc + i })/data_slice.size
-          # @mse = batch_mean
-          batch_mean /= data_slice.size
-          @mse = batch_mean
+            # Save gradients from entire batch before updating weights & biases
+            @w_gradient = Array(Float64).new(@all_synapses.size) { 0.0 }
+            @b_gradient = Array(Float64).new(@all_neurons.size) { 0.0 }
+            @lstm_layers.each &.zero_gate_gradients
+            @transformer_layers.each &.zero_gradients
 
-          # Update all wieghts & biases for the batch
-          @time_step += 1 unless mini_batch_size # Based on how many epochs have passed in current training run, needed for Adam
-          update_weights(training_type)
-          update_biases(training_type)
-          update_lstm_gates(training_type)
-          update_transformer_layers
+            # Go over each data point and collect gradients of weights/biases
+            # based on each specific example
+            data_slice.each do |data_point|
+              input_d = data_point[0]
+              output_d = data_point[1]
+              output_arr = [] of Float64
+              if output_d.is_a?(Array)
+                output_d.as(Array).each do |v|
+                  if v.is_a?(Number)
+                    output_arr << v.to_f64
+                  end
+                end
+              else
+                output_arr << output_d.to_f64
+              end
+              if input_d.is_a?(Array) && input_d.as(Array).first.is_a?(Array)
+                seq_in = (input_d.as(Array).map { |x| x.as(Array).map(&.to_f64).as(Array(Float64)) }).as(Array(Array(Float64)))
+                evaluate_sequence(seq_in, output_arr.map(&.to_f64), cost_function)
+              else
+                input_arr = [] of Float64
+                input_d.as(Array).each do |v|
+                  if v.is_a?(Number)
+                    input_arr << v.to_f64
+                  end
+                end
+                evaluate(input_arr, output_arr.map(&.to_f64), cost_function)
+              end
+              # all_errors << @total_error
+              all_errors += @total_error
 
-          # Update epoch status
-          epoch_mse += @mse
-          @error_signal.size.times { |i| epoch_error_sum[i] += @error_signal[i] }
+              # Propogate the errors backwards through the hidden layers
+              @hidden_layers.reverse_each do |l|
+                if l.is_a?(TransformerLayer)
+                  l.as(TransformerLayer).backward(@transformer_error)
+                else
+                  l.neurons.each { |neuron| neuron.hidden_error_prop }
+                end
+              end
 
-          @prev_mse = @mse.clone
-          # Show training progress of the mini-batches
-          display_counter += 1
-          if counter % log_each == 0
-            Log.info { "  Slice: (#{display_counter} / #{slices}), MSE: #{@mse}" } if show_slice
-            # Log.info { "@error_signal: #{@error_signal}" }
+              # Propogate the errors backwards through the input layers
+              @input_layers.reverse_each do |l|
+                # Update neuron error based on errors*weights of neurons from the next layer
+                l.neurons.each { |neuron| neuron.hidden_error_prop }
+              end
+
+              # Collect gradients for embedding layers before summing
+              @hidden_layers.each do |l|
+                if l.is_a?(EmbeddingLayer)
+                  l.as(EmbeddingLayer).accumulate_gradient
+                end
+              end
+
+              # Sum all gradients from each data point for the batch update
+              @all_synapses.each_with_index { |synapse, i| @w_gradient[i] += (synapse.source_neuron.activation)*(synapse.dest_neuron.gradient) }
+              @all_neurons.each_with_index { |neuron, i| @b_gradient[i] += neuron.gradient }
+              @lstm_layers.each &.accumulate_gate_gradients
+
+              # Calculate MSE per data point
+              if @error_signal.size == 1
+                error_avg = 0.0_f64
+              else
+                error_avg = @total_error/@output_layers.last.neurons.size
+              end
+              # sqrd_dists = [] of Float64
+              # @error_signal.each { |e| sqrd_dists << (e - error_avg)**2 }
+              sqrd_dists = 0.0_f64
+              @error_signal.each { |e| sqrd_dists += (e - error_avg)**2 }
+
+              # @mse = (sqrd_dists.reduce { |acc, i| acc + i })/@output_layers.last.neurons.size
+              # batch_mean << @mse
+              @mse = sqrd_dists / @output_layers.last.neurons.size
+              batch_mean += @mse
+            end
+
+            # Total error per batch
+            # @total_error = all_errors.reduce { |acc, i| acc + i }
+            @total_error = all_errors
+
+            # Calculate MSE per batch
+            # batch_mean = (batch_mean.reduce { |acc, i| acc + i })/data_slice.size
+            # @mse = batch_mean
+            batch_mean /= data_slice.size
+            @mse = batch_mean
+
+            # Update all wieghts & biases for the batch
+            @time_step += 1 unless mini_batch_size # Based on how many epochs have passed in current training run, needed for Adam
+            update_weights(training_type)
+            update_biases(training_type)
+            update_lstm_gates(training_type)
+            update_transformer_layers
+
+            # Update epoch status
+            epoch_mse += @mse
+            @error_signal.size.times { |i| epoch_error_sum[i] += @error_signal[i] }
+
+            @prev_mse = @mse.clone
+            # Show training progress of the mini-batches
+            display_counter += 1
+            if counter % log_each == 0
+              Log.info { "  Slice: (#{display_counter} / #{slices}), MSE: #{@mse}" } if show_slice
+              # Log.info { "@error_signal: #{@error_signal}" }
+            end
           end
         end
 
@@ -612,7 +707,7 @@ module SHAInet
         epoch_mse = 0.0
         epoch_error_sum = Array(Float64).new(@output_layers.last.neurons.size) { 0.0 }
 
-        raw_data.each_slice(batch_size, reuse: false) do |data_slice|
+        raw_data.not_nil!.each_slice(batch_size, reuse: false) do |data_slice|
           verify_data(data_slice)
 
           pool = Pool.new(
