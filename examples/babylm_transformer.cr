@@ -20,7 +20,7 @@ puts "Dataset loaded, size: #{text.size} characters."
 puts "Using the GPU? #{SHAInet::CUDA.available? ? "Yes" : "No"}"
 puts "Training the tokenizer on the dataset..."
 # Train tokenizer and encode text
-vocab_size = 30_000
+vocab_size = 10_000
 tokenizer = SHAInet::BPETokenizer.new
 tokenizer.train(text, vocab_size)
 ids = tokenizer.encode(text)
@@ -37,7 +37,7 @@ net.add_layer(:input, 1, :memory, SHAInet.none)
 net.add_layer(:embedding, d_model, :memory, SHAInet.none)
 4.times { net.add_layer(:transformer, d_model) }
 # Use a sigmoid output so cross-entropy can be applied per token
-net.add_layer(:output, token_count, :memory, SHAInet.sigmoid)
+net.add_layer(:output, token_count, :memory, SHAInet.identity)
 net.fully_connect
 
 puts "Network built"
@@ -45,20 +45,12 @@ puts "Network built"
 pos_enc = SHAInet::PositionalEncoding.sinusoidal(seq_len, d_model)
 net.transformer_layers.each { |l| l.positional_encoding = pos_enc }
 
-# Helper for one-hot vectors
-def one_hot(id, size)
-  arr = Array(Float64).new(size, 0.0)
-  arr[id] = 1.0
-  arr
-end
-
 # Build training/validation splits and helper to create pairs
-def build_pairs(ids, seq_len, vocab_size)
-  pairs = [] of Tuple(Array(Array(Float64)), Array(Float64))
+def build_pairs(ids, seq_len)
+  pairs = [] of Tuple(Array(Array(Float64)), Int32)
   (0...(ids.size - seq_len)).each do |i|
     seq = ids[i, seq_len].map { |id| [id.to_f64] }
-    target = Array(Float64).new(vocab_size, 0.0)
-    target[ids[i + seq_len]] = 1.0
+    target = ids[i + seq_len]
     pairs << {seq, target}
   end
   pairs
@@ -68,12 +60,12 @@ split = ids.size * 9 // 10
 train_ids = ids[0, split]
 val_ids = ids[split - seq_len, ids.size - (split - seq_len)]
 
-training = build_pairs(train_ids, seq_len, token_count)
-validation = build_pairs(val_ids, seq_len, token_count)
+training = build_pairs(train_ids, seq_len)
+validation = build_pairs(val_ids, seq_len)
 
 # Convert tuples to arrays as expected by `net.train`
-train_data = training.map { |seq, target| [seq, target] }
-val_data = validation.map { |seq, target| [seq, target] }
+train_data = training.map { |seq, target| [seq, [target]] }
+val_data = validation.map { |seq, target| [seq, [target]] }
 
 epochs = 10
 batch = 32
@@ -81,20 +73,18 @@ net.learning_rate = 0.001
 
 puts "Training the network for #{epochs} epochs with batch size #{batch}..."
 epochs.times do |epoch|
-  training.shuffle!
-  train_data.shuffle!
   net.train(data: train_data,
     training_type: :adam,
-    cost_function: :c_ent,
+    cost_function: :c_ent_sm,
     epochs: 1,
     mini_batch_size: batch,
     log_each: 100)
 
   val_loss = 0.0
-  validation.each do |seq, expected|
+  validation.each do |seq, tgt|
     output_vec = net.run(seq).last
-    tgt = expected.index(1.0) || 0
-    val_loss += -Math.log(output_vec[tgt].clamp(1e-9, 1.0))
+    probs = SHAInet.softmax(output_vec)
+    val_loss += -Math.log(probs[tgt].clamp(1e-9, 1.0))
   end
   val_loss /= validation.size.to_f
   puts "Epoch #{epoch + 1} validation loss: #{val_loss}"
