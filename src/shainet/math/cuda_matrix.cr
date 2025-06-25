@@ -37,6 +37,20 @@ module SHAInet
       m
     end
 
+    # Return the transposed matrix. When CUDA is available the returned
+    # instance keeps the device buffer in sync so that further GPU
+    # operations can be used without additional copies.
+    def transpose
+      result = CudaMatrix.new(@cols, @rows)
+      @rows.times do |i|
+        @cols.times do |j|
+          result[j, i] = self[i, j]
+        end
+      end
+      result.sync_to_device!
+      result
+    end
+
     def sync_to_device!
       return unless dptr = @device_ptr
       return if dptr.null?

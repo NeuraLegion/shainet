@@ -1,3 +1,7 @@
+require "../cuda"
+require "../math/simple_matrix"
+require "../math/cuda_matrix"
+
 module SHAInet
   # Simple byte-pair encoding tokenizer. It can train a vocabulary
   # from text and encode/decode using the learned merges.
@@ -21,21 +25,57 @@ module SHAInet
         tokens.each { |t| add_token(t) }
       end
 
+      use_gpu = CUDA.available? && ENV["SHAINET_BPE_CUDA"]?
+
       while @vocab.size < vocab_size
-        pair_counts = Hash(Tuple(String, String), Int32).new(0)
+        pair_list = [] of Tuple(Int32, Int32)
         corpus.each do |tokens|
           (0...(tokens.size - 1)).each do |i|
-            pair = {tokens[i], tokens[i + 1]}
-            pair_counts[pair] += 1
+            id1 = @vocab[tokens[i]]
+            id2 = @vocab[tokens[i + 1]]
+            pair_list << {id1, id2}
           end
         end
-        break if pair_counts.empty?
-        best_pair, _ = pair_counts.max_by { |_, count| count }
-        new_token = best_pair[0] + best_pair[1]
+        break if pair_list.empty?
+
+        vsize = @vocab.size
+        if use_gpu
+          rows = pair_list.size
+          a = CudaMatrix.new(rows, vsize)
+          b = CudaMatrix.new(rows, vsize)
+          pair_list.each_with_index do |(id1, id2), idx|
+            a[idx, id1] = 1.0
+            b[idx, id2] = 1.0
+          end
+          a.sync_to_device!
+          b.sync_to_device!
+          counts = a.transpose * b
+          counts.as?(CudaMatrix).try &.sync_from_device!
+          best_pair_ids = pair_list.reduce(pair_list.first) do |best, pair|
+            count = counts[pair[0], pair[1]].to_i
+            best_count = counts[best[0], best[1]].to_i
+            count > best_count ? pair : best
+          end
+        else
+          pair_counts = Hash(Tuple(String, String), Int32).new(0)
+          corpus.each do |tokens|
+            (0...(tokens.size - 1)).each do |i|
+              pair = {tokens[i], tokens[i + 1]}
+              pair_counts[pair] += 1
+            end
+          end
+          break if pair_counts.empty?
+          best_pair, _ = pair_counts.max_by { |_, count| count }
+          best_pair_ids = {@vocab[best_pair[0]], @vocab[best_pair[1]]}
+        end
+
+        token_a = @inv_vocab[best_pair_ids[0]]
+        token_b = @inv_vocab[best_pair_ids[1]]
+        new_token = token_a + token_b
         corpus.each do |tokens|
           i = 0
           while i < tokens.size - 1
-            if tokens[i] == best_pair[0] && tokens[i + 1] == best_pair[1]
+            if tokens[i] == token_a && tokens[i + 1] == token_b
               tokens[i] = new_token
               tokens.delete_at(i + 1)
             else
@@ -43,7 +83,7 @@ module SHAInet
             end
           end
         end
-        @merges << best_pair
+        @merges << {token_a, token_b}
         add_token(new_token)
       end
     end
