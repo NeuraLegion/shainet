@@ -19,8 +19,9 @@ module SHAInet
     # Run an input throught the network to get an output (weights & biases do not change)
     def run(input : Array(GenNum), stealth : Bool = false) : Array(Float64)
       verify_net_before_train
+      expected_size = @input_layers.reduce(0) { |acc, l| acc + l.neurons.size }
       raise NeuralNetRunError.new(
-        "Error input data size: #{input.size} doesn't fit input layer size: #{@input_layers.first.neurons.size}.") unless input.size == @input_layers.first.neurons.size
+        "Error input data size: #{input.size} doesn't fit input layer size: #{expected_size}.") unless input.size == expected_size
 
       if @hidden_layers.any? &.is_a?(TransformerLayer)
         mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
@@ -41,11 +42,13 @@ module SHAInet
         end
         output
       else
-        # Insert the input data into the input layer
-        input.each_with_index do |data, i|
-          # Inserts the input information into the input layers
-          # TODO: add support for multiple input layers
-          @input_layers.first.neurons[i].activation = data.to_f64
+        # Insert the input data into the input layers
+        index = 0
+        @input_layers.each do |layer|
+          layer.neurons.each do |neuron|
+            neuron.activation = input[index].to_f64
+            index += 1
+          end
         end
 
         # Propogate the information forward through the hidden layers
@@ -68,7 +71,10 @@ module SHAInet
           l.neurons.each { |neuron| neuron.activate(l.activation_function) }
         end
 
-        output = @output_layers.last.neurons.map { |neuron| neuron.activation }
+        output = [] of Float64
+        @output_layers.each do |l|
+          l.neurons.each { |neuron| output << neuron.activation }
+        end
         unless stealth
           Log.info { "Input => #{input}, network output => #{output}" }
         end
@@ -80,8 +86,9 @@ module SHAInet
 
     def run(input : Array(Array(GenNum)), stealth : Bool = false) : Array(Array(Float64))
       verify_net_before_train
+      expected_size = @input_layers.reduce(0) { |acc, l| acc + l.neurons.size }
       input.each do |step|
-        raise NeuralNetRunError.new("Error input data size: #{step.size} doesn't fit input layer size: #{@input_layers.first.neurons.size}.") unless step.size == @input_layers.first.neurons.size
+        raise NeuralNetRunError.new("Error input data size: #{step.size} doesn't fit input layer size: #{expected_size}.") unless step.size == expected_size
       end
       if @hidden_layers.any? &.is_a?(TransformerLayer)
         mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
@@ -96,8 +103,12 @@ module SHAInet
         reset_recurrent_state
         outputs = [] of Array(Float64)
         input.each do |step|
-          step.each_with_index do |data, i|
-            @input_layers.first.neurons[i].activation = data.to_f64
+          index = 0
+          @input_layers.each do |layer|
+            layer.neurons.each do |neuron|
+              neuron.activation = step[index].to_f64
+              index += 1
+            end
           end
           @hidden_layers.each do |l|
             if l.is_a?(RecurrentLayer)
@@ -114,7 +125,11 @@ module SHAInet
           @output_layers.each do |l|
             l.neurons.each { |neuron| neuron.activate(l.activation_function) }
           end
-          outputs << @output_layers.last.neurons.map { |neuron| neuron.activation }
+          out_step = [] of Float64
+          @output_layers.each do |l|
+            l.neurons.each { |neuron| out_step << neuron.activation }
+          end
+          outputs << out_step
         end
         outputs
       end

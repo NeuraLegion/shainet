@@ -28,14 +28,17 @@ module SHAInet
   class Network
     def run_exp(input : Array(GenNum), stealth : Bool = false) : Array(Float64)
       verify_net_before_train
+      expected_size = @input_layers.reduce(0) { |acc, l| acc + l.neurons.size }
       raise NeuralNetRunError.new(
-        "Error input data size: #{input.size} doesn't fit input layer size: #{@input_layers.first.neurons.size}.") unless input.size == @input_layers.first.neurons.size
+        "Error input data size: #{input.size} doesn't fit input layer size: #{expected_size}.") unless input.size == expected_size
 
       # Insert the input data into the input layer
-      input.each_with_index do |data, i|
-        # Inserts the input information into the input layers
-        # TODO: add support for multiple input layers
-        @input_layers.last.activations.data[i][0].value = data.to_f64
+      index = 0
+      @input_layers.each do |layer|
+        layer.neurons.each do |neuron|
+          neuron.activation = input[index].to_f64
+          index += 1
+        end
       end
 
       unless stealth # Hide report during training
@@ -59,8 +62,11 @@ module SHAInet
       # Propogate the information through the output layers
       @output_layers.each(&.propagate_forward_exp(@hidden_layers.last))
 
-      @output_layers.last.neurons.map(&.activation) # return an array of all output neuron activations
-      # TODO: add support for multiple output layers
+      output = [] of Float64
+      @output_layers.each do |l|
+        l.neurons.each { |n| output << n.activation }
+      end
+      output
 
 
     rescue e : Exception
