@@ -19,7 +19,7 @@ describe SHAInet::EmbeddingLayer do
     layer = net.hidden_layers.first.as(SHAInet::EmbeddingLayer)
     before = layer.embed(1).dup
 
-    training = [ [[1], [0.5]] ]
+    training = [[[1], [0.5]]]
     net.learning_rate = 0.1
     net.train(data: training, training_type: :sgdm, epochs: 1, mini_batch_size: 1, log_each: 1)
 

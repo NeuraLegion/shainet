@@ -120,11 +120,11 @@ module SHAInet
 
         neuron.synapses_in.each_with_index do |syn, j|
           val = if @recurrent_synapses[i].includes?(syn)
-                   j2 = @neurons.index(syn.source_neuron).not_nil!
-                   @hidden_state[j2]
-                 else
-                   syn.source_neuron.activation
-                 end
+                  j2 = @neurons.index(syn.source_neuron).not_nil!
+                  @hidden_state[j2]
+                else
+                  syn.source_neuron.activation
+                end
           sum_in += val * syn.weight
           sum_gate += val * @input_weights[i][j]
           sum_forget += val * @forget_weights[i][j]
@@ -136,8 +136,8 @@ module SHAInet
         gate_o, _ = SHAInet.sigmoid.call(sum_out + @output_bias[i])
         cell_in, _ = @activation_function.call(sum_in)
 
-      c = gate_f * @cell_state[i] + gate_i * cell_in
-      h = gate_o * Math.tanh(c)
+        c = gate_f * @cell_state[i] + gate_i * cell_in
+        h = gate_o * Math.tanh(c)
 
         neuron.input_sum = h
         neuron.sigma_prime = 1.0

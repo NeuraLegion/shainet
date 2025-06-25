@@ -60,4 +60,3 @@ module SHAInet
     end
   end
 end
-

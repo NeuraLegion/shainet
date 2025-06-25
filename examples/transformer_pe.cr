@@ -15,7 +15,7 @@ layer.positional_encoding = pos_enc
 # Causal mask so each position attends only to itself and previous ones
 mask = SHAInet::SimpleMatrix.from_a([
   [0.0, -1e9],
-  [0.0, 0.0]
+  [0.0, 0.0],
 ])
 
 # Train the layer to output ones

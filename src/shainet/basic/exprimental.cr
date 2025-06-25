@@ -67,8 +67,6 @@ module SHAInet
         l.neurons.each { |n| output << n.activation }
       end
       output
-
-
     rescue e : Exception
       raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
     end

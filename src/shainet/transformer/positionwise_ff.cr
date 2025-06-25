@@ -27,8 +27,8 @@ module SHAInet
       @g_w2 = SimpleMatrix.zeros(hidden_dim, d_model)
       @g_b1 = SimpleMatrix.zeros(1, hidden_dim)
       @g_b2 = SimpleMatrix.zeros(1, d_model)
-      @h = SimpleMatrix.zeros(1,1)
-      @out = SimpleMatrix.zeros(1,1)
+      @h = SimpleMatrix.zeros(1, 1)
+      @out = SimpleMatrix.zeros(1, 1)
     end
 
     def forward(x : SimpleMatrix)
@@ -36,14 +36,14 @@ module SHAInet
       @h = x * @w1
       @h.rows.times do |i|
         @h.cols.times do |j|
-          @h[i,j] += @b1[0,j]
+          @h[i, j] += @b1[0, j]
         end
       end
       relu!(@h)
       @out = @h * @w2
       @out.rows.times do |i|
         @out.cols.times do |j|
-          @out[i,j] += @b2[0,j]
+          @out[i, j] += @b2[0, j]
         end
       end
       @out
@@ -55,7 +55,7 @@ module SHAInet
       db2 = SimpleMatrix.zeros(1, d_out.cols)
       d_out.rows.times do |i|
         d_out.cols.times do |j|
-          db2[0,j] += d_out[i,j]
+          db2[0, j] += d_out[i, j]
         end
       end
       @g_b2 = @g_b2 + db2
@@ -64,7 +64,7 @@ module SHAInet
       db1 = SimpleMatrix.zeros(1, drelu.cols)
       drelu.rows.times do |i|
         drelu.cols.times do |j|
-          db1[0,j] += drelu[i,j]
+          db1[0, j] += drelu[i, j]
         end
       end
       @g_b1 = @g_b1 + db1
@@ -93,7 +93,7 @@ module SHAInet
     private def relu!(m : SimpleMatrix)
       m.rows.times do |i|
         m.cols.times do |j|
-          m[i,j] = m[i,j] > 0 ? m[i,j] : 0.0
+          m[i, j] = m[i, j] > 0 ? m[i, j] : 0.0
         end
       end
     end
@@ -102,7 +102,7 @@ module SHAInet
       out = grad.clone
       m.rows.times do |i|
         m.cols.times do |j|
-          out[i,j] = m[i,j] > 0 ? grad[i,j] : 0.0
+          out[i, j] = m[i, j] > 0 ? grad[i, j] : 0.0
         end
       end
       out

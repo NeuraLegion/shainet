@@ -10,7 +10,7 @@ describe SHAInet::RecurrentLayer do
 
     seq = [[1.0], [2.0], [3.0]]
     before = net.all_synapses.first.weight
-    net.train([ [seq, [0.5]] ], training_type: :sgdm, epochs: 1, mini_batch_size: 1, log_each: 1)
+    net.train([[seq, [0.5]]], training_type: :sgdm, epochs: 1, mini_batch_size: 1, log_each: 1)
     after = net.all_synapses.first.weight
     (before != after).should eq(true)
     outputs = net.run(seq)
@@ -32,4 +32,3 @@ describe SHAInet::RecurrentLayer do
     result.should be_close(expected, 0.1)
   end
 end
-

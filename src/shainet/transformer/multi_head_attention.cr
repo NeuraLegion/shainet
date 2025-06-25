@@ -37,7 +37,7 @@ module SHAInet
       @k_heads = [] of SimpleMatrix
       @v_heads = [] of SimpleMatrix
       @attn = [] of SimpleMatrix
-      @out = SimpleMatrix.zeros(1,1)
+      @out = SimpleMatrix.zeros(1, 1)
     end
 
     def forward(x : SimpleMatrix, mask : SimpleMatrix? = nil)
@@ -104,10 +104,10 @@ module SHAInet
         attn.rows.times do |i|
           sum = 0.0
           attn.cols.times do |j|
-            sum += attn[i,j] * d_attn[i,j]
+            sum += attn[i, j] * d_attn[i, j]
           end
           attn.cols.times do |j|
-            d_scores[i,j] = attn[i,j]*(d_attn[i,j] - sum)
+            d_scores[i, j] = attn[i, j]*(d_attn[i, j] - sum)
           end
         end
         d_qs = d_scores * ks
@@ -149,8 +149,8 @@ module SHAInet
       result = SimpleMatrix.new(m.rows, m.cols)
       m.rows.times do |i|
         sum = 0.0
-        m.cols.times { |j| sum += Math.exp(m[i,j]) }
-        m.cols.times { |j| result[i,j] = Math.exp(m[i,j]) / sum }
+        m.cols.times { |j| sum += Math.exp(m[i, j]) }
+        m.cols.times { |j| result[i, j] = Math.exp(m[i, j]) / sum }
       end
       result
     end

@@ -29,6 +29,8 @@ module SHAInet
       use_gpu = CUDA.available? && ENV["SHAINET_BPE_CUDA"]?
 
       while @vocab.size < vocab_size
+        Log.debug { "Merges done: #{@merges.size}, vocabulary size: #{@vocab.size}" }
+        Log.debug { "Progress: #{(@vocab.size.to_f / vocab_size * 100.0).round(2)}%" }
         pair_list = [] of Tuple(Int32, Int32)
         corpus.each do |tokens|
           (0...(tokens.size - 1)).each do |i|
@@ -38,7 +40,7 @@ module SHAInet
           end
         end
         break if pair_list.empty?
-
+        Log.debug { "Found #{pair_list.size} pairs to merge." }
         vsize = @vocab.size
         rows = pair_list.size
         product = rows.to_u64 * vsize.to_u64

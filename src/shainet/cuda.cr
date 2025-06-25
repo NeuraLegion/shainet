@@ -3,7 +3,7 @@ module SHAInet
     extend self
 
     # :nodoc:
-    @[Link("cudart", ldflags: "-L/usr/local/cuda/targets/x86_64-linux/lib")] 
+    @[Link("cudart", ldflags: "-L/usr/local/cuda/targets/x86_64-linux/lib")]
     lib LibCUDARuntime
       fun cudaRuntimeGetVersion(version : Pointer(Int32)) : Int32
       fun cudaMalloc(ptr : Pointer(Pointer(Void)), size : LibC::SizeT) : Int32
@@ -11,23 +11,23 @@ module SHAInet
       fun cudaMemcpy(dst : Pointer(Void), src : Pointer(Void), count : LibC::SizeT, kind : Int32) : Int32
     end
 
-    @[Link("cublas", ldflags: "-L/usr/local/cuda/targets/x86_64-linux/lib")] 
+    @[Link("cublas", ldflags: "-L/usr/local/cuda/targets/x86_64-linux/lib")]
     lib LibCUBLAS
       type Handle = Void*
 
       fun cublasCreate_v2(handle : Pointer(Handle)) : Int32
       fun cublasDestroy_v2(handle : Handle) : Int32
       fun cublasDgemm_v2(handle : Handle, transa : Int32, transb : Int32,
-        m : Int32, n : Int32, k : Int32,
-        alpha : Pointer(Float64), a : Pointer(Float64), lda : Int32,
-        b : Pointer(Float64), ldb : Int32,
-        beta : Pointer(Float64), c : Pointer(Float64), ldc : Int32) : Int32
+                         m : Int32, n : Int32, k : Int32,
+                         alpha : Pointer(Float64), a : Pointer(Float64), lda : Int32,
+                         b : Pointer(Float64), ldb : Int32,
+                         beta : Pointer(Float64), c : Pointer(Float64), ldc : Int32) : Int32
     end
 
     enum MemcpyKind
-      HostToHost  = 0
-      HostToDevice = 1
-      DeviceToHost = 2
+      HostToHost     = 0
+      HostToDevice   = 1
+      DeviceToHost   = 2
       DeviceToDevice = 3
     end
 

@@ -1,5 +1,5 @@
 require "../src/shainet"
-
+require "log"
 # BabyLM challenge example
 # ------------------------
 # 1. Download the BabyLM training set from the following URL:
@@ -12,15 +12,22 @@ require "../src/shainet"
 # 5. Predict the next token for a sample input.
 
 # Path to the unzipped training text
-path = "data/train.txt"
+path = "/home/unshadow/Downloads/train_100M/childes.train"
+puts "Reading dataset from #{path}..."
 text = File.read(path)
+puts "Dataset loaded, size: #{text.size} characters."
 
+puts "Using the GPU? #{SHAInet::CUDA.available? ? "Yes" : "No"}"
+puts "Training the tokenizer on the dataset..."
 # Train tokenizer and encode text
 vocab_size = 30_000
 tokenizer = SHAInet::BPETokenizer.new
 tokenizer.train(text, vocab_size)
 ids = tokenizer.encode(text)
 
+puts "Tokenizer trained with #{tokenizer.vocab.size} tokens."
+
+puts "Building the network..."
 # Build the network
 d_model = 256
 seq_len = 16
@@ -33,6 +40,7 @@ net.add_layer(:embedding, d_model, :memory, SHAInet.none)
 net.add_layer(:output, token_count, :memory, SHAInet.sigmoid)
 net.fully_connect
 
+puts "Network built"
 # Positional encoding shared across layers
 pos_enc = SHAInet::PositionalEncoding.sinusoidal(seq_len, d_model)
 net.transformer_layers.each { |l| l.positional_encoding = pos_enc }
@@ -71,6 +79,7 @@ epochs = 10
 batch = 32
 net.learning_rate = 0.001
 
+puts "Training the network for #{epochs} epochs with batch size #{batch}..."
 epochs.times do |epoch|
   training.shuffle!
   train_data.shuffle!
@@ -79,7 +88,7 @@ epochs.times do |epoch|
     cost_function: :c_ent,
     epochs: 1,
     mini_batch_size: batch,
-    log_each: 1000)
+    log_each: 100)
 
   val_loss = 0.0
   validation.each do |seq, expected|
