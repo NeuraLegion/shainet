@@ -6,6 +6,7 @@ module SHAInet
   # Simple byte-pair encoding tokenizer. It can train a vocabulary
   # from text and encode/decode using the learned merges.
   class BPETokenizer
+    Log = ::Log.for(self)
     getter vocab : Hash(String, Int32)
     getter inv_vocab : Array(String)
     getter merges : Array(Tuple(String, String))
@@ -40,24 +41,34 @@ module SHAInet
 
         vsize = @vocab.size
         rows = pair_list.size
-        if use_gpu && (rows.to_i64 * vsize.to_i64 <= Int32::MAX)
-          a = CudaMatrix.new(rows, vsize)
-          b = CudaMatrix.new(rows, vsize)
-          pair_list.each_with_index do |(id1, id2), idx|
-            a[idx, id1] = 1.0
-            b[idx, id2] = 1.0
+        product = rows.to_u64 * vsize.to_u64
+
+        best_pair_ids = nil
+
+        if use_gpu && product <= Int32::MAX.to_u64
+          begin
+            a = CudaMatrix.new(rows, vsize)
+            b = CudaMatrix.new(rows, vsize)
+            pair_list.each_with_index do |(id1, id2), idx|
+              a[idx, id1] = 1.0
+              b[idx, id2] = 1.0
+            end
+            a.sync_to_device!
+            b.sync_to_device!
+            counts = a.transpose * b
+            counts.as?(CudaMatrix).try &.sync_from_device!
+            best_pair_ids = pair_list.reduce(pair_list.first) do |best, pair|
+              count = counts[pair[0], pair[1]].to_i
+              best_count = counts[best[0], best[1]].to_i
+              count > best_count ? pair : best
+            end
+          rescue e
+            Log.warn { "Falling back to CPU: #{e.message}" }
           end
-          a.sync_to_device!
-          b.sync_to_device!
-          counts = a.transpose * b
-          counts.as?(CudaMatrix).try &.sync_from_device!
-          best_pair_ids = pair_list.reduce(pair_list.first) do |best, pair|
-            count = counts[pair[0], pair[1]].to_i
-            best_count = counts[best[0], best[1]].to_i
-            count > best_count ? pair : best
-          end
-        else
-          use_gpu = false if rows.to_i64 * vsize.to_i64 > Int32::MAX
+        end
+
+        if best_pair_ids.nil?
+          Log.warn { "Falling back to CPU: #{rows} × #{vsize} too large for GPU matrix." } if use_gpu && product > Int32::MAX.to_u64
           pair_counts = Hash(Tuple(String, String), Int32).new(0)
           corpus.each do |tokens|
             (0...(tokens.size - 1)).each do |i|
