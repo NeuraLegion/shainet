@@ -25,19 +25,20 @@ module SHAInet
 
     def initialize(@d_model : Int32, @num_heads : Int32)
       @head_dim = (@d_model // @num_heads)
-      @w_q = SimpleMatrix.new(@d_model, @d_model).random_fill!
-      @w_k = SimpleMatrix.new(@d_model, @d_model).random_fill!
-      @w_v = SimpleMatrix.new(@d_model, @d_model).random_fill!
-      @w_o = SimpleMatrix.new(@d_model, @d_model).random_fill!
-      @grads_w_q = SimpleMatrix.zeros(@d_model, @d_model)
-      @grads_w_k = SimpleMatrix.zeros(@d_model, @d_model)
-      @grads_w_v = SimpleMatrix.zeros(@d_model, @d_model)
-      @grads_w_o = SimpleMatrix.zeros(@d_model, @d_model)
+      mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
+      @w_q = mat_klass.new(@d_model, @d_model).random_fill!
+      @w_k = mat_klass.new(@d_model, @d_model).random_fill!
+      @w_v = mat_klass.new(@d_model, @d_model).random_fill!
+      @w_o = mat_klass.new(@d_model, @d_model).random_fill!
+      @grads_w_q = mat_klass.zeros(@d_model, @d_model)
+      @grads_w_k = mat_klass.zeros(@d_model, @d_model)
+      @grads_w_v = mat_klass.zeros(@d_model, @d_model)
+      @grads_w_o = mat_klass.zeros(@d_model, @d_model)
       @q_heads = [] of SimpleMatrix
       @k_heads = [] of SimpleMatrix
       @v_heads = [] of SimpleMatrix
       @attn = [] of SimpleMatrix
-      @out = SimpleMatrix.zeros(1, 1)
+      @out = mat_klass.zeros(1, 1)
     end
 
     def forward(x : SimpleMatrix, mask : SimpleMatrix? = nil)
@@ -81,13 +82,14 @@ module SHAInet
 
     def backward(d_out : SimpleMatrix)
       # Gradients for output projection
-      @grads_w_o = (@q_heads.size == 0 ? SimpleMatrix.zeros(@d_model, @d_model) : @grads_w_o)
+      mat_klass = @w_q.class
+      @grads_w_o = (@q_heads.size == 0 ? mat_klass.zeros(@d_model, @d_model) : @grads_w_o)
       @grads_w_o = @grads_w_o + ((@out.clone.transpose * d_out))
       d_concat = d_out * @w_o.transpose
 
-      d_q_total = SimpleMatrix.zeros(@x.not_nil!.rows, @d_model)
-      d_k_total = SimpleMatrix.zeros(@x.not_nil!.rows, @d_model)
-      d_v_total = SimpleMatrix.zeros(@x.not_nil!.rows, @d_model)
+      d_q_total = mat_klass.zeros(@x.not_nil!.rows, @d_model)
+      d_k_total = mat_klass.zeros(@x.not_nil!.rows, @d_model)
+      d_v_total = mat_klass.zeros(@x.not_nil!.rows, @d_model)
 
       @num_heads.times do |h|
         d_head = d_concat.slice_cols(h*@head_dim, @head_dim)
@@ -100,7 +102,7 @@ module SHAInet
         d_vs = attn.transpose * d_head
 
         # softmax gradient
-        d_scores = SimpleMatrix.zeros(attn.rows, attn.cols)
+        d_scores = mat_klass.zeros(attn.rows, attn.cols)
         attn.rows.times do |i|
           sum = 0.0
           attn.cols.times do |j|
@@ -128,21 +130,23 @@ module SHAInet
     end
 
     def apply_gradients(lr : Float64)
+      mat_klass = @w_q.class
       @w_q = @w_q - @grads_w_q * lr
       @w_k = @w_k - @grads_w_k * lr
       @w_v = @w_v - @grads_w_v * lr
       @w_o = @w_o - @grads_w_o * lr
-      @grads_w_q = SimpleMatrix.zeros(@d_model, @d_model)
-      @grads_w_k = SimpleMatrix.zeros(@d_model, @d_model)
-      @grads_w_v = SimpleMatrix.zeros(@d_model, @d_model)
-      @grads_w_o = SimpleMatrix.zeros(@d_model, @d_model)
+      @grads_w_q = mat_klass.zeros(@d_model, @d_model)
+      @grads_w_k = mat_klass.zeros(@d_model, @d_model)
+      @grads_w_v = mat_klass.zeros(@d_model, @d_model)
+      @grads_w_o = mat_klass.zeros(@d_model, @d_model)
     end
 
     def zero_gradients
-      @grads_w_q = SimpleMatrix.zeros(@d_model, @d_model)
-      @grads_w_k = SimpleMatrix.zeros(@d_model, @d_model)
-      @grads_w_v = SimpleMatrix.zeros(@d_model, @d_model)
-      @grads_w_o = SimpleMatrix.zeros(@d_model, @d_model)
+      mat_klass = @w_q.class
+      @grads_w_q = mat_klass.zeros(@d_model, @d_model)
+      @grads_w_k = mat_klass.zeros(@d_model, @d_model)
+      @grads_w_v = mat_klass.zeros(@d_model, @d_model)
+      @grads_w_o = mat_klass.zeros(@d_model, @d_model)
     end
 
     private def softmax_rows(m : SimpleMatrix)

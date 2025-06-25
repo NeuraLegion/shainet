@@ -4,12 +4,12 @@ require "../cuda"
 module SHAInet
   # Basic GPU matrix wrapper. Allocates device memory when CUDA is
   # available and falls back to SimpleMatrix otherwise. Only matrix
-  # multiplication uses the GPU.
+  # multiplication was previously using the GPU.
   class CudaMatrix < SimpleMatrix
     property device_ptr : Pointer(Float64)?
 
-    def initialize(rows : Int32, cols : Int32)
-      super(rows, cols)
+  def initialize(rows : Int32, cols : Int32, init : Float64 = 0.0)
+    super(rows, cols, init)
       if CUDA.available?
         ptr = Pointer(Float64).null
         bytes = ((@rows*@cols)*8).to_u64
@@ -40,7 +40,7 @@ module SHAInet
     # Return the transposed matrix. When CUDA is available the returned
     # instance keeps the device buffer in sync so that further GPU
     # operations can be used without additional copies.
-    def transpose
+  def transpose
       result = CudaMatrix.new(@cols, @rows)
       @rows.times do |i|
         @cols.times do |j|
@@ -88,6 +88,103 @@ module SHAInet
       else
         super(other)
       end
+    end
+  end
+
+  def self.zeros(rows : Int32, cols : Int32)
+    m = new(rows, cols)
+    m.sync_to_device!
+    m
+  end
+
+  def self.ones(rows : Int32, cols : Int32)
+    m = new(rows, cols)
+    rows.times do |i|
+      cols.times do |j|
+        m[i, j] = 1.0
+      end
+    end
+    m.sync_to_device!
+    m
+  end
+
+  def random_fill!(min : Float64 = -0.1, max : Float64 = 0.1)
+    super(min, max)
+    sync_to_device!
+    self
+  end
+
+  def clone
+    dup = CudaMatrix.new(@rows, @cols)
+    @rows.times do |i|
+      @cols.times do |j|
+        dup[i, j] = self[i, j]
+      end
+    end
+    dup.sync_to_device!
+    dup
+  end
+
+  def +(other : CudaMatrix)
+    raise ArgumentError.new("size mismatch") unless @rows == other.rows && @cols == other.cols
+    if CUDA.available? && (ptr_a = self.device_ptr) && (ptr_b = other.device_ptr) && !ptr_a.null? && !ptr_b.null?
+      handle = CUDA.create_handle
+      result = CudaMatrix.new(@rows, @cols)
+      CUDA.geam(handle, ptr_a, ptr_b, result.device_ptr.not_nil!, @rows, @cols, 1.0, 1.0)
+      CUDA.destroy_handle(handle)
+      result.sync_from_device!
+      result
+    else
+      result = CudaMatrix.new(@rows, @cols)
+      @rows.times do |i|
+        @cols.times do |j|
+          result[i, j] = self[i, j] + other[i, j]
+        end
+      end
+      result.sync_to_device! if CUDA.available?
+      result
+    end
+  end
+
+  def -(other : CudaMatrix)
+    raise ArgumentError.new("size mismatch") unless @rows == other.rows && @cols == other.cols
+    if CUDA.available? && (ptr_a = self.device_ptr) && (ptr_b = other.device_ptr) && !ptr_a.null? && !ptr_b.null?
+      handle = CUDA.create_handle
+      result = CudaMatrix.new(@rows, @cols)
+      CUDA.geam(handle, ptr_a, ptr_b, result.device_ptr.not_nil!, @rows, @cols, 1.0, -1.0)
+      CUDA.destroy_handle(handle)
+      result.sync_from_device!
+      result
+    else
+      result = CudaMatrix.new(@rows, @cols)
+      @rows.times do |i|
+        @cols.times do |j|
+          result[i, j] = self[i, j] - other[i, j]
+        end
+      end
+      result.sync_to_device! if CUDA.available?
+      result
+    end
+  end
+
+  def *(scalar : Number)
+    if CUDA.available? && (dptr = self.device_ptr) && !dptr.null?
+      handle = CUDA.create_handle
+      out = self.clone
+      ptr = out.device_ptr.not_nil!
+      CUDA.scal(handle, ptr, (@rows*@cols), scalar.to_f64)
+      CUDA.destroy_handle(handle)
+      out.sync_from_device!
+      out
+    else
+      result = CudaMatrix.new(@rows, @cols)
+      @rows.times do |i|
+        @cols.times do |j|
+          result[i, j] = self[i, j] * scalar.to_f64
+        end
+      end
+      result.sync_to_device! if CUDA.available?
+      result
     end
   end
 end

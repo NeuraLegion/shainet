@@ -12,24 +12,27 @@ module SHAInet
     @norm : SimpleMatrix
 
     def initialize(d_model : Int32, epsilon : Float64 = 1e-5)
-      @gamma = SimpleMatrix.ones(1, d_model)
-      @beta = SimpleMatrix.zeros(1, d_model)
-      @g_gamma = SimpleMatrix.zeros(1, d_model)
-      @g_beta = SimpleMatrix.zeros(1, d_model)
+      mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
+      @gamma = mat_klass.new(1, d_model)
+      d_model.times { |j| @gamma[0, j] = 1.0 }
+      @beta = mat_klass.zeros(1, d_model)
+      @g_gamma = mat_klass.zeros(1, d_model)
+      @g_beta = mat_klass.zeros(1, d_model)
       @epsilon = epsilon
-      @mean = SimpleMatrix.zeros(1, 1)
-      @var = SimpleMatrix.zeros(1, 1)
-      @norm = SimpleMatrix.zeros(1, 1)
+      @mean = mat_klass.zeros(1, 1)
+      @var = mat_klass.zeros(1, 1)
+      @norm = mat_klass.zeros(1, 1)
     end
 
     def forward(x : SimpleMatrix)
       @x = x
       rows = x.rows
       cols = x.cols
-      @mean = SimpleMatrix.new(rows, 1)
-      @var = SimpleMatrix.new(rows, 1)
-      @norm = SimpleMatrix.new(rows, cols)
-      out = SimpleMatrix.new(rows, cols)
+      mat_klass = @gamma.class
+      @mean = mat_klass.new(rows, 1)
+      @var = mat_klass.new(rows, 1)
+      @norm = mat_klass.new(rows, cols)
+      out = mat_klass.new(rows, cols)
       rows.times do |i|
         mean = 0.0
         cols.times { |j| mean += x[i, j] }
@@ -56,9 +59,10 @@ module SHAInet
       x = @x.not_nil!
       rows = x.rows
       cols = x.cols
-      d_gamma = SimpleMatrix.zeros(1, cols)
-      d_beta = SimpleMatrix.zeros(1, cols)
-      d_x = SimpleMatrix.new(rows, cols)
+      mat_klass = @gamma.class
+      d_gamma = mat_klass.zeros(1, cols)
+      d_beta = mat_klass.zeros(1, cols)
+      d_x = mat_klass.new(rows, cols)
       rows.times do |i|
         denom = Math.sqrt(@var[i, 0] + @epsilon)
         inv = 1.0 / denom
@@ -86,13 +90,15 @@ module SHAInet
     def apply_gradients(lr : Float64)
       @gamma = @gamma - @g_gamma * lr
       @beta = @beta - @g_beta * lr
-      @g_gamma = SimpleMatrix.zeros(@gamma.rows, @gamma.cols)
-      @g_beta = SimpleMatrix.zeros(@beta.rows, @beta.cols)
+      mat_klass = @gamma.class
+      @g_gamma = mat_klass.zeros(@gamma.rows, @gamma.cols)
+      @g_beta = mat_klass.zeros(@beta.rows, @beta.cols)
     end
 
     def zero_gradients
-      @g_gamma = SimpleMatrix.zeros(@gamma.rows, @gamma.cols)
-      @g_beta = SimpleMatrix.zeros(@beta.rows, @beta.cols)
+      mat_klass = @gamma.class
+      @g_gamma = mat_klass.zeros(@gamma.rows, @gamma.cols)
+      @g_beta = mat_klass.zeros(@beta.rows, @beta.cols)
     end
   end
 end
