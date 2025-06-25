@@ -129,12 +129,15 @@ iris.test(test_set)
 ```
 
 ### Training with StreamingData
-`StreamingData` reads batches lazily from disk. Each line in the data file
-should contain a JSON array describing the input and expected output:
-`[[1,0],[1]]`.
+`StreamingData` reads batches lazily from disk using a small buffer so even
+massive corpora can be processed. Each line in the data file should contain a
+JSON array describing the input and expected output: `[[1,0],[1]]`. Use the
+`chunk_size` argument to control how many lines are buffered and shuffled at a
+time.
 
 ```crystal
-stream = SHAInet::StreamingData.new("data.txt")
+# Buffer at most 1,024 lines and shuffle each chunk
+stream = SHAInet::StreamingData.new("data.txt", shuffle: true, chunk_size: 1024)
 
 net = SHAInet::Network.new
 net.add_layer(:input, 2, :memory, SHAInet.sigmoid)
