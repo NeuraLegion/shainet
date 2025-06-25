@@ -20,7 +20,7 @@ module SHAInet
 
     LAYER_TYPES      = ["input", "hidden", "recurrent", "output"]
     CONNECTION_TYPES = ["full", "ind_to_ind", "random"]
-    COST_FUNCTIONS   = ["mse", "c_ent"] # , "exp", "hel_d", "kld", "gkld", "ita_sai_d"]
+    COST_FUNCTIONS   = ["mse", "c_ent", "c_ent_sm"] # , "exp", "hel_d", "kld", "gkld", "ita_sai_d"]
 
     # General network parameters
     getter :input_layers, :output_layers, :hidden_layers, :recurrent_layers, :lstm_layers, :all_neurons, :all_synapses

@@ -226,6 +226,59 @@ module SHAInet
       raise NeuralNetRunError.new("Error in evaluate: #{e}")
     end
 
+    # Evaluate a single example using a class label and softmax cross entropy
+    def evaluate_label(input_data : Array(GenNum), label : Int32)
+      actual_output = run(input_data.map(&.to_f64), stealth: true)
+      validate_values(actual_output, "actual_output")
+      probs = SHAInet.softmax(actual_output)
+
+      @error_signal = [] of Float64
+      probs.size.times do |i|
+        neuron = @output_layers.last.neurons[i]
+        grad = probs[i] - (i == label ? 1.0 : 0.0)
+        neuron.gradient = grad*neuron.sigma_prime
+        @error_signal << (i == label ? -Math.log(probs[i].clamp(1e-9, 1.0)) : 0.0)
+      end
+
+      validate_values(@error_signal, "error_signal")
+      @total_error = -Math.log(probs[label].clamp(1e-9, 1.0))
+
+      if @hidden_layers.any? &.is_a?(TransformerLayer)
+        mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
+        exp = mat_klass.zeros(1, probs.size)
+        exp[0, label] = 1.0
+        act = mat_klass.from_a([probs])
+        @transformer_error = act - exp
+      end
+    end
+
+    # Evaluate a sequence example with a class label and softmax cross entropy
+    def evaluate_sequence_label(input_data : Array(Array(GenNum)), label : Int32)
+      seq = input_data.map { |x| x.map(&.to_f64) }
+      actual_output = run(seq, stealth: true).last
+      validate_values(actual_output, "actual_output")
+      probs = SHAInet.softmax(actual_output)
+
+      @error_signal = [] of Float64
+      probs.size.times do |i|
+        neuron = @output_layers.last.neurons[i]
+        grad = probs[i] - (i == label ? 1.0 : 0.0)
+        neuron.gradient = grad*neuron.sigma_prime
+        @error_signal << (i == label ? -Math.log(probs[i].clamp(1e-9, 1.0)) : 0.0)
+      end
+
+      validate_values(@error_signal, "error_signal")
+      @total_error = -Math.log(probs[label].clamp(1e-9, 1.0))
+
+      if @hidden_layers.any? &.is_a?(TransformerLayer)
+        mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
+        exp = mat_klass.zeros(1, probs.size)
+        exp[0, label] = 1.0
+        act = mat_klass.from_a([probs])
+        @transformer_error = act - exp
+      end
+    end
+
     # Calculate MSE from the error signal of the output layer
     def update_mse
       n = @output_layers.last.neurons.size
@@ -271,10 +324,14 @@ module SHAInet
       end
 
       # Change String/Symbol into the corrent proc of the cost function
+      label_mode = false
       if cost_function.is_a?(Symbol) || cost_function.is_a?(String)
-        raise NeuralNetRunError.new("Must define correct cost function type (:mse, :c_ent, :exp, :hel_d, :kld, :gkld, :ita_sai_d).") if COST_FUNCTIONS.any? { |x| x == cost_function.to_s } == false
-        proc = get_cost_proc(cost_function.to_s)
-        cost_function = proc
+        raise NeuralNetRunError.new("Must define correct cost function type (:mse, :c_ent, :c_ent_sm, :exp, :hel_d, :kld, :gkld, :ita_sai_d).") if COST_FUNCTIONS.any? { |x| x == cost_function.to_s } == false
+        label_mode = cost_function.to_s == "c_ent_sm"
+        unless label_mode
+          proc = get_cost_proc(cost_function.to_s)
+          cost_function = proc
+        end
       end
 
       counter = 0_i64
@@ -312,7 +369,7 @@ module SHAInet
         if data.is_a?(SHAInet::StreamingData)
           while (data_slice = data.next_batch(batch_size)).size > 0
             slices += 1
-            verify_data(data_slice)
+            verify_data(data_slice, label_mode)
             @time_step += 1 if mini_batch_size
             batch_mean = 0.0_f64
             all_errors = 0.0_f64
@@ -333,17 +390,29 @@ module SHAInet
               else
                 output_arr << output_d.to_f64
               end
-              if input_d.is_a?(Array) && input_d.as(Array).first.is_a?(Array)
-                seq_in = (input_d.as(Array).map { |x| x.as(Array).map(&.to_f64).as(Array(Float64)) }).as(Array(Array(Float64)))
-                evaluate_sequence(seq_in, output_arr.map(&.to_f64), cost_function)
-              else
-                input_arr = [] of Float64
-                input_d.as(Array).each do |v|
-                  if v.is_a?(Number)
-                    input_arr << v.to_f64
+              if label_mode
+                label = output_arr.first.to_i
+                if input_d.is_a?(Array) && input_d.as(Array).first.is_a?(Array)
+                  seq_in = (input_d.as(Array).map { |x| x.as(Array).map(&.to_f64).as(Array(Float64)) }).as(Array(Array(Float64)))
+                  evaluate_sequence_label(seq_in, label)
+                else
+                  input_arr = [] of Float64
+                  input_d.as(Array).each do |v|
+                    input_arr << v.to_f64 if v.is_a?(Number)
                   end
+                  evaluate_label(input_arr, label)
                 end
-                evaluate(input_arr, output_arr.map(&.to_f64), cost_function)
+              else
+                if input_d.is_a?(Array) && input_d.as(Array).first.is_a?(Array)
+                  seq_in = (input_d.as(Array).map { |x| x.as(Array).map(&.to_f64).as(Array(Float64)) }).as(Array(Array(Float64)))
+                  evaluate_sequence(seq_in, output_arr.map(&.to_f64), cost_function.as(CostFunction))
+                else
+                  input_arr = [] of Float64
+                  input_d.as(Array).each do |v|
+                    input_arr << v.to_f64 if v.is_a?(Number)
+                  end
+                  evaluate(input_arr, output_arr.map(&.to_f64), cost_function.as(CostFunction))
+                end
               end
               all_errors += @total_error
               @hidden_layers.reverse_each do |l|
@@ -396,7 +465,7 @@ module SHAInet
         else
           raw_data.not_nil!.each_slice(batch_size, reuse: false) do |data_slice|
             slices += 1
-            verify_data(data_slice)
+            verify_data(data_slice, label_mode)
             @time_step += 1 if mini_batch_size # in mini-batch update adam time_step
 
             # batch_mean = [] of Float64
@@ -425,17 +494,29 @@ module SHAInet
               else
                 output_arr << output_d.to_f64
               end
-              if input_d.is_a?(Array) && input_d.as(Array).first.is_a?(Array)
-                seq_in = (input_d.as(Array).map { |x| x.as(Array).map(&.to_f64).as(Array(Float64)) }).as(Array(Array(Float64)))
-                evaluate_sequence(seq_in, output_arr.map(&.to_f64), cost_function)
-              else
-                input_arr = [] of Float64
-                input_d.as(Array).each do |v|
-                  if v.is_a?(Number)
-                    input_arr << v.to_f64
+              if label_mode
+                label = output_arr.first.to_i
+                if input_d.is_a?(Array) && input_d.as(Array).first.is_a?(Array)
+                  seq_in = (input_d.as(Array).map { |x| x.as(Array).map(&.to_f64).as(Array(Float64)) }).as(Array(Array(Float64)))
+                  evaluate_sequence_label(seq_in, label)
+                else
+                  input_arr = [] of Float64
+                  input_d.as(Array).each do |v|
+                    input_arr << v.to_f64 if v.is_a?(Number)
                   end
+                  evaluate_label(input_arr, label)
                 end
-                evaluate(input_arr, output_arr.map(&.to_f64), cost_function)
+              else
+                if input_d.is_a?(Array) && input_d.as(Array).first.is_a?(Array)
+                  seq_in = (input_d.as(Array).map { |x| x.as(Array).map(&.to_f64).as(Array(Float64)) }).as(Array(Array(Float64)))
+                  evaluate_sequence(seq_in, output_arr.map(&.to_f64), cost_function.as(CostFunction))
+                else
+                  input_arr = [] of Float64
+                  input_d.as(Array).each do |v|
+                    input_arr << v.to_f64 if v.is_a?(Number)
+                  end
+                  evaluate(input_arr, output_arr.map(&.to_f64), cost_function.as(CostFunction))
+                end
               end
               # all_errors << @total_error
               all_errors += @total_error
@@ -695,7 +776,7 @@ module SHAInet
 
       # Change String/Symbol into the corrent proc of the cost function
       if cost_function.is_a?(Symbol) || cost_function.is_a?(String)
-        raise NeuralNetRunError.new("Must define correct cost function type (:mse, :c_ent, :exp, :hel_d, :kld, :gkld, :ita_sai_d).") if COST_FUNCTIONS.any? { |x| x == cost_function.to_s } == false
+        raise NeuralNetRunError.new("Must define correct cost function type (:mse, :c_ent, :c_ent_sm, :exp, :hel_d, :kld, :gkld, :ita_sai_d).") if COST_FUNCTIONS.any? { |x| x == cost_function.to_s } == false
         proc = get_cost_proc(cost_function.to_s)
         cost_function = proc
       end
@@ -732,7 +813,7 @@ module SHAInet
         epoch_error_sum = Array(Float64).new(@output_layers.last.neurons.size) { 0.0 }
 
         raw_data.not_nil!.each_slice(batch_size, reuse: false) do |data_slice|
-          verify_data(data_slice)
+          verify_data(data_slice, false)
 
           pool = Pool.new(
             network: self,
@@ -765,7 +846,7 @@ module SHAInet
               end
               if input_d.is_a?(Array) && input_d.as(Array).first.is_a?(Array)
                 seq_in = (input_d.as(Array).map { |x| x.as(Array).map(&.to_f64).as(Array(Float64)) }).as(Array(Array(Float64)))
-                evaluate_sequence(seq_in, output_arr.map(&.to_f64), cost_function)
+                evaluate_sequence(seq_in, output_arr.map(&.to_f64), cost_function.as(CostFunction))
               else
                 input_arr = [] of Float64
                 input_d.as(Array).each do |v|
@@ -773,7 +854,7 @@ module SHAInet
                     input_arr << v.to_f64
                   end
                 end
-                evaluate(input_arr, output_arr.map(&.to_f64), cost_function)
+                evaluate(input_arr, output_arr.map(&.to_f64), cost_function.as(CostFunction))
               end
               update_mse
               batch_mse_sum += @mse
@@ -803,7 +884,7 @@ module SHAInet
       end
     end
 
-    def verify_data(data : Array(Array))
+    def verify_data(data : Array(Array), label_mode : Bool = false)
       message = nil
       if data.sample.size != 2
         message = "Train data must have two arrays, one for input one for output"
@@ -823,7 +904,7 @@ module SHAInet
         if (test.last.size != random_output)
           message = "Output data sizes are inconsistent"
         end
-        unless (test.last.size == @output_layers.first.neurons.size)
+        unless label_mode || (test.last.size == @output_layers.first.neurons.size)
           message = "data at index #{i} and size: #{test.last.size} mismatch output layer size"
         end
       end
@@ -856,6 +937,8 @@ module SHAInet
         SHAInet.quadratic_cost
       when "c_ent"
         # raise MathError.new("Cross entropy cost is not implemented fully yet, please use quadratic cost for now.")
+        SHAInet.cross_entropy_cost
+      when "c_ent_sm"
         SHAInet.cross_entropy_cost
       else
         raise NeuralNetInitalizationError.new("Must choose correct cost function or provide a correct Proc")
