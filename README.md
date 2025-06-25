@@ -308,9 +308,41 @@ label = {
       correct += 1 if error_sum < 0.3
     end
     puts "Correct answers: (#{correct} / #{test_data.size})"
-    (correct > 10).should eq(true)
+(correct > 10).should eq(true)
 ```
 
+### Autograd::Tensor and TensorMatrix
+
+`Autograd::Tensor` wraps a numeric value and tracks how it was computed so
+gradients can be propagated automatically. `TensorMatrix` is a lightweight
+matrix made of tensors for differentiable operations. Each tensor stores its
+value in `data` and accumulates gradients in `grad` during backpropagation.
+
+```crystal
+a = SHAInet::SimpleMatrix.tensor(1, 2)
+a[0, 0] = SHAInet::Autograd::Tensor.new(2.0)
+a[0, 1] = SHAInet::Autograd::Tensor.new(3.0)
+
+w = SHAInet::SimpleMatrix.tensor(2, 1)
+w[0, 0] = SHAInet::Autograd::Tensor.new(4.0)
+w[1, 0] = SHAInet::Autograd::Tensor.new(5.0)
+
+out = a * w
+out[0, 0].as(SHAInet::Autograd::Tensor).backward
+
+learning_rate = 0.1
+w.rows.times do |i|
+  w.cols.times do |j|
+    t = w[i, j]
+    w[i, j] = SHAInet::Autograd::Tensor.new(t.data - learning_rate * t.grad)
+    t.grad = 0.0
+  end
+end
+```
+
+After calling `backward` the gradients reside in each tensor's `grad` field.
+The loop above applies a simple gradient descent step. Use
+`TensorMatrix#zero_grads!` to clear gradients when starting a new iteration.
 
 ## Development
 
