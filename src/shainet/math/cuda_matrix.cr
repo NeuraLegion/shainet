@@ -8,8 +8,8 @@ module SHAInet
   class CudaMatrix < SimpleMatrix
     property device_ptr : Pointer(Float64)?
 
-  def initialize(rows : Int32, cols : Int32, init : Float64 = 0.0)
-    super(rows, cols, init)
+    def initialize(rows : Int32, cols : Int32, init : Float64 = 0.0)
+      super(rows, cols, init)
       if CUDA.available?
         ptr = Pointer(Float64).null
         bytes = ((@rows*@cols)*8).to_u64
@@ -40,7 +40,7 @@ module SHAInet
     # Return the transposed matrix. When CUDA is available the returned
     # instance keeps the device buffer in sync so that further GPU
     # operations can be used without additional copies.
-  def transpose
+    def transpose
       result = CudaMatrix.new(@cols, @rows)
       @rows.times do |i|
         @cols.times do |j|
@@ -106,6 +106,10 @@ module SHAInet
     end
     m.sync_to_device!
     m
+  end
+
+  def self.tensor(rows : Int32, cols : Int32)
+    CudaTensorMatrix.new(rows, cols)
   end
 
   def random_fill!(min : Float64 = -0.1, max : Float64 = 0.1)
