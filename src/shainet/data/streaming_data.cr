@@ -4,15 +4,20 @@ module SHAInet
   class StreamingData
     alias Datum = Array(Float64) | Array(Array(Float64))
     @path : String
-    @lines : Array(String)
+    @file : File
+    @buffer : Array(String)
     @index : Int32 = 0
     @shuffle : Bool
+    @chunk_size : Int32
 
-    # Reads data from `path`. When `shuffle` is true the file is read into
-    # memory and shuffled at the beginning of every epoch.
-    def initialize(@path : String, @shuffle : Bool = false)
-      @lines = File.read_lines(@path)
-      shuffle! if @shuffle
+    # Reads data from `path`. The file is buffered in chunks to avoid loading
+    # everything into memory. When `shuffle` is true the buffer is shuffled at
+    # the beginning of each chunk.
+    def initialize(@path : String, @shuffle : Bool = false, @chunk_size : Int32 = 1024)
+      @file = File.new(@path)
+      @buffer = [] of String
+      @index = 0
+      read_chunk
     end
 
     # Returns the next `batch_size` examples. Each line may contain either a
@@ -21,9 +26,9 @@ module SHAInet
     def next_batch(batch_size : Int32)
       batch = [] of Array(Datum)
       batch_size.times do
-        break if @index >= @lines.size
-        pair = JSON.parse(@lines[@index]).as_a
-        @index += 1
+        line = next_line
+        break unless line
+        pair = JSON.parse(line).as_a
         input = parse_array(pair[0])
         output = parse_array(pair[1])
         batch << [input, output]
@@ -33,12 +38,34 @@ module SHAInet
 
     # Resets the data pointer for a new epoch and reshuffles if enabled.
     def rewind
-      @index = 0
-      shuffle! if @shuffle
+      @file.seek(0)
+      read_chunk
     end
 
     private def shuffle!
-      @lines.shuffle!
+      @buffer.shuffle!
+    end
+
+    private def next_line : String?
+      if @index >= @buffer.size
+        read_chunk
+        return nil if @buffer.empty?
+      end
+      line = @buffer[@index]
+      @index += 1
+      line
+    end
+
+    private def read_chunk
+      @buffer.clear
+      @index = 0
+      count = 0
+      while (line = @file.gets)
+        @buffer << line
+        count += 1
+        break if count >= @chunk_size
+      end
+      shuffle! if @shuffle
     end
 
     # Parses a JSON array and converts all numeric values to Float64. Supports
