@@ -703,6 +703,21 @@ describe SHAInet::Network do
   # #   puts "Correct answers: #{correct} / #{total}, Accuracy: #{(accuracy*100).round(3)}%"
   # #   (accuracy >= 0.2).should eq(true) # Without training acc is ~= 10%
   # # end
+
+  it "trains a simple transformer network using autograd" do
+    Random::DEFAULT.new_seed(42_u64, 54_u64)
+    net = SHAInet::Network.new
+    net.add_layer(:input, 2, :memory, SHAInet.none)
+    net.add_layer(:transformer, 2)
+    net.add_layer(:output, 2, :memory, SHAInet.none)
+    training = [[[[1.0, 0.0]], [1.0, 1.0]]]
+    net.learning_rate = 0.1
+    net.train(data: training, training_type: :sgdm,
+      epochs: 2000, mini_batch_size: 1, log_each: 2000)
+    out = net.run([[1.0, 0.0]]).last
+    out[0].should be_close(1.0, 0.1)
+    out[1].should be_close(1.0, 0.1)
+  end
 end
 
 # Remove train data
