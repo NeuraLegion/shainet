@@ -39,8 +39,8 @@ module SHAInet
         break if pair_list.empty?
 
         vsize = @vocab.size
-        if use_gpu
-          rows = pair_list.size
+        rows = pair_list.size
+        if use_gpu && (rows.to_i64 * vsize.to_i64 <= Int32::MAX)
           a = CudaMatrix.new(rows, vsize)
           b = CudaMatrix.new(rows, vsize)
           pair_list.each_with_index do |(id1, id2), idx|
@@ -57,6 +57,7 @@ module SHAInet
             count > best_count ? pair : best
           end
         else
+          use_gpu = false if rows.to_i64 * vsize.to_i64 > Int32::MAX
           pair_counts = Hash(Tuple(String, String), Int32).new(0)
           corpus.each do |tokens|
             (0...(tokens.size - 1)).each do |i|
