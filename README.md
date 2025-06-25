@@ -493,6 +493,17 @@ net.load_from_pt("transformer.pt")
 out = net.run([1])
 ```
 
+### Loading a HuggingFace GPT model
+
+Weights from models like GPT-2 published on HuggingFace can be loaded
+directly from the `pytorch_model.bin` file. The conversion happens
+automatically using `scripts/pt_to_json.py`.
+
+```crystal
+net = SHAInet::Network.new
+net.load_from_pt("pytorch_model.bin")
+```
+
 ### Possible Future Features
   - [x] RNN (recurant neural network)
   - [x] LSTM (long-short term memory)
