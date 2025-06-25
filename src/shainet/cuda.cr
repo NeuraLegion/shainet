@@ -22,6 +22,14 @@ module SHAInet
                          alpha : Pointer(Float64), a : Pointer(Float64), lda : Int32,
                          b : Pointer(Float64), ldb : Int32,
                          beta : Pointer(Float64), c : Pointer(Float64), ldc : Int32) : Int32
+      fun cublasDgeam(handle : Handle,
+                      transa : Int32, transb : Int32,
+                      m : Int32, n : Int32,
+                      alpha : Pointer(Float64), a : Pointer(Float64), lda : Int32,
+                      beta  : Pointer(Float64), b : Pointer(Float64), ldb : Int32,
+                      c : Pointer(Float64), ldc : Int32) : Int32
+      fun cublasDscal_v2(handle : Handle, n : Int32,
+                         alpha : Pointer(Float64), x : Pointer(Float64), incx : Int32) : Int32
     end
 
     enum MemcpyKind
@@ -103,6 +111,20 @@ module SHAInet
         pointerof(alpha), a, m,
         b, k,
         pointerof(beta), c, m)
+    end
+
+    def geam(handle : LibCUBLAS::Handle, a : Pointer(Float64), b : Pointer(Float64), c : Pointer(Float64),
+             m : Int32, n : Int32, alpha : Float64, beta : Float64)
+      LibCUBLAS.cublasDgeam(handle,
+        Operation::N.value, Operation::N.value,
+        m, n,
+        pointerof(alpha), a, m,
+        pointerof(beta), b, m,
+        c, m)
+    end
+
+    def scal(handle : LibCUBLAS::Handle, x : Pointer(Float64), n : Int32, alpha : Float64)
+      LibCUBLAS.cublasDscal_v2(handle, n, pointerof(alpha), x, 1)
     end
   end
 end
