@@ -23,6 +23,10 @@ net.add_layer(:embedding, 8, :memory, SHAInet.none)
 net.add_layer(:transformer, 8)
 net.add_layer(:output, token_count, :memory, SHAInet.sigmoid)
 net.fully_connect
+net.warmup_steps = 10
+net.weight_decay = 0.01
+net.accumulation_steps = 2
+net.mixed_precision = true
 
 # Helper to create one-hot vectors
 one_hot = ->(id : Int32, size : Int32) do
@@ -42,9 +46,9 @@ end
 # Convert tuples to arrays for training
 train_data = training.map { |seq, target| [seq, target] }
 
-net.learning_rate = 0.1
+net.learning_rate = 0.001
 net.train(data: train_data,
-  training_type: :sgdm,
+  training_type: :adamw,
   cost_function: :c_ent,
   epochs: 200,
   mini_batch_size: 1,

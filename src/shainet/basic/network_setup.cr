@@ -39,6 +39,10 @@ module SHAInet
     property alpha : Float64
     getter beta1 : Float64, beta2 : Float64, epsilon : Float64, time_step : Int32
     property clip_threshold : Float64
+    property warmup_steps : Int32
+    property weight_decay : Float64
+    property accumulation_steps : Int32
+    property mixed_precision : Bool
 
     # First creates an empty shell of the entire network
     def initialize
@@ -72,6 +76,10 @@ module SHAInet
       @time_step = 0_i32   # For Adam
       @transformer_error = SimpleMatrix.zeros(1, 1)
       @clip_threshold = Float64::INFINITY
+      @warmup_steps = 0
+      @weight_decay = 0.0
+      @accumulation_steps = 1
+      @mixed_precision = false
     end
 
     # Create and populate a layer with neurons
