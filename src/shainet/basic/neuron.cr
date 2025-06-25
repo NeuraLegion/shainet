@@ -41,12 +41,16 @@ module SHAInet
     # Allows the neuron to absorb the activation from its' own input neurons through the synapses
     # Then, it sums the information and an activation function is applied to normalize the data
     def activate(activation_function : ActivationFunction = SHAInet.sigmoid) : Float64
-      sum = 0_f64
-      @synapses_in.each do |synapse| # Sum activation from each incoming neuron with applied weights
-        sum += synapse.propagate_forward
+      sum = Autograd::Tensor.new(0.0)
+      @synapses_in.each do |synapse|
+        sum = sum + Autograd::Tensor.new(synapse.propagate_forward)
       end
-      @input_sum = sum + @bias # Add neuron bias (activation threshold)
-      @activation, @sigma_prime = activation_function.call(@input_sum)
+      input_t = sum + Autograd::Tensor.new(@bias)
+      out, sig_p = activation_function.call(input_t.data)
+      @input_sum = input_t.data
+      @activation = out
+      @sigma_prime = sig_p
+      @activation
     end
 
     # This is the backward propogation of the hidden layers

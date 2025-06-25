@@ -430,10 +430,10 @@ module SHAInet
         blocks.each_with_index do |prefix, idx|
           t_layer = @transformer_layers[idx]
           mha = t_layer.mha
-          mha.w_q = SimpleMatrix.from_a(lookup["#{prefix}.mha.w_q"]["weight"].as_a.map { |r| r.as_a.map(&.as_f) }).transpose
-          mha.w_k = SimpleMatrix.from_a(lookup["#{prefix}.mha.w_k"]["weight"].as_a.map { |r| r.as_a.map(&.as_f) }).transpose
-          mha.w_v = SimpleMatrix.from_a(lookup["#{prefix}.mha.w_v"]["weight"].as_a.map { |r| r.as_a.map(&.as_f) }).transpose
-          mha.w_o = SimpleMatrix.from_a(lookup["#{prefix}.mha.w_o"]["weight"].as_a.map { |r| r.as_a.map(&.as_f) }).transpose
+          mha.w_q = TensorMatrix.from_a(lookup["#{prefix}.mha.w_q"]["weight"].as_a.map { |r| r.as_a.map(&.as_f) }).transpose
+          mha.w_k = TensorMatrix.from_a(lookup["#{prefix}.mha.w_k"]["weight"].as_a.map { |r| r.as_a.map(&.as_f) }).transpose
+          mha.w_v = TensorMatrix.from_a(lookup["#{prefix}.mha.w_v"]["weight"].as_a.map { |r| r.as_a.map(&.as_f) }).transpose
+          mha.w_o = TensorMatrix.from_a(lookup["#{prefix}.mha.w_o"]["weight"].as_a.map { |r| r.as_a.map(&.as_f) }).transpose
 
           ffn = t_layer.ffn
           ffn.w1 = SimpleMatrix.from_a(lookup["#{prefix}.ffn.w1"]["weight"].as_a.map { |r| r.as_a.map(&.as_f) }).transpose

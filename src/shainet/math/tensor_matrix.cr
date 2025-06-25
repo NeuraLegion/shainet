@@ -132,5 +132,19 @@ module SHAInet
       end
       dup
     end
+
+    def to_simple
+      m = SimpleMatrix.new(@rows, @cols)
+      @rows.times do |i|
+        @cols.times do |j|
+          m[i, j] = self[i, j].data
+        end
+      end
+      m
+    end
+
+    def zero_grads!
+      @data.each { |t| t.grad = 0.0 }
+    end
   end
 end

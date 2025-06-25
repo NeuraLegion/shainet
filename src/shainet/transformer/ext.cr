@@ -1,18 +1,18 @@
 module SHAInet
   class MultiHeadAttention
-    def w_q=(m : SimpleMatrix)
+    def w_q=(m : TensorMatrix)
       @w_q = m
     end
 
-    def w_k=(m : SimpleMatrix)
+    def w_k=(m : TensorMatrix)
       @w_k = m
     end
 
-    def w_v=(m : SimpleMatrix)
+    def w_v=(m : TensorMatrix)
       @w_v = m
     end
 
-    def w_o=(m : SimpleMatrix)
+    def w_o=(m : TensorMatrix)
       @w_o = m
     end
   end
