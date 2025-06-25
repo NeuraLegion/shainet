@@ -11,12 +11,14 @@ module SHAInet
     getter inv_vocab : Array(String)
     getter merges : Array(Tuple(String, String))
     getter merges_map : Hash(Tuple(String, String), String)
+    getter merges_rank : Hash(Tuple(String, String), Int32)
 
     def initialize
       @vocab = Hash(String, Int32).new
       @inv_vocab = [] of String
       @merges = [] of Tuple(String, String)
       @merges_map = Hash(Tuple(String, String), String).new
+      @merges_rank = Hash(Tuple(String, String), Int32).new
     end
 
     # Train the tokenizer vocabulary from the given text using the
@@ -81,20 +83,45 @@ module SHAInet
         pair = {token_a, token_b}
         @merges << pair
         @merges_map[pair] = new_token
+        @merges_rank[pair] = @merges.size - 1
         add_token(new_token)
       end
     end
 
     # Encode a string into token IDs. Unknown tokens are added to the
-    # vocabulary.
+    # vocabulary using a greedy BPE merging strategy.
     def encode(text : String) : Array(Int32)
       ids = [] of Int32
       text.split(/\s+/).each do |word|
-        tokens = word.chars.map(&.to_s) + ["</w>"]
-        @merges.each { |pair| merge_tokens!(tokens, pair) }
+        tokens = encode_tokens(word)
         tokens.each { |t| ids << add_token(t) }
       end
       ids
+    end
+
+    private def encode_tokens(word : String) : Array(String)
+      tokens = word.chars.map(&.to_s) + ["</w>"]
+      return tokens if @merges_rank.empty?
+
+      pairs = get_pairs(tokens)
+      while !pairs.empty?
+        ranked_pairs = pairs.select { |p| @merges_rank.has_key?(p) }
+        break if ranked_pairs.empty?
+        best = ranked_pairs.min_by { |p| @merges_rank[p] }
+        merge_tokens!(tokens, best)
+        break if tokens.size <= 1
+        pairs = get_pairs(tokens)
+      end
+
+      tokens
+    end
+
+    private def get_pairs(tokens : Array(String)) : Set(Tuple(String, String))
+      pairs = Set(Tuple(String, String)).new
+      (0...tokens.size - 1).each do |i|
+        pairs << {tokens[i], tokens[i + 1]}
+      end
+      pairs
     end
 
     # Decode an array of token IDs back into a string.
