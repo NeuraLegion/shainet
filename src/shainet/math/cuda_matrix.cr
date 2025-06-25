@@ -54,7 +54,7 @@ module SHAInet
     def sync_to_device!
       return unless dptr = @device_ptr
       return if dptr.null?
-      buf = Array(Float64).new(@rows*@cols)
+      buf = Array(Float64).new(@rows*@cols, 0.0)
       @rows.times do |i|
         @cols.times do |j|
           buf[j*@rows + i] = self[i, j]
@@ -67,7 +67,7 @@ module SHAInet
     def sync_from_device!
       return unless dptr = @device_ptr
       return if dptr.null?
-      buf = Array(Float64).new(@rows*@cols)
+      buf = Array(Float64).new(@rows*@cols, 0.0)
       bytes = ((@rows*@cols)*8).to_u64
       CUDA.memcpy(buf.to_unsafe.as(Pointer(Void)), dptr.as(Pointer(Void)), bytes, CUDA::MemcpyKind::DeviceToHost)
       @rows.times do |i|
