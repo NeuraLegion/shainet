@@ -1,12 +1,13 @@
 module SHAInet
-  class TransformerLayer < Layer
+  # TransformerBlock implements multi-head self-attention followed by a
+  # position-wise feed forward network. LayerNorm and dropout are applied
+  # with residual connections around each sub layer.
+  class TransformerBlock < Layer
     getter mha : MultiHeadAttention
     getter ffn : PositionWiseFF
     getter norm1 : LayerNorm
     getter norm2 : LayerNorm
     property positional_encoding : SimpleMatrix?
-
-    # Percentage of units to drop (0-100)
     property drop_percent : Int32
 
     def initialize(d_model : Int32, num_heads : Int32, ff_hidden : Int32,
@@ -28,18 +29,22 @@ module SHAInet
                 x
               end
       attn = @mha.forward(input, mask)
-      attn_out = @drop_percent > 0 ? TransformerDropout.apply(attn, @drop_percent) : attn
-      normed = @norm1.forward(attn_out)
+      attn = TransformerDropout.apply(attn, @drop_percent) if @drop_percent > 0
+      attn = attn + input
+      normed = @norm1.forward(attn)
       ff = @ffn.forward(normed)
-      ff_out = @drop_percent > 0 ? TransformerDropout.apply(ff, @drop_percent) : ff
-      @norm2.forward(ff_out)
+      ff = TransformerDropout.apply(ff, @drop_percent) if @drop_percent > 0
+      ff = ff + normed
+      @norm2.forward(ff)
     end
 
     def backward(d_out : SimpleMatrix)
       d_norm2 = @norm2.backward(d_out)
       d_ff = @ffn.backward(d_norm2)
+      d_ff += d_norm2
       d_norm1 = @norm1.backward(d_ff)
-      @mha.backward(d_norm1)
+      d_attn = @mha.backward(d_norm1)
+      d_attn + d_norm1
     end
 
     def apply_gradients(lr : Float64)
@@ -60,4 +65,6 @@ module SHAInet
       [] of Neuron
     end
   end
+
+  alias TransformerLayer = TransformerBlock
 end
