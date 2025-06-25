@@ -115,4 +115,20 @@ describe "Network with TransformerLayer" do
     out[0].should be_close(1.0, 0.1)
     out[1].should be_close(1.0, 0.1)
   end
+
+  it "works with embeddings and positional encoding" do
+    Random::DEFAULT.new_seed(42_u64, 54_u64)
+    net = SHAInet::Network.new
+    net.add_layer(:input, 1, :memory, SHAInet.none)
+    net.add_layer(:embedding, 2, :memory, SHAInet.none)
+    net.add_layer(:transformer, 2)
+    net.add_layer(:output, 2, :memory, SHAInet.none)
+    net.fully_connect
+
+    pe = SHAInet::PositionalEncoding.sinusoidal(2, 2)
+    net.transformer_layers.each { |l| l.positional_encoding = pe }
+
+    out = net.run([[1.0], [2.0]]).last
+    out.size.should eq(2)
+  end
 end
