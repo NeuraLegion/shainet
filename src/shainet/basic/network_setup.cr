@@ -78,7 +78,13 @@ module SHAInet
     # l_type is: :input, :hidden or :output
     # l_size = how many neurons in the layer
     # n_type = advanced option for different neuron types
-    def add_layer(l_type : Symbol | String, l_size : Int32, n_type : Symbol | String = "memory", activation_function : ActivationFunction = SHAInet.sigmoid)
+    def add_layer(l_type : Symbol | String, l_size : Int32, n_type : Symbol | String = "memory", activation_function : ActivationFunction = SHAInet.sigmoid, num_heads : Int32 = 1, ff_hidden : Int32 = l_size*4, drop_percent : Int32 = 0, blocks : Int32 = 1)
+      if l_type.to_s == "transformer" && blocks > 1
+        blocks.times do
+          add_layer(l_type, l_size, n_type, activation_function, num_heads, ff_hidden, drop_percent, 1)
+        end
+        return
+      end
       layer = case l_type.to_s
               when "recurrent"
                 RecurrentLayer.new(n_type.to_s, l_size, activation_function)
@@ -87,7 +93,7 @@ module SHAInet
               when "embedding"
                 EmbeddingLayer.new(l_size, activation_function)
               when "transformer"
-                TransformerLayer.new(l_size, 1, l_size*4)
+                TransformerLayer.new(l_size, num_heads, ff_hidden, drop_percent)
               else
                 Layer.new(n_type.to_s, l_size, activation_function)
               end
