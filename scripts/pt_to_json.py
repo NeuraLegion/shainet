@@ -16,10 +16,14 @@ if len(sys.argv) < 2:
 
 model = torch.jit.load(sys.argv[1], map_location="cpu")
 state = model.state_dict()
+
+# Preserve parameter order from PyTorch so that repeated blocks
+# (e.g. layers within a transformer) are emitted in the same
+# order as defined in the model.
 keys = list(state.keys())
-keys.sort()
 
 layers = []
+blocks = []
 for key in keys:
     if key.endswith(".weight"):
         name = key[:-7]
@@ -28,4 +32,16 @@ for key in keys:
         bias_list = bias.cpu().tolist() if bias is not None else []
         layers.append({"name": name, "weight": weight, "bias": bias_list})
 
-print(json.dumps({"layers": layers}))
+        # Detect repeating layer groups such as layers.0 or layer1 and
+        # store them so the loader can recreate the original ordering.
+        parts = name.split(".")
+        prefix = None
+        if parts[0].startswith("layers"):
+            if len(parts) > 1:
+                prefix = parts[0] + "." + parts[1]
+        elif parts[0].startswith("layer"):
+            prefix = parts[0]
+        if prefix and prefix not in blocks:
+            blocks.append(prefix)
+
+print(json.dumps({"layers": layers, "blocks": blocks}))

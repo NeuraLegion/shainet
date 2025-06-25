@@ -369,9 +369,9 @@ module SHAInet
     end
 
     # Load a network from a TorchScript file exported via PyTorch.
-    # Supports simple sequential Linear models as well as a minimal
-    # Transformer consisting of an embedding layer followed by a
-    # single TransformerLayer and a final Linear output layer.
+    # Supports simple sequential Linear models as well as Transformer
+    # models consisting of an embedding layer followed by one or more
+    # TransformerLayer blocks and a final Linear output layer.
     def load_from_pt(file_path : String)
       data = PyTorchImport.load(file_path)
       layers = data["layers"].as_a
@@ -379,15 +379,32 @@ module SHAInet
       lookup = Hash(String, JSON::Any).new
       layers.each { |l| lookup[l["name"].as_s] = l }
 
+      blocks = if blk = data["blocks"]?
+                 blk.as_a.map(&.as_s)
+               else
+                 prefixes = [] of String
+                 lookup.keys.each do |k|
+                   if m = k.match(/^((?:layers?\.\d+)|(?:layer\d*)|layer)\./)
+                     prefix = m[1]
+                     prefixes << prefix unless prefixes.includes?(prefix)
+                   end
+                 end
+                 prefixes
+               end
+
       if lookup.has_key?("embedding")
-        # Transformer style model
+        # Transformer style model. Multiple transformer blocks are
+        # supported and will be stacked in the same order as in the
+        # exported PyTorch model.
         emb_w = lookup["embedding"]["weight"].as_a
         d_model = emb_w.first.as_a.size
         out_size = lookup["out"]? ? lookup["out"]["weight"].as_a.size : d_model
 
         add_layer(:input, 1)
         add_layer(:embedding, d_model)
-        add_layer(:transformer, d_model)
+        blocks.each do
+          add_layer(:transformer, d_model)
+        end
         add_layer(:output, out_size, activation_function: SHAInet.identity)
         fully_connect
 
@@ -396,25 +413,27 @@ module SHAInet
           emb_layer.embeddings[idx] = row.as_a.map(&.as_f)
         end
 
-        t_layer = @transformer_layers.first
-        mha = t_layer.mha
-        mha.w_q = SimpleMatrix.from_a(lookup["layer.mha.w_q"]["weight"].as_a.map { |r| r.as_a.map(&.as_f) }).transpose
-        mha.w_k = SimpleMatrix.from_a(lookup["layer.mha.w_k"]["weight"].as_a.map { |r| r.as_a.map(&.as_f) }).transpose
-        mha.w_v = SimpleMatrix.from_a(lookup["layer.mha.w_v"]["weight"].as_a.map { |r| r.as_a.map(&.as_f) }).transpose
-        mha.w_o = SimpleMatrix.from_a(lookup["layer.mha.w_o"]["weight"].as_a.map { |r| r.as_a.map(&.as_f) }).transpose
+        blocks.each_with_index do |prefix, idx|
+          t_layer = @transformer_layers[idx]
+          mha = t_layer.mha
+          mha.w_q = SimpleMatrix.from_a(lookup["#{prefix}.mha.w_q"]["weight"].as_a.map { |r| r.as_a.map(&.as_f) }).transpose
+          mha.w_k = SimpleMatrix.from_a(lookup["#{prefix}.mha.w_k"]["weight"].as_a.map { |r| r.as_a.map(&.as_f) }).transpose
+          mha.w_v = SimpleMatrix.from_a(lookup["#{prefix}.mha.w_v"]["weight"].as_a.map { |r| r.as_a.map(&.as_f) }).transpose
+          mha.w_o = SimpleMatrix.from_a(lookup["#{prefix}.mha.w_o"]["weight"].as_a.map { |r| r.as_a.map(&.as_f) }).transpose
 
-        ffn = t_layer.ffn
-        ffn.w1 = SimpleMatrix.from_a(lookup["layer.ffn.w1"]["weight"].as_a.map { |r| r.as_a.map(&.as_f) }).transpose
-        ffn.b1 = SimpleMatrix.from_a([lookup["layer.ffn.w1"]["bias"].as_a.map(&.as_f)])
-        ffn.w2 = SimpleMatrix.from_a(lookup["layer.ffn.w2"]["weight"].as_a.map { |r| r.as_a.map(&.as_f) }).transpose
-        ffn.b2 = SimpleMatrix.from_a([lookup["layer.ffn.w2"]["bias"].as_a.map(&.as_f)])
+          ffn = t_layer.ffn
+          ffn.w1 = SimpleMatrix.from_a(lookup["#{prefix}.ffn.w1"]["weight"].as_a.map { |r| r.as_a.map(&.as_f) }).transpose
+          ffn.b1 = SimpleMatrix.from_a([lookup["#{prefix}.ffn.w1"]["bias"].as_a.map(&.as_f)])
+          ffn.w2 = SimpleMatrix.from_a(lookup["#{prefix}.ffn.w2"]["weight"].as_a.map { |r| r.as_a.map(&.as_f) }).transpose
+          ffn.b2 = SimpleMatrix.from_a([lookup["#{prefix}.ffn.w2"]["bias"].as_a.map(&.as_f)])
 
-        n1 = t_layer.norm1
-        n1.gamma = SimpleMatrix.from_a([lookup["layer.norm1"]["weight"].as_a.map(&.as_f)])
-        n1.beta = SimpleMatrix.from_a([lookup["layer.norm1"]["bias"].as_a.map(&.as_f)])
-        n2 = t_layer.norm2
-        n2.gamma = SimpleMatrix.from_a([lookup["layer.norm2"]["weight"].as_a.map(&.as_f)])
-        n2.beta = SimpleMatrix.from_a([lookup["layer.norm2"]["bias"].as_a.map(&.as_f)])
+          n1 = t_layer.norm1
+          n1.gamma = SimpleMatrix.from_a([lookup["#{prefix}.norm1"]["weight"].as_a.map(&.as_f)])
+          n1.beta = SimpleMatrix.from_a([lookup["#{prefix}.norm1"]["bias"].as_a.map(&.as_f)])
+          n2 = t_layer.norm2
+          n2.gamma = SimpleMatrix.from_a([lookup["#{prefix}.norm2"]["weight"].as_a.map(&.as_f)])
+          n2.beta = SimpleMatrix.from_a([lookup["#{prefix}.norm2"]["bias"].as_a.map(&.as_f)])
+        end
 
         if out = lookup["out"]?
           weights = out["weight"].as_a
