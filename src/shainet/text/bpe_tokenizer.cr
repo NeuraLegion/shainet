@@ -26,72 +26,20 @@ module SHAInet
         tokens.each { |t| add_token(t) }
       end
 
-      use_gpu = CUDA.available? && ENV["SHAINET_BPE_CUDA"]?
-
       while @vocab.size < vocab_size
         Log.debug { "Merges done: #{@merges.size}, vocabulary size: #{@vocab.size}" }
         Log.debug { "Progress: #{(@vocab.size.to_f / vocab_size * 100.0).round(2)}%" }
-        pair_list = [] of Tuple(Int32, Int32)
+        pair_counts = Hash(Tuple(Int32, Int32), Int32).new(0)
         corpus.each do |tokens|
           (0...(tokens.size - 1)).each do |i|
             id1 = @vocab[tokens[i]]
             id2 = @vocab[tokens[i + 1]]
-            pair_list << {id1, id2}
+            pair_counts[{id1, id2}] += 1
           end
         end
-        break if pair_list.empty?
-        Log.debug { "Found #{pair_list.size} pairs to merge." }
-        vsize = @vocab.size
-        rows = pair_list.size
-        product = rows.to_u64 * vsize.to_u64
-
-        best_pair_ids = nil
-
-        if use_gpu
-          begin
-            max_rows = Int32::MAX // vsize
-            counts = SimpleMatrix.new(vsize, vsize)
-            pair_list.each_slice(max_rows) do |slice|
-              a = CudaMatrix.new(slice.size, vsize)
-              b = CudaMatrix.new(slice.size, vsize)
-              slice.each_with_index do |(id1, id2), idx|
-                a[idx, id1] = 1.0
-                b[idx, id2] = 1.0
-              end
-              a.sync_to_device!
-              b.sync_to_device!
-              slice_counts = a.transpose * b
-              slice_counts.as?(CudaMatrix).try &.sync_from_device!
-              vsize.times do |i|
-                vsize.times do |j|
-                  counts[i, j] += slice_counts[i, j]
-                end
-              end
-            end
-
-            best_pair_ids = pair_list.reduce(pair_list.first) do |best, pair|
-              count = counts[pair[0], pair[1]].to_i
-              best_count = counts[best[0], best[1]].to_i
-              count > best_count ? pair : best
-            end
-          rescue e
-            Log.warn { "Falling back to CPU: #{e.message}" }
-          end
-        end
-
-        if best_pair_ids.nil?
-          Log.warn { "Falling back to CPU: #{rows} × #{vsize} too large for GPU matrix." } if use_gpu && product > Int32::MAX.to_u64
-          pair_counts = Hash(Tuple(String, String), Int32).new(0)
-          corpus.each do |tokens|
-            (0...(tokens.size - 1)).each do |i|
-              pair = {tokens[i], tokens[i + 1]}
-              pair_counts[pair] += 1
-            end
-          end
-          break if pair_counts.empty?
-          best_pair, _ = pair_counts.max_by { |_, count| count }
-          best_pair_ids = {@vocab[best_pair[0]], @vocab[best_pair[1]]}
-        end
+        break if pair_counts.empty?
+        Log.debug { "Found #{pair_counts.size} unique pairs to merge." }
+        best_pair_ids, _ = pair_counts.max_by { |_, count| count }
 
         token_a = @inv_vocab[best_pair_ids[0]]
         token_b = @inv_vocab[best_pair_ids[1]]
