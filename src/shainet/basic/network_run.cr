@@ -200,7 +200,8 @@ module SHAInet
       seq = input_data.map do |x|
         @mixed_precision ? x.map { |v| v.to_f32.to_f64 } : x.map(&.to_f64)
       end
-      actual_output = run(seq, stealth: true).last
+      outputs = run(seq, stealth: true)
+      actual_output = outputs.last
 
       # Test for NaNs & exploading gradients
       validate_values(actual_output, "actual_output")
@@ -227,9 +228,13 @@ module SHAInet
 
       if @hidden_layers.any? &.is_a?(TransformerLayer)
         mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
-        exp = mat_klass.from_a([expected_output.map(&.to_f64)])
-        act = mat_klass.from_a([actual_output])
-        @transformer_error = act - exp
+        exp_row = mat_klass.from_a([expected_output.map(&.to_f64)])
+        act_row = mat_klass.from_a([actual_output])
+        diff = act_row - exp_row
+        @transformer_error = mat_klass.zeros(outputs.size, diff.cols)
+        diff.cols.times do |j|
+          @transformer_error[outputs.size - 1, j] = diff[0, j]
+        end
       end
 
       # puts "@error_signal: #{@error_signal}"
@@ -269,7 +274,8 @@ module SHAInet
     # Evaluate a sequence example with a class label and softmax cross entropy
     def evaluate_sequence_label(input_data : Array(Array(GenNum)), label : Int32)
       seq = input_data.map { |x| x.map(&.to_f64) }
-      actual_output = run(seq, stealth: true).last
+      outputs = run(seq, stealth: true)
+      actual_output = outputs.last
       validate_values(actual_output, "actual_output")
       probs = SHAInet.softmax(actual_output)
 
@@ -286,10 +292,14 @@ module SHAInet
 
       if @hidden_layers.any? &.is_a?(TransformerLayer)
         mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
-        exp = mat_klass.zeros(1, probs.size)
-        exp[0, label] = 1.0
-        act = mat_klass.from_a([probs])
-        @transformer_error = act - exp
+        exp_row = mat_klass.zeros(1, probs.size)
+        exp_row[0, label] = 1.0
+        act_row = mat_klass.from_a([probs])
+        diff = act_row - exp_row
+        @transformer_error = mat_klass.zeros(outputs.size, diff.cols)
+        diff.cols.times do |j|
+          @transformer_error[outputs.size - 1, j] = diff[0, j]
+        end
       end
     end
 
