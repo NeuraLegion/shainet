@@ -45,18 +45,28 @@ module SHAInet
 
         best_pair_ids = nil
 
-        if use_gpu && product <= Int32::MAX.to_u64
+        if use_gpu
           begin
-            a = CudaMatrix.new(rows, vsize)
-            b = CudaMatrix.new(rows, vsize)
-            pair_list.each_with_index do |(id1, id2), idx|
-              a[idx, id1] = 1.0
-              b[idx, id2] = 1.0
+            max_rows = Int32::MAX // vsize
+            counts = SimpleMatrix.new(vsize, vsize)
+            pair_list.each_slice(max_rows) do |slice|
+              a = CudaMatrix.new(slice.size, vsize)
+              b = CudaMatrix.new(slice.size, vsize)
+              slice.each_with_index do |(id1, id2), idx|
+                a[idx, id1] = 1.0
+                b[idx, id2] = 1.0
+              end
+              a.sync_to_device!
+              b.sync_to_device!
+              slice_counts = a.transpose * b
+              slice_counts.as?(CudaMatrix).try &.sync_from_device!
+              vsize.times do |i|
+                vsize.times do |j|
+                  counts[i, j] += slice_counts[i, j]
+                end
+              end
             end
-            a.sync_to_device!
-            b.sync_to_device!
-            counts = a.transpose * b
-            counts.as?(CudaMatrix).try &.sync_from_device!
+
             best_pair_ids = pair_list.reduce(pair_list.first) do |best, pair|
               count = counts[pair[0], pair[1]].to_i
               best_count = counts[best[0], best[1]].to_i
