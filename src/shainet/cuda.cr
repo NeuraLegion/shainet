@@ -217,19 +217,23 @@ module SHAInet
       raise "CUDA kernels not available"
     end
 
-<<<<<<< codex/implement-cuda-kernels-for-multi-head-attention
+    def gather_rows(dst : Pointer(Float64), src : Pointer(Float64), ids : Pointer(Int32), rows : Int32, cols : Int32)
+      raise "CUDA kernels not available"
+    end
+
     def slice_cols(dst : Pointer(Float64), src : Pointer(Float64), rows : Int32, src_cols : Int32, start_col : Int32, len : Int32)
       raise "CUDA kernels not available"
     end
 
     def set_cols(dst : Pointer(Float64), src : Pointer(Float64), rows : Int32, dst_cols : Int32, start_col : Int32, len : Int32)
-=======
+      raise "CUDA kernels not available"
+    end
+
     def row_mean_var(mean : Pointer(Float64), var : Pointer(Float64), src : Pointer(Float64), rows : Int32, cols : Int32)
       raise "CUDA kernels not available"
     end
 
     def layer_norm(dst : Pointer(Float64), src : Pointer(Float64), mean : Pointer(Float64), var : Pointer(Float64), rows : Int32, cols : Int32, eps : Float64)
->>>>>>> master
       raise "CUDA kernels not available"
     end
 

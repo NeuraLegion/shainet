@@ -29,6 +29,17 @@ __global__ void dropout(double* out, const double* in, int rows, int cols, doubl
     }
 }
 
+__global__ void gather_rows(double* out, const double* in, const int* ids, int rows, int cols) {
+    int row = blockIdx.x;
+    if(row >= rows) return;
+    int id = ids[row];
+    const double *row_in = in + id * cols;
+    double *row_out = out + row * cols;
+    for(int j=0;j<cols;++j){
+        row_out[j] = row_in[j];
+    }
+}
+
 __global__ void row_mean_var(const double* in, double* mean, double* var,
                              int rows, int cols) {
     int row = blockIdx.x;
@@ -59,7 +70,7 @@ __global__ void apply_layer_norm(double* out, const double* in,
         row_out[j] = (row_in[j] - m) / denom;
     }
 }
-}
+  
 __global__ void slice_cols(double* out, const double* in, int rows, int src_cols, int start, int len){
     int row = blockIdx.x;
     int col = threadIdx.x;
@@ -73,4 +84,4 @@ __global__ void set_cols(double* out, const double* in, int rows, int dst_cols, 
     if(row >= rows || col >= len) return;
     out[row * dst_cols + start + col] = in[row * len + col];
 }
-}
+
