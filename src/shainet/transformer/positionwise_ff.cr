@@ -46,22 +46,33 @@ module SHAInet
       dh = d_out * @w2.transpose
       @g_w2 = @g_w2 + (@h.transpose * d_out)
       mat_klass = @w1.class
-      db2 = mat_klass.zeros(1, d_out.cols)
-      d_out.rows.times do |i|
-        d_out.cols.times do |j|
-          db2[0, j] += d_out[i, j]
+      if CUDA.available? && d_out.is_a?(CudaMatrix) && @g_b2.is_a?(CudaMatrix)
+        CUDA.row_sum(@g_b2.as(CudaMatrix).device_ptr.not_nil!, d_out.as(CudaMatrix).device_ptr.not_nil!, d_out.rows, d_out.cols)
+        @g_b2.as(CudaMatrix).sync_from_device!
+      else
+        db2 = mat_klass.zeros(1, d_out.cols)
+        d_out.rows.times do |i|
+          d_out.cols.times do |j|
+            db2[0, j] += d_out[i, j]
+          end
         end
+        @g_b2 = @g_b2 + db2
       end
-      @g_b2 = @g_b2 + db2
+
       drelu = relu_grad(@h, dh)
       @g_w1 = @g_w1 + (@x.not_nil!.transpose * drelu)
-      db1 = mat_klass.zeros(1, drelu.cols)
-      drelu.rows.times do |i|
-        drelu.cols.times do |j|
-          db1[0, j] += drelu[i, j]
+      if CUDA.available? && drelu.is_a?(CudaMatrix) && @g_b1.is_a?(CudaMatrix)
+        CUDA.row_sum(@g_b1.as(CudaMatrix).device_ptr.not_nil!, drelu.as(CudaMatrix).device_ptr.not_nil!, drelu.rows, drelu.cols)
+        @g_b1.as(CudaMatrix).sync_from_device!
+      else
+        db1 = mat_klass.zeros(1, drelu.cols)
+        drelu.rows.times do |i|
+          drelu.cols.times do |j|
+            db1[0, j] += drelu[i, j]
+          end
         end
+        @g_b1 = @g_b1 + db1
       end
-      @g_b1 = @g_b1 + db1
       d_input = drelu * @w1.transpose
       d_input
     end
