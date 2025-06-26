@@ -217,6 +217,14 @@ module SHAInet
       raise "CUDA kernels not available"
     end
 
+    def slice_cols(dst : Pointer(Float64), src : Pointer(Float64), rows : Int32, src_cols : Int32, start_col : Int32, len : Int32)
+      raise "CUDA kernels not available"
+    end
+
+    def set_cols(dst : Pointer(Float64), src : Pointer(Float64), rows : Int32, dst_cols : Int32, start_col : Int32, len : Int32)
+      raise "CUDA kernels not available"
+    end
+
     # In-place element-wise ReLU on GPU memory. This fallback implementation
     # copies the data to the host, applies ReLU and writes the result back. It
     # avoids additional synchronization logic in the caller while still keeping

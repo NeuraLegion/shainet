@@ -29,3 +29,17 @@ __global__ void dropout(double* out, const double* in, int rows, int cols, doubl
     }
 }
 }
+__global__ void slice_cols(double* out, const double* in, int rows, int src_cols, int start, int len){
+    int row = blockIdx.x;
+    int col = threadIdx.x;
+    if(row >= rows || col >= len) return;
+    out[row * len + col] = in[row * src_cols + start + col];
+}
+
+__global__ void set_cols(double* out, const double* in, int rows, int dst_cols, int start, int len){
+    int row = blockIdx.x;
+    int col = threadIdx.x;
+    if(row >= rows || col >= len) return;
+    out[row * dst_cols + start + col] = in[row * len + col];
+}
+}
