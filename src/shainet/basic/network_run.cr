@@ -251,6 +251,10 @@ module SHAInet
       validate_values(actual_output, "actual_output")
       probs = SHAInet.softmax(actual_output)
 
+      if label < 0 || label >= probs.size
+        raise NeuralNetRunError.new("Label #{label} out of bounds for output size #{probs.size}")
+      end
+
       @error_signal = [] of Float64
       probs.size.times do |i|
         neuron = @output_layers.last.neurons[i]
@@ -278,6 +282,10 @@ module SHAInet
       actual_output = outputs.last
       validate_values(actual_output, "actual_output")
       probs = SHAInet.softmax(actual_output)
+
+      if label < 0 || label >= probs.size
+        raise NeuralNetRunError.new("Label #{label} out of bounds for output size #{probs.size}")
+      end
 
       @error_signal = [] of Float64
       probs.size.times do |i|
