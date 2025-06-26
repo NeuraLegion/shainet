@@ -402,6 +402,9 @@ module SHAInet
         end
       end
 
+      @w_gradient = Array(Float64).new(@all_synapses.size) { 0.0 }
+      @b_gradient = Array(Float64).new(@all_neurons.size) { 0.0 }
+
       counter = 0_i64
       loop do
         # Autosave the network
@@ -443,8 +446,8 @@ module SHAInet
             batch_mean = 0.0_f64
             all_errors = 0.0_f64
             if acc_counter % @accumulation_steps == 0
-              @w_gradient = Array(Float64).new(@all_synapses.size) { 0.0 }
-              @b_gradient = Array(Float64).new(@all_neurons.size) { 0.0 }
+              @w_gradient.fill(0.0)
+              @b_gradient.fill(0.0)
               @lstm_layers.each &.zero_gate_gradients
               @transformer_layers.each &.zero_gradients
             end
@@ -547,8 +550,8 @@ module SHAInet
             all_errors = 0.0_f64
 
             if acc_counter % @accumulation_steps == 0
-              @w_gradient = Array(Float64).new(@all_synapses.size) { 0.0 }
-              @b_gradient = Array(Float64).new(@all_neurons.size) { 0.0 }
+              @w_gradient.fill(0.0)
+              @b_gradient.fill(0.0)
               @lstm_layers.each &.zero_gate_gradients
               @transformer_layers.each &.zero_gradients
             end
