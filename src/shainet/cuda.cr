@@ -163,6 +163,7 @@ module SHAInet
 
     def dropout(dst : Pointer(Float64), src : Pointer(Float64), rows : Int32, cols : Int32, drop_p : Float64, seed : UInt64)
       raise "CUDA kernels not available"
+    end
 
     # In-place element-wise ReLU on GPU memory. This fallback implementation
     # copies the data to the host, applies ReLU and writes the result back. It
@@ -191,7 +192,6 @@ module SHAInet
       ger(handle, ones_dev, bias, mat, rows, cols)
       destroy_handle(handle)
       free(ones_dev.as(Pointer(Void)))
-
     end
   end
 end
