@@ -121,7 +121,7 @@ describe "Network with TransformerLayer" do
     Random::DEFAULT.new_seed(42_u64, 54_u64)
     net = SHAInet::Network.new
     net.add_layer(:input, 1, :memory, SHAInet.none)
-    net.add_layer(:embedding, 2, :memory, SHAInet.none)
+    net.add_layer(:embedding, 2, :memory, SHAInet.none, vocab_size: 3)
     net.add_layer(:transformer, 2)
     net.add_layer(:output, 2, :memory, SHAInet.none)
     net.fully_connect

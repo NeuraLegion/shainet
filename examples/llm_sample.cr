@@ -19,7 +19,7 @@ ids = tokenizer.encode(text)
 token_count = tokenizer.vocab.size
 net = SHAInet::Network.new
 net.add_layer(:input, 1, :memory, SHAInet.none)
-net.add_layer(:embedding, 8, :memory, SHAInet.none)
+net.add_layer(:embedding, 8, :memory, SHAInet.none, vocab_size: token_count)
 net.add_layer(:lstm, 16)
 net.add_layer(:output, token_count, :memory, SHAInet.sigmoid)
 net.fully_connect

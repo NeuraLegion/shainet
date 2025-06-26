@@ -411,7 +411,7 @@ ids_matrix = tokenizer.encode_matrix("hello world hello")
 
 net = SHAInet::Network.new
 net.add_layer(:input, 1)
-net.add_layer(:embedding, 8) # 8 dimensional embeddings
+net.add_layer(:embedding, 8, vocab_size: tokenizer.vocab.size) # 8 dimensional embeddings
 net.add_layer(:lstm, 4)
 net.add_layer(:output, 1)
 net.fully_connect

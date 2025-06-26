@@ -2,7 +2,7 @@ require "./spec_helper"
 
 describe SHAInet::EmbeddingLayer do
   it "returns consistent embeddings" do
-    layer = SHAInet::EmbeddingLayer.new(4)
+    layer = SHAInet::EmbeddingLayer.new(5, 4)
     first = layer.embed(1)
     second = layer.embed(1)
     first.should eq(second)
@@ -12,7 +12,7 @@ describe SHAInet::EmbeddingLayer do
   it "updates embeddings during training" do
     net = SHAInet::Network.new
     net.add_layer(:input, 1, :memory, SHAInet.none)
-    net.add_layer(:embedding, 2, :memory, SHAInet.none)
+    net.add_layer(:embedding, 2, :memory, SHAInet.none, vocab_size: 3)
     net.add_layer(:output, 1, :memory, SHAInet.none)
     net.fully_connect
 
@@ -23,7 +23,7 @@ describe SHAInet::EmbeddingLayer do
     net.learning_rate = 0.1
     net.train(data: training, training_type: :sgdm, epochs: 1, mini_batch_size: 1, log_each: 1)
 
-    after = layer.embeddings[1]
+    after = layer.lookup(1)
     after.should_not eq(before)
   end
 end

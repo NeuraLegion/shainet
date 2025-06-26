@@ -34,7 +34,7 @@ seq_len = 16
 token_count = tokenizer.vocab.size
 net = SHAInet::Network.new
 net.add_layer(:input, 1, :memory, SHAInet.none)
-net.add_layer(:embedding, d_model, :memory, SHAInet.none)
+net.add_layer(:embedding, d_model, :memory, SHAInet.none, vocab_size: token_count)
 4.times { net.add_layer(:transformer, d_model) }
 # Use a sigmoid output so cross-entropy can be applied per token
 net.add_layer(:output, token_count, :memory, SHAInet.identity)
