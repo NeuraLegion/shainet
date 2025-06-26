@@ -112,23 +112,51 @@ module SHAInet
       new_hidden = Array(Float64).new(@l_size, 0.0)
       new_cell = Array(Float64).new(@l_size, 0.0)
 
-      @neurons.each_with_index do |neuron, i|
-        sum_in = neuron.bias
-        sum_gate = 0.0
-        sum_forget = 0.0
-        sum_out = 0.0
+      use_cuda = CUDA.available?
 
-        neuron.synapses_in.each_with_index do |syn, j|
-          val = if @recurrent_synapses[i].includes?(syn)
-                  j2 = @neurons.index(syn.source_neuron).not_nil!
-                  @hidden_state[j2]
-                else
-                  syn.source_neuron.activation
-                end
-          sum_in += val * syn.weight
-          sum_gate += val * @input_weights[i][j]
-          sum_forget += val * @forget_weights[i][j]
-          sum_out += val * @output_weights[i][j]
+      @neurons.each_with_index do |neuron, i|
+        if use_cuda
+          inputs = [] of Float64
+          syn_w = [] of Float64
+          neuron.synapses_in.each_with_index do |syn, j|
+            val = if @recurrent_synapses[i].includes?(syn)
+                    j2 = @neurons.index(syn.source_neuron).not_nil!
+                    @hidden_state[j2]
+                  else
+                    syn.source_neuron.activation
+                  end
+            inputs << val
+            syn_w << syn.weight
+          end
+          mat_klass = CudaMatrix
+          inp = mat_klass.from_a([inputs])
+          w_in = mat_klass.from_a(syn_w.map { |w| [w] })
+          wi = mat_klass.from_a(@input_weights[i].map { |w| [w] })
+          wf = mat_klass.from_a(@forget_weights[i].map { |w| [w] })
+          wo = mat_klass.from_a(@output_weights[i].map { |w| [w] })
+
+          sum_in = (inp * w_in)[0, 0] + neuron.bias
+          sum_gate = (inp * wi)[0, 0] + @input_bias[i]
+          sum_forget = (inp * wf)[0, 0] + @forget_bias[i]
+          sum_out = (inp * wo)[0, 0] + @output_bias[i]
+        else
+          sum_in = neuron.bias
+          sum_gate = 0.0
+          sum_forget = 0.0
+          sum_out = 0.0
+
+          neuron.synapses_in.each_with_index do |syn, j|
+            val = if @recurrent_synapses[i].includes?(syn)
+                    j2 = @neurons.index(syn.source_neuron).not_nil!
+                    @hidden_state[j2]
+                  else
+                    syn.source_neuron.activation
+                  end
+            sum_in += val * syn.weight
+            sum_gate += val * @input_weights[i][j]
+            sum_forget += val * @forget_weights[i][j]
+            sum_out += val * @output_weights[i][j]
+          end
         end
 
         gate_i, _ = SHAInet.sigmoid.call(sum_gate + @input_bias[i])
