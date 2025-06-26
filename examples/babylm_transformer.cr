@@ -84,9 +84,9 @@ epochs.times do |epoch|
 
   val_loss = 0.0
   count = 0
-  while (batch = val_data.next_batch(1)).size > 0
-    seq = batch.first[0].as(Array(Array(Float64)))
-    tgt = batch.first[1].as(Array(Float64)).first.to_i
+  while (val_batch = val_data.next_batch(1)).size > 0
+    seq = val_batch.first[0].as(Array(Array(Float64)))
+    tgt = val_batch.first[1].as(Array(Float64)).first.to_i
     output_vec = net.run(seq).last
     probs = SHAInet.softmax(output_vec)
     val_loss += -Math.log(probs[tgt].clamp(1e-9, 1.0))

@@ -74,7 +74,7 @@ module SHAInet
       d_input
     end
 
-   def apply_gradients(lr : Float64)
+    def apply_gradients(lr : Float64)
       mat_klass = @w1.class
       @w1 = @w1 - @g_w1 * lr
       @b1 = @b1 - @g_b1 * lr
@@ -86,7 +86,7 @@ module SHAInet
       @g_b2 = mat_klass.zeros(@b2.rows, @b2.cols)
     end
 
-   def zero_gradients
+    def zero_gradients
       mat_klass = @w1.class
       @g_w1 = mat_klass.zeros(@w1.rows, @w1.cols)
       @g_w2 = mat_klass.zeros(@w2.rows, @w2.cols)

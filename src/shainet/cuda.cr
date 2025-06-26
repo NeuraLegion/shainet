@@ -26,7 +26,7 @@ module SHAInet
                       transa : Int32, transb : Int32,
                       m : Int32, n : Int32,
                       alpha : Pointer(Float64), a : Pointer(Float64), lda : Int32,
-                      beta  : Pointer(Float64), b : Pointer(Float64), ldb : Int32,
+                      beta : Pointer(Float64), b : Pointer(Float64), ldb : Int32,
                       c : Pointer(Float64), ldc : Int32) : Int32
       fun cublasDscal_v2(handle : Handle, n : Int32,
                          alpha : Pointer(Float64), x : Pointer(Float64), incx : Int32) : Int32
