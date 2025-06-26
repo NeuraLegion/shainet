@@ -74,7 +74,7 @@ module SHAInet
           scores.add!(m)
           scores_t = scores_t + TensorMatrix.from_a(m.to_a)
         end
-        attn = softmax_rows(scores)
+        attn = SHAInet.softmax_rows(scores)
         attn_tensor = softmax_rows_tensor(scores_t)
         @attn << attn
         attn_t << attn_tensor
@@ -125,16 +125,6 @@ module SHAInet
 
     def zero_gradients
       [@w_q, @w_k, @w_v, @w_o].each &.zero_grads!
-    end
-
-    private def softmax_rows(m : SimpleMatrix)
-      result = SimpleMatrix.new(m.rows, m.cols)
-      m.rows.times do |i|
-        sum = 0.0
-        m.cols.times { |j| sum += Math.exp(m[i, j]) }
-        m.cols.times { |j| result[i, j] = Math.exp(m[i, j]) / sum }
-      end
-      result
     end
 
     private def softmax_rows_tensor(m : TensorMatrix)

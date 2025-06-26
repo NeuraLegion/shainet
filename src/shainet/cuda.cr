@@ -155,6 +155,15 @@ module SHAInet
       LibCUBLAS.cublasDger(handle, m, n, pointerof(alpha), x, 1, y, 1, a, m)
     end
 
+    # Optional kernels implemented in src/shainet/native/cuda_kernels.cu
+    # These methods fall back to CPU when the native library is missing.
+    def softmax_rows(dst : Pointer(Float64), src : Pointer(Float64), rows : Int32, cols : Int32)
+      raise "CUDA kernels not available"
+    end
+
+    def dropout(dst : Pointer(Float64), src : Pointer(Float64), rows : Int32, cols : Int32, drop_p : Float64, seed : UInt64)
+      raise "CUDA kernels not available"
+
     # In-place element-wise ReLU on GPU memory. This fallback implementation
     # copies the data to the host, applies ReLU and writes the result back. It
     # avoids additional synchronization logic in the caller while still keeping
@@ -182,6 +191,7 @@ module SHAInet
       ger(handle, ones_dev, bias, mat, rows, cols)
       destroy_handle(handle)
       free(ones_dev.as(Pointer(Void)))
+
     end
   end
 end

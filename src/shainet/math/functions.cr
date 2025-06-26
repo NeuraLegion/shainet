@@ -243,4 +243,33 @@ module SHAInet
       0
     end
   end
+
+  def self.softmax_rows(m : SimpleMatrix)
+    result = SimpleMatrix.new(m.rows, m.cols)
+    m.rows.times do |i|
+      sum = 0.0
+      m.cols.times { |j| sum += Math.exp(m[i, j]) }
+      m.cols.times { |j| result[i, j] = Math.exp(m[i, j]) / sum }
+    end
+    result
+  end
+
+  def self.softmax_rows(m : CudaMatrix)
+    m.softmax_rows
+  end
+
+  def self.dropout(m : SimpleMatrix, drop_percent : Int32)
+    raise ArgumentError.new("drop_percent must be between 0 and 100") unless 0 <= drop_percent && drop_percent <= 100
+    result = SimpleMatrix.new(m.rows, m.cols)
+    m.rows.times do |i|
+      m.cols.times do |j|
+        result[i, j] = rand(0...100) < drop_percent ? 0.0 : m[i, j]
+      end
+    end
+    result
+  end
+
+  def self.dropout(m : CudaMatrix, drop_percent : Int32)
+    m.dropout(drop_percent)
+  end
 end
