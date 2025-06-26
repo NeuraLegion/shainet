@@ -14,4 +14,14 @@ describe "CUDA availability" do
       version.should be_nil
     end
   end
+
+  it "checks cuDNN availability" do
+    value = SHAInet::CUDA.cudnn_available?
+    value.should be_a(Bool)
+  end
+
+  it "checks custom kernel library availability" do
+    value = SHAInet::CUDA.kernels_available?
+    value.should be_a(Bool)
+  end
 end

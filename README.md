@@ -50,6 +50,28 @@ You can verify the path with `ldconfig -p | grep libcudart` and add the export l
 No additional build flags are required as the CUDA and cuBLAS libraries are
 dynamically loaded at runtime.
 
+cuDNN support is detected in the same way. Ensure `libcudnn.so` can be found in
+`LD_LIBRARY_PATH` if you want to use optimized convolution or activation
+kernels:
+
+```crystal
+puts "cuDNN available: #{SHAInet::CUDA.cudnn_available?}"
+```
+
+Optional custom kernels can be provided in `libshainet_cuda_kernels.so`. Their
+presence is reported by `SHAInet::CUDA.kernels_available?`.
+
+### GPU benchmarks
+
+Run the benchmark script to compare CPU and GPU performance:
+
+```bash
+crystal run benchmarks/matrix_benchmark.cr --release
+```
+
+It prints timings for matrix multiplication and ReLU. When the GPU libraries are
+loaded you should see lower numbers for the GPU path.
+
 ## Usage
 
 More usage examples can be found in the specs

@@ -111,6 +111,40 @@ module SHAInet
       nil
     end
 
+    # Returns true when the cuDNN library can be loaded.
+    def cudnn_available?
+      handle = LibC.dlopen("libcudnn.so", LibC::RTLD_LAZY)
+      if handle.null?
+        err = LibC.dlerror
+        msg = err.null? ? "unknown" : String.new(err)
+        Log.debug { "Failed to load libcudnn.so: #{msg}. LD_LIBRARY_PATH=#{ENV["LD_LIBRARY_PATH"]?}" }
+        false
+      else
+        LibC.dlclose(handle)
+        true
+      end
+    rescue e
+      Log.error { "cuDNN availability check raised: #{e}" }
+      false
+    end
+
+    # Check if optional CUDA kernels are available via libshainet_cuda_kernels.so
+    def kernels_available?
+      handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+      if handle.null?
+        err = LibC.dlerror
+        msg = err.null? ? "unknown" : String.new(err)
+        Log.debug { "Failed to load libshainet_cuda_kernels.so: #{msg}. LD_LIBRARY_PATH=#{ENV["LD_LIBRARY_PATH"]?}" }
+        false
+      else
+        LibC.dlclose(handle)
+        true
+      end
+    rescue e
+      Log.error { "kernel availability check raised: #{e}" }
+      false
+    end
+
     def malloc(ptr : Pointer(Pointer(Void)), size : LibC::SizeT)
       LibCUDARuntime.cudaMalloc(ptr, size)
     end
