@@ -28,4 +28,15 @@ __global__ void dropout(double* out, const double* in, int rows, int cols, doubl
         row_out[j] = r < drop_p ? 0.0 : row_in[j];
     }
 }
+
+__global__ void gather_rows(double* out, const double* in, const int* ids, int rows, int cols) {
+    int row = blockIdx.x;
+    if(row >= rows) return;
+    int id = ids[row];
+    const double *row_in = in + id * cols;
+    double *row_out = out + row * cols;
+    for(int j=0;j<cols;++j){
+        row_out[j] = row_in[j];
+    }
+}
 }

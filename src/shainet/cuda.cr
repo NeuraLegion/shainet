@@ -217,6 +217,10 @@ module SHAInet
       raise "CUDA kernels not available"
     end
 
+    def gather_rows(dst : Pointer(Float64), src : Pointer(Float64), ids : Pointer(Int32), rows : Int32, cols : Int32)
+      raise "CUDA kernels not available"
+    end
+
     # In-place element-wise ReLU on GPU memory. This fallback implementation
     # copies the data to the host, applies ReLU and writes the result back. It
     # avoids additional synchronization logic in the caller while still keeping

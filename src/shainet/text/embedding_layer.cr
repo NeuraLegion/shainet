@@ -30,14 +30,59 @@ module SHAInet
       Array.new(@l_size) { |i| @embeddings[id, i] }
     end
 
-    # Set the neuron activations for this layer according to the embedding of the
-    # provided token id. Returns the embedding vector.
-    def embed(id : Int32) : Array(Float64)
-      @neurons.each_with_index do |n, i|
-        n.activation = @embeddings[id, i]
+    # Retrieve embeddings for multiple ids as a matrix. When CUDA is available
+    # the returned matrix keeps the values on the device without syncing them
+    # back to the host. Gradients are tracked for later accumulation.
+    def embed(ids : Array(Int32))
+      mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
+      result = mat_klass.zeros(ids.size, @l_size)
+      if CUDA.available? && @embeddings.is_a?(CudaMatrix) && result.is_a?(CudaMatrix)
+        e_ptr = @embeddings.as(CudaMatrix).device_ptr
+        r_ptr = result.as(CudaMatrix).device_ptr
+        if e_ptr && r_ptr && !e_ptr.null? && !r_ptr.null?
+          begin
+            bytes = (ids.size * 4).to_u64
+            ids_dev = Pointer(Int32).null
+            CUDA.malloc(pointerof(ids_dev).as(Pointer(Pointer(Void))), bytes)
+            CUDA.memcpy(ids_dev.as(Pointer(Void)), ids.to_unsafe.as(Pointer(Void)), bytes, CUDA::MemcpyKind::HostToDevice)
+            begin
+              CUDA.gather_rows(r_ptr, e_ptr, ids_dev, ids.size, @l_size)
+            rescue
+              ids.each_with_index do |id, row|
+                src = e_ptr + id*@l_size
+                dst = r_ptr + row*@l_size
+                CUDA.memcpy(dst.as(Pointer(Void)), src.as(Pointer(Void)), (@l_size*8).to_u64, CUDA::MemcpyKind::DeviceToDevice)
+              end
+            end
+            CUDA.free(ids_dev.as(Pointer(Void)))
+            @current_ids.concat(ids)
+            return result
+          rescue
+          end
+        end
       end
-      @current_ids << id
-      lookup(id)
+
+      ids.each_with_index do |id, row|
+        @neurons.each_with_index do |n, col|
+          n.activation = @embeddings[id, col] if ids.size == 1
+          result[row, col] = @embeddings[id, col]
+        end
+      end
+      @current_ids.concat(ids)
+      result
+    end
+
+    # Set the neuron activations for this layer according to the embedding of the
+    # provided token id. Returns the embedding vector as an Array for
+    # compatibility with previous API versions.
+    def embed(id : Int32) : Array(Float64)
+      mat = embed([id])
+      if mat.is_a?(CudaMatrix) && CUDA.available?
+        mat.as(CudaMatrix).sync_from_device!
+      end
+      arr = Array(Float64).new(@l_size) { |i| mat[0, i] }
+      @neurons.each_with_index { |n, i| n.activation = arr[i] }
+      arr
     end
 
     # Accumulate gradient for the last embedded ids

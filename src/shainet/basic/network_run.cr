@@ -32,8 +32,12 @@ module SHAInet
           case l
           when EmbeddingLayer
             token = input.first.to_i
-            vec = l.as(EmbeddingLayer).embed(token)
-            matrix = mat_klass.from_a([vec])
+            if CUDA.available?
+              matrix = l.as(EmbeddingLayer).embed([token])
+            else
+              vec = l.as(EmbeddingLayer).embed(token)
+              matrix = mat_klass.from_a([vec])
+            end
           when TransformerLayer
             matrix = l.as(TransformerLayer).forward(matrix)
           end
@@ -129,8 +133,12 @@ module SHAInet
           when EmbeddingLayer
             raise NeuralNetRunError.new("Embedding input mismatch") unless matrix.cols == 1
             tokens = (0...matrix.rows).map { |r| matrix[r, 0].to_i }
-            embeddings = tokens.map { |id| l.as(EmbeddingLayer).embed(id) }
-            matrix = mat_klass.from_a(embeddings)
+            if CUDA.available?
+              matrix = l.as(EmbeddingLayer).embed(tokens)
+            else
+              embeddings = tokens.map { |id| l.as(EmbeddingLayer).embed(id) }
+              matrix = mat_klass.from_a(embeddings)
+            end
           when TransformerLayer
             matrix = l.as(TransformerLayer).forward(matrix)
           end
