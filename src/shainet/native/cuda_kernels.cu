@@ -28,4 +28,35 @@ __global__ void dropout(double* out, const double* in, int rows, int cols, doubl
         row_out[j] = r < drop_p ? 0.0 : row_in[j];
     }
 }
+
+__global__ void row_mean_var(const double* in, double* mean, double* var,
+                             int rows, int cols) {
+    int row = blockIdx.x;
+    if(row >= rows) return;
+    const double *row_in = in + row * cols;
+    double sum = 0.0;
+    double sq_sum = 0.0;
+    for(int j=0;j<cols;++j){
+        double v = row_in[j];
+        sum += v;
+        sq_sum += v*v;
+    }
+    double m = sum / cols;
+    mean[row] = m;
+    var[row] = sq_sum / cols - m*m;
+}
+
+__global__ void apply_layer_norm(double* out, const double* in,
+                                 const double* mean, const double* var,
+                                 int rows, int cols, double epsilon) {
+    int row = blockIdx.x;
+    if(row >= rows) return;
+    const double *row_in = in + row * cols;
+    double *row_out = out + row * cols;
+    double m = mean[row];
+    double denom = sqrt(var[row] + epsilon);
+    for(int j=0;j<cols;++j){
+        row_out[j] = (row_in[j] - m) / denom;
+    }
+}
 }

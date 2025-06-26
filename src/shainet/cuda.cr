@@ -217,6 +217,14 @@ module SHAInet
       raise "CUDA kernels not available"
     end
 
+    def row_mean_var(mean : Pointer(Float64), var : Pointer(Float64), src : Pointer(Float64), rows : Int32, cols : Int32)
+      raise "CUDA kernels not available"
+    end
+
+    def layer_norm(dst : Pointer(Float64), src : Pointer(Float64), mean : Pointer(Float64), var : Pointer(Float64), rows : Int32, cols : Int32, eps : Float64)
+      raise "CUDA kernels not available"
+    end
+
     # In-place element-wise ReLU on GPU memory. This fallback implementation
     # copies the data to the host, applies ReLU and writes the result back. It
     # avoids additional synchronization logic in the caller while still keeping
