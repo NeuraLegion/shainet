@@ -107,6 +107,7 @@ describe "Network with TransformerLayer" do
     net.add_layer(:input, 2, :memory, SHAInet.none)
     net.add_layer(:transformer, 2)
     net.add_layer(:output, 2, :memory, SHAInet.none)
+    net.fully_connect
     training = [[[[1.0, 0.0]], [1.0, 1.0]]]
     net.learning_rate = 0.1
     net.train(data: training, training_type: :sgdm,

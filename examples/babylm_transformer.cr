@@ -45,27 +45,29 @@ puts "Network built"
 pos_enc = SHAInet::PositionalEncoding.sinusoidal(seq_len, d_model)
 net.transformer_layers.each { |l| l.positional_encoding = pos_enc }
 
-# Build training/validation splits and helper to create pairs
-def build_pairs(ids, seq_len)
-  pairs = [] of Tuple(Array(Array(Float64)), Int32)
-  (0...(ids.size - seq_len)).each do |i|
-    seq = ids[i, seq_len].map { |id| [id.to_f64] }
-    target = ids[i + seq_len]
-    pairs << {seq, target}
+# Build training/validation splits and write pairs to disk for streaming
+def write_pairs(path, ids, seq_len)
+  File.open(path, "w") do |f|
+    (0...(ids.size - seq_len)).each do |i|
+      seq = ids[i, seq_len].map { |id| [id] }
+      pair = [seq, [ids[i + seq_len]]]
+      f.puts pair.to_json
+    end
   end
-  pairs
 end
 
 split = ids.size * 9 // 10
 train_ids = ids[0, split]
 val_ids = ids[split - seq_len, ids.size - (split - seq_len)]
 
-training = build_pairs(train_ids, seq_len)
-validation = build_pairs(val_ids, seq_len)
+train_file = "train_pairs.jsonl"
+val_file = "val_pairs.jsonl"
 
-# Convert tuples to arrays as expected by `net.train`
-train_data = training.map { |seq, target| [seq, [target]] }
-val_data = validation.map { |seq, target| [seq, [target]] }
+write_pairs(train_file, train_ids, seq_len)
+write_pairs(val_file, val_ids, seq_len)
+
+train_data = SHAInet::StreamingData.new(train_file, shuffle: true)
+val_data = SHAInet::StreamingData.new(val_file)
 
 epochs = 10
 batch = 32
@@ -81,12 +83,17 @@ epochs.times do |epoch|
     log_each: 100)
 
   val_loss = 0.0
-  validation.each do |seq, tgt|
+  count = 0
+  while (batch = val_data.next_batch(1)).size > 0
+    seq = batch.first[0].as(Array(Array(Float64)))
+    tgt = batch.first[1].as(Array(Float64)).first.to_i
     output_vec = net.run(seq).last
     probs = SHAInet.softmax(output_vec)
     val_loss += -Math.log(probs[tgt].clamp(1e-9, 1.0))
+    count += 1
   end
-  val_loss /= validation.size.to_f
+  val_loss /= count.to_f if count > 0
+  val_data.rewind
   puts "Epoch #{epoch + 1} validation loss: #{val_loss}"
 end
 
