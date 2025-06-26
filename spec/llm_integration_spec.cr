@@ -10,9 +10,9 @@ describe "LLM integration" do
     quick_id = tokenizer.encode("quick").first
     brown_id = tokenizer.encode("brown").first
 
-    training = [] of Array(Array(Array(Float64)) | Array(Float64))
+    training = [] of Array(Array(Array(Int32)) | Array(Float64))
     50.times do
-      seq = [[quick_id.to_f64]]
+      seq = [[quick_id]]
       target = Array(Float64).new(tokenizer.vocab.size, 0.0)
       target[brown_id] = 1.0
       training << [seq, target]

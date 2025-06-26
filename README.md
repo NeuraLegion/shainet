@@ -416,7 +416,7 @@ net.add_layer(:lstm, 4)
 net.add_layer(:output, 1)
 net.fully_connect
 
-sequence = ids.map { |id| [id.to_f64] }
+sequence = ids.map { |id| [id] }
 output = net.run(sequence).last
 ```
 

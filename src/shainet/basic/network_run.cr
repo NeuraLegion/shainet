@@ -100,6 +100,18 @@ module SHAInet
       raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
     end
 
+    # Accept a sequence of integer tokens for embedding layers
+    def run(input : Array(Array(Int32)), stealth : Bool = false) : Array(Array(Float64))
+      seq = input.map { |x| x.map(&.to_f64) }
+      run(seq, stealth: stealth)
+    end
+
+    # Accept integer input for embedding layers
+    def run(input : Array(Int32), stealth : Bool = false) : Array(Float64)
+      float_in = input.map(&.to_f64)
+      run(float_in, stealth: stealth)
+    end
+
     def run(input : Array(Array(GenNum)), stealth : Bool = false) : Array(Array(Float64))
       verify_net_before_train
       expected_size = @input_layers.reduce(0) { |acc, l| acc + l.neurons.size }
@@ -226,6 +238,13 @@ module SHAInet
       raise NeuralNetRunError.new("Error in evaluate: #{e}")
     end
 
+    # Accept integer input for embeddings
+    def evaluate(input_data : Array(Int32),
+                 expected_output : Array(GenNum),
+                 cost_function : CostFunction = SHAInet.quadratic_cost)
+      evaluate(input_data.map(&.to_f64), expected_output, cost_function)
+    end
+
     def evaluate_sequence(input_data : Array(Array(GenNum)),
                           expected_output : Array(GenNum),
                           cost_function : CostFunction = SHAInet.quadratic_cost)
@@ -277,6 +296,13 @@ module SHAInet
       raise NeuralNetRunError.new("Error in evaluate: #{e}")
     end
 
+    def evaluate_sequence(input_data : Array(Array(Int32)),
+                          expected_output : Array(GenNum),
+                          cost_function : CostFunction = SHAInet.quadratic_cost)
+      seq = input_data.map { |x| x.map(&.to_f64) }
+      evaluate_sequence(seq, expected_output, cost_function)
+    end
+
     # Evaluate a single example using a class label and softmax cross entropy
     def evaluate_label(input_data : Array(GenNum), label : Int32)
       actual_output = run(input_data.map(&.to_f64), stealth: true)
@@ -307,6 +333,10 @@ module SHAInet
         w = mat_klass.from_a(@output_layers.last.weights.to_a)
         @transformer_error = diff * w
       end
+    end
+
+    def evaluate_label(input_data : Array(Int32), label : Int32)
+      evaluate_label(input_data.map(&.to_f64), label)
     end
 
     # Evaluate a sequence example with a class label and softmax cross entropy
@@ -345,6 +375,11 @@ module SHAInet
           @transformer_error[outputs.size - 1, j] = trans[0, j]
         end
       end
+    end
+
+    def evaluate_sequence_label(input_data : Array(Array(Int32)), label : Int32)
+      seq = input_data.map { |x| x.map(&.to_f64) }
+      evaluate_sequence_label(seq, label)
     end
 
     # Calculate MSE from the error signal of the output layer
