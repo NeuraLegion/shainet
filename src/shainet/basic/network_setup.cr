@@ -86,7 +86,7 @@ module SHAInet
     # l_type is: :input, :hidden or :output
     # l_size = how many neurons in the layer
     # n_type = advanced option for different neuron types
-    def add_layer(l_type : Symbol | String, l_size : Int32, n_type : Symbol | String = "memory", activation_function : ActivationFunction = SHAInet.sigmoid, num_heads : Int32 = 1, ff_hidden : Int32 = l_size*4, drop_percent : Int32 = 0, blocks : Int32 = 1)
+    def add_layer(l_type : Symbol | String, l_size : Int32, n_type : Symbol | String = "memory", activation_function : ActivationFunction = SHAInet.sigmoid, num_heads : Int32 = 1, ff_hidden : Int32 = l_size*4, drop_percent : Int32 = 0, blocks : Int32 = 1, *, vocab_size : Int32 = 0)
       if l_type.to_s == "transformer" && blocks > 1
         blocks.times do
           add_layer(l_type, l_size, n_type, activation_function, num_heads, ff_hidden, drop_percent, 1)
@@ -99,7 +99,8 @@ module SHAInet
               when "lstm"
                 LSTMLayer.new(n_type.to_s, l_size, activation_function)
               when "embedding"
-                EmbeddingLayer.new(l_size, activation_function)
+                raise NeuralNetRunError.new("vocab_size required for embedding layer") if vocab_size <= 0
+                EmbeddingLayer.new(vocab_size, l_size, activation_function)
               when "transformer"
                 TransformerLayer.new(l_size, num_heads, ff_hidden, drop_percent)
               else
@@ -420,7 +421,7 @@ module SHAInet
         out_size = lookup["out"]? ? lookup["out"]["weight"].as_a.size : d_model
 
         add_layer(:input, 1)
-        add_layer(:embedding, d_model)
+        add_layer(:embedding, d_model, vocab_size: emb_w.size)
         blocks.each do
           add_layer(:transformer, d_model)
         end
@@ -429,7 +430,9 @@ module SHAInet
 
         emb_layer = @hidden_layers.find(&.is_a?(EmbeddingLayer)).as(EmbeddingLayer)
         emb_w.each_with_index do |row, idx|
-          emb_layer.embeddings[idx] = row.as_a.map(&.as_f)
+          row.as_a.each_with_index do |val, j|
+            emb_layer.embeddings[idx, j] = val.as_f
+          end
         end
 
         blocks.each_with_index do |prefix, idx|
