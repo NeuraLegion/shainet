@@ -163,6 +163,35 @@ module SHAInet
 
     def dropout(dst : Pointer(Float64), src : Pointer(Float64), rows : Int32, cols : Int32, drop_p : Float64, seed : UInt64)
       raise "CUDA kernels not available"
+
+    # In-place element-wise ReLU on GPU memory. This fallback implementation
+    # copies the data to the host, applies ReLU and writes the result back. It
+    # avoids additional synchronization logic in the caller while still keeping
+    # the computation on the GPU when proper kernels are available.
+    def relu(ptr : Pointer(Float64), len : Int32)
+      host = Array(Float64).new(len, 0.0)
+      bytes = (len * 8).to_u64
+      memcpy(host.to_unsafe.as(Pointer(Void)), ptr.as(Pointer(Void)), bytes, MemcpyKind::DeviceToHost)
+      len.times do |i|
+        v = host[i]
+        host[i] = v > 0 ? v : 0.0
+      end
+      memcpy(ptr.as(Pointer(Void)), host.to_unsafe.as(Pointer(Void)), bytes, MemcpyKind::HostToDevice)
+    end
+
+    # Add a bias row vector to each row of a matrix in GPU memory. Uses the
+    # cuBLAS GER routine for the rank-1 update.
+    def add_bias(mat : Pointer(Float64), bias : Pointer(Float64), rows : Int32, cols : Int32)
+      handle = create_handle
+      ones_host = Array(Float64).new(rows, 1.0)
+      ones_dev = Pointer(Float64).null
+      bytes = (rows * 8).to_u64
+      malloc(pointerof(ones_dev).as(Pointer(Pointer(Void))), bytes)
+      memcpy(ones_dev.as(Pointer(Void)), ones_host.to_unsafe.as(Pointer(Void)), bytes, MemcpyKind::HostToDevice)
+      ger(handle, ones_dev, bias, mat, rows, cols)
+      destroy_handle(handle)
+      free(ones_dev.as(Pointer(Void)))
+
     end
   end
 end

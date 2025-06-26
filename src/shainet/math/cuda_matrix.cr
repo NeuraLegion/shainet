@@ -215,10 +215,7 @@ module SHAInet
   def add_bias!(bias : CudaMatrix)
     raise ArgumentError.new("bias size mismatch") unless bias.rows == 1 && bias.cols == @cols
     if CUDA.available? && (dptr = self.device_ptr) && (bptr = bias.device_ptr) && !dptr.null? && !bptr.null?
-      handle = CUDA.create_handle
-      ones = CudaMatrix.ones(@rows, 1)
-      CUDA.ger(handle, ones.device_ptr.not_nil!, bptr, dptr, @rows, @cols)
-      CUDA.destroy_handle(handle)
+      CUDA.add_bias(dptr, bptr, @rows, @cols)
       self.sync_from_device!
     else
       @rows.times do |i|
@@ -234,14 +231,8 @@ module SHAInet
   # Element-wise ReLU activation in-place.
   def relu!
     if CUDA.available? && (dptr = self.device_ptr) && !dptr.null?
+      CUDA.relu(dptr, (@rows*@cols))
       self.sync_from_device!
-      @rows.times do |i|
-        @cols.times do |j|
-          v = self[i, j]
-          self[i, j] = v > 0 ? v : 0.0
-        end
-      end
-      self.sync_to_device!
     else
       @rows.times do |i|
         @cols.times do |j|
