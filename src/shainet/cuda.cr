@@ -163,6 +163,7 @@ module SHAInet
       LibCUBLAS.cublasDger(handle, m, n, pointerof(alpha), x, 1, y, 1, a, m)
     end
 
+<<<<<<< codex/implement-gpu-support-for-lstm-and-embedding-layer
     def dot(handle : LibCUBLAS::Handle, x : Pointer(Float64), y : Pointer(Float64), n : Int32)
       result = 0.0
       LibCUBLAS.cublasDdot_v2(handle, n, x, 1, y, 1, pointerof(result))
@@ -171,6 +172,16 @@ module SHAInet
 
     def axpy(handle : LibCUBLAS::Handle, alpha : Float64, x : Pointer(Float64), y : Pointer(Float64), n : Int32)
       LibCUBLAS.cublasDaxpy_v2(handle, n, pointerof(alpha), x, 1, y, 1)
+=======
+    # Optional kernels implemented in src/shainet/native/cuda_kernels.cu
+    # These methods fall back to CPU when the native library is missing.
+    def softmax_rows(dst : Pointer(Float64), src : Pointer(Float64), rows : Int32, cols : Int32)
+      raise "CUDA kernels not available"
+    end
+
+    def dropout(dst : Pointer(Float64), src : Pointer(Float64), rows : Int32, cols : Int32, drop_p : Float64, seed : UInt64)
+      raise "CUDA kernels not available"
+>>>>>>> master
     end
 
     # In-place element-wise ReLU on GPU memory. This fallback implementation
