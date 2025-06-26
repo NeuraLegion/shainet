@@ -129,6 +129,25 @@ module SHAInet
     dup
   end
 
+  # In-place element-wise addition.
+  def add!(other : CudaMatrix)
+    raise ArgumentError.new("size mismatch") unless other.rows == @rows && other.cols == @cols
+    if CUDA.available? && (ptr_a = self.device_ptr) && (ptr_b = other.device_ptr) && !ptr_a.null? && !ptr_b.null?
+      handle = CUDA.create_handle
+      CUDA.geam(handle, ptr_a, ptr_b, ptr_a, @rows, @cols, 1.0, 1.0)
+      CUDA.destroy_handle(handle)
+      self.sync_from_device!
+    else
+      @rows.times do |i|
+        @cols.times do |j|
+          self[i, j] += other[i, j]
+        end
+      end
+      self.sync_to_device! if CUDA.available?
+    end
+    self
+  end
+
   def +(other : CudaMatrix)
     raise ArgumentError.new("size mismatch") unless @rows == other.rows && @cols == other.cols
     if CUDA.available? && (ptr_a = self.device_ptr) && (ptr_b = other.device_ptr) && !ptr_a.null? && !ptr_b.null?
@@ -190,5 +209,71 @@ module SHAInet
       result.sync_to_device! if CUDA.available?
       result
     end
+  end
+
+  # Add a bias row vector to each row in-place.
+  def add_bias!(bias : CudaMatrix)
+    raise ArgumentError.new("bias size mismatch") unless bias.rows == 1 && bias.cols == @cols
+    if CUDA.available? && (dptr = self.device_ptr) && (bptr = bias.device_ptr) && !dptr.null? && !bptr.null?
+      handle = CUDA.create_handle
+      ones = CudaMatrix.ones(@rows, 1)
+      CUDA.ger(handle, ones.device_ptr.not_nil!, bptr, dptr, @rows, @cols)
+      CUDA.destroy_handle(handle)
+      self.sync_from_device!
+    else
+      @rows.times do |i|
+        @cols.times do |j|
+          self[i, j] += bias[0, j]
+        end
+      end
+      self.sync_to_device! if CUDA.available?
+    end
+    self
+  end
+
+  # Element-wise ReLU activation in-place.
+  def relu!
+    if CUDA.available? && (dptr = self.device_ptr) && !dptr.null?
+      self.sync_from_device!
+      @rows.times do |i|
+        @cols.times do |j|
+          v = self[i, j]
+          self[i, j] = v > 0 ? v : 0.0
+        end
+      end
+      self.sync_to_device!
+    else
+      @rows.times do |i|
+        @cols.times do |j|
+          v = self[i, j]
+          self[i, j] = v > 0 ? v : 0.0
+        end
+      end
+      self.sync_to_device! if CUDA.available?
+    end
+    self
+  end
+
+  # Multiply each column by the corresponding value in a row vector in-place.
+  def mul_row_vector!(vec : CudaMatrix)
+    raise ArgumentError.new("vector size mismatch") unless vec.rows == 1 && vec.cols == @cols
+    if CUDA.available? && (dptr = self.device_ptr) && (vptr = vec.device_ptr) && !dptr.null? && !vptr.null?
+      handle = CUDA.create_handle
+      @cols.times do |j|
+        alpha = vec[0, j]
+        ptr = dptr + j*@rows
+        CUDA.scal(handle, ptr, @rows, alpha)
+      end
+      CUDA.destroy_handle(handle)
+      self.sync_from_device!
+    else
+      @rows.times do |i|
+        @cols.times do |j|
+          self[i, j] *= vec[0, j]
+        end
+      end
+      self.sync_to_device! if CUDA.available?
+    end
+    self
   end
 end

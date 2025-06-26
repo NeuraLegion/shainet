@@ -71,7 +71,7 @@ module SHAInet
         scores_t = qs_t * ks_t.transpose * (1.0 / Math.sqrt(@head_dim.to_f))
         if m = mask
           raise "mask size mismatch" unless m.rows == scores.rows && m.cols == scores.cols
-          scores = scores + m
+          scores.add!(m)
           scores_t = scores_t + TensorMatrix.from_a(m.to_a)
         end
         attn = softmax_rows(scores)
