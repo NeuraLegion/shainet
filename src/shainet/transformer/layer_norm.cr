@@ -32,6 +32,30 @@ module SHAInet
       @mean = mat_klass.new(rows, 1)
       @var = mat_klass.new(rows, 1)
       @norm = mat_klass.new(rows, cols)
+
+      if CUDA.available? && CUDA.kernels_available? && x.is_a?(CudaMatrix) &&
+         mat_klass <= CudaMatrix
+        cx = x.as(CudaMatrix)
+        begin
+          CUDA.row_mean_var(@mean.as(CudaMatrix).device_ptr.not_nil!,
+            @var.as(CudaMatrix).device_ptr.not_nil!,
+            cx.device_ptr.not_nil!, rows, cols)
+          CUDA.layer_norm(@norm.as(CudaMatrix).device_ptr.not_nil!,
+            cx.device_ptr.not_nil!,
+            @mean.as(CudaMatrix).device_ptr.not_nil!,
+            @var.as(CudaMatrix).device_ptr.not_nil!,
+            rows, cols, @epsilon)
+          @mean.as(CudaMatrix).sync_from_device!
+          @var.as(CudaMatrix).sync_from_device!
+          @norm.as(CudaMatrix).sync_from_device!
+          out = @norm.clone
+          out.mul_row_vector!(@gamma)
+          out.add_bias!(@beta)
+          return out rescue
+          # ignore and fall back to CPU path
+        end
+      end
+
       rows.times do |i|
         mean = 0.0
         cols.times { |j| mean += x[i, j] }
@@ -58,6 +82,7 @@ module SHAInet
 
     def backward(d_out : SimpleMatrix)
       x = @x.not_nil!
+      x.sync_from_device! if x.responds_to?(:sync_from_device!)
       rows = x.rows
       cols = x.cols
       mat_klass = @gamma.class

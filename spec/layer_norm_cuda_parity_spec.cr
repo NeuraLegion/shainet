@@ -1,0 +1,55 @@
+require "./spec_helper"
+
+describe "LayerNorm GPU parity" do
+  it "matches CPU and GPU forward/backward" do
+    pending! "CUDA not available" unless SHAInet::CUDA.available?
+
+    rows = 3
+    cols = 4
+
+    data = Array.new(rows) { Array.new(cols) { rand } }
+    dout_data = Array.new(rows) { Array.new(cols) { rand } }
+
+    ENV["SHAINET_DISABLE_CUDA"] = "1"
+    cpu_ln = SHAInet::LayerNorm.new(cols)
+    x_cpu = SHAInet::SimpleMatrix.from_a(data)
+    dout_cpu = SHAInet::SimpleMatrix.from_a(dout_data)
+    out_cpu = cpu_ln.forward(x_cpu)
+    dx_cpu = cpu_ln.backward(dout_cpu)
+    g_gamma_cpu = cpu_ln.g_gamma.clone
+    g_beta_cpu = cpu_ln.g_beta.clone
+    ENV.delete("SHAINET_DISABLE_CUDA")
+
+    gpu_ln = SHAInet::LayerNorm.new(cols)
+    gpu_ln.gamma = SHAInet::CudaMatrix.from_a(cpu_ln.gamma.to_a)
+    gpu_ln.beta = SHAInet::CudaMatrix.from_a(cpu_ln.beta.to_a)
+    x_gpu = SHAInet::CudaMatrix.from_a(data)
+    dout_gpu = SHAInet::CudaMatrix.from_a(dout_data)
+    out_gpu = gpu_ln.forward(x_gpu)
+    if ptr = out_gpu.as?(SHAInet::CudaMatrix)
+      ptr.sync_from_device!
+    end
+    dx_gpu = gpu_ln.backward(dout_gpu)
+    if ptr = dx_gpu.as?(SHAInet::CudaMatrix)
+      ptr.sync_from_device!
+    end
+    if ptr = gpu_ln.g_gamma.as?(SHAInet::CudaMatrix)
+      ptr.sync_from_device!
+    end
+    if ptr = gpu_ln.g_beta.as?(SHAInet::CudaMatrix)
+      ptr.sync_from_device!
+    end
+
+    rows.times do |i|
+      cols.times do |j|
+        out_gpu[i, j].should be_close(out_cpu[i, j], 1e-6)
+        dx_gpu[i, j].should be_close(dx_cpu[i, j], 1e-6)
+      end
+    end
+
+    cols.times do |j|
+      gpu_ln.g_gamma[0, j].should be_close(g_gamma_cpu[0, j], 1e-6)
+      gpu_ln.g_beta[0, j].should be_close(g_beta_cpu[0, j], 1e-6)
+    end
+  end
+end

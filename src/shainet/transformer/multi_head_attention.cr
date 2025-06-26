@@ -52,6 +52,12 @@ module SHAInet
       v_heads_t = [] of TensorMatrix
       attn_t = [] of TensorMatrix
       outputs_t = [] of TensorMatrix
+      gpu_enabled = CUDA.available? && CUDA.kernels_available? && x.is_a?(CudaMatrix)
+      gpu_outputs = [] of CudaMatrix if gpu_enabled
+      q_gpu = CudaMatrix.from_a(q.to_a) if gpu_enabled
+      k_gpu = CudaMatrix.from_a(k.to_a) if gpu_enabled
+      v_gpu = CudaMatrix.from_a(v.to_a) if gpu_enabled
+      mask_gpu = CudaMatrix.from_a(mask.not_nil!.to_a) if gpu_enabled && mask
 
       @num_heads.times do |h|
         qs = q.slice_cols(h*@head_dim, @head_dim)
@@ -66,6 +72,21 @@ module SHAInet
         q_heads_t << qs_t
         k_heads_t << ks_t
         v_heads_t << vs_t
+
+        if gpu_enabled
+          qs_g = q_gpu.not_nil!.slice_cols(h*@head_dim, @head_dim)
+          ks_g = k_gpu.not_nil!.slice_cols(h*@head_dim, @head_dim)
+          vs_g = v_gpu.not_nil!.slice_cols(h*@head_dim, @head_dim)
+          tmp_g = qs_g * ks_g.transpose
+          scores_g = tmp_g.is_a?(CudaMatrix) ? tmp_g : CudaMatrix.from_a(tmp_g.to_a)
+          scores_g = scores_g * (1.0 / Math.sqrt(@head_dim.to_f))
+          if mg = mask_gpu
+            scores_g.add!(mg)
+          end
+          attn_tmp = SHAInet.softmax_rows(scores_g)
+          attn_g = attn_tmp.is_a?(CudaMatrix) ? attn_tmp : CudaMatrix.from_a(attn_tmp.to_a)
+          gpu_outputs.not_nil! << (attn_g * vs_g).as(CudaMatrix)
+        end
 
         scores = qs * ks.transpose * (1.0 / Math.sqrt(@head_dim.to_f))
         scores_t = qs_t * ks_t.transpose * (1.0 / Math.sqrt(@head_dim.to_f))
@@ -82,15 +103,29 @@ module SHAInet
         outputs_t << (attn_tensor * vs_t)
       end
 
-      concat = SimpleMatrix.new(x.rows, @d_model)
       concat_t = TensorMatrix.new(x.rows, @d_model)
       @num_heads.times do |h|
-        concat.set_cols!(h*@head_dim, outputs[h])
         concat_t.set_cols!(h*@head_dim, outputs_t[h])
       end
 
+      if gpu_enabled
+        concat_gpu = CudaMatrix.new(x.rows, @d_model)
+        @num_heads.times do |h|
+          concat_gpu.set_cols!(h*@head_dim, gpu_outputs.not_nil![h])
+        end
+        wo_gpu = CudaMatrix.from_a(@w_o.to_simple.to_a)
+        out_gpu = (concat_gpu * wo_gpu).as(CudaMatrix)
+        out_gpu.sync_from_device!
+        @out = out_gpu
+      else
+        concat = SimpleMatrix.new(x.rows, @d_model)
+        @num_heads.times do |h|
+          concat.set_cols!(h*@head_dim, outputs[h])
+        end
+        @out = concat * @w_o.to_simple
+      end
+
       @out_t = concat_t * @w_o
-      @out = concat * @w_o.to_simple
       @out
     end
 
