@@ -193,8 +193,8 @@ module SHAInet
       LibCUBLAS.cublasDscal_v2(handle, n, pointerof(alpha), x, 1)
     end
 
-    def ger(handle : LibCUBLAS::Handle, x : Pointer(Float64), y : Pointer(Float64), a : Pointer(Float64), m : Int32, n : Int32, alpha : Float64 = 1.0)
-      LibCUBLAS.cublasDger(handle, m, n, pointerof(alpha), x, 1, y, 1, a, m)
+    def ger(handle : LibCUBLAS::Handle, x : Pointer(Float64), y : Pointer(Float64), a : Pointer(Float64), m : Int32, n : Int32, lda : Int32, alpha : Float64 = 1.0)
+      LibCUBLAS.cublasDger(handle, m, n, pointerof(alpha), x, 1, y, 1, a, lda)
     end
 
     def dot(handle : LibCUBLAS::Handle, x : Pointer(Float64), y : Pointer(Float64), n : Int32)

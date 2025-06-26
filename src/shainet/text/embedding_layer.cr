@@ -100,7 +100,7 @@ module SHAInet
           CUDA.malloc(pointerof(one_dev).as(Pointer(Pointer(Void))), 8_u64)
           CUDA.memcpy(one_dev.as(Pointer(Void)), pointerof(one_val).as(Pointer(Void)), 8_u64, CUDA::MemcpyKind::HostToDevice)
           handle = CUDA.create_handle
-          CUDA.ger(handle, one_dev, g_dev, dptr + id, 1, @gradients.cols)
+          CUDA.ger(handle, one_dev, g_dev, dptr + id, 1, @gradients.cols, @gradients.rows)
           CUDA.destroy_handle(handle)
           CUDA.free(g_dev.as(Pointer(Void)))
           CUDA.free(one_dev.as(Pointer(Void)))
