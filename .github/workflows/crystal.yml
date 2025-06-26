@@ -17,6 +17,8 @@ jobs:
     steps:
     - uses: actions/checkout@v3
 
+    - name: Install basic tools
+      run: sudo apt-get update && apt-get install -y wget curl
     - name: install CUDA libs
       run: |
         # 1. Add the NVIDIA keyring
