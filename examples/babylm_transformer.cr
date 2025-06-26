@@ -99,6 +99,6 @@ end
 
 # Predict the token following the first token in the dataset
 first_id = ids.first
-output = net.run([[first_id.to_f64]]).last
+output = net.run([[first_id]]).last
 pred_id = output.index(output.max) || 0
 puts "Prediction -> #{tokenizer.decode([pred_id])}"

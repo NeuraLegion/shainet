@@ -36,9 +36,9 @@ one_hot = ->(id : Int32, size : Int32) do
 end
 
 # Each token predicts the next token
-training = [] of Tuple(Array(Array(Float64)), Array(Float64))
+training = [] of Tuple(Array(Array(Int32)), Array(Float64))
 (0...ids.size - 1).each do |i|
-  input = [[ids[i].to_f64]]
+  input = [[ids[i]]]
   expected = one_hot.call(ids[i + 1], token_count)
   training << {input, expected}
 end
@@ -56,6 +56,6 @@ net.train(data: train_data,
 
 # Predict the token following "hello"
 hello_id = tokenizer.encode("hello").first
-output = net.run([[hello_id.to_f64]]).last
+output = net.run([[hello_id]]).last
 pred_id = output.index(output.max) || 0
 puts "Prediction for 'hello' -> #{tokenizer.decode([pred_id])}"
