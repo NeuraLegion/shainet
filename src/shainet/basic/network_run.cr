@@ -38,6 +38,20 @@ module SHAInet
             matrix = l.as(TransformerLayer).forward(matrix)
           end
         end
+        out_layer = @output_layers.last
+        w = mat_klass.from_a(out_layer.weights.to_a)
+        b = mat_klass.from_a(out_layer.biases.to_a)
+        matrix = matrix * w.transpose
+        matrix.rows.times do |i|
+          matrix.cols.times do |j|
+            matrix[i, j] += b[j, 0]
+            val = matrix[i, j]
+            act, sig = out_layer.activation_function.call(val)
+            matrix[i, j] = act
+            out_layer.neurons[j].activation = act if i == matrix.rows - 1
+            out_layer.neurons[j].sigma_prime = sig if i == matrix.rows - 1
+          end
+        end
         output = matrix.to_a.first
         unless stealth
           Log.info { "Input => #{input}, network output => #{output}" }
@@ -107,6 +121,22 @@ module SHAInet
             matrix = mat_klass.from_a(embeddings)
           when TransformerLayer
             matrix = l.as(TransformerLayer).forward(matrix)
+          end
+        end
+        out_layer = @output_layers.last
+        w = mat_klass.from_a(out_layer.weights.to_a)
+        b = mat_klass.from_a(out_layer.biases.to_a)
+        matrix = matrix * w.transpose
+        matrix.rows.times do |i|
+          matrix.cols.times do |j|
+            matrix[i, j] += b[j, 0]
+            val = matrix[i, j]
+            act, sig = out_layer.activation_function.call(val)
+            matrix[i, j] = act
+            if i == matrix.rows - 1
+              out_layer.neurons[j].activation = act
+              out_layer.neurons[j].sigma_prime = sig
+            end
           end
         end
         matrix.to_a
@@ -183,7 +213,9 @@ module SHAInet
         mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
         exp = mat_klass.from_a([expected_output.map(&.to_f64)])
         act = mat_klass.from_a([actual_output])
-        @transformer_error = act - exp
+        diff = act - exp
+        w = mat_klass.from_a(@output_layers.last.weights.to_a)
+        @transformer_error = diff * w
       end
 
       # puts "@error_signal: #{@error_signal}"
@@ -271,7 +303,9 @@ module SHAInet
         exp = mat_klass.zeros(1, probs.size)
         exp[0, label] = 1.0
         act = mat_klass.from_a([probs])
-        @transformer_error = act - exp
+        diff = act - exp
+        w = mat_klass.from_a(@output_layers.last.weights.to_a)
+        @transformer_error = diff * w
       end
     end
 
@@ -304,9 +338,11 @@ module SHAInet
         exp_row[0, label] = 1.0
         act_row = mat_klass.from_a([probs])
         diff = act_row - exp_row
-        @transformer_error = mat_klass.zeros(outputs.size, diff.cols)
-        diff.cols.times do |j|
-          @transformer_error[outputs.size - 1, j] = diff[0, j]
+        w = mat_klass.from_a(@output_layers.last.weights.to_a)
+        trans = diff * w
+        @transformer_error = mat_klass.zeros(outputs.size, trans.cols)
+        trans.cols.times do |j|
+          @transformer_error[outputs.size - 1, j] = trans[0, j]
         end
       end
     end
