@@ -45,6 +45,7 @@ If the libraries are installed in a non-standard location set
 ```bash
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 ```
+You can verify the path with `ldconfig -p | grep libcudart` and add the export line to your shell profile (e.g. `~/.bashrc`) to persist the setting.
 
 No additional build flags are required as the CUDA and cuBLAS libraries are
 dynamically loaded at runtime.

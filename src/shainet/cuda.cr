@@ -1,5 +1,8 @@
+require "log"
+
 module SHAInet
   module CUDA
+    Log = ::Log.for(self)
     extend self
 
     # :nodoc:
@@ -52,8 +55,21 @@ module SHAInet
       return false if ENV["SHAINET_DISABLE_CUDA"]?
       return @@available if @@checked
       @@checked = true
+
       rt = LibC.dlopen("libcudart.so", LibC::RTLD_LAZY)
+      if rt.null?
+        err = LibC.dlerror
+        msg = err.null? ? "unknown" : String.new(err)
+        Log.debug { "Failed to load libcudart.so: #{msg}. LD_LIBRARY_PATH=#{ENV["LD_LIBRARY_PATH"]?}" }
+      end
+
       blas = LibC.dlopen("libcublas.so", LibC::RTLD_LAZY)
+      if blas.null?
+        err = LibC.dlerror
+        msg = err.null? ? "unknown" : String.new(err)
+        Log.debug { "Failed to load libcublas.so: #{msg}. LD_LIBRARY_PATH=#{ENV["LD_LIBRARY_PATH"]?}" }
+      end
+
       if rt.null? || blas.null?
         @@available = false
       else
@@ -61,8 +77,10 @@ module SHAInet
         LibC.dlclose(blas)
         @@available = true
       end
+
       @@available
-    rescue
+    rescue e
+      Log.error { "CUDA availability check raised: #{e}" }
       @@available = false
     end
 
