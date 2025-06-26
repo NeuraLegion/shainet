@@ -44,14 +44,50 @@ module SHAInet
     def accumulate_gradient
       until @current_ids.empty?
         id = @current_ids.shift
-        @neurons.each_with_index do |n, i|
-          @gradients[id, i] += n.gradient
+        if CUDA.available? && @gradients.is_a?(CudaMatrix) && (dptr = @gradients.as(CudaMatrix).device_ptr) && !dptr.null?
+          host_vec = Array(Float64).new(@l_size) { |i| @neurons[i].gradient }
+          bytes = (@l_size * 8).to_u64
+          g_dev = Pointer(Float64).null
+          CUDA.malloc(pointerof(g_dev).as(Pointer(Pointer(Void))), bytes)
+          CUDA.memcpy(g_dev.as(Pointer(Void)), host_vec.to_unsafe.as(Pointer(Void)), bytes, CUDA::MemcpyKind::HostToDevice)
+          one_val = 1.0
+          one_dev = Pointer(Float64).null
+          CUDA.malloc(pointerof(one_dev).as(Pointer(Pointer(Void))), 8_u64)
+          CUDA.memcpy(one_dev.as(Pointer(Void)), pointerof(one_val).as(Pointer(Void)), 8_u64, CUDA::MemcpyKind::HostToDevice)
+          handle = CUDA.create_handle
+          CUDA.ger(handle, one_dev, g_dev, dptr + id, 1, @gradients.cols)
+          CUDA.destroy_handle(handle)
+          CUDA.free(g_dev.as(Pointer(Void)))
+          CUDA.free(one_dev.as(Pointer(Void)))
+        else
+          @neurons.each_with_index do |n, i|
+            @gradients[id, i] += n.gradient
+          end
         end
+      end
+      if CUDA.available? && @gradients.is_a?(CudaMatrix)
+        @gradients.as(CudaMatrix).sync_from_device!
       end
     end
 
     # Update embeddings using stored gradients and clear them
     def apply_gradients(lr : Float64)
+      if CUDA.available? && @embeddings.is_a?(CudaMatrix) && @gradients.is_a?(CudaMatrix)
+        e_ptr = @embeddings.as(CudaMatrix).device_ptr
+        g_ptr = @gradients.as(CudaMatrix).device_ptr
+        if e_ptr && g_ptr && !e_ptr.null? && !g_ptr.null?
+          handle = CUDA.create_handle
+          total = @embeddings.rows * @embeddings.cols
+          CUDA.axpy(handle, -lr, g_ptr, e_ptr, total)
+          CUDA.destroy_handle(handle)
+          zeros = Array(Float64).new(total, 0.0)
+          CUDA.memcpy(g_ptr.as(Pointer(Void)), zeros.to_unsafe.as(Pointer(Void)), (total * 8).to_u64, CUDA::MemcpyKind::HostToDevice)
+          @embeddings.as(CudaMatrix).sync_from_device!
+          @gradients.as(CudaMatrix).sync_from_device!
+          return
+        end
+      end
+
       @gradients.rows.times do |r|
         @gradients.cols.times do |c|
           g = @gradients[r, c]
@@ -59,6 +95,10 @@ module SHAInet
           @embeddings[r, c] -= lr * g
           @gradients[r, c] = 0.0
         end
+      end
+      if CUDA.available? && @embeddings.is_a?(CudaMatrix)
+        @embeddings.as(CudaMatrix).sync_to_device!
+        @gradients.as(CudaMatrix).sync_to_device!
       end
     end
   end

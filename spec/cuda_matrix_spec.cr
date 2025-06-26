@@ -18,7 +18,7 @@ describe SHAInet::CudaMatrix do
 
   it "performs relu and add_bias on GPU when available" do
     matrix = SHAInet::CudaMatrix.from_a([[-1, 2], [-3, 4]])
-    bias   = SHAInet::CudaMatrix.from_a([[1, 1]])
+    bias = SHAInet::CudaMatrix.from_a([[1, 1]])
 
     matrix.relu!
     matrix.add_bias!(bias)
