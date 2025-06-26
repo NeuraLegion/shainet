@@ -77,6 +77,44 @@ module SHAInet
       end
     end
 
+    def slice_cols(start_col : Int32, length : Int32)
+      result = CudaMatrix.new(@rows, length)
+      if CUDA.available? && (sptr = self.device_ptr) && (dptr = result.device_ptr) && !sptr.null? && !dptr.null?
+        begin
+          CUDA.slice_cols(dptr, sptr, @rows, @cols, start_col, length)
+          result.sync_from_device!
+          return result
+        rescue
+        end
+      end
+      @rows.times do |i|
+        length.times do |j|
+          result[i, j] = self[i, start_col + j]
+        end
+      end
+      result.sync_to_device! if CUDA.available?
+      result
+    end
+
+    def set_cols!(start_col : Int32, other : CudaMatrix)
+      raise ArgumentError.new("row mismatch") unless other.rows == @rows
+      if CUDA.available? && (dptr = self.device_ptr) && (sptr = other.device_ptr) && !dptr.null? && !sptr.null?
+        begin
+          CUDA.set_cols(dptr, sptr, @rows, @cols, start_col, other.cols)
+          self.sync_from_device!
+          return self
+        rescue
+        end
+      end
+      other.cols.times do |j|
+        @rows.times do |i|
+          self[i, start_col + j] = other[i, j]
+        end
+      end
+      self.sync_to_device! if CUDA.available?
+      self
+    end
+
     def *(other : CudaMatrix)
       if CUDA.available? && (ptr_a = self.device_ptr) && (ptr_b = other.device_ptr) && !ptr_a.null? && !ptr_b.null?
         handle = CUDA.create_handle
