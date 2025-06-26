@@ -33,6 +33,12 @@ module SHAInet
                       c : Pointer(Float64), ldc : Int32) : Int32
       fun cublasDscal_v2(handle : Handle, n : Int32,
                          alpha : Pointer(Float64), x : Pointer(Float64), incx : Int32) : Int32
+      fun cublasDger(handle : Handle,
+                     m : Int32, n : Int32,
+                     alpha : Pointer(Float64),
+                     x : Pointer(Float64), incx : Int32,
+                     y : Pointer(Float64), incy : Int32,
+                     a : Pointer(Float64), lda : Int32) : Int32
     end
 
     enum MemcpyKind
@@ -143,6 +149,10 @@ module SHAInet
 
     def scal(handle : LibCUBLAS::Handle, x : Pointer(Float64), n : Int32, alpha : Float64)
       LibCUBLAS.cublasDscal_v2(handle, n, pointerof(alpha), x, 1)
+    end
+
+    def ger(handle : LibCUBLAS::Handle, x : Pointer(Float64), y : Pointer(Float64), a : Pointer(Float64), m : Int32, n : Int32, alpha : Float64 = 1.0)
+      LibCUBLAS.cublasDger(handle, m, n, pointerof(alpha), x, 1, y, 1, a, m)
     end
   end
 end

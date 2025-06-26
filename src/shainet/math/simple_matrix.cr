@@ -146,5 +146,49 @@ module SHAInet
       end
       dup
     end
+
+    # In-place element-wise addition.
+    def add!(other : SimpleMatrix)
+      raise ArgumentError.new("size mismatch") unless other.rows == @rows && other.cols == @cols
+      @rows.times do |i|
+        @cols.times do |j|
+          self[i, j] += other[i, j]
+        end
+      end
+      self
+    end
+
+    # Add a bias row vector to each row of the matrix in-place.
+    def add_bias!(bias : SimpleMatrix)
+      raise ArgumentError.new("bias size mismatch") unless bias.rows == 1 && bias.cols == @cols
+      @rows.times do |i|
+        @cols.times do |j|
+          self[i, j] += bias[0, j]
+        end
+      end
+      self
+    end
+
+    # Element-wise ReLU activation in-place.
+    def relu!
+      @rows.times do |i|
+        @cols.times do |j|
+          v = self[i, j]
+          self[i, j] = v > 0 ? v : 0.0
+        end
+      end
+      self
+    end
+
+    # Multiply each column by the corresponding value in a row vector in-place.
+    def mul_row_vector!(vec : SimpleMatrix)
+      raise ArgumentError.new("vector size mismatch") unless vec.rows == 1 && vec.cols == @cols
+      @rows.times do |i|
+        @cols.times do |j|
+          self[i, j] *= vec[0, j]
+        end
+      end
+      self
+    end
   end
 end

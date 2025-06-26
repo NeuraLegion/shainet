@@ -35,18 +35,10 @@ module SHAInet
     def forward(x : SimpleMatrix)
       @x = x
       @h = x * @w1
-      @h.rows.times do |i|
-        @h.cols.times do |j|
-          @h[i, j] += @b1[0, j]
-        end
-      end
-      relu!(@h)
+      @h.add_bias!(@b1)
+      @h.relu!
       @out = @h * @w2
-      @out.rows.times do |i|
-        @out.cols.times do |j|
-          @out[i, j] += @b2[0, j]
-        end
-      end
+      @out.add_bias!(@b2)
       @out
     end
 
@@ -92,14 +84,6 @@ module SHAInet
       @g_w2 = mat_klass.zeros(@w2.rows, @w2.cols)
       @g_b1 = mat_klass.zeros(@b1.rows, @b1.cols)
       @g_b2 = mat_klass.zeros(@b2.rows, @b2.cols)
-    end
-
-    private def relu!(m : SimpleMatrix)
-      m.rows.times do |i|
-        m.cols.times do |j|
-          m[i, j] = m[i, j] > 0 ? m[i, j] : 0.0
-        end
-      end
     end
 
     private def relu_grad(m : SimpleMatrix, grad : SimpleMatrix)

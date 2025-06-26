@@ -32,7 +32,6 @@ module SHAInet
       @mean = mat_klass.new(rows, 1)
       @var = mat_klass.new(rows, 1)
       @norm = mat_klass.new(rows, cols)
-      out = mat_klass.new(rows, cols)
       rows.times do |i|
         mean = 0.0
         cols.times { |j| mean += x[i, j] }
@@ -49,9 +48,11 @@ module SHAInet
         cols.times do |j|
           n = (x[i, j] - mean) / denom
           @norm[i, j] = n
-          out[i, j] = n * @gamma[0, j] + @beta[0, j]
         end
       end
+      out = @norm.clone
+      out.mul_row_vector!(@gamma)
+      out.add_bias!(@beta)
       out
     end
 
