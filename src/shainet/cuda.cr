@@ -245,5 +245,26 @@ module SHAInet
       destroy_handle(handle)
       free(ones_dev.as(Pointer(Void)))
     end
+
+    # Accumulate the sum over rows of a matrix into an existing row vector.
+    # Performs: dst += ones^T * src
+    def row_sum(dst : Pointer(Float64), src : Pointer(Float64), rows : Int32, cols : Int32)
+      handle = create_handle
+      ones_host = Array(Float64).new(rows, 1.0)
+      ones_dev = Pointer(Float64).null
+      bytes = (rows * 8).to_u64
+      malloc(pointerof(ones_dev).as(Pointer(Pointer(Void))), bytes)
+      memcpy(ones_dev.as(Pointer(Void)), ones_host.to_unsafe.as(Pointer(Void)), bytes, MemcpyKind::HostToDevice)
+      alpha = 1.0
+      beta = 1.0
+      LibCUBLAS.cublasDgemm_v2(handle,
+        Operation::N.value, Operation::N.value,
+        1, cols, rows,
+        pointerof(alpha), ones_dev, 1,
+        src, rows,
+        pointerof(beta), dst, 1)
+      destroy_handle(handle)
+      free(ones_dev.as(Pointer(Void)))
+    end
   end
 end
