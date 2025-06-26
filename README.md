@@ -486,6 +486,22 @@ batch = stream.next_batch(2)
 stream.rewind # start a new shuffled epoch
 ```
 
+### BabyLM Transformer example
+
+The file `examples/babylm_transformer.cr` trains a small Transformer
+language model on the BabyLM corpus. After tokenizing the text,
+generate streaming pairs with:
+
+```bash
+python3 scripts/write_token_pairs.py tokens.txt 16 train_pairs.jsonl
+```
+
+Then train using `StreamingData`:
+
+```bash
+crystal run examples/babylm_transformer.cr
+```
+
 ### Loading a PyTorch model
 
 SHAInet can import simple sequential models or a tiny Transformer
