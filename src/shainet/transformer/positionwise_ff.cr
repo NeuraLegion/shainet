@@ -19,7 +19,8 @@ module SHAInet
     property g_b2 : SimpleMatrix
 
     def initialize(d_model : Int32, hidden_dim : Int32)
-      mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
+      # Always use SimpleMatrix for compatibility - CUDA operations handled in forward/backward
+      mat_klass = SimpleMatrix
       @w1 = mat_klass.new(d_model, hidden_dim).random_fill!
       @b1 = mat_klass.new(1, hidden_dim).random_fill!
       @w2 = mat_klass.new(hidden_dim, d_model).random_fill!
@@ -46,9 +47,19 @@ module SHAInet
       dh = d_out * @w2.transpose
       @g_w2 = @g_w2 + (@h.transpose * d_out)
       mat_klass = @w1.class
-      if CUDA.available? && d_out.is_a?(CudaMatrix) && @g_b2.is_a?(CudaMatrix)
-        CUDA.row_sum(@g_b2.as(CudaMatrix).device_ptr.not_nil!, d_out.as(CudaMatrix).device_ptr.not_nil!, d_out.rows, d_out.cols)
-        @g_b2.as(CudaMatrix).sync_from_device!
+      # Efficient bias gradient using GPU when available
+      if CUDA.available? && CUDA.kernels_available? && d_out.is_a?(CudaMatrix) && @g_b2.is_a?(CudaMatrix)
+        begin
+          CUDA.row_sum(@g_b2.as(CudaMatrix).device_ptr.not_nil!, d_out.as(CudaMatrix).device_ptr.not_nil!, d_out.rows, d_out.cols)
+          @g_b2.as(CudaMatrix).sync_from_device!
+        rescue e : Exception
+          # Fallback to CPU computation
+          d_out.rows.times do |i|
+            d_out.cols.times do |j|
+              @g_b2[0, j] += d_out[i, j]
+            end
+          end
+        end
       else
         db2 = mat_klass.zeros(1, d_out.cols)
         d_out.rows.times do |i|
@@ -61,9 +72,18 @@ module SHAInet
 
       drelu = relu_grad(@h, dh)
       @g_w1 = @g_w1 + (@x.not_nil!.transpose * drelu)
-      if CUDA.available? && drelu.is_a?(CudaMatrix) && @g_b1.is_a?(CudaMatrix)
-        CUDA.row_sum(@g_b1.as(CudaMatrix).device_ptr.not_nil!, drelu.as(CudaMatrix).device_ptr.not_nil!, drelu.rows, drelu.cols)
-        @g_b1.as(CudaMatrix).sync_from_device!
+      if CUDA.available? && CUDA.kernels_available? && drelu.is_a?(CudaMatrix) && @g_b1.is_a?(CudaMatrix)
+        begin
+          CUDA.row_sum(@g_b1.as(CudaMatrix).device_ptr.not_nil!, drelu.as(CudaMatrix).device_ptr.not_nil!, drelu.rows, drelu.cols)
+          @g_b1.as(CudaMatrix).sync_from_device!
+        rescue e : Exception
+          # Fallback to CPU computation
+          drelu.rows.times do |i|
+            drelu.cols.times do |j|
+              @g_b1[0, j] += drelu[i, j]
+            end
+          end
+        end
       else
         db1 = mat_klass.zeros(1, drelu.cols)
         drelu.rows.times do |i|

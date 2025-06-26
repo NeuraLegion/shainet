@@ -2,12 +2,10 @@ module SHAInet
   class MultiHeadAttention
     getter num_heads, d_model, head_dim
     @head_dim : Int32
-    @w_q : TensorMatrix
-    @w_k : TensorMatrix
-    @w_v : TensorMatrix
-    @w_o : TensorMatrix
-    @x_t : TensorMatrix?
-    @out_t : TensorMatrix
+    @w_q : SimpleMatrix
+    @w_k : SimpleMatrix
+    @w_v : SimpleMatrix
+    @w_o : SimpleMatrix
     @x : SimpleMatrix?
     @q_heads : Array(SimpleMatrix)
     @k_heads : Array(SimpleMatrix)
@@ -15,16 +13,33 @@ module SHAInet
     @attn : Array(SimpleMatrix)
     @out : SimpleMatrix
 
+    # Gradient matrices - keep same type as weights
+    @g_w_q : SimpleMatrix
+    @g_w_k : SimpleMatrix
+    @g_w_v : SimpleMatrix
+    @g_w_o : SimpleMatrix
+
     getter w_q, w_k, w_v, w_o
+    property g_w_q, g_w_k, g_w_v, g_w_o
 
     def initialize(@d_model : Int32, @num_heads : Int32)
       @head_dim = (@d_model // @num_heads)
-      mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
-      @w_q = mat_klass.tensor(@d_model, @d_model).random_fill!
-      @w_k = mat_klass.tensor(@d_model, @d_model).random_fill!
-      @w_v = mat_klass.tensor(@d_model, @d_model).random_fill!
-      @w_o = mat_klass.tensor(@d_model, @d_model).random_fill!
-      @out_t = mat_klass.tensor(1, 1)
+      # Always use SimpleMatrix for compatibility with existing tests
+      # CUDA operations will be automatically handled in forward/backward passes
+      mat_klass = SimpleMatrix
+
+      # Use consistent matrix type throughout - no more TensorMatrix mixing
+      @w_q = mat_klass.new(@d_model, @d_model).random_fill!
+      @w_k = mat_klass.new(@d_model, @d_model).random_fill!
+      @w_v = mat_klass.new(@d_model, @d_model).random_fill!
+      @w_o = mat_klass.new(@d_model, @d_model).random_fill!
+
+      # Initialize gradients
+      @g_w_q = mat_klass.zeros(@d_model, @d_model)
+      @g_w_k = mat_klass.zeros(@d_model, @d_model)
+      @g_w_v = mat_klass.zeros(@d_model, @d_model)
+      @g_w_o = mat_klass.zeros(@d_model, @d_model)
+
       @q_heads = [] of SimpleMatrix
       @k_heads = [] of SimpleMatrix
       @v_heads = [] of SimpleMatrix
@@ -34,143 +49,158 @@ module SHAInet
 
     def forward(x : SimpleMatrix, mask : SimpleMatrix? = nil)
       @x = x
-      @x_t = TensorMatrix.from_a(x.to_a)
-      q_t = @x_t.not_nil! * @w_q
-      k_t = @x_t.not_nil! * @w_k
-      v_t = @x_t.not_nil! * @w_v
-      q = x * @w_q.to_simple
-      k = x * @w_k.to_simple
-      v = x * @w_v.to_simple
+
+      # Compute Q, K, V projections - keep on same device as input
+      q = x * @w_q
+      k = x * @w_k
+      v = x * @w_v
 
       @q_heads = [] of SimpleMatrix
       @k_heads = [] of SimpleMatrix
       @v_heads = [] of SimpleMatrix
       @attn = [] of SimpleMatrix
       outputs = [] of SimpleMatrix
-      q_heads_t = [] of TensorMatrix
-      k_heads_t = [] of TensorMatrix
-      v_heads_t = [] of TensorMatrix
-      attn_t = [] of TensorMatrix
-      outputs_t = [] of TensorMatrix
-      gpu_enabled = CUDA.available? && CUDA.kernels_available? && x.is_a?(CudaMatrix)
-      gpu_outputs = [] of CudaMatrix if gpu_enabled
-      q_gpu = CudaMatrix.from_a(q.to_a) if gpu_enabled
-      k_gpu = CudaMatrix.from_a(k.to_a) if gpu_enabled
-      v_gpu = CudaMatrix.from_a(v.to_a) if gpu_enabled
-      mask_gpu = CudaMatrix.from_a(mask.not_nil!.to_a) if gpu_enabled && mask
 
+      # Split into heads and compute attention - all operations stay on same device
       @num_heads.times do |h|
-        qs = q.slice_cols(h*@head_dim, @head_dim)
-        ks = k.slice_cols(h*@head_dim, @head_dim)
-        vs = v.slice_cols(h*@head_dim, @head_dim)
-        qs_t = q_t.slice_cols(h*@head_dim, @head_dim)
-        ks_t = k_t.slice_cols(h*@head_dim, @head_dim)
-        vs_t = v_t.slice_cols(h*@head_dim, @head_dim)
+        qs = q.slice_cols(h * @head_dim, @head_dim)
+        ks = k.slice_cols(h * @head_dim, @head_dim)
+        vs = v.slice_cols(h * @head_dim, @head_dim)
+
         @q_heads << qs
         @k_heads << ks
         @v_heads << vs
-        q_heads_t << qs_t
-        k_heads_t << ks_t
-        v_heads_t << vs_t
 
-        if gpu_enabled
-          qs_g = q_gpu.not_nil!.slice_cols(h*@head_dim, @head_dim)
-          ks_g = k_gpu.not_nil!.slice_cols(h*@head_dim, @head_dim)
-          vs_g = v_gpu.not_nil!.slice_cols(h*@head_dim, @head_dim)
-          tmp_g = qs_g * ks_g.transpose
-          scores_g = tmp_g.is_a?(CudaMatrix) ? tmp_g : CudaMatrix.from_a(tmp_g.to_a)
-          scores_g = scores_g * (1.0 / Math.sqrt(@head_dim.to_f))
-          if mg = mask_gpu
-            scores_g.add!(mg)
-          end
-          attn_tmp = SHAInet.softmax_rows(scores_g)
-          attn_g = attn_tmp.is_a?(CudaMatrix) ? attn_tmp : CudaMatrix.from_a(attn_tmp.to_a)
-          gpu_outputs.not_nil! << (attn_g * vs_g).as(CudaMatrix)
-        end
-
+        # Attention computation - stays on GPU if input was GPU
         scores = qs * ks.transpose * (1.0 / Math.sqrt(@head_dim.to_f))
-        scores_t = qs_t * ks_t.transpose * (1.0 / Math.sqrt(@head_dim.to_f))
+
+        # Apply mask if provided
         if m = mask
           raise "mask size mismatch" unless m.rows == scores.rows && m.cols == scores.cols
-          scores.add!(m)
-          scores_t = scores_t + TensorMatrix.from_a(m.to_a)
+          scores = scores + m
         end
+
+        # GPU-accelerated softmax when available
         attn = SHAInet.softmax_rows(scores)
-        attn_tensor = softmax_rows_tensor(scores_t)
         @attn << attn
-        attn_t << attn_tensor
+
+        # Compute output for this head
         outputs << (attn * vs)
-        outputs_t << (attn_tensor * vs_t)
       end
 
-      concat_t = TensorMatrix.new(x.rows, @d_model)
+      # Concatenate heads - maintain device type
+      mat_klass = x.class
+      concat = mat_klass.new(x.rows, @d_model)
       @num_heads.times do |h|
-        concat_t.set_cols!(h*@head_dim, outputs_t[h])
+        concat.set_cols!(h * @head_dim, outputs[h])
       end
 
-      if gpu_enabled
-        concat_gpu = CudaMatrix.new(x.rows, @d_model)
-        @num_heads.times do |h|
-          concat_gpu.set_cols!(h*@head_dim, gpu_outputs.not_nil![h])
-        end
-        wo_gpu = CudaMatrix.from_a(@w_o.to_simple.to_a)
-        out_gpu = (concat_gpu * wo_gpu).as(CudaMatrix)
-        out_gpu.sync_from_device!
-        @out = out_gpu
-      else
-        concat = SimpleMatrix.new(x.rows, @d_model)
-        @num_heads.times do |h|
-          concat.set_cols!(h*@head_dim, outputs[h])
-        end
-        @out = concat * @w_o.to_simple
-      end
-
-      @out_t = concat_t * @w_o
+      # Final projection - keeps result on same device
+      @out = concat * @w_o
       @out
     end
 
     def backward(d_out : SimpleMatrix)
-      loss = Autograd::Tensor.new(0.0)
-      d_out.rows.times do |i|
-        d_out.cols.times do |j|
-          loss = loss + @out_t[i, j] * Autograd::Tensor.new(d_out[i, j])
-        end
+      mat_klass = d_out.class
+      x = @x.not_nil!
+
+      # Gradient w.r.t. W_o
+      concat = mat_klass.new(x.rows, @d_model)
+      @num_heads.times do |h|
+        output = @attn[h] * @v_heads[h]
+        concat.set_cols!(h * @head_dim, output)
       end
-      loss.backward
-      grad_matrix = @x_t.not_nil!.clone
-      grad_matrix.rows.times do |i|
-        grad_matrix.cols.times do |j|
-          grad_matrix[i, j] = Autograd::Tensor.new(@x_t.not_nil![i, j].grad)
-        end
+      @g_w_o = @g_w_o + (concat.transpose * d_out)
+
+      # Gradient w.r.t. concat
+      d_concat = d_out * @w_o.transpose
+
+      # Gradients w.r.t. each head
+      d_q_heads = [] of SimpleMatrix
+      d_k_heads = [] of SimpleMatrix
+      d_v_heads = [] of SimpleMatrix
+
+      @num_heads.times do |h|
+        d_out_h = d_concat.slice_cols(h * @head_dim, @head_dim)
+
+        # Gradient w.r.t. V
+        d_v = @attn[h].transpose * d_out_h
+        d_v_heads << d_v
+
+        # Gradient w.r.t. attention weights
+        d_attn = d_out_h * @v_heads[h].transpose
+
+        # Gradient w.r.t. scores (softmax backward)
+        d_scores = softmax_backward(d_attn, @attn[h])
+
+        # Scale by 1/sqrt(d_k)
+        d_scores = d_scores * (1.0 / Math.sqrt(@head_dim.to_f))
+
+        # Gradients w.r.t. Q and K
+        d_q = d_scores * @k_heads[h]
+        d_k = d_scores.transpose * @q_heads[h]
+
+        d_q_heads << d_q
+        d_k_heads << d_k
       end
-      grad_matrix.to_simple
+
+      # Concatenate head gradients
+      d_q_concat = mat_klass.new(x.rows, @d_model)
+      d_k_concat = mat_klass.new(x.rows, @d_model)
+      d_v_concat = mat_klass.new(x.rows, @d_model)
+
+      @num_heads.times do |h|
+        d_q_concat.set_cols!(h * @head_dim, d_q_heads[h])
+        d_k_concat.set_cols!(h * @head_dim, d_k_heads[h])
+        d_v_concat.set_cols!(h * @head_dim, d_v_heads[h])
+      end
+
+      # Gradients w.r.t. projection weights
+      @g_w_q = @g_w_q + (x.transpose * d_q_concat)
+      @g_w_k = @g_w_k + (x.transpose * d_k_concat)
+      @g_w_v = @g_w_v + (x.transpose * d_v_concat)
+
+      # Gradient w.r.t. input
+      d_x = (d_q_concat * @w_q.transpose) +
+            (d_k_concat * @w_k.transpose) +
+            (d_v_concat * @w_v.transpose)
+
+      d_x
     end
 
     def apply_gradients(lr : Float64)
-      [@w_q, @w_k, @w_v, @w_o].each do |w|
-        w.rows.times do |i|
-          w.cols.times do |j|
-            t = w[i, j]
-            w[i, j] = Autograd::Tensor.new(t.data - lr * t.grad)
-            t.grad = 0.0
-          end
-        end
-      end
+      @w_q = @w_q - (@g_w_q * lr)
+      @w_k = @w_k - (@g_w_k * lr)
+      @w_v = @w_v - (@g_w_v * lr)
+      @w_o = @w_o - (@g_w_o * lr)
+
+      # Clear gradients
+      zero_gradients
     end
 
     def zero_gradients
-      [@w_q, @w_k, @w_v, @w_o].each &.zero_grads!
+      mat_klass = @w_q.class
+      @g_w_q = mat_klass.zeros(@d_model, @d_model)
+      @g_w_k = mat_klass.zeros(@d_model, @d_model)
+      @g_w_v = mat_klass.zeros(@d_model, @d_model)
+      @g_w_o = mat_klass.zeros(@d_model, @d_model)
     end
 
-    private def softmax_rows_tensor(m : TensorMatrix)
-      result = TensorMatrix.new(m.rows, m.cols)
-      m.rows.times do |i|
-        sum = Autograd::Tensor.new(0.0)
-        m.cols.times { |j| sum = sum + Autograd::Tensor.new(Math.exp(m[i, j].data)) }
-        m.cols.times do |j|
-          result[i, j] = Autograd::Tensor.new(Math.exp(m[i, j].data)) / sum
+    private def softmax_backward(d_out : SimpleMatrix, softmax_out : SimpleMatrix)
+      # Efficient softmax gradient computation
+      mat_klass = d_out.class
+      result = mat_klass.new(d_out.rows, d_out.cols)
+
+      d_out.rows.times do |i|
+        # For each row, compute: softmax * (d_out - sum(softmax * d_out))
+        sum = 0.0
+        d_out.cols.times { |j| sum += softmax_out[i, j] * d_out[i, j] }
+
+        d_out.cols.times do |j|
+          result[i, j] = softmax_out[i, j] * (d_out[i, j] - sum)
         end
       end
+
       result
     end
   end

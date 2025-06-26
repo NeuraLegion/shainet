@@ -10,3 +10,7 @@
 # Dependencies will be locked in application that uses them
 /shard.lock
 cuda-keyring_*.deb
+# Build output of CUDA kernels
+libshainet_cuda_kernels.so
+# specs output
+*.jsonl

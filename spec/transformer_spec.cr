@@ -44,7 +44,7 @@ describe SHAInet::MultiHeadAttention do
     input = SHAInet::SimpleMatrix.from_a([[1.0, 0.0], [0.0, 1.0]])
     mask = SHAInet::SimpleMatrix.from_a([[0.0, -1e9], [-1e9, 0.0]])
     out = attn.forward(input, mask)
-    expected = (input * attn.w_v.to_simple) * attn.w_o.to_simple
+    expected = (input * attn.w_v) * attn.w_o
     out.rows.times do |i|
       out.cols.times do |j|
         out[i, j].should be_close(expected[i, j], 1e-6)

@@ -1,0 +1,134 @@
+module SHAInet
+  # GPU Memory Manager - helps minimize CPU-GPU transfers
+  module GPUMemory
+    extend self
+
+    # Convert SimpleMatrix to CudaMatrix if CUDA is available and input is not already CudaMatrix
+    def to_gpu(matrix : SimpleMatrix)
+      return matrix if matrix.is_a?(CudaMatrix) || !CUDA.available?
+
+      result = CudaMatrix.new(matrix.rows, matrix.cols)
+      matrix.rows.times do |i|
+        matrix.cols.times do |j|
+          result[i, j] = matrix[i, j]
+        end
+      end
+      result.sync_to_device!
+      result
+    end
+
+    # Ensure matrix stays on GPU if it's already there
+    def keep_on_gpu(matrix : SimpleMatrix)
+      if matrix.is_a?(CudaMatrix)
+        matrix
+      elsif CUDA.available?
+        to_gpu(matrix)
+      else
+        matrix
+      end
+    end
+
+    # Create a new matrix of the same type as the input
+    def like(matrix : SimpleMatrix, rows : Int32, cols : Int32, init : Float64 = 0.0)
+      if matrix.is_a?(CudaMatrix) && CUDA.available?
+        result = CudaMatrix.new(rows, cols, init)
+        result.sync_to_device!
+        result
+      else
+        SimpleMatrix.new(rows, cols, init)
+      end
+    end
+
+    # Create zeros matrix of same type as input
+    def zeros_like(matrix : SimpleMatrix, rows : Int32, cols : Int32)
+      like(matrix, rows, cols, 0.0)
+    end
+
+    # Create ones matrix of same type as input
+    def ones_like(matrix : SimpleMatrix, rows : Int32, cols : Int32)
+      like(matrix, rows, cols, 1.0)
+    end
+
+    # Apply operation and ensure result stays on same device
+    def preserve_device(input : SimpleMatrix, &block : SimpleMatrix -> SimpleMatrix)
+      result = yield input
+
+      # Ensure result is same type as input
+      if input.is_a?(CudaMatrix) && !result.is_a?(CudaMatrix) && CUDA.available?
+        gpu_result = to_gpu(result)
+        gpu_result
+      else
+        result
+      end
+    end
+
+    # Batch sync multiple CudaMatrix objects from device efficiently
+    def batch_sync_from_device(matrices : Array(SimpleMatrix))
+      matrices.each do |matrix|
+        if matrix.is_a?(CudaMatrix)
+          matrix.sync_from_device!
+        end
+      end
+    end
+
+    # Batch sync multiple CudaMatrix objects to device efficiently
+    def batch_sync_to_device(matrices : Array(SimpleMatrix))
+      matrices.each do |matrix|
+        if matrix.is_a?(CudaMatrix)
+          matrix.sync_to_device!
+        end
+      end
+    end
+
+    # Check if all matrices in array are of the same type (all GPU or all CPU)
+    def same_device_type?(matrices : Array(SimpleMatrix))
+      return true if matrices.empty?
+
+      first_type = matrices.first.class
+      matrices.all? { |m| m.class == first_type }
+    end
+
+    # Convert all matrices to the same device type (prefer GPU if available)
+    def unify_device_type(matrices : Array(SimpleMatrix))
+      return matrices if same_device_type?(matrices)
+
+      # If CUDA is available and any matrix is on GPU, move all to GPU
+      has_gpu = matrices.any? { |m| m.is_a?(CudaMatrix) }
+
+      if has_gpu && CUDA.available?
+        matrices.map { |m| to_gpu(m) }
+      else
+        # Otherwise ensure all are CPU matrices (SimpleMatrix)
+        matrices.map do |m|
+          if m.is_a?(CudaMatrix)
+            m.sync_from_device!
+            cpu_matrix = SimpleMatrix.new(m.rows, m.cols)
+            m.rows.times do |i|
+              m.cols.times do |j|
+                cpu_matrix[i, j] = m[i, j]
+              end
+            end
+            cpu_matrix
+          else
+            m
+          end
+        end
+      end
+    end
+
+    # Memory usage helpers
+    def gpu_memory_allocated?(matrix : SimpleMatrix)
+      matrix.is_a?(CudaMatrix) && matrix.device_ptr && !matrix.device_ptr.not_nil!.null?
+    end
+
+    def estimate_gpu_memory_usage(matrices : Array(SimpleMatrix))
+      total_elements = 0_i64
+      matrices.each do |matrix|
+        if gpu_memory_allocated?(matrix)
+          total_elements += matrix.rows.to_i64 * matrix.cols.to_i64
+        end
+      end
+      total_elements * 8 # 8 bytes per Float64
+    end
+  end
+end

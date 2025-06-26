@@ -85,3 +85,4 @@ __global__ void set_cols(double* out, const double* in, int rows, int dst_cols, 
     out[row * dst_cols + start + col] = in[row * len + col];
 }
 
+} // extern "C"

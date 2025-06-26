@@ -1,7 +1,25 @@
 require "../src/shainet"
 require "log"
-# BabyLM challenge example
+# BabyLM challenge example (GPU-optimized)
 # ------------------------
+# This example has been optimized for better GPU utilization.
+#
+# For maximum performance:
+# 1. Run: make install (builds CUDA kernels)
+# 2. Set library path: export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(pwd)
+# 3. Monitor GPU usage: nvidia-smi -l 1
+#
+# 1. Download the BabyLM training set from the following URL:src/shainet"
+require "log"
+# BabyLM challenge example (GPU-optimized)
+# ------------------------
+# This example has been optimized for better GPU utilization.
+#
+# To enable full GPU acceleration:
+# 1. Build CUDA kernels: ./build_cuda_kernels.sh
+# 2. Set library path: export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(pwd)
+# 3. Monitor GPU usage: nvidia-smi
+#
 # 1. Download the BabyLM training set from the following URL:
 #    https://osf.io/ryjfm/files/osfstorage/6819fdbfbecda878d4c61566 (train_100M.zip)
 #    Extract `train.txt` somewhere locally (for this example we expect it under
@@ -88,7 +106,19 @@ epochs.times do |epoch|
     seq = val_batch.first[0].as(Array(Array(Float64)))
     tgt = val_batch.first[1].as(Array(Float64)).first.to_i
     output_vec = net.run(seq).last
-    probs = SHAInet.softmax(output_vec)
+
+    # Use GPU-optimized softmax when CUDA kernels are available
+    if SHAInet::CUDA.kernels_available? && output_vec.is_a?(Array(Float64))
+      # Create a CudaMatrix from the output vector to use GPU softmax
+      mat_klass = SHAInet::CUDA.available? ? SHAInet::CudaMatrix : SHAInet::SimpleMatrix
+      output_matrix = mat_klass.from_a([output_vec])
+      probs_matrix = SHAInet.softmax_rows(output_matrix)
+      probs = (0...output_vec.size).map { |i| probs_matrix[0, i] }
+    else
+      # Fallback to CPU softmax
+      probs = SHAInet.softmax(output_vec)
+    end
+
     val_loss += -Math.log(probs[tgt].clamp(1e-9, 1.0))
     count += 1
   end

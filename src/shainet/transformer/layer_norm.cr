@@ -5,6 +5,15 @@ module SHAInet
     property g_gamma : SimpleMatrix
     property g_beta : SimpleMatrix
 
+    # Allow setting gamma and beta for test compatibility
+    def gamma=(val : SimpleMatrix)
+      @gamma = val
+    end
+
+    def beta=(val : SimpleMatrix)
+      @beta = val
+    end
+
     @epsilon : Float64
     @x : SimpleMatrix?
     @mean : SimpleMatrix
@@ -12,7 +21,8 @@ module SHAInet
     @norm : SimpleMatrix
 
     def initialize(d_model : Int32, epsilon : Float64 = 1e-5)
-      mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
+      # Always use SimpleMatrix for compatibility - CUDA operations handled in forward/backward
+      mat_klass = SimpleMatrix
       @gamma = mat_klass.new(1, d_model)
       d_model.times { |j| @gamma[0, j] = 1.0 }
       @beta = mat_klass.zeros(1, d_model)
@@ -28,34 +38,56 @@ module SHAInet
       @x = x
       rows = x.rows
       cols = x.cols
-      mat_klass = @gamma.class
-      @mean = mat_klass.new(rows, 1)
-      @var = mat_klass.new(rows, 1)
-      @norm = mat_klass.new(rows, cols)
 
-      if CUDA.available? && CUDA.kernels_available? && x.is_a?(CudaMatrix) &&
-         mat_klass <= CudaMatrix
+      # Convert to CUDA if input is CUDA and CUDA is available
+      if CUDA.available? && CUDA.kernels_available? && x.is_a?(CudaMatrix)
+        # Convert internal matrices to CUDA to match input
+        cuda_mean = CudaMatrix.new(rows, 1)
+        cuda_var = CudaMatrix.new(rows, 1)
+        cuda_norm = CudaMatrix.new(rows, cols)
+
         cx = x.as(CudaMatrix)
         begin
-          CUDA.row_mean_var(@mean.as(CudaMatrix).device_ptr.not_nil!,
-            @var.as(CudaMatrix).device_ptr.not_nil!,
+          # Try to use CUDA kernels - if they fail, fallback to CPU
+          CUDA.row_mean_var(cuda_mean.device_ptr.not_nil!,
+            cuda_var.device_ptr.not_nil!,
             cx.device_ptr.not_nil!, rows, cols)
-          CUDA.layer_norm(@norm.as(CudaMatrix).device_ptr.not_nil!,
+          CUDA.layer_norm(cuda_norm.device_ptr.not_nil!,
             cx.device_ptr.not_nil!,
-            @mean.as(CudaMatrix).device_ptr.not_nil!,
-            @var.as(CudaMatrix).device_ptr.not_nil!,
+            cuda_mean.device_ptr.not_nil!,
+            cuda_var.device_ptr.not_nil!,
             rows, cols, @epsilon)
-          @mean.as(CudaMatrix).sync_from_device!
-          @var.as(CudaMatrix).sync_from_device!
-          @norm.as(CudaMatrix).sync_from_device!
-          out = @norm.clone
-          out.mul_row_vector!(@gamma)
-          out.add_bias!(@beta)
-          return out rescue
-          # ignore and fall back to CPU path
+          cuda_mean.sync_from_device!
+          cuda_var.sync_from_device!
+          cuda_norm.sync_from_device!
+
+          # Store results for backward pass
+          @mean = SimpleMatrix.from_a(cuda_mean.to_a)
+          @var = SimpleMatrix.from_a(cuda_var.to_a)
+          @norm = SimpleMatrix.from_a(cuda_norm.to_a)
+
+          result = cuda_norm.clone
+          # Apply gamma and beta - use their actual types for operations
+          if @gamma.is_a?(CudaMatrix) && @beta.is_a?(CudaMatrix)
+            result.mul_row_vector!(@gamma.as(CudaMatrix))
+            result.add_bias!(@beta.as(CudaMatrix))
+          else
+            # Convert SimpleMatrix gamma/beta to CUDA for operations
+            cuda_gamma = CudaMatrix.from_a(@gamma.to_a)
+            cuda_beta = CudaMatrix.from_a(@beta.to_a)
+            result.mul_row_vector!(cuda_gamma)
+            result.add_bias!(cuda_beta)
+          end
+          return result
+        rescue e : Exception
+          # Fall through to CPU implementation when kernels fail
         end
       end
 
+      # CPU implementation or fallback - compute mean and variance per row
+      @mean = SimpleMatrix.new(rows, 1)
+      @var = SimpleMatrix.new(rows, 1)
+      @norm = SimpleMatrix.new(rows, cols)
       rows.times do |i|
         mean = 0.0
         cols.times { |j| mean += x[i, j] }
@@ -74,10 +106,11 @@ module SHAInet
           @norm[i, j] = n
         end
       end
-      out = @norm.clone
-      out.mul_row_vector!(@gamma)
-      out.add_bias!(@beta)
-      out
+
+      result = @norm.clone
+      result.mul_row_vector!(@gamma)
+      result.add_bias!(@beta)
+      result
     end
 
     def backward(d_out : SimpleMatrix)
@@ -85,7 +118,9 @@ module SHAInet
       x.sync_from_device! if x.responds_to?(:sync_from_device!)
       rows = x.rows
       cols = x.cols
-      mat_klass = @gamma.class
+
+      # Use the same matrix type as the input for consistency
+      mat_klass = d_out.is_a?(CudaMatrix) ? CudaMatrix : SimpleMatrix
       d_gamma = mat_klass.zeros(1, cols)
       d_beta = mat_klass.zeros(1, cols)
       d_x = mat_klass.new(rows, cols)
@@ -108,23 +143,27 @@ module SHAInet
           d_x[i, j] = inv * (doutg - sum_dout_gamma/col_f - xm * inv*inv / col_f * sum_dout_gamma_norm)
         end
       end
-      @g_gamma = @g_gamma + d_gamma
-      @g_beta = @g_beta + d_beta
+      # Convert gradients to match parameter types if needed
+      if d_gamma.is_a?(CudaMatrix)
+        @g_gamma = @g_gamma + SimpleMatrix.from_a(d_gamma.to_a)
+        @g_beta = @g_beta + SimpleMatrix.from_a(d_beta.to_a)
+      else
+        @g_gamma = @g_gamma + d_gamma
+        @g_beta = @g_beta + d_beta
+      end
       d_x
     end
 
     def apply_gradients(lr : Float64)
       @gamma = @gamma - @g_gamma * lr
       @beta = @beta - @g_beta * lr
-      mat_klass = @gamma.class
-      @g_gamma = mat_klass.zeros(@gamma.rows, @gamma.cols)
-      @g_beta = mat_klass.zeros(@beta.rows, @beta.cols)
+      @g_gamma = SimpleMatrix.zeros(@gamma.rows, @gamma.cols)
+      @g_beta = SimpleMatrix.zeros(@beta.rows, @beta.cols)
     end
 
     def zero_gradients
-      mat_klass = @gamma.class
-      @g_gamma = mat_klass.zeros(@gamma.rows, @gamma.cols)
-      @g_beta = mat_klass.zeros(@beta.rows, @beta.cols)
+      @g_gamma = SimpleMatrix.zeros(@gamma.rows, @gamma.cols)
+      @g_beta = SimpleMatrix.zeros(@beta.rows, @beta.cols)
     end
   end
 end
