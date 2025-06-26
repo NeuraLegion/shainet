@@ -182,7 +182,12 @@ module SHAInet
       # Connect each neuron from source layer to all neurons in destination layer
       when "full"
         # Resize the weights matrix based on the connecting layer
-        dest_layer.weights = Matrix(Float64).build(dest_layer.size, src_layer.size) { 0.0 }
+        if src_layer.is_a?(TransformerLayer)
+          dest_layer.weights = Matrix(Float64).build(dest_layer.size, src_layer.size) { rand(-0.1_f64..0.1_f64) }
+          dest_layer.biases = Matrix(Float64).build(dest_layer.size, 1) { rand(-0.1_f64..0.1_f64) }
+        else
+          dest_layer.weights = Matrix(Float64).build(dest_layer.size, src_layer.size) { 0.0 }
+        end
 
         src_layer.neurons.each_with_index do |src_neuron, src_i|
           dest_layer.neurons.each_with_index do |dest_neuron, dest_i|
