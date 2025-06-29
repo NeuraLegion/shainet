@@ -2,8 +2,8 @@ require "./spec_helper"
 
 describe SHAInet::CudaMatrix do
   it "mirrors SimpleMatrix operations" do
-    a = SHAInet::CudaMatrix.from_a([[1, 2], [3, 4]])
-    b = SHAInet::CudaMatrix.from_a([[1, 0], [0, 1]])
+    a = SHAInet::GPUMemory.to_gpu(SHAInet::SimpleMatrix.from_a([[1, 2], [3, 4]]))
+    b = SHAInet::GPUMemory.to_gpu(SHAInet::SimpleMatrix.from_a([[1, 0], [0, 1]]))
 
     sum = a + b
     sum[1, 1].should eq(5.0)
@@ -17,14 +17,14 @@ describe SHAInet::CudaMatrix do
   end
 
   it "performs relu and add_bias on GPU when available" do
-    matrix = SHAInet::CudaMatrix.from_a([[-1, 2], [-3, 4]])
-    bias = SHAInet::CudaMatrix.from_a([[1, 1]])
+    matrix = SHAInet::GPUMemory.to_gpu(SHAInet::SimpleMatrix.from_a([[-1, 2], [-3, 4]]))
+    bias = SHAInet::GPUMemory.to_gpu(SHAInet::SimpleMatrix.from_a([[1, 1]]))
 
     matrix.relu!
     matrix.add_bias!(bias)
 
     if SHAInet::CUDA.available?
-      matrix.device_ptr.should_not be_nil
+      matrix.as(SHAInet::CudaMatrix).device_ptr.should_not be_nil
     end
 
     matrix[0, 0].should eq(0.0 + 1.0)

@@ -26,8 +26,7 @@ module SHAInet
       processed = @mixed_precision ? input.map { |v| v.to_f32.to_f64 } : input.map(&.to_f64)
 
       if @hidden_layers.any? &.is_a?(TransformerLayer)
-        mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
-        matrix = mat_klass.from_a([processed])
+        matrix = GPUMemory.to_gpu(SimpleMatrix.from_a([processed]))
         @hidden_layers.each do |l|
           case l
           when EmbeddingLayer
@@ -36,15 +35,15 @@ module SHAInet
               matrix = l.as(EmbeddingLayer).embed([token])
             else
               vec = l.as(EmbeddingLayer).embed(token)
-              matrix = mat_klass.from_a([vec])
+              matrix = GPUMemory.to_gpu(SimpleMatrix.from_a([vec]))
             end
           when TransformerLayer
             matrix = l.as(TransformerLayer).forward(matrix)
           end
         end
         out_layer = @output_layers.last
-        w = mat_klass.from_a(out_layer.weights.to_a)
-        b = mat_klass.from_a(out_layer.biases.to_a)
+        w = GPUMemory.keep_on_gpu(out_layer.weights)
+        b = GPUMemory.keep_on_gpu(out_layer.biases)
         matrix = matrix * w.transpose
         matrix.rows.times do |i|
           matrix.cols.times do |j|
@@ -62,8 +61,7 @@ module SHAInet
         end
         output
       elsif @hidden_layers.none? { |l| l.is_a?(RecurrentLayer) || l.is_a?(LSTMLayer) }
-        mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
-        matrix = mat_klass.from_a([processed])
+        matrix = GPUMemory.to_gpu(SimpleMatrix.from_a([processed]))
         @hidden_layers.each do |l|
           case l
           when EmbeddingLayer
@@ -72,7 +70,7 @@ module SHAInet
               matrix = l.as(EmbeddingLayer).embed([token])
             else
               vec = l.as(EmbeddingLayer).embed(token)
-              matrix = mat_klass.from_a([vec])
+              matrix = GPUMemory.to_gpu(SimpleMatrix.from_a([vec]))
             end
           else
             matrix = l.forward_matrix(matrix)
@@ -150,8 +148,7 @@ module SHAInet
         @mixed_precision ? x.map { |v| v.to_f32.to_f64 } : x.map(&.to_f64)
       end
       if @hidden_layers.any? &.is_a?(TransformerLayer)
-        mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
-        matrix = mat_klass.from_a(processed)
+        matrix = GPUMemory.to_gpu(SimpleMatrix.from_a(processed))
         @hidden_layers.each do |l|
           case l
           when EmbeddingLayer
@@ -161,15 +158,15 @@ module SHAInet
               matrix = l.as(EmbeddingLayer).embed(tokens)
             else
               embeddings = tokens.map { |id| l.as(EmbeddingLayer).embed(id) }
-              matrix = mat_klass.from_a(embeddings)
+              matrix = GPUMemory.to_gpu(SimpleMatrix.from_a(embeddings))
             end
           when TransformerLayer
             matrix = l.as(TransformerLayer).forward(matrix)
           end
         end
         out_layer = @output_layers.last
-        w = mat_klass.from_a(out_layer.weights.to_a)
-        b = mat_klass.from_a(out_layer.biases.to_a)
+        w = GPUMemory.keep_on_gpu(out_layer.weights)
+        b = GPUMemory.keep_on_gpu(out_layer.biases)
         matrix = matrix * w.transpose
         matrix.rows.times do |i|
           matrix.cols.times do |j|
@@ -185,8 +182,7 @@ module SHAInet
         end
         matrix.to_a
       elsif @hidden_layers.none? { |l| l.is_a?(RecurrentLayer) || l.is_a?(LSTMLayer) }
-        mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
-        matrix = mat_klass.from_a(processed)
+        matrix = GPUMemory.to_gpu(SimpleMatrix.from_a(processed))
         @hidden_layers.each do |l|
           case l
           when EmbeddingLayer
@@ -196,7 +192,7 @@ module SHAInet
               matrix = l.as(EmbeddingLayer).embed(tokens)
             else
               embeddings = tokens.map { |id| l.as(EmbeddingLayer).embed(id) }
-              matrix = mat_klass.from_a(embeddings)
+              matrix = GPUMemory.to_gpu(SimpleMatrix.from_a(embeddings))
             end
           else
             matrix = l.forward_matrix(matrix)
@@ -275,11 +271,10 @@ module SHAInet
       @total_error = @error_signal.reduce(0.0) { |acc, i| acc + i }
 
       if @hidden_layers.any? &.is_a?(TransformerLayer)
-        mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
-        exp = mat_klass.from_a([expected_output.map(&.to_f64)])
-        act = mat_klass.from_a([actual_output])
+        exp = GPUMemory.to_gpu(SimpleMatrix.from_a([expected_output.map(&.to_f64)]))
+        act = GPUMemory.to_gpu(SimpleMatrix.from_a([actual_output]))
         diff = act - exp
-        w = mat_klass.from_a(@output_layers.last.weights.to_a)
+        w = GPUMemory.keep_on_gpu(@output_layers.last.weights)
         @transformer_error = diff * w
       end
 
@@ -331,11 +326,10 @@ module SHAInet
       @total_error = @error_signal.reduce(0.0) { |acc, i| acc + i }
 
       if @hidden_layers.any? &.is_a?(TransformerLayer)
-        mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
-        exp_row = mat_klass.from_a([expected_output.map(&.to_f64)])
-        act_row = mat_klass.from_a([actual_output])
+        exp_row = GPUMemory.to_gpu(SimpleMatrix.from_a([expected_output.map(&.to_f64)]))
+        act_row = GPUMemory.to_gpu(SimpleMatrix.from_a([actual_output]))
         diff = act_row - exp_row
-        @transformer_error = mat_klass.zeros(outputs.size, diff.cols)
+        @transformer_error = GPUMemory.zeros_like(diff, outputs.size, diff.cols)
         diff.cols.times do |j|
           @transformer_error[outputs.size - 1, j] = diff[0, j]
         end
@@ -378,12 +372,11 @@ module SHAInet
       @total_error = -Math.log(probs[label].clamp(1e-9, 1.0))
 
       if @hidden_layers.any? &.is_a?(TransformerLayer)
-        mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
-        exp = mat_klass.zeros(1, probs.size)
+        exp = GPUMemory.to_gpu(SimpleMatrix.zeros(1, probs.size))
         exp[0, label] = 1.0
-        act = mat_klass.from_a([probs])
+        act = GPUMemory.to_gpu(SimpleMatrix.from_a([probs]))
         diff = act - exp
-        w = mat_klass.from_a(@output_layers.last.weights.to_a)
+        w = GPUMemory.keep_on_gpu(@output_layers.last.weights)
         @transformer_error = diff * w
       end
     end
@@ -416,14 +409,13 @@ module SHAInet
       @total_error = -Math.log(probs[label].clamp(1e-9, 1.0))
 
       if @hidden_layers.any? &.is_a?(TransformerLayer)
-        mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
-        exp_row = mat_klass.zeros(1, probs.size)
+        exp_row = GPUMemory.to_gpu(SimpleMatrix.zeros(1, probs.size))
         exp_row[0, label] = 1.0
-        act_row = mat_klass.from_a([probs])
+        act_row = GPUMemory.to_gpu(SimpleMatrix.from_a([probs]))
         diff = act_row - exp_row
-        w = mat_klass.from_a(@output_layers.last.weights.to_a)
+        w = GPUMemory.keep_on_gpu(@output_layers.last.weights)
         trans = diff * w
-        @transformer_error = mat_klass.zeros(outputs.size, trans.cols)
+        @transformer_error = GPUMemory.zeros_like(trans, outputs.size, trans.cols)
         trans.cols.times do |j|
           @transformer_error[outputs.size - 1, j] = trans[0, j]
         end
@@ -589,8 +581,7 @@ module SHAInet
                   l.neurons.each { |neuron| neuron.hidden_error_prop }
                 end
               elsif @hidden_layers.none? { |l| l.is_a?(RecurrentLayer) || l.is_a?(LSTMLayer) }
-                mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
-                grad = mat_klass.from_a([@output_layers.last.neurons.map(&.gradient)])
+                grad = GPUMemory.to_gpu(SimpleMatrix.from_a([@output_layers.last.neurons.map(&.gradient)]))
                 prev = @output_layers.last
                 @hidden_layers.reverse_each do |l|
                   grad = l.backward_matrix(prev, grad)
@@ -719,8 +710,7 @@ module SHAInet
                   l.neurons.each { |neuron| neuron.hidden_error_prop }
                 end
               elsif @hidden_layers.none? { |l| l.is_a?(RecurrentLayer) || l.is_a?(LSTMLayer) }
-                mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
-                grad = mat_klass.from_a([@output_layers.last.neurons.map(&.gradient)])
+                grad = GPUMemory.to_gpu(SimpleMatrix.from_a([@output_layers.last.neurons.map(&.gradient)]))
                 prev = @output_layers.last
                 @hidden_layers.reverse_each do |l|
                   grad = l.backward_matrix(prev, grad)

@@ -11,7 +11,7 @@ describe "MultiHeadAttention GPU parity" do
     ENV.delete("SHAINET_DISABLE_CUDA")
     Random::DEFAULT.new_seed(42_u64, 54_u64)
     gpu_attn = SHAInet::MultiHeadAttention.new(2, 1)
-    gpu_in = SHAInet::CudaMatrix.from_a(input.to_a)
+    gpu_in = SHAInet::GPUMemory.to_gpu(input)
     gpu_out = gpu_attn.forward(gpu_in)
     cpu_out.rows.times do |i|
       cpu_out.cols.times do |j|

@@ -7,7 +7,7 @@ describe "Embedding GPU lookup" do
     ids = [1, 3]
     matrix = layer.embed(ids)
     matrix.should be_a(SHAInet::CudaMatrix)
-    matrix.as(SHAInet::CudaMatrix).sync_from_device!
+    SHAInet::GPUMemory.batch_sync_from_device([matrix])
     ids.each_with_index do |id, row|
       layer.lookup(id).each_with_index do |val, col|
         matrix[row, col].should be_close(val, 1e-6)

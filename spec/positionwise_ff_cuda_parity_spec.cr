@@ -23,8 +23,8 @@ describe "PositionWiseFF GPU parity" do
     ENV.delete("SHAINET_DISABLE_CUDA")
     Random::DEFAULT.new_seed(42_u64, 54_u64)
     gpu_ff = SHAInet::PositionWiseFF.new(4, 6)
-    x_gpu = SHAInet::CudaMatrix.from_a(x_cpu.to_a)
-    dout_gpu = SHAInet::CudaMatrix.ones(2, 4)
+    x_gpu = SHAInet::GPUMemory.to_gpu(x_cpu)
+    dout_gpu = SHAInet::GPUMemory.to_gpu(SHAInet::SimpleMatrix.ones(2, 4))
     gpu_ff.forward(x_gpu)
     gpu_ff.backward(dout_gpu)
     gb1_gpu = gpu_ff.g_b1.clone
