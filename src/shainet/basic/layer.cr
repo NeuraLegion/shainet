@@ -1,25 +1,24 @@
-require "apatite"
+require "../math/simple_matrix"
 
 module SHAInet
   class Layer
-    include Apatite
     Log = ::Log.for(self)
 
     property :n_type, :neurons
     getter :activation_function, :l_size
-    property input_sums : Matrix(Float64), weights : Matrix(Float64), biases : Matrix(Float64)
-    getter activations : Matrix(Float64), sigma_primes : Matrix(Float64)
+    property input_sums : SimpleMatrix, weights : SimpleMatrix, biases : SimpleMatrix
+    getter activations : SimpleMatrix, sigma_primes : SimpleMatrix
 
     def initialize(@n_type : String, @l_size : Int32, @activation_function : ActivationFunction = SHAInet.sigmoid)
       @neurons = Array(Neuron).new
 
       # ------- Experimental -------
       # Pointer matrices for forward propogation
-      @input_sums = Matrix(Float64).build(1, @l_size) { 0.0 }
-      @weights = Matrix(Float64).build(1, @l_size) { 0.0 }
-      @biases = Matrix(Float64).build(1, @l_size) { 0.0 }
-      @activations = Matrix(Float64).build(1, @l_size) { 0.0 }
-      @sigma_primes = Matrix(Float64).build(1, @l_size) { 0.0 }
+      @input_sums = SimpleMatrix.new(1, @l_size, 0.0)
+      @weights = SimpleMatrix.new(1, @l_size, 0.0)
+      @biases = SimpleMatrix.new(1, @l_size, 0.0)
+      @activations = SimpleMatrix.new(1, @l_size, 0.0)
+      @sigma_primes = SimpleMatrix.new(1, @l_size, 0.0)
 
       # # Pointer matrices for back propogation
       # @w_gradients = Array(Array(Pointer)).new
@@ -45,10 +44,10 @@ module SHAInet
 
       # ------- Experimental -------
       # Transpose the needed matrices
-      @input_sums.t
-      @biases.t
-      @activations.t
-      @sigma_primes.t
+      @input_sums.transpose
+      @biases.transpose
+      @activations.transpose
+      @sigma_primes.transpose
     end
 
     def clone

@@ -183,11 +183,12 @@ module SHAInet
       # Connect each neuron from source layer to all neurons in destination layer
       when "full"
         # Resize the weights matrix based on the connecting layer
+        mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
         if src_layer.is_a?(TransformerLayer)
-          dest_layer.weights = Matrix(Float64).build(dest_layer.size, src_layer.size) { rand(-0.1_f64..0.1_f64) }
-          dest_layer.biases = Matrix(Float64).build(dest_layer.size, 1) { rand(-0.1_f64..0.1_f64) }
+          dest_layer.weights = mat_klass.new(dest_layer.size, src_layer.size).random_fill!
+          dest_layer.biases = mat_klass.new(dest_layer.size, 1).random_fill!
         else
-          dest_layer.weights = Matrix(Float64).build(dest_layer.size, src_layer.size) { 0.0 }
+          dest_layer.weights = mat_klass.new(dest_layer.size, src_layer.size, 0.0)
         end
 
         src_layer.neurons.each_with_index do |src_neuron, src_i|
@@ -438,10 +439,10 @@ module SHAInet
         blocks.each_with_index do |prefix, idx|
           t_layer = @transformer_layers[idx]
           mha = t_layer.mha
-          mha.w_q = TensorMatrix.from_a(lookup["#{prefix}.mha.w_q"]["weight"].as_a.map { |r| r.as_a.map(&.as_f) }).transpose
-          mha.w_k = TensorMatrix.from_a(lookup["#{prefix}.mha.w_k"]["weight"].as_a.map { |r| r.as_a.map(&.as_f) }).transpose
-          mha.w_v = TensorMatrix.from_a(lookup["#{prefix}.mha.w_v"]["weight"].as_a.map { |r| r.as_a.map(&.as_f) }).transpose
-          mha.w_o = TensorMatrix.from_a(lookup["#{prefix}.mha.w_o"]["weight"].as_a.map { |r| r.as_a.map(&.as_f) }).transpose
+          mha.w_q = SimpleMatrix.from_a(lookup["#{prefix}.mha.w_q"]["weight"].as_a.map { |r| r.as_a.map(&.as_f) }).transpose
+          mha.w_k = SimpleMatrix.from_a(lookup["#{prefix}.mha.w_k"]["weight"].as_a.map { |r| r.as_a.map(&.as_f) }).transpose
+          mha.w_v = SimpleMatrix.from_a(lookup["#{prefix}.mha.w_v"]["weight"].as_a.map { |r| r.as_a.map(&.as_f) }).transpose
+          mha.w_o = SimpleMatrix.from_a(lookup["#{prefix}.mha.w_o"]["weight"].as_a.map { |r| r.as_a.map(&.as_f) }).transpose
 
           ffn = t_layer.ffn
           ffn.w1 = SimpleMatrix.from_a(lookup["#{prefix}.ffn.w1"]["weight"].as_a.map { |r| r.as_a.map(&.as_f) }).transpose
