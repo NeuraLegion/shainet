@@ -21,6 +21,8 @@ module SHAInet
       @drop_percent = drop_percent
     end
 
+    # `x` is a matrix where each row is a batch element. Sequences can be
+    # processed step-by-step using this batch-first layout.
     def forward(x : SimpleMatrix, pe : SimpleMatrix? = nil, mask : SimpleMatrix? = nil)
       input = if enc = (pe || @positional_encoding)
                 raise "positional encoding size mismatch" unless enc.rows == x.rows && enc.cols == x.cols
@@ -38,6 +40,7 @@ module SHAInet
       @norm2.forward(ff)
     end
 
+    # `d_out` follows the batch-first convention used by `forward`.
     def backward(d_out : SimpleMatrix)
       d_norm2 = @norm2.backward(d_out)
       d_ff = @ffn.backward(d_norm2)
