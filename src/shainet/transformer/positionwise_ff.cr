@@ -51,7 +51,7 @@ module SHAInet
       if CUDA.available? && CUDA.kernels_available? && d_out.is_a?(CudaMatrix) && @g_b2.is_a?(CudaMatrix)
         begin
           CUDA.row_sum(@g_b2.as(CudaMatrix).device_ptr.not_nil!, d_out.as(CudaMatrix).device_ptr.not_nil!, d_out.rows, d_out.cols)
-          @g_b2.as(CudaMatrix).sync_from_device!
+          GPUMemory.batch_sync_from_device([@g_b2])
         rescue e : Exception
           # Fallback to CPU computation
           d_out.rows.times do |i|
@@ -75,7 +75,7 @@ module SHAInet
       if CUDA.available? && CUDA.kernels_available? && drelu.is_a?(CudaMatrix) && @g_b1.is_a?(CudaMatrix)
         begin
           CUDA.row_sum(@g_b1.as(CudaMatrix).device_ptr.not_nil!, drelu.as(CudaMatrix).device_ptr.not_nil!, drelu.rows, drelu.cols)
-          @g_b1.as(CudaMatrix).sync_from_device!
+          GPUMemory.batch_sync_from_device([@g_b1])
         rescue e : Exception
           # Fallback to CPU computation
           drelu.rows.times do |i|

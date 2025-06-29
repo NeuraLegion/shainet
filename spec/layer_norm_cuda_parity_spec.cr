@@ -32,19 +32,15 @@ describe "LayerNorm GPU parity" do
       gpu_ln.beta[0, j] = cpu_ln.beta[0, j]
     end
 
-    x_gpu = SHAInet::CudaMatrix.from_a(data)
-    dout_gpu = SHAInet::CudaMatrix.from_a(dout_data)
+    x_gpu = SHAInet::GPUMemory.to_gpu(SHAInet::SimpleMatrix.from_a(data))
+    dout_gpu = SHAInet::GPUMemory.to_gpu(SHAInet::SimpleMatrix.from_a(dout_data))
     out_gpu = gpu_ln.forward(x_gpu)
 
     # Sync GPU results if needed
-    if out_gpu.is_a?(SHAInet::CudaMatrix)
-      out_gpu.sync_from_device!
-    end
+    SHAInet::GPUMemory.batch_sync_from_device([out_gpu]) if out_gpu.is_a?(SHAInet::CudaMatrix)
 
     dx_gpu = gpu_ln.backward(dout_gpu)
-    if dx_gpu.is_a?(SHAInet::CudaMatrix)
-      dx_gpu.sync_from_device!
-    end
+    SHAInet::GPUMemory.batch_sync_from_device([dx_gpu]) if dx_gpu.is_a?(SHAInet::CudaMatrix)
 
     rows.times do |i|
       cols.times do |j|

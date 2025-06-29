@@ -57,9 +57,7 @@ module SHAInet
             cuda_mean.device_ptr.not_nil!,
             cuda_var.device_ptr.not_nil!,
             rows, cols, @epsilon)
-          cuda_mean.sync_from_device!
-          cuda_var.sync_from_device!
-          cuda_norm.sync_from_device!
+          GPUMemory.batch_sync_from_device([cuda_mean, cuda_var, cuda_norm])
 
           # Store results for backward pass
           @mean = SimpleMatrix.from_a(cuda_mean.to_a)
@@ -68,16 +66,10 @@ module SHAInet
 
           result = cuda_norm.clone
           # Apply gamma and beta - use their actual types for operations
-          if @gamma.is_a?(CudaMatrix) && @beta.is_a?(CudaMatrix)
-            result.mul_row_vector!(@gamma.as(CudaMatrix))
-            result.add_bias!(@beta.as(CudaMatrix))
-          else
-            # Convert SimpleMatrix gamma/beta to CUDA for operations
-            cuda_gamma = CudaMatrix.from_a(@gamma.to_a)
-            cuda_beta = CudaMatrix.from_a(@beta.to_a)
-            result.mul_row_vector!(cuda_gamma)
-            result.add_bias!(cuda_beta)
-          end
+          g = GPUMemory.keep_on_gpu(@gamma)
+          b = GPUMemory.keep_on_gpu(@beta)
+          result.mul_row_vector!(g.as(CudaMatrix))
+          result.add_bias!(b.as(CudaMatrix))
           return result
         rescue e : Exception
           # Fall through to CPU implementation when kernels fail
