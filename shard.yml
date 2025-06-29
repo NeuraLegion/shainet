@@ -8,9 +8,6 @@ authors:
 crystal: 1.6.2
 
 dependencies:
-  apatite:
-    github: watzon/apatite
-    branch: master
 
 development_dependencies:
   ameba:
