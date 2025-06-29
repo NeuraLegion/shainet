@@ -82,5 +82,71 @@ module SHAInet
     def size
       @l_size
     end
+
+    # Forward propagation using matrix multiplication. Returns the resulting
+    # activation matrix and updates neuron states for compatibility with the
+    # non-matrix implementation.
+    def forward_matrix(input : SimpleMatrix | CudaMatrix)
+      mat_klass = input.class
+      w = if mat_klass == CudaMatrix && @weights.is_a?(CudaMatrix)
+            @weights
+          elsif mat_klass == SimpleMatrix && @weights.is_a?(SimpleMatrix)
+            @weights
+          else
+            mat_klass.from_a(@weights.to_a)
+          end
+      b = if mat_klass == CudaMatrix && @biases.is_a?(CudaMatrix)
+            @biases
+          elsif mat_klass == SimpleMatrix && @biases.is_a?(SimpleMatrix)
+            @biases
+          else
+            mat_klass.from_a(@biases.to_a)
+          end
+
+      out = input * w.transpose
+      out.add_bias!(b)
+
+      out.rows.times do |i|
+        out.cols.times do |j|
+          val = out[i, j]
+          act, sig = @activation_function.call(val)
+          out[i, j] = act
+          if i == out.rows - 1
+            neuron = @neurons[j]
+            neuron.activation = act
+            neuron.sigma_prime = sig
+            neuron.input_sum = val
+          end
+        end
+      end
+      out
+    end
+
+    # Backward propagation using matrix multiplication. Calculates the gradient
+    # for this layer based on the next layer's weights and gradients. The
+    # returned matrix can be used to continue propagating errors backwards.
+    def backward_matrix(next_layer : Layer, next_grad : SimpleMatrix | CudaMatrix? = nil)
+      mat_klass = next_grad ? next_grad.class : (CUDA.available? ? CudaMatrix : SimpleMatrix)
+      grad = next_grad || mat_klass.from_a([next_layer.neurons.map(&.gradient)])
+      w = if mat_klass == CudaMatrix && next_layer.weights.is_a?(CudaMatrix)
+            next_layer.weights
+          elsif mat_klass == SimpleMatrix && next_layer.weights.is_a?(SimpleMatrix)
+            next_layer.weights
+          else
+            mat_klass.from_a(next_layer.weights.to_a)
+          end
+
+      err = grad * w
+      err.rows.times do |i|
+        err.cols.times do |j|
+          val = err[i, j] * @neurons[j].sigma_prime
+          err[i, j] = val
+          if i == err.rows - 1
+            @neurons[j].gradient = val
+          end
+        end
+      end
+      err
+    end
   end
 end
