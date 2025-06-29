@@ -126,6 +126,11 @@ module SHAInet
       raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
     end
 
+    # Run a batch of sequences by calling `run` for each sequence
+    def run(input : Array(Array(Array(GenNum))), stealth : Bool = false) : Array(Array(Array(Float64)))
+      input.map { |seq| run(seq, stealth: stealth) }
+    end
+
     # Accept a sequence of integer tokens for embedding layers
     def run(input : Array(Array(Int32)), stealth : Bool = false) : Array(Array(Float64))
       seq = input.map { |x| x.map(&.to_f64) }

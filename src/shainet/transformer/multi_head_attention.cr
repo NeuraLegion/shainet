@@ -47,6 +47,9 @@ module SHAInet
       @out = mat_klass.zeros(1, 1)
     end
 
+    # `x` is expected to have each row representing a batch entry.
+    # Sequence length should be encoded along the column dimension or through
+    # multiple calls when processing sequences step-by-step.
     def forward(x : SimpleMatrix, mask : SimpleMatrix? = nil)
       @x = x
 
@@ -100,6 +103,8 @@ module SHAInet
       @out
     end
 
+    # `d_out` should follow the same batch-first layout as the input to
+    # `forward`, where each row corresponds to a batch entry.
     def backward(d_out : SimpleMatrix)
       mat_klass = d_out.class
       x = @x.not_nil!

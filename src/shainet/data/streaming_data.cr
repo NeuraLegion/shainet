@@ -36,6 +36,20 @@ module SHAInet
       batch
     end
 
+    # Similar to `next_batch` but returns GPU matrices when CUDA is available.
+    def next_batch_gpu(batch_size : Int32)
+      return next_batch(batch_size) unless CUDA.available?
+
+      cpu_batch = next_batch(batch_size)
+      gpu_batch = [] of Array(SimpleMatrix)
+      cpu_batch.each do |ex|
+        inp = to_matrix(ex[0])
+        out_m = to_matrix(ex[1])
+        gpu_batch << [GPUMemory.to_gpu(inp), GPUMemory.to_gpu(out_m)]
+      end
+      gpu_batch
+    end
+
     # Resets the data pointer for a new epoch and reshuffles if enabled.
     def rewind
       @file.seek(0)
@@ -77,6 +91,14 @@ module SHAInet
         Array(Array(Float64)).from_json(json_any.to_json)
       else
         Array(Float64).from_json(json_any.to_json)
+      end
+    end
+
+    private def to_matrix(d : Datum) : SimpleMatrix
+      if d.is_a?(Array(Array(Float64)))
+        SimpleMatrix.from_a(d)
+      else
+        SimpleMatrix.from_a([d.as(Array(Float64))])
       end
     end
   end
