@@ -204,7 +204,11 @@ time.
 
 ```crystal
 # Buffer at most 1,024 lines and shuffle each chunk
-stream = SHAInet::StreamingData.new("data.txt", shuffle: true, chunk_size: 1024)
+stream = SHAInet::StreamingData.new(
+  "data.txt",
+  shuffle: true,
+  chunk_size: 1024,
+  gpu_batches: true)
 
 net = SHAInet::Network.new
 net.add_layer(:input, 2, :memory, SHAInet.sigmoid)
@@ -219,6 +223,10 @@ net.train(
   mini_batch_size: 2,
   log_each: 1000)
 ```
+
+When `gpu_batches` is set to `true` and CUDA is available, `next_batch` will
+return `CudaMatrix` pairs so the training loop can operate directly on GPU
+batches.
 
 ### Using convolutional network
 
@@ -553,7 +561,7 @@ File.open("tokens.txt", "w") do |f|
   end
 end
 
-stream = SHAInet::StreamingData.new("tokens.txt", shuffle: true)
+stream = SHAInet::StreamingData.new("tokens.txt", shuffle: true, gpu_batches: true)
 batch = stream.next_batch(2)
 stream.rewind # start a new shuffled epoch
 ```

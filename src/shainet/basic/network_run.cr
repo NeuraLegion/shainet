@@ -126,6 +126,61 @@ module SHAInet
       raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
     end
 
+    # Run using a pre-constructed matrix. Useful when batches are already on the GPU.
+    def run(input : SimpleMatrix, stealth : Bool = false) : SimpleMatrix
+      verify_net_before_train
+
+      matrix = GPUMemory.keep_on_gpu(input)
+
+      if @hidden_layers.any? &.is_a?(TransformerLayer)
+        @hidden_layers.each do |l|
+          case l
+          when EmbeddingLayer
+            raise NeuralNetRunError.new("Embedding input mismatch") unless matrix.cols == 1
+            tokens = (0...matrix.rows).map { |r| matrix[r, 0].to_i }
+            matrix = l.as(EmbeddingLayer).embed(tokens)
+          when TransformerLayer
+            matrix = l.as(TransformerLayer).forward(matrix)
+          end
+        end
+        out_layer = @output_layers.last
+        w = GPUMemory.keep_on_gpu(out_layer.weights)
+        b = GPUMemory.keep_on_gpu(out_layer.biases)
+        matrix = matrix * w.transpose
+        matrix.rows.times do |i|
+          matrix.cols.times do |j|
+            matrix[i, j] += b[j, 0]
+            val = matrix[i, j]
+            act, sig = out_layer.activation_function.call(val)
+            matrix[i, j] = act
+            if i == matrix.rows - 1
+              out_layer.neurons[j].activation = act
+              out_layer.neurons[j].sigma_prime = sig
+            end
+          end
+        end
+        matrix
+      elsif @hidden_layers.none? { |l| l.is_a?(RecurrentLayer) || l.is_a?(LSTMLayer) }
+        @hidden_layers.each do |l|
+          case l
+          when EmbeddingLayer
+            raise NeuralNetRunError.new("Embedding input mismatch") unless matrix.cols == 1
+            tokens = (0...matrix.rows).map { |r| matrix[r, 0].to_i }
+            matrix = l.as(EmbeddingLayer).embed(tokens)
+          else
+            matrix = l.forward_matrix(matrix)
+          end
+        end
+        out_layer = @output_layers.last
+        matrix = out_layer.forward_matrix(matrix)
+        matrix
+      else
+        raise NeuralNetRunError.new("Matrix input not supported for recurrent networks")
+      end
+    rescue e : Exception
+      raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
+    end
+
     # Run a batch of sequences by calling `run` for each sequence
     def run(input : Array(Array(Array(GenNum))), stealth : Bool = false) : Array(Array(Array(Float64)))
       input.map { |seq| run(seq, stealth: stealth) }
@@ -291,6 +346,37 @@ module SHAInet
       raise NeuralNetRunError.new("Error in evaluate: #{e}")
     end
 
+    # Evaluate using matrices already on the desired device
+    def evaluate(input_data : SimpleMatrix,
+                 expected_output : SimpleMatrix,
+                 cost_function : CostFunction = SHAInet.quadratic_cost)
+      actual_matrix = run(input_data, stealth: true)
+      exp = expected_output.to_a.first
+      act = actual_matrix.to_a.first
+      validate_values(act, "actual_output")
+
+      @error_signal = [] of Float64
+      act.size.times do |i|
+        neuron = @output_layers.last.neurons[i]
+        cost = cost_function.call(exp[i], act[i])
+        neuron.gradient = cost[:derivative]*neuron.sigma_prime
+        @error_signal << cost[:value]
+      end
+
+      validate_values(@error_signal, "error_signal")
+      @total_error = @error_signal.reduce(0.0) { |acc, i| acc + i }
+
+      if @hidden_layers.any? &.is_a?(TransformerLayer)
+        exp_m = GPUMemory.to_gpu(SimpleMatrix.from_a([exp]))
+        act_m = GPUMemory.to_gpu(SimpleMatrix.from_a([act]))
+        diff = act_m - exp_m
+        w = GPUMemory.keep_on_gpu(@output_layers.last.weights)
+        @transformer_error = diff * w
+      end
+    rescue e : Exception
+      raise NeuralNetRunError.new("Error in evaluate: #{e}")
+    end
+
     # Accept integer input for embeddings
     def evaluate(input_data : Array(Int32),
                  expected_output : Array(GenNum),
@@ -390,6 +476,11 @@ module SHAInet
       evaluate_label(input_data.map(&.to_f64), label)
     end
 
+    def evaluate_label(input_data : SimpleMatrix, label : Int32)
+      vec = input_data.to_a.first.map(&.to_f64)
+      evaluate_label(vec, label)
+    end
+
     # Evaluate a sequence example with a class label and softmax cross entropy
     def evaluate_sequence_label(input_data : Array(Array(GenNum)), label : Int32)
       seq = input_data.map { |x| x.map(&.to_f64) }
@@ -429,6 +520,11 @@ module SHAInet
 
     def evaluate_sequence_label(input_data : Array(Array(Int32)), label : Int32)
       seq = input_data.map { |x| x.map(&.to_f64) }
+      evaluate_sequence_label(seq, label)
+    end
+
+    def evaluate_sequence_label(input_data : SimpleMatrix, label : Int32)
+      seq = input_data.to_a.map { |row| row.map(&.to_f64) }
       evaluate_sequence_label(seq, label)
     end
 
@@ -539,38 +635,51 @@ module SHAInet
             data_slice.each do |data_point|
               input_d = data_point[0]
               output_d = data_point[1]
-              output_arr = [] of Float64
-              if output_d.is_a?(Array)
-                output_d.as(Array).each do |v|
-                  if v.is_a?(Number)
-                    output_arr << v.to_f64
-                  end
+
+              if input_d.is_a?(SimpleMatrix)
+                if label_mode
+                  label = output_d.as(SimpleMatrix)[0, 0].to_i
+                  evaluate_label(input_d.as(SimpleMatrix), label)
+                else
+                  evaluate(input_d.as(SimpleMatrix), output_d.as(SimpleMatrix), cost_function.as(CostFunction))
                 end
               else
-                output_arr << output_d.to_f64
-              end
-              if label_mode
-                label = output_arr.first.to_i
-                if input_d.is_a?(Array) && input_d.as(Array).first.is_a?(Array)
-                  seq_in = (input_d.as(Array).map { |x| x.as(Array).map(&.to_f64).as(Array(Float64)) }).as(Array(Array(Float64)))
-                  evaluate_sequence_label(seq_in, label)
-                else
-                  input_arr = [] of Float64
-                  input_d.as(Array).each do |v|
-                    input_arr << v.to_f64 if v.is_a?(Number)
+                output_arr = [] of Float64
+                if output_d.is_a?(Array)
+                  output_d.as(Array).each do |v|
+                    if v.is_a?(Number)
+                      output_arr << v.to_f64
+                    end
                   end
-                  evaluate_label(input_arr, label)
+                elsif output_d.is_a?(SimpleMatrix)
+                  output_arr << output_d.as(SimpleMatrix)[0, 0]
+                else
+                  output_arr << output_d.to_f64
                 end
-              else
-                if input_d.is_a?(Array) && input_d.as(Array).first.is_a?(Array)
-                  seq_in = (input_d.as(Array).map { |x| x.as(Array).map(&.to_f64).as(Array(Float64)) }).as(Array(Array(Float64)))
-                  evaluate_sequence(seq_in, output_arr.map(&.to_f64), cost_function.as(CostFunction))
-                else
-                  input_arr = [] of Float64
-                  input_d.as(Array).each do |v|
-                    input_arr << v.to_f64 if v.is_a?(Number)
+
+                if label_mode
+                  label = output_arr.first.to_i
+                  if input_d.is_a?(Array) && input_d.as(Array).first.is_a?(Array)
+                    seq_in = (input_d.as(Array).map { |x| x.as(Array).map(&.to_f64).as(Array(Float64)) }).as(Array(Array(Float64)))
+                    evaluate_sequence_label(seq_in, label)
+                  else
+                    input_arr = [] of Float64
+                    input_d.as(Array).each do |v|
+                      input_arr << v.to_f64 if v.is_a?(Number)
+                    end
+                    evaluate_label(input_arr, label)
                   end
-                  evaluate(input_arr, output_arr.map(&.to_f64), cost_function.as(CostFunction))
+                else
+                  if input_d.is_a?(Array) && input_d.as(Array).first.is_a?(Array)
+                    seq_in = (input_d.as(Array).map { |x| x.as(Array).map(&.to_f64).as(Array(Float64)) }).as(Array(Array(Float64)))
+                    evaluate_sequence(seq_in, output_arr.map(&.to_f64), cost_function.as(CostFunction))
+                  else
+                    input_arr = [] of Float64
+                    input_d.as(Array).each do |v|
+                      input_arr << v.to_f64 if v.is_a?(Number)
+                    end
+                    evaluate(input_arr, output_arr.map(&.to_f64), cost_function.as(CostFunction))
+                  end
                 end
               end
               all_errors += @total_error
@@ -1124,22 +1233,26 @@ module SHAInet
         message = "Train data must have two arrays, one for input one for output"
       end
       sample_input = data.sample.first
+      return if sample_input.is_a?(SimpleMatrix)
       if sample_input.is_a?(Array) && sample_input.as(Array).first.is_a?(Array)
         return
       end
       sample_input_arr = sample_input.is_a?(Array) ? sample_input.as(Array) : [sample_input]
       random_input = sample_input_arr.size
-      random_output = data.sample.last.size
+      sample_out = data.sample.last
+      random_output = sample_out.is_a?(SimpleMatrix) ? sample_out.as(SimpleMatrix).cols : sample_out.as(Array).size
       data.each_with_index do |test, i|
         inp = test.first
-        if inp.as(Array).size != random_input
+        if !inp.is_a?(SimpleMatrix) && inp.as(Array).size != random_input
           message = "Input data sizes are inconsistent"
         end
-        if (test.last.size != random_output)
+        out = test.last
+        out_size = out.is_a?(SimpleMatrix) ? out.as(SimpleMatrix).cols : out.size
+        if out_size != random_output
           message = "Output data sizes are inconsistent"
         end
-        unless label_mode || (test.last.size == @output_layers.first.neurons.size)
-          message = "data at index #{i} and size: #{test.last.size} mismatch output layer size"
+        unless label_mode || (out_size == @output_layers.first.neurons.size)
+          message = "data at index #{i} and size: #{out_size} mismatch output layer size"
         end
       end
       if message
