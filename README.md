@@ -177,9 +177,9 @@ iris.add_layer(:output, 3, :memory, SHAInet.sigmoid)
 iris.fully_connect
 
 # Adjust network parameters
-xor.learning_rate = 0.7
-xor.momentum = 0.3
-xor.clip_threshold = 5.0
+iris.learning_rate = 0.7
+iris.momentum = 0.3
+iris.clip_threshold = 5.0
 
 # Train the network
 iris.train_batch(
