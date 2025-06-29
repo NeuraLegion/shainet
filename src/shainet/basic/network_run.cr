@@ -467,6 +467,12 @@ module SHAInet
         start_time = Time.monotonic
         batch_size = mini_batch_size
         @time_step = 0
+        if CUDA.available?
+          input_dim = @input_layers.reduce(0) { |acc, l| acc + l.neurons.size }
+          out_dim = @output_layers.last.neurons.size
+          GPUMemory.preallocate!(1, input_dim, batch_size)
+          GPUMemory.preallocate!(1, out_dim, batch_size)
+        end
       else
         raw_data = data.is_a?(SHAInet::TrainingData) ? data.data : data
         Log.info { "Training started" }
@@ -474,6 +480,12 @@ module SHAInet
         start_time = Time.monotonic
         batch_size = mini_batch_size ? mini_batch_size : raw_data.size
         @time_step = 0
+        if CUDA.available?
+          input_dim = @input_layers.reduce(0) { |acc, l| acc + l.neurons.size }
+          out_dim = @output_layers.last.neurons.size
+          GPUMemory.preallocate!(1, input_dim, batch_size)
+          GPUMemory.preallocate!(1, out_dim, batch_size)
+        end
       end
 
       # Change String/Symbol into the corrent proc of the cost function
@@ -800,6 +812,8 @@ module SHAInet
         @error_signal.size.times { |i| @error_signal[i] = (epoch_error_sum[i] / slices) }
         counter += 1
       end
+    ensure
+      GPUMemory.cleanup if CUDA.available?
     end
 
     # This method is kept for matching syntax of previous versions.

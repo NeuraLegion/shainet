@@ -1,7 +1,76 @@
+require "../cuda"
+
 module SHAInet
   # GPU Memory Manager - helps minimize CPU-GPU transfers
   module GPUMemory
     extend self
+
+    # -- Simple GPU allocator -------------------------------------------------
+    @@pool = Hash(Int32, Array(Pointer(Float64))).new { |h, k| h[k] = [] of Pointer(Float64) }
+    @@pool_limit : Int32 = (ENV["SHAINET_GPU_POOL_SIZE"]? || "32").to_i
+
+    # Configure the maximum number of cached buffers
+    def pool_limit
+      @@pool_limit
+    end
+
+    def pool_limit=(limit : Int32)
+      @@pool_limit = limit
+    end
+
+    # Preallocate +count+ buffers of given shape
+    def preallocate!(rows : Int32, cols : Int32, count : Int32)
+      return unless CUDA.available?
+      size = rows * cols
+      count.times do
+        ptr = Pointer(Float64).null
+        bytes = ((size) * 8).to_u64
+        res = CUDA.malloc(pointerof(ptr).as(Pointer(Pointer(Void))), bytes)
+        next unless res == 0
+        @@pool[size] << ptr
+      end
+    end
+
+    # Allocate device memory, reusing cached buffers when possible
+    def alloc_buffer(rows : Int32, cols : Int32)
+      size = rows * cols
+      bucket = @@pool[size]?
+      if bucket && !bucket.empty?
+        bucket.pop
+      else
+        ptr = Pointer(Float64).null
+        bytes = ((size) * 8).to_u64
+        res = CUDA.malloc(pointerof(ptr).as(Pointer(Pointer(Void))), bytes)
+        res == 0 ? ptr : Pointer(Float64).null
+      end
+    end
+
+    # Return a buffer to the pool for reuse
+    def release_buffer(ptr : Pointer(Float64), rows : Int32, cols : Int32)
+      return if ptr.null?
+      size = rows * cols
+      bucket = @@pool[size]?
+      if bucket.nil?
+        bucket = [] of Pointer(Float64)
+        @@pool[size] = bucket
+      end
+      arr = bucket.not_nil!
+      if arr.size < @@pool_limit
+        arr << ptr
+      else
+        CUDA.free(ptr.as(Pointer(Void)))
+      end
+    end
+
+    # Free all cached buffers
+    def cleanup
+      @@pool.each_value do |arr|
+        arr.each do |ptr|
+          CUDA.free(ptr.as(Pointer(Void)))
+        end
+      end
+      @@pool.clear
+    end
 
     # Convert SimpleMatrix to CudaMatrix if CUDA is available and input is not already CudaMatrix
     def to_gpu(matrix : SimpleMatrix)

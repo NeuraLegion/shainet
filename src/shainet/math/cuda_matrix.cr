@@ -1,5 +1,6 @@
 require "./simple_matrix"
 require "../cuda"
+require "./gpu_memory"
 
 module SHAInet
   # Basic GPU matrix wrapper. Allocates device memory when CUDA is
@@ -11,10 +12,7 @@ module SHAInet
     def initialize(rows : Int32, cols : Int32, init : Float64 = 0.0)
       super(rows, cols, init)
       if CUDA.available?
-        ptr = Pointer(Float64).null
-        bytes = ((@rows*@cols)*8).to_u64
-        res = CUDA.malloc(pointerof(ptr).as(Pointer(Pointer(Void))), bytes)
-        @device_ptr = res == 0 ? ptr : Pointer(Float64).null
+        @device_ptr = GPUMemory.alloc_buffer(@rows, @cols)
       else
         @device_ptr = Pointer(Float64).null
       end
@@ -22,7 +20,7 @@ module SHAInet
 
     def finalize
       if dptr = @device_ptr
-        CUDA.free(dptr.as(Pointer(Void))) unless dptr.null?
+        GPUMemory.release_buffer(dptr, @rows, @cols) unless dptr.null?
       end
     end
 
