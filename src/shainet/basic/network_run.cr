@@ -61,6 +61,30 @@ module SHAInet
           Log.info { "Input => #{input}, network output => #{output}" }
         end
         output
+      elsif @hidden_layers.none? { |l| l.is_a?(RecurrentLayer) || l.is_a?(LSTMLayer) }
+        mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
+        matrix = mat_klass.from_a([processed])
+        @hidden_layers.each do |l|
+          case l
+          when EmbeddingLayer
+            token = input.first.to_i
+            if CUDA.available?
+              matrix = l.as(EmbeddingLayer).embed([token])
+            else
+              vec = l.as(EmbeddingLayer).embed(token)
+              matrix = mat_klass.from_a([vec])
+            end
+          else
+            matrix = l.forward_matrix(matrix)
+          end
+        end
+        out_layer = @output_layers.last
+        matrix = out_layer.forward_matrix(matrix)
+        output = matrix.to_a.first
+        unless stealth
+          Log.info { "Input => #{input}, network output => #{output}" }
+        end
+        output
       else
         # Insert the input data into the input layers
         index = 0
@@ -159,6 +183,27 @@ module SHAInet
             end
           end
         end
+        matrix.to_a
+      elsif @hidden_layers.none? { |l| l.is_a?(RecurrentLayer) || l.is_a?(LSTMLayer) }
+        mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
+        matrix = mat_klass.from_a(processed)
+        @hidden_layers.each do |l|
+          case l
+          when EmbeddingLayer
+            raise NeuralNetRunError.new("Embedding input mismatch") unless matrix.cols == 1
+            tokens = (0...matrix.rows).map { |r| matrix[r, 0].to_i }
+            if CUDA.available?
+              matrix = l.as(EmbeddingLayer).embed(tokens)
+            else
+              embeddings = tokens.map { |id| l.as(EmbeddingLayer).embed(id) }
+              matrix = mat_klass.from_a(embeddings)
+            end
+          else
+            matrix = l.forward_matrix(matrix)
+          end
+        end
+        out_layer = @output_layers.last
+        matrix = out_layer.forward_matrix(matrix)
         matrix.to_a
       else
         reset_recurrent_state
@@ -532,15 +577,36 @@ module SHAInet
                 end
               end
               all_errors += @total_error
-              @hidden_layers.reverse_each do |l|
-                if l.is_a?(TransformerLayer)
-                  l.as(TransformerLayer).backward(@transformer_error)
-                else
+              if @hidden_layers.any? &.is_a?(TransformerLayer)
+                @hidden_layers.reverse_each do |l|
+                  if l.is_a?(TransformerLayer)
+                    l.as(TransformerLayer).backward(@transformer_error)
+                  else
+                    l.neurons.each { |neuron| neuron.hidden_error_prop }
+                  end
+                end
+                @input_layers.reverse_each do |l|
                   l.neurons.each { |neuron| neuron.hidden_error_prop }
                 end
-              end
-              @input_layers.reverse_each do |l|
-                l.neurons.each { |neuron| neuron.hidden_error_prop }
+              elsif @hidden_layers.none? { |l| l.is_a?(RecurrentLayer) || l.is_a?(LSTMLayer) }
+                mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
+                grad = mat_klass.from_a([@output_layers.last.neurons.map(&.gradient)])
+                prev = @output_layers.last
+                @hidden_layers.reverse_each do |l|
+                  grad = l.backward_matrix(prev, grad)
+                  prev = l
+                end
+                @input_layers.reverse_each do |l|
+                  grad = l.backward_matrix(prev, grad)
+                  prev = l
+                end
+              else
+                @hidden_layers.reverse_each do |l|
+                  l.neurons.each { |neuron| neuron.hidden_error_prop }
+                end
+                @input_layers.reverse_each do |l|
+                  l.neurons.each { |neuron| neuron.hidden_error_prop }
+                end
               end
               @hidden_layers.each do |l|
                 if l.is_a?(EmbeddingLayer)
@@ -641,19 +707,36 @@ module SHAInet
               # all_errors << @total_error
               all_errors += @total_error
 
-              # Propogate the errors backwards through the hidden layers
-              @hidden_layers.reverse_each do |l|
-                if l.is_a?(TransformerLayer)
-                  l.as(TransformerLayer).backward(@transformer_error)
-                else
+              if @hidden_layers.any? &.is_a?(TransformerLayer)
+                @hidden_layers.reverse_each do |l|
+                  if l.is_a?(TransformerLayer)
+                    l.as(TransformerLayer).backward(@transformer_error)
+                  else
+                    l.neurons.each { |neuron| neuron.hidden_error_prop }
+                  end
+                end
+                @input_layers.reverse_each do |l|
                   l.neurons.each { |neuron| neuron.hidden_error_prop }
                 end
-              end
-
-              # Propogate the errors backwards through the input layers
-              @input_layers.reverse_each do |l|
-                # Update neuron error based on errors*weights of neurons from the next layer
-                l.neurons.each { |neuron| neuron.hidden_error_prop }
+              elsif @hidden_layers.none? { |l| l.is_a?(RecurrentLayer) || l.is_a?(LSTMLayer) }
+                mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
+                grad = mat_klass.from_a([@output_layers.last.neurons.map(&.gradient)])
+                prev = @output_layers.last
+                @hidden_layers.reverse_each do |l|
+                  grad = l.backward_matrix(prev, grad)
+                  prev = l
+                end
+                @input_layers.reverse_each do |l|
+                  grad = l.backward_matrix(prev, grad)
+                  prev = l
+                end
+              else
+                @hidden_layers.reverse_each do |l|
+                  l.neurons.each { |neuron| neuron.hidden_error_prop }
+                end
+                @input_layers.reverse_each do |l|
+                  l.neurons.each { |neuron| neuron.hidden_error_prop }
+                end
               end
 
               # Collect gradients for embedding layers before summing
