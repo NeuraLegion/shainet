@@ -1,16 +1,4 @@
 require "../src/shainet"
-require "log"
-# BabyLM challenge example (GPU-optimized)
-# ------------------------
-# This example has been optimized for better GPU utilization.
-#
-# For maximum performance:
-# 1. Run: make install (builds CUDA kernels)
-# 2. Set library path: export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(pwd)
-# 3. Monitor GPU usage: nvidia-smi -l 1
-#
-# 1. Download the BabyLM training set from the following URL:src/shainet"
-require "log"
 # BabyLM challenge example (GPU-optimized)
 # ------------------------
 # This example has been optimized for better GPU utilization.
