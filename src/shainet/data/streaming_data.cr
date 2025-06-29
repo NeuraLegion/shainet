@@ -9,11 +9,14 @@ module SHAInet
     @index : Int32 = 0
     @shuffle : Bool
     @chunk_size : Int32
+    @gpu_batches : Bool
+    getter gpu_batches
 
     # Reads data from `path`. The file is buffered in chunks to avoid loading
     # everything into memory. When `shuffle` is true the buffer is shuffled at
     # the beginning of each chunk.
-    def initialize(@path : String, @shuffle : Bool = false, @chunk_size : Int32 = 1024)
+    def initialize(@path : String, @shuffle : Bool = false, @chunk_size : Int32 = 1024, gpu_batches : Bool = false)
+      @gpu_batches = gpu_batches
       @file = File.new(@path)
       @buffer = [] of String
       @index = 0
@@ -33,21 +36,27 @@ module SHAInet
         output = parse_array(pair[1])
         batch << [input, output]
       end
-      batch
+
+      return batch unless @gpu_batches && CUDA.available?
+
+      gpu_batch = [] of Array(SimpleMatrix)
+      batch.each do |ex|
+        inp = to_matrix(ex[0])
+        out_m = to_matrix(ex[1])
+        gpu_batch << [GPUMemory.to_gpu(inp), GPUMemory.to_gpu(out_m)]
+      end
+      gpu_batch
     end
 
     # Similar to `next_batch` but returns GPU matrices when CUDA is available.
     def next_batch_gpu(batch_size : Int32)
       return next_batch(batch_size) unless CUDA.available?
 
-      cpu_batch = next_batch(batch_size)
-      gpu_batch = [] of Array(SimpleMatrix)
-      cpu_batch.each do |ex|
-        inp = to_matrix(ex[0])
-        out_m = to_matrix(ex[1])
-        gpu_batch << [GPUMemory.to_gpu(inp), GPUMemory.to_gpu(out_m)]
-      end
-      gpu_batch
+      prev = @gpu_batches
+      @gpu_batches = true
+      batch = next_batch(batch_size)
+      @gpu_batches = prev
+      batch.as(Array(Array(SimpleMatrix)))
     end
 
     # Resets the data pointer for a new epoch and reshuffles if enabled.

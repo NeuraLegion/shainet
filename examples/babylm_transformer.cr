@@ -72,8 +72,8 @@ val_file = "val_pairs.jsonl"
 write_pairs(train_file, train_ids, seq_len)
 write_pairs(val_file, val_ids, seq_len)
 
-train_data = SHAInet::StreamingData.new(train_file, shuffle: true)
-val_data = SHAInet::StreamingData.new(val_file)
+train_data = SHAInet::StreamingData.new(train_file, shuffle: true, gpu_batches: true)
+val_data = SHAInet::StreamingData.new(val_file, gpu_batches: true)
 
 epochs = 10
 batch = 32

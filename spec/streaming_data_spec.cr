@@ -50,4 +50,14 @@ describe SHAInet::StreamingData do
     second_epoch = data.next_batch(3)
     second_epoch.size.should eq(3)
   end
+
+  it "returns GPU matrices when enabled" do
+    pending! "CUDA not available" unless SHAInet::CUDA.available?
+    File.open("/tmp/stream_gpu.txt", "w") do |f|
+      f.puts "[[0,0],[0]]"
+    end
+    data = SHAInet::StreamingData.new("/tmp/stream_gpu.txt", gpu_batches: true)
+    batch = data.next_batch(1)
+    batch.first[0].should be_a(SHAInet::CudaMatrix)
+  end
 end
