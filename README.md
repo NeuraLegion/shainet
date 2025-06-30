@@ -19,6 +19,9 @@ dependencies:
     github: NeuraLegion/shainet
 ```
 
+SHAInet ships with a built-in `SimpleMatrix` implementation. If you previously
+included `apatite` in your project, you can remove that dependency.
+
 ### Optional CUDA setup
 
 To enable GPU acceleration install the CUDA Toolkit so that `libcudart.so` and
