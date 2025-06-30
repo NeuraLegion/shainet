@@ -37,9 +37,13 @@ module SHAInet
         tokens.each { |t| add_token(t) }
       end
 
+      rounds = 0
       while @vocab.size < vocab_size
-        Log.debug { "Merges done: #{@merges.size}, vocabulary size: #{@vocab.size}" }
-        Log.debug { "Progress: #{(@vocab.size.to_f / vocab_size * 100.0).round(2)}%" }
+        rounds += 1
+        if rounds % 100 == 0
+          Log.debug { "Round #{rounds}: Merges done: #{@merges.size}, vocabulary size: #{@vocab.size}" }
+          Log.debug { "Progress: #{(@vocab.size.to_f / vocab_size * 100.0).round(2)}%" }
+        end
         pair_counts = Hash(Tuple(Int32, Int32), Int32).new(0)
         corpus.each_with_index do |tokens, idx|
           freq = freqs[idx]
@@ -54,7 +58,6 @@ module SHAInet
           end
         end
         break if pair_counts.empty?
-        Log.debug { "Found #{pair_counts.size} unique pairs to merge." }
         heap = PairHeap.new
         pair_counts.each do |pair, count|
           heap.push PairHeap::Node.new(pair, count)

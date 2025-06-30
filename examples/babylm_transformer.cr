@@ -47,9 +47,9 @@ net.add_layer(:output, token_count, :memory, SHAInet.identity)
 net.fully_connect
 
 puts "Network built"
-# Positional encoding shared across layers
+# Positional encoding should only be applied to the first transformer layer
 pos_enc = SHAInet::PositionalEncoding.sinusoidal(seq_len, d_model)
-net.transformer_layers.each { |l| l.positional_encoding = pos_enc }
+net.transformer_layers.first.positional_encoding = pos_enc
 
 # Build training/validation splits and write pairs to disk for streaming
 def write_pairs(path, ids, seq_len)

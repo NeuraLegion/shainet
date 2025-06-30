@@ -34,11 +34,11 @@ module SHAInet
       fun cublasDscal_v2(handle : Handle, n : Int32,
                          alpha : Pointer(Float64), x : Pointer(Float64), incx : Int32) : Int32
       fun cublasDger_v2(handle : Handle,
-                     m : Int32, n : Int32,
-                     alpha : Pointer(Float64),
-                     x : Pointer(Float64), incx : Int32,
-                     y : Pointer(Float64), incy : Int32,
-                     a : Pointer(Float64), lda : Int32) : Int32
+                        m : Int32, n : Int32,
+                        alpha : Pointer(Float64),
+                        x : Pointer(Float64), incx : Int32,
+                        y : Pointer(Float64), incy : Int32,
+                        a : Pointer(Float64), lda : Int32) : Int32
       fun cublasDdot_v2(handle : Handle, n : Int32,
                         x : Pointer(Float64), incx : Int32,
                         y : Pointer(Float64), incy : Int32,

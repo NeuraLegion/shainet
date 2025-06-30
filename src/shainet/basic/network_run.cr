@@ -44,7 +44,7 @@ module SHAInet
         out_layer = @output_layers.last
         w = GPUMemory.keep_on_gpu(out_layer.weights)
         b = GPUMemory.keep_on_gpu(out_layer.biases)
-        matrix = matrix * w.transpose
+        matrix = safe_output_transform(matrix, w)
         matrix.rows.times do |i|
           matrix.cols.times do |j|
             matrix[i, j] += b[j, 0]
@@ -146,7 +146,7 @@ module SHAInet
         out_layer = @output_layers.last
         w = GPUMemory.keep_on_gpu(out_layer.weights)
         b = GPUMemory.keep_on_gpu(out_layer.biases)
-        matrix = matrix * w.transpose
+        matrix = safe_output_transform(matrix, w)
         matrix.rows.times do |i|
           matrix.cols.times do |j|
             matrix[i, j] += b[j, 0]
@@ -227,7 +227,7 @@ module SHAInet
         out_layer = @output_layers.last
         w = GPUMemory.keep_on_gpu(out_layer.weights)
         b = GPUMemory.keep_on_gpu(out_layer.biases)
-        matrix = matrix * w.transpose
+        matrix = safe_output_transform(matrix, w)
         matrix.rows.times do |i|
           matrix.cols.times do |j|
             matrix[i, j] += b[j, 0]
@@ -520,11 +520,6 @@ module SHAInet
 
     def evaluate_sequence_label(input_data : Array(Array(Int32)), label : Int32)
       seq = input_data.map { |x| x.map(&.to_f64) }
-      evaluate_sequence_label(seq, label)
-    end
-
-    def evaluate_sequence_label(input_data : SimpleMatrix, label : Int32)
-      seq = input_data.to_a.map { |row| row.map(&.to_f64) }
       evaluate_sequence_label(seq, label)
     end
 
@@ -1320,6 +1315,26 @@ module SHAInet
       end
       Log.info { "Predicted #{correct} out of #{correct + incorrect} (#{(correct.to_f/(correct + incorrect).to_f)*100}% accuracy)" }
       correct.to_f/(correct + incorrect).to_f
+    end
+
+    # Helper method to safely multiply matrix by weights transpose, handling CUDA issues
+    private def safe_output_transform(matrix : SimpleMatrix, weights : SimpleMatrix) : SimpleMatrix
+      begin
+        w_t = weights.transpose
+        matrix * w_t
+      rescue ex : Exception
+        # Fallback to CPU computation if CUDA transpose fails
+        if matrix.is_a?(CudaMatrix) && weights.is_a?(CudaMatrix)
+          matrix_cpu = SimpleMatrix.new(matrix.rows, matrix.cols)
+          matrix.rows.times { |i| matrix.cols.times { |j| matrix_cpu[i, j] = matrix[i, j] } }
+          w_cpu = SimpleMatrix.new(weights.rows, weights.cols)
+          weights.rows.times { |i| weights.cols.times { |j| w_cpu[i, j] = weights[i, j] } }
+          result = matrix_cpu * w_cpu.transpose
+          GPUMemory.to_gpu(result)
+        else
+          raise ex
+        end
+      end
     end
   end
 end

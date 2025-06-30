@@ -3,14 +3,14 @@ require "../src/shainet"
 # Simple benchmark comparing training with individual sequences vs pre-batched sequences
 
 SAMPLES = 50
-SEQ_LEN = 2
-DIM = 2
+SEQ_LEN =  2
+DIM     =  2
 
 # Generate random data
-random_seq = ->{
+random_seq = -> {
   Array.new(SEQ_LEN) { Array.new(DIM) { rand } }
 }
-random_out = ->{ Array.new(DIM) { rand } }
+random_out = -> { Array.new(DIM) { rand } }
 
 data = Array.new(SAMPLES) { [random_seq.call, random_out.call] }
 

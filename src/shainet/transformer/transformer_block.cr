@@ -25,8 +25,37 @@ module SHAInet
     # processed step-by-step using this batch-first layout.
     def forward(x : SimpleMatrix, pe : SimpleMatrix? = nil, mask : SimpleMatrix? = nil)
       input = if enc = (pe || @positional_encoding)
-                raise "positional encoding size mismatch" unless enc.rows == x.rows && enc.cols == x.cols
-                x + enc
+                # Check dimensions and provide better error message
+                if enc.rows != x.rows || enc.cols != x.cols
+                  # If dimensions don't match, create a truncated or padded version
+                  if enc.cols == x.cols && enc.rows > 0 && x.rows > 0
+                    # Same d_model, different sequence length - use subset of positional encoding
+                    actual_pe = if x.rows <= enc.rows
+                                  # Use first x.rows positions from the positional encoding
+                                  SHAInet::SimpleMatrix.new(x.rows, x.cols).tap do |pe_subset|
+                                    x.rows.times do |i|
+                                      x.cols.times do |j|
+                                        pe_subset[i, j] = enc[i, j]
+                                      end
+                                    end
+                                  end
+                                else
+                                  # Need more positions than available - use what we have and pad with zeros
+                                  SHAInet::SimpleMatrix.new(x.rows, x.cols).tap do |pe_extended|
+                                    x.rows.times do |i|
+                                      x.cols.times do |j|
+                                        pe_extended[i, j] = i < enc.rows ? enc[i, j] : 0.0
+                                      end
+                                    end
+                                  end
+                                end
+                    x + actual_pe
+                  else
+                    raise "positional encoding size mismatch: expected (#{x.rows}, #{x.cols}), got (#{enc.rows}, #{enc.cols})"
+                  end
+                else
+                  x + enc
+                end
               else
                 x
               end
