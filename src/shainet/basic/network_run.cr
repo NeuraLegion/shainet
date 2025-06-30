@@ -45,16 +45,40 @@ module SHAInet
         w = GPUMemory.keep_on_gpu(out_layer.weights)
         b = GPUMemory.keep_on_gpu(out_layer.biases)
         matrix = safe_output_transform(matrix, w)
-        matrix.rows.times do |i|
-          matrix.cols.times do |j|
-            matrix[i, j] += b[j, 0]
-            val = matrix[i, j]
-            act, sig = out_layer.activation_function.call(val)
-            matrix[i, j] = act
-            out_layer.neurons[j].activation = act if i == matrix.rows - 1
-            out_layer.neurons[j].sigma_prime = sig if i == matrix.rows - 1
+
+        # Use GPU-accelerated bias addition when available
+        if matrix.is_a?(CudaMatrix) && b.is_a?(CudaMatrix)
+          matrix.add_bias!(b)
+        else
+          matrix.rows.times do |i|
+            matrix.cols.times do |j|
+              matrix[i, j] += b[j, 0]
+            end
           end
         end
+
+        # Apply activation function - for identity, no operation needed
+        # For other activation functions, we could add GPU-accelerated versions
+        unless out_layer.activation_function == SHAInet.identity
+          matrix.rows.times do |i|
+            matrix.cols.times do |j|
+              val = matrix[i, j]
+              act, sig = out_layer.activation_function.call(val)
+              matrix[i, j] = act
+              if i == matrix.rows - 1
+                out_layer.neurons[j].activation = act
+                out_layer.neurons[j].sigma_prime = sig
+              end
+            end
+          end
+        else
+          # For identity activation, just copy values to neurons
+          matrix.cols.times do |j|
+            out_layer.neurons[j].activation = matrix[matrix.rows - 1, j]
+            out_layer.neurons[j].sigma_prime = 1.0
+          end
+        end
+
         output = matrix.to_a.first
         unless stealth
           Log.info { "Input => #{input}, network output => #{output}" }
@@ -228,18 +252,39 @@ module SHAInet
         w = GPUMemory.keep_on_gpu(out_layer.weights)
         b = GPUMemory.keep_on_gpu(out_layer.biases)
         matrix = safe_output_transform(matrix, w)
-        matrix.rows.times do |i|
-          matrix.cols.times do |j|
-            matrix[i, j] += b[j, 0]
-            val = matrix[i, j]
-            act, sig = out_layer.activation_function.call(val)
-            matrix[i, j] = act
-            if i == matrix.rows - 1
-              out_layer.neurons[j].activation = act
-              out_layer.neurons[j].sigma_prime = sig
+
+        # Use GPU-accelerated bias addition when available
+        if matrix.is_a?(CudaMatrix) && b.is_a?(CudaMatrix)
+          matrix.add_bias!(b)
+        else
+          matrix.rows.times do |i|
+            matrix.cols.times do |j|
+              matrix[i, j] += b[j, 0]
             end
           end
         end
+
+        # Apply activation function - for identity, no operation needed
+        unless out_layer.activation_function == SHAInet.identity
+          matrix.rows.times do |i|
+            matrix.cols.times do |j|
+              val = matrix[i, j]
+              act, sig = out_layer.activation_function.call(val)
+              matrix[i, j] = act
+              if i == matrix.rows - 1
+                out_layer.neurons[j].activation = act
+                out_layer.neurons[j].sigma_prime = sig
+              end
+            end
+          end
+        else
+          # For identity activation, just copy values to neurons
+          matrix.cols.times do |j|
+            out_layer.neurons[j].activation = matrix[matrix.rows - 1, j]
+            out_layer.neurons[j].sigma_prime = 1.0
+          end
+        end
+
         matrix.to_a
       elsif @hidden_layers.none? { |l| l.is_a?(RecurrentLayer) || l.is_a?(LSTMLayer) }
         matrix = GPUMemory.to_gpu(SimpleMatrix.from_a(processed))
