@@ -114,8 +114,15 @@ Run the benchmark script to compare CPU and GPU performance:
 crystal run benchmarks/matrix_benchmark.cr --release
 ```
 
+You can also run a small transformer training benchmark:
+
+```bash
+make benchmark
+```
+
 It prints timings for matrix multiplication and ReLU. When the GPU libraries are
-loaded you should see lower numbers for the GPU path.
+loaded you should see lower numbers for the GPU path. The transformer benchmark
+reports time per epoch and estimated GPU memory usage.
 
 ## Usage
 
