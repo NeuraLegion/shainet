@@ -24,6 +24,7 @@ text = File.read(path)
 puts "Dataset loaded, size: #{text.size} characters."
 
 puts "Using the GPU? #{SHAInet::CUDA.available? ? "Yes" : "No"}"
+puts "Kernels available? #{SHAInet::CUDA.kernels_available? ? "Yes" : "No"}"
 puts "Training the tokenizer on the dataset..."
 # Train tokenizer and encode text
 vocab_size = 10_000
