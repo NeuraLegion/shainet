@@ -286,5 +286,23 @@ module SHAInet
       destroy_handle(handle)
       free(ones_dev.as(Pointer(Void)))
     end
+
+    # Count token pairs using a custom CUDA kernel when available.
+    @@count_pairs_proc : Proc(Pointer(Int32), Pointer(Int32), Pointer(Int32), Pointer(Int32), Int32, Int32, Void)? = nil
+
+    def count_token_pairs(counts : Pointer(Int32), a : Pointer(Int32), b : Pointer(Int32), freqs : Pointer(Int32), pair_count : Int32, vocab : Int32)
+      unless fn = @@count_pairs_proc
+        handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        unless handle.null?
+          sym = LibC.dlsym(handle, "count_token_pairs")
+          unless sym.null?
+            @@count_pairs_proc = Proc(Pointer(Int32), Pointer(Int32), Pointer(Int32), Pointer(Int32), Int32, Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@count_pairs_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(counts, a, b, freqs, pair_count, vocab)
+    end
   end
 end
