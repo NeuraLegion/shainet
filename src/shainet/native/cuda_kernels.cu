@@ -85,4 +85,12 @@ __global__ void set_cols(double* out, const double* in, int rows, int dst_cols, 
     out[row * dst_cols + start + col] = in[row * len + col];
 }
 
+__global__ void count_token_pairs(const int* a, const int* b, const int* freq,
+                                  int pair_count, int vocab_size, int* counts){
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx >= pair_count) return;
+    int offset = a[idx] * vocab_size + b[idx];
+    atomicAdd(&counts[offset], freq[idx]);
+}
+
 } // extern "C"

@@ -45,17 +45,62 @@ module SHAInet
           Log.debug { "Progress: #{(@vocab.size.to_f / vocab_size * 100.0).round(2)}%" }
         end
         pair_counts = Hash(Tuple(Int32, Int32), Int32).new(0)
-        corpus.each_with_index do |tokens, idx|
-          freq = freqs[idx]
-          (0...(tokens.size - 1)).each do |i|
-            t1 = tokens[i]
-            t2 = tokens[i + 1]
-            id1 = @vocab[t1]?
-            id2 = @vocab[t2]?
-            if id1 && id2
-              pair_counts[{id1, id2}] += freq
+        if CUDA.available? && CUDA.kernels_available?
+          begin
+            pairs_a = [] of Int32
+            pairs_b = [] of Int32
+            weights = [] of Int32
+            corpus.each_with_index do |tokens, idx|
+              freq = freqs[idx]
+              (0...(tokens.size - 1)).each do |i|
+                if id1 = @vocab[tokens[i]]?
+                  if id2 = @vocab[tokens[i + 1]]?
+                    pairs_a << id1
+                    pairs_b << id2
+                    weights << freq
+                  end
+                end
+              end
             end
+            if !pairs_a.empty?
+              vocab_n = @vocab.size
+              counts = Array(Int32).new(vocab_n*vocab_n, 0)
+              counts_dev = Pointer(Int32).null
+              a_dev = Pointer(Int32).null
+              b_dev = Pointer(Int32).null
+              f_dev = Pointer(Int32).null
+              bytes_counts = (counts.size * 4).to_u64
+              bytes_pairs = (pairs_a.size * 4).to_u64
+              CUDA.malloc(pointerof(counts_dev).as(Pointer(Pointer(Void))), bytes_counts)
+              CUDA.malloc(pointerof(a_dev).as(Pointer(Pointer(Void))), bytes_pairs)
+              CUDA.malloc(pointerof(b_dev).as(Pointer(Pointer(Void))), bytes_pairs)
+              CUDA.malloc(pointerof(f_dev).as(Pointer(Pointer(Void))), bytes_pairs)
+              CUDA.memcpy(a_dev.as(Pointer(Void)), pairs_a.to_unsafe.as(Pointer(Void)), bytes_pairs, CUDA::MemcpyKind::HostToDevice)
+              CUDA.memcpy(b_dev.as(Pointer(Void)), pairs_b.to_unsafe.as(Pointer(Void)), bytes_pairs, CUDA::MemcpyKind::HostToDevice)
+              CUDA.memcpy(f_dev.as(Pointer(Void)), weights.to_unsafe.as(Pointer(Void)), bytes_pairs, CUDA::MemcpyKind::HostToDevice)
+              CUDA.memcpy(counts_dev.as(Pointer(Void)), counts.to_unsafe.as(Pointer(Void)), bytes_counts, CUDA::MemcpyKind::HostToDevice)
+              begin
+                CUDA.count_token_pairs(counts_dev, a_dev, b_dev, f_dev, pairs_a.size, vocab_n)
+                CUDA.memcpy(counts.to_unsafe.as(Pointer(Void)), counts_dev.as(Pointer(Void)), bytes_counts, CUDA::MemcpyKind::DeviceToHost)
+                counts.each_with_index do |cnt, idx|
+                  next if cnt == 0
+                  id1 = idx // vocab_n
+                  id2 = idx % vocab_n
+                  pair_counts[{id1, id2}] = cnt
+                end
+              rescue
+                pair_counts = cpu_pair_counts(corpus, freqs)
+              end
+              CUDA.free(a_dev.as(Pointer(Void)))
+              CUDA.free(b_dev.as(Pointer(Void)))
+              CUDA.free(f_dev.as(Pointer(Void)))
+              CUDA.free(counts_dev.as(Pointer(Void)))
+            end
+          rescue
+            pair_counts = cpu_pair_counts(corpus, freqs)
           end
+        else
+          pair_counts = cpu_pair_counts(corpus, freqs)
         end
         break if pair_counts.empty?
         heap = PairHeap.new
@@ -183,6 +228,21 @@ module SHAInet
           i += 1
         end
       end
+    end
+
+    private def cpu_pair_counts(corpus, freqs)
+      pc = Hash(Tuple(Int32, Int32), Int32).new(0)
+      corpus.each_with_index do |tokens, idx|
+        freq = freqs[idx]
+        (0...(tokens.size - 1)).each do |i|
+          if id1 = @vocab[tokens[i]]?
+            if id2 = @vocab[tokens[i + 1]]?
+              pc[{id1, id2}] += freq
+            end
+          end
+        end
+      end
+      pc
     end
 
     private def add_token(token : String) : Int32
