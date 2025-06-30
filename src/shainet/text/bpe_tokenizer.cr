@@ -28,8 +28,8 @@ module SHAInet
       word_freqs = Hash(String, Int32).new(0)
       text.split(/\s+/).each { |w| word_freqs[w] += 1 }
 
-      corpus = [] of Array(String)
-      freqs = [] of Int32
+      corpus = Array(Array(String)).new(word_freqs.size)
+      freqs = Array(Int32).new(word_freqs.size)
       word_freqs.each do |word, count|
         tokens = word.chars.map(&.to_s) + ["</w>"]
         corpus << tokens
@@ -94,8 +94,9 @@ module SHAInet
     # Encode a string into token IDs. Unknown tokens are added to the
     # vocabulary using a greedy BPE merging strategy.
     def encode(text : String) : Array(Int32)
-      ids = [] of Int32
-      text.split(/\s+/).each do |word|
+      words = text.split(/\s+/)
+      ids = Array(Int32).new(words.size)
+      words.each do |word|
         tokens = encode_tokens(word)
         tokens.each { |t| ids << add_token(t) }
       end
@@ -108,10 +109,18 @@ module SHAInet
 
       pairs = get_pairs(tokens)
       while !pairs.empty?
-        ranked_pairs = pairs.select { |p| @merges_rank.has_key?(p) }
-        break if ranked_pairs.empty?
-        best = ranked_pairs.min_by { |p| @merges_rank[p] }
-        merge_tokens!(tokens, best)
+        best_pair = nil
+        best_rank = Int32::MAX
+        pairs.each do |p|
+          if rank = @merges_rank[p]?
+            if rank < best_rank
+              best_rank = rank
+              best_pair = p
+            end
+          end
+        end
+        break unless best_pair
+        merge_tokens!(tokens, best_pair)
         break if tokens.size <= 1
         pairs = get_pairs(tokens)
       end
@@ -119,8 +128,8 @@ module SHAInet
       tokens
     end
 
-    private def get_pairs(tokens : Array(String)) : Set(Tuple(String, String))
-      pairs = Set(Tuple(String, String)).new
+    private def get_pairs(tokens : Array(String)) : Array(Tuple(String, String))
+      pairs = Array(Tuple(String, String)).new(tokens.size - 1)
       (0...tokens.size - 1).each do |i|
         pairs << {tokens[i], tokens[i + 1]}
       end
@@ -129,19 +138,20 @@ module SHAInet
 
     # Decode an array of token IDs back into a string.
     def decode(ids : Array(Int32)) : String
-      words = [] of String
-      current = ""
-      ids.each do |id|
-        token = @inv_vocab[id]? || ""
-        if token.ends_with?("</w>")
-          current += token.chomp("</w>")
-          words << current
-          current = ""
-        else
-          current += token
+      String.build do |io|
+        current = String::Builder.new
+        ids.each do |id|
+          token = @inv_vocab[id]? || ""
+          if token.ends_with?("</w>")
+            current << token[0, token.size - 4]
+            io << current.to_s
+            io << ' '
+            current = String::Builder.new
+          else
+            current << token
+          end
         end
-      end
-      words.join(" ")
+      end.rstrip
     end
 
     private def merge_tokens!(tokens : Array(String), pair : Tuple(String, String))
