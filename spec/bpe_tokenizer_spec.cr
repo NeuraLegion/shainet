@@ -7,4 +7,12 @@ describe SHAInet::BPETokenizer do
     encoded = tokenizer.encode("hello world")
     tokenizer.decode(encoded).should eq("hello world")
   end
+
+  it "merges tokens correctly on long sequences" do
+    tokenizer = SHAInet::BPETokenizer.new
+    long_word = "ab" * 50
+    tokenizer.train(long_word, 100)
+    ids = tokenizer.encode(long_word)
+    tokenizer.decode(ids).should eq(long_word)
+  end
 end

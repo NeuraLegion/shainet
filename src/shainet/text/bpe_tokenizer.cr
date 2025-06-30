@@ -74,10 +74,17 @@ module SHAInet
         end
         corpus.each do |tokens|
           i = 0
-          while i < tokens.size - 1
+          size = tokens.size
+          while i < size - 1
             if tokens[i] == token_a && tokens[i + 1] == token_b
               tokens[i] = new_token
-              tokens.delete_at(i + 1)
+              j = i + 1
+              while j < size - 1
+                tokens[j] = tokens[j + 1]
+                j += 1
+              end
+              tokens.pop
+              size -= 1
             else
               i += 1
             end
@@ -161,10 +168,17 @@ module SHAInet
         io << pair[1]
       end
       i = 0
-      while i < tokens.size - 1
+      size = tokens.size
+      while i < size - 1
         if tokens[i] == pair[0] && tokens[i + 1] == pair[1]
           tokens[i] = new_token
-          tokens.delete_at(i + 1)
+          j = i + 1
+          while j < size - 1
+            tokens[j] = tokens[j + 1]
+            j += 1
+          end
+          tokens.pop
+          size -= 1
         else
           i += 1
         end
