@@ -46,38 +46,8 @@ module SHAInet
         b = GPUMemory.keep_on_gpu(out_layer.biases)
         matrix = safe_output_transform(matrix, w)
 
-        # Use GPU-accelerated bias addition when available
-        if matrix.is_a?(CudaMatrix) && b.is_a?(CudaMatrix)
-          matrix.add_bias!(b)
-        else
-          matrix.rows.times do |i|
-            matrix.cols.times do |j|
-              matrix[i, j] += b[j, 0]
-            end
-          end
-        end
-
-        # Apply activation function - for identity, no operation needed
-        # For other activation functions, we could add GPU-accelerated versions
-        unless out_layer.activation_function == SHAInet.identity
-          matrix.rows.times do |i|
-            matrix.cols.times do |j|
-              val = matrix[i, j]
-              act, sig = out_layer.activation_function.call(val)
-              matrix[i, j] = act
-              if i == matrix.rows - 1
-                out_layer.neurons[j].activation = act
-                out_layer.neurons[j].sigma_prime = sig
-              end
-            end
-          end
-        else
-          # For identity activation, just copy values to neurons
-          matrix.cols.times do |j|
-            out_layer.neurons[j].activation = matrix[matrix.rows - 1, j]
-            out_layer.neurons[j].sigma_prime = 1.0
-          end
-        end
+        # Delegate output computation to the matrix-based layer implementation
+        matrix = out_layer.forward_matrix(matrix)
 
         output = matrix.to_a.first
         unless stealth

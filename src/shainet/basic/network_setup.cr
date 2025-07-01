@@ -52,6 +52,7 @@ module SHAInet
       @recurrent_layers = Array(RecurrentLayer).new
       @lstm_layers = Array(LSTMLayer).new
       @transformer_layers = Array(TransformerLayer).new
+      @layers = [] of MatrixLayer
       @all_neurons = Array(Neuron).new   # Array of all current neurons in the network
       @all_synapses = Array(Synapse).new # Array of all current synapses in the network
       @error_signal = Array(Float64).new # Array of errors for each neuron in the output layers, based on specific input
@@ -106,16 +107,7 @@ module SHAInet
               else
                 Layer.new(n_type.to_s, l_size, activation_function)
               end
-      unless layer.is_a?(TransformerLayer)
-        layer.neurons.each do |neuron|
-          @all_neurons << neuron # To easily access neurons later
-        end
-      end
-      if layer.is_a?(RecurrentLayer) || layer.is_a?(LSTMLayer)
-        layer.neurons.each do |neuron|
-          neuron.synapses_in.each { |s| @all_synapses << s }
-        end
-      end
+      # Neuron and synapse bookkeeping removed in favor of matrix-based layers
 
       case l_type.to_s
       when "input"
@@ -182,28 +174,13 @@ module SHAInet
       case connection_type.to_s
       # Connect each neuron from source layer to all neurons in destination layer
       when "full"
-        # Resize the weights matrix based on the connecting layer
+        # Matrix-based layers handle weight initialization internally
         mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
         if src_layer.is_a?(TransformerLayer)
           dest_layer.weights = mat_klass.new(dest_layer.size, src_layer.size).random_fill!
           dest_layer.biases = mat_klass.new(dest_layer.size, 1).random_fill!
         else
           dest_layer.weights = mat_klass.new(dest_layer.size, src_layer.size, 0.0)
-        end
-
-        src_layer.neurons.each_with_index do |src_neuron, src_i|
-          dest_layer.neurons.each_with_index do |dest_neuron, dest_i|
-            synapse = Synapse.new(src_neuron, dest_neuron)
-            src_neuron.synapses_out << synapse
-            dest_neuron.synapses_in << synapse
-            @all_synapses << synapse
-
-            dest_layer.weights[dest_i, src_i] = synapse.weight
-
-            # weights_vector << pointerof(synapse.weight)
-            # prev_weights_vector << pointerof(synapse.prev_weight)
-            # w_grad_vector << pointerof(synapse.gradient)
-          end
         end
         # Connect each neuron from source layer to neuron with
         # corresponding index in destination layer
@@ -234,7 +211,7 @@ module SHAInet
           end
         end
       end
-      @all_synapses.uniq!
+      # Synapse tracking removed
     rescue e : Exception
       raise NeuralNetRunError.new("Error in connect_ltl: #{e}")
     end
