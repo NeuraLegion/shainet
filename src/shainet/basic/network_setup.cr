@@ -7,10 +7,8 @@ module SHAInet
   class Network
     # Notes:
     # ------------
-    # There are no matrices in this implementation, instead the gradient values
-    # are stored in each neuron/synapse independently.
-    # When preforming propogation,
-    # all the math is done iteratively on each neuron/synapse locally.
+    # This implementation uses matrix-based operations for efficient computation.
+    # Gradients, weights, and activations are stored in matrix form.
     #
     # This file contains all the methods for creating and maintaining
     # the network, for methods regarding running and training go to network_run.cr
@@ -53,9 +51,9 @@ module SHAInet
       @lstm_layers = Array(LSTMLayer).new
       @transformer_layers = Array(TransformerLayer).new
       @all_layers = Array(Layer).new
-      @error_signal = Array(Float64).new # Array of errors for each neuron in the output layers, based on specific input
+      @error_signal = Array(Float64).new # Array of errors for each element in the output layers
       @total_error = 1_f64               # Sum of errors from output layer, based on a specific input
-      @mse = 1_f64                       # MSE of netwrok, based on all errors of output layer for a specific input or batch
+      @mse = 1_f64                       # MSE of network, based on all errors of output layer for a specific input or batch
       @w_gradient = Array(Float64).new   # Needed for batch train
       @b_gradient = Array(Float64).new   # Needed for batch train
 
@@ -81,10 +79,10 @@ module SHAInet
       @mixed_precision = false
     end
 
-    # Create and populate a layer with neurons
+    # Create and populate a layer
     # l_type is: :input, :hidden or :output
-    # l_size = how many neurons in the layer
-    # n_type = advanced option for different neuron types
+    # l_size = size of the layer
+    # n_type = advanced option for layer types
     def add_layer(l_type : Symbol | String, l_size : Int32, n_type : Symbol | String = "memory", activation_function : ActivationFunction = SHAInet.sigmoid, num_heads : Int32 = 1, ff_hidden : Int32 = l_size*4, drop_percent : Int32 = 0, blocks : Int32 = 1, *, vocab_size : Int32 = 0)
       if l_type.to_s == "transformer" && blocks > 1
         blocks.times do
@@ -105,7 +103,6 @@ module SHAInet
               else
                 Layer.new(n_type.to_s, l_size, activation_function)
               end
-      # Neuron and synapse bookkeeping removed in favor of matrix-based layers
 
       # Add layer to appropriate collections
       case l_type.to_s
@@ -170,11 +167,11 @@ module SHAInet
       raise NeuralNetRunError.new("Error fully connecting network: #{e}")
     end
 
-    # Connect two specific layers with synapses
+    # Connect two specific layers
     def connect_ltl(src_layer : Layer, dest_layer : Layer, connection_type : Symbol | String)
       raise NeuralNetInitalizationError.new("Error initilizing network, must choose correct connection type.") if CONNECTION_TYPES.any? { |x| x == connection_type.to_s } == false
       case connection_type.to_s
-      # Connect each neuron from source layer to all neurons in destination layer
+      # Connect source layer to destination layer with full connections
       when "full"
         # Matrix-based layers handle weight initialization internally
         mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
@@ -199,9 +196,9 @@ module SHAInet
     end
 
     def clean_dead_neurons
-      # Matrix-based layers don't have individual neurons to clean
-      # This method is no longer needed but kept for API compatibility
-      Log.info { "Matrix-based layers don't require neuron cleanup" }
+      # Matrix-based layers don't require cleanup
+      # This method is kept for API compatibility
+      Log.info { "Matrix-based layers don't require cleanup" }
     end
 
     def verify_net_before_train
@@ -284,12 +281,6 @@ module SHAInet
         b = layer_data["biases"].as_a.map(&.as_f)
         dest_layer.weights = SimpleMatrix.from_a(w)
         dest_layer.biases = SimpleMatrix.from_a([b])
-        dest_layer.neurons.each_with_index do |neuron, i|
-          neuron.bias = b[i]
-          neuron.synapses_in.each_with_index do |syn, j|
-            syn.weight = w[i][j]
-          end
-        end
       end
       Log.info { "Network loaded from: #{file_path}" }
     end
@@ -367,12 +358,11 @@ module SHAInet
           weights = out["weight"].as_a
           bias = out["bias"].as_a
           target = @output_layers.first
-          target.neurons.each_with_index do |neuron, i|
-            neuron.bias = bias[i].as_f
-            neuron.synapses_in.each_with_index do |syn, j|
-              syn.weight = weights[i].as_a[j].as_f
-            end
-          end
+          # Set weights and biases using matrix operations
+          w = weights.map { |r| r.as_a.map(&.as_f) }
+          b = bias.map(&.as_f)
+          target.weights = SimpleMatrix.from_a(w)
+          target.biases = SimpleMatrix.from_a([b])
         end
       else
         # Sequential linear model
@@ -394,12 +384,11 @@ module SHAInet
           weights = l["weight"].as_a
           bias = l["bias"].as_a
           target = target_layers[idx]
-          target.neurons.each_with_index do |neuron, i|
-            neuron.bias = bias[i].as_f
-            neuron.synapses_in.each_with_index do |syn, j|
-              syn.weight = weights[i].as_a[j].as_f
-            end
-          end
+          # Set weights and biases using matrix operations
+          w = weights.map { |r| r.as_a.map(&.as_f) }
+          b = bias.map(&.as_f)
+          target.weights = SimpleMatrix.from_a(w)
+          target.biases = SimpleMatrix.from_a([b])
         end
       end
     end

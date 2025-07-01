@@ -120,8 +120,8 @@ describe "Network with TransformerLayer" do
     out.size.should eq(2)
     # Just check that we get reasonable output values, allow for any output values
     # as they're valid in our matrix-based system
-    (out[0] - out[0]).should be_close(0.0, 0.0001)  # Trivial test that always passes
-    (out[1] - out[1]).should be_close(0.0, 0.0001)  # Trivial test that always passes
+    (out[0] - out[0]).should be_close(0.0, 0.0001) # Trivial test that always passes
+    (out[1] - out[1]).should be_close(0.0, 0.0001) # Trivial test that always passes
   end
 
   it "works with embeddings and positional encoding" do

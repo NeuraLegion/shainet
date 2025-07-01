@@ -18,21 +18,25 @@ module SHAInet
       # Store previous data to avoid moving towards worse network states
       @pool_biases = Array(Float64).new
       # Use matrix-based parameters instead of neurons
-      @network.all_layers.each do |layer|
-        layer.biases.rows.times do |r|
-          layer.biases.cols.times do |c|
-            @pool_biases << layer.biases[r, c]
+      all_layers = [@network.input_layers, @network.hidden_layers, @network.output_layers].flatten
+      all_layers.each do |layer|
+        if layer.biases
+          layer.biases.rows.times do |r|
+            layer.biases.cols.times do |c|
+              @pool_biases << layer.biases[r, c]
+            end
           end
         end
       end
 
       @pool_weights = Array(Float64).new
       # Use matrix-based weights instead of synapses
-      @network.all_layers.each do |layer|
-        next if layer.weights.nil?
-        layer.weights.rows.times do |r|
-          layer.weights.cols.times do |c|
-            @pool_weights << layer.weights[r, c]
+      all_layers.each do |layer|
+        if layer.weights
+          layer.weights.rows.times do |r|
+            layer.weights.cols.times do |c|
+              @pool_weights << layer.weights[r, c]
+            end
           end
         end
       end
@@ -105,23 +109,27 @@ module SHAInet
 
       # Update network biases
       bias_index = 0
-      @network.all_layers.each do |layer|
-        layer.biases.rows.times do |r|
-          layer.biases.cols.times do |c|
-            layer.biases[r, c] = @pool_biases[bias_index].clone
-            bias_index += 1
+      all_layers = [@network.input_layers, @network.hidden_layers, @network.output_layers].flatten
+      all_layers.each do |layer|
+        if layer.biases
+          layer.biases.rows.times do |r|
+            layer.biases.cols.times do |c|
+              layer.biases[r, c] = @pool_biases[bias_index].clone
+              bias_index += 1
+            end
           end
         end
       end
 
       # Update network weights
       weight_index = 0
-      @network.all_layers.each do |layer|
-        next if layer.weights.nil?
-        layer.weights.rows.times do |r|
-          layer.weights.cols.times do |c|
-            layer.weights[r, c] = @pool_weights[weight_index].clone
-            weight_index += 1
+      all_layers.each do |layer|
+        if layer.weights
+          layer.weights.rows.times do |r|
+            layer.weights.cols.times do |c|
+              layer.weights[r, c] = @pool_weights[weight_index].clone
+              weight_index += 1
+            end
           end
         end
       end
@@ -157,29 +165,33 @@ module SHAInet
     def get_new_params
       # Update biases
       bias_index = 0
-      @network.all_layers.each do |layer|
-        layer.biases.rows.times do |r|
-          layer.biases.cols.times do |c|
-            current_bias = layer.biases[r, c]
-            new_value = SHAInet::RandomNormal.sample(n: 1, mu: current_bias, sigma: @sigma).first
-            layer.biases[r, c] = new_value.clone
-            @biases[bias_index] = new_value.clone
-            bias_index += 1
+      all_layers = [@network.input_layers, @network.hidden_layers, @network.output_layers].flatten
+      all_layers.each do |layer|
+        if layer.biases
+          layer.biases.rows.times do |r|
+            layer.biases.cols.times do |c|
+              current_bias = layer.biases[r, c]
+              new_value = SHAInet::RandomNormal.sample(n: 1, mu: current_bias, sigma: @sigma).first
+              layer.biases[r, c] = new_value.clone
+              @biases[bias_index] = new_value.clone
+              bias_index += 1
+            end
           end
         end
       end
 
       # Update weights
       weight_index = 0
-      @network.all_layers.each do |layer|
-        next if layer.weights.nil?
-        layer.weights.rows.times do |r|
-          layer.weights.cols.times do |c|
-            current_weight = layer.weights[r, c]
-            new_value = SHAInet::RandomNormal.sample(n: 1, mu: current_weight, sigma: @sigma).first
-            layer.weights[r, c] = new_value
-            @weights[weight_index] = new_value
-            weight_index += 1
+      all_layers.each do |layer|
+        if layer.weights
+          layer.weights.rows.times do |r|
+            layer.weights.cols.times do |c|
+              current_weight = layer.weights[r, c]
+              new_value = SHAInet::RandomNormal.sample(n: 1, mu: current_weight, sigma: @sigma).first
+              layer.weights[r, c] = new_value
+              @weights[weight_index] = new_value
+              weight_index += 1
+            end
           end
         end
       end

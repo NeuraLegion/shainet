@@ -2,7 +2,6 @@ require "./spec_helper"
 require "csv"
 
 describe SHAInet::Network do
-
   it "Initialize" do
     puts "\n"
     nn = SHAInet::Network.new

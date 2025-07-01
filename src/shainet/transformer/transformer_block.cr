@@ -32,24 +32,24 @@ module SHAInet
 
                 # Create a position encoding matrix that matches the input sequence length
                 actual_pe = if x.rows <= enc.rows
-                  # Use first x.rows positions from the positional encoding
-                  SHAInet::SimpleMatrix.new(x.rows, x.cols).tap do |pe_subset|
-                    x.rows.times do |i|
-                      x.cols.times do |j|
-                        pe_subset[i, j] = enc[i, j]
-                      end
-                    end
-                  end
-                else
-                  # Need more positions than available - use what we have and pad with zeros
-                  SHAInet::SimpleMatrix.new(x.rows, x.cols).tap do |pe_extended|
-                    x.rows.times do |i|
-                      x.cols.times do |j|
-                        pe_extended[i, j] = i < enc.rows ? enc[i, j] : 0.0
-                      end
-                    end
-                  end
-                end
+                              # Use first x.rows positions from the positional encoding
+                              SHAInet::SimpleMatrix.new(x.rows, x.cols).tap do |pe_subset|
+                                x.rows.times do |i|
+                                  x.cols.times do |j|
+                                    pe_subset[i, j] = enc[i, j]
+                                  end
+                                end
+                              end
+                            else
+                              # Need more positions than available - use what we have and pad with zeros
+                              SHAInet::SimpleMatrix.new(x.rows, x.cols).tap do |pe_extended|
+                                x.rows.times do |i|
+                                  x.cols.times do |j|
+                                    pe_extended[i, j] = i < enc.rows ? enc[i, j] : 0.0
+                                  end
+                                end
+                              end
+                            end
                 x + actual_pe
               else
                 x
@@ -87,7 +87,6 @@ module SHAInet
       @norm1.zero_gradients
       @norm2.zero_gradients
     end
-
   end
 
   alias TransformerLayer = TransformerBlock

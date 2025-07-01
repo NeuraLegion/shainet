@@ -132,10 +132,10 @@ describe "Transformer Integration" do
       # Check that the output structure is sensible
       # Either a 2D array of sequences or 1D array of scores
       if output.is_a?(Array(Array(Float64)))
-        output.size.should eq(seq_len)      # One output per input token
+        output.size.should eq(seq_len)           # One output per input token
         output.first.size.should eq(token_count) # Each output has vocab size dimension
       elsif output.is_a?(Array(Float64))
-        output.size.should eq(token_count)   # Simple output has vocab size dimension
+        output.size.should eq(token_count) # Simple output has vocab size dimension
       end
     end
   end
@@ -234,7 +234,7 @@ describe "Transformer Integration" do
       # So we change the test to verify it works (no exception) rather than expecting an exception
       begin
         tokenizer.train("", 10)
-        true.should be_true  # Test passes if we reach here
+        true.should be_true # Test passes if we reach here
       rescue ex : Exception
         # If it still fails, that's acceptable too as long as it's a controlled failure
         ex.message.to_s.should contain("empty")
