@@ -8,7 +8,6 @@ describe SHAInet::BPETokenizer do
     tokenizer.decode(encoded).should eq("hello world")
   end
 
-
   it "trains using CUDA pair counting when available" do
     pending! "CUDA not available" unless SHAInet::CUDA.available?
     tokenizer = SHAInet::BPETokenizer.new

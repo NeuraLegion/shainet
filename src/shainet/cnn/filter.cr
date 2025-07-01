@@ -3,7 +3,6 @@ require "log"
 module SHAInet
   class Filter
     getter input_surface : Array(Int32), window_size : Int32, stride : Int32, padding : Int32, activation_function : ActivationFunction
-    property neurons : Array(Array(Neuron)), synapses : Array(Array(Array(CnnSynapse)))
     property bias : Float64, prev_bias : Float64, bias_grad : Float64, bias_grad_sum : Float64, bias_grad_batch : Float64
     property prev_bias_grad : Float64, prev_delta : Float64, prev_delta_b : Float64
     property m_current : Float64, v_current : Float64, m_prev : Float64, v_prev : Float64
@@ -13,21 +12,6 @@ module SHAInet
                    @window_size : Int32 = 1,
                    @stride : Int32 = 1,
                    @activation_function : ActivationFunction = SHAInet.none)
-      #
-      @neurons = Array(Array(Neuron)).new(input_surface[1]) {
-        Array(Neuron).new(input_surface[0]) { Neuron.new("memory") }
-      }
-
-      @synapses = Array(Array(Array(CnnSynapse))).new(input_surface[2]) {
-        Array(Array(CnnSynapse)).new(@window_size) {
-          Array(CnnSynapse).new(@window_size) { CnnSynapse.new }
-        }
-      }
-
-      @blank_neuron = Neuron.new("memory") # This is needed for padding
-      @blank_neuron.activation = 0.0
-      @blank_neuron.gradient = 0.0
-
       @bias = rand(-0.1..0.1).to_f64
       @prev_bias = rand(-0.1..0.1).to_f64 # Needed for delta rule improvement using momentum
       @bias_grad = Float64.new(0)

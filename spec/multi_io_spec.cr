@@ -12,7 +12,6 @@ describe "multi input/output" do
     # add a second output layer manually
     extra = SHAInet::Layer.new("memory", 1)
     net.output_layers << extra
-    net.all_neurons.concat(extra.neurons)
     net.connect_ltl(net.hidden_layers.last, extra, :full)
 
     net.randomize_all_weights

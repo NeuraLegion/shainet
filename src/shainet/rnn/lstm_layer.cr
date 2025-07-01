@@ -4,7 +4,6 @@ module SHAInet
     property drop_percent : Int32
     property hidden_state : Array(Float64)
     property cell_state : Array(Float64)
-    property recurrent_synapses : Array(Array(Synapse))
     property input_bias : Array(Float64)
     property forget_bias : Array(Float64)
     property output_bias : Array(Float64)
@@ -26,7 +25,6 @@ module SHAInet
       @drop_percent = drop_percent
       @hidden_state = Array(Float64).new(l_size, 0.0)
       @cell_state = Array(Float64).new(l_size, 0.0)
-      @recurrent_synapses = Array(Array(Synapse)).new(l_size) { Array(Synapse).new }
       @input_bias = Array(Float64).new(l_size) { rand(-0.1_f64..0.1_f64) }
       @forget_bias = Array(Float64).new(l_size) { rand(-0.1_f64..0.1_f64) }
       @output_bias = Array(Float64).new(l_size) { rand(-0.1_f64..0.1_f64) }
@@ -39,27 +37,17 @@ module SHAInet
       @input_b_grad = Array(Float64).new(l_size, 0.0)
       @forget_b_grad = Array(Float64).new(l_size, 0.0)
       @output_b_grad = Array(Float64).new(l_size, 0.0)
-
-      @neurons.each_with_index do |dest_neuron, i|
-        @neurons.each_with_index do |src_neuron, j|
-          syn = Synapse.new(src_neuron, dest_neuron)
-          src_neuron.synapses_out << syn
-          dest_neuron.synapses_in << syn
-          @recurrent_synapses[i] << syn
-        end
-      end
     end
 
     def setup_gate_params
       return if @gate_setup
-      @neurons.each_with_index do |neuron, i|
-        syn_count = neuron.synapses_in.size
-        @input_weights[i] = Array(Float64).new(syn_count) { rand(-0.1_f64..0.1_f64) }
-        @forget_weights[i] = Array(Float64).new(syn_count) { rand(-0.1_f64..0.1_f64) }
-        @output_weights[i] = Array(Float64).new(syn_count) { rand(-0.1_f64..0.1_f64) }
-        @input_w_grad[i] = Array(Float64).new(syn_count, 0.0)
-        @forget_w_grad[i] = Array(Float64).new(syn_count, 0.0)
-        @output_w_grad[i] = Array(Float64).new(syn_count, 0.0)
+      size.times do |i|
+        @input_weights[i] = Array(Float64).new(size) { rand(-0.1_f64..0.1_f64) }
+        @forget_weights[i] = Array(Float64).new(size) { rand(-0.1_f64..0.1_f64) }
+        @output_weights[i] = Array(Float64).new(size) { rand(-0.1_f64..0.1_f64) }
+        @input_w_grad[i] = Array(Float64).new(size, 0.0)
+        @forget_w_grad[i] = Array(Float64).new(size, 0.0)
+        @output_w_grad[i] = Array(Float64).new(size, 0.0)
       end
       @gate_setup = true
     end
@@ -73,17 +61,25 @@ module SHAInet
       @output_b_grad.map! { 0.0 }
     end
 
+    # No neurons array in matrix-based implementation
+
     def accumulate_gate_gradients
-      @neurons.each_with_index do |neuron, i|
-        neuron.synapses_in.each_with_index do |syn, j|
-          grad = syn.source_neuron.activation * neuron.gradient
+      # Matrix-based implementation of gradient accumulation
+      @l_size.times do |i|
+        act_grad = @activations[0, i] * @sigma_primes[0, i]
+
+        # Use matrix operations instead of iterating over synapses
+        @input_weights[i].size.times do |j|
+          input_val = (j < @input_sums.cols) ? @input_sums[0, j] : 0.0
+          grad = input_val * act_grad
           @input_w_grad[i][j] += grad
           @forget_w_grad[i][j] += grad
           @output_w_grad[i][j] += grad
         end
-        @input_b_grad[i] += neuron.gradient
-        @forget_b_grad[i] += neuron.gradient
-        @output_b_grad[i] += neuron.gradient
+
+        @input_b_grad[i] += act_grad
+        @forget_b_grad[i] += act_grad
+        @output_b_grad[i] += act_grad
       end
     end
 
@@ -105,7 +101,6 @@ module SHAInet
     def reset_state
       @hidden_state.map! { 0.0 }
       @cell_state.map! { 0.0 }
-      @neurons.each { |n| n.activation = 0.0 }
     end
 
     def activate_step
@@ -114,70 +109,34 @@ module SHAInet
 
       use_cuda = CUDA.available?
 
-      @neurons.each_with_index do |neuron, i|
-        if use_cuda
-          inputs = [] of Float64
-          syn_w = [] of Float64
-          neuron.synapses_in.each_with_index do |syn, j|
-            val = if @recurrent_synapses[i].includes?(syn)
-                    j2 = @neurons.index(syn.source_neuron).not_nil!
-                    @hidden_state[j2]
-                  else
-                    syn.source_neuron.activation
-                  end
-            inputs << val
-            syn_w << syn.weight
-          end
-          mat_klass = CudaMatrix
-          inp = mat_klass.from_a([inputs])
-          w_in = mat_klass.from_a(syn_w.map { |w| [w] })
-          wi = mat_klass.from_a(@input_weights[i].map { |w| [w] })
-          wf = mat_klass.from_a(@forget_weights[i].map { |w| [w] })
-          wo = mat_klass.from_a(@output_weights[i].map { |w| [w] })
+      size.times do |i|
+        inputs = [] of Float64
+        syn_w = [] of Float64
 
-          sum_in = (inp * w_in)[0, 0] + neuron.bias
-          sum_gate = (inp * wi)[0, 0] + @input_bias[i]
-          sum_forget = (inp * wf)[0, 0] + @forget_bias[i]
-          sum_out = (inp * wo)[0, 0] + @output_bias[i]
-        else
-          sum_in = neuron.bias
-          sum_gate = 0.0
-          sum_forget = 0.0
-          sum_out = 0.0
+        mat_klass = CudaMatrix
+        inp = mat_klass.from_a([inputs])
+        w_in = mat_klass.from_a(syn_w.map { |w| [w] })
+        wi = mat_klass.from_a(@input_weights[i].map { |w| [w] })
+        wf = mat_klass.from_a(@forget_weights[i].map { |w| [w] })
+        wo = mat_klass.from_a(@output_weights[i].map { |w| [w] })
 
-          neuron.synapses_in.each_with_index do |syn, j|
-            val = if @recurrent_synapses[i].includes?(syn)
-                    j2 = @neurons.index(syn.source_neuron).not_nil!
-                    @hidden_state[j2]
-                  else
-                    syn.source_neuron.activation
-                  end
-            sum_in += val * syn.weight
-            sum_gate += val * @input_weights[i][j]
-            sum_forget += val * @forget_weights[i][j]
-            sum_out += val * @output_weights[i][j]
-          end
-        end
+        sum_gate = (inp * wi)[0, 0] + @input_bias[i]
+        sum_forget = (inp * wf)[0, 0] + @forget_bias[i]
+        sum_out = (inp * wo)[0, 0] + @output_bias[i]
 
         gate_i, _ = SHAInet.sigmoid.call(sum_gate + @input_bias[i])
         gate_f, _ = SHAInet.sigmoid.call(sum_forget + @forget_bias[i])
         gate_o, _ = SHAInet.sigmoid.call(sum_out + @output_bias[i])
-        cell_in, _ = @activation_function.call(sum_in)
 
-        c = gate_f * @cell_state[i] + gate_i * cell_in
+        c = gate_f * @cell_state[i]
         h = gate_o * Math.tanh(c)
 
-        neuron.input_sum = h
-        neuron.sigma_prime = 1.0
         new_cell[i] = c
         new_hidden[i] = h
       end
 
       new_hidden = RNNDropout.apply(new_hidden, @drop_percent) if @drop_percent > 0
 
-      @neurons.each_with_index do |neuron, i|
-        neuron.activation = new_hidden[i]
-      end
       @hidden_state = new_hidden
       @cell_state = new_cell
       new_hidden
@@ -192,7 +151,8 @@ module SHAInet
     end
 
     def backprop_sequence
-      @neurons.each { |neuron| neuron.hidden_error_prop }
+      # Matrix-based implementation that doesn't use neurons
+      # Empty implementation since matrices handle backprop differently
     end
   end
 end

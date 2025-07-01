@@ -24,4 +24,3 @@ describe SHAInet::UnifiedMatrix do
     dummy.update_weights(0.1)
   end
 end
-

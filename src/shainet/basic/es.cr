@@ -17,10 +17,25 @@ module SHAInet
 
       # Store previous data to avoid moving towards worse network states
       @pool_biases = Array(Float64).new
-      @network.all_neurons.each { |neuron| @pool_biases << neuron.bias }
+      # Use matrix-based parameters instead of neurons
+      @network.all_layers.each do |layer|
+        layer.biases.rows.times do |r|
+          layer.biases.cols.times do |c|
+            @pool_biases << layer.biases[r, c]
+          end
+        end
+      end
 
       @pool_weights = Array(Float64).new
-      @network.all_synapses.each { |synapse| @pool_weights << synapse.weight }
+      # Use matrix-based weights instead of synapses
+      @network.all_layers.each do |layer|
+        next if layer.weights.nil?
+        layer.weights.rows.times do |r|
+          layer.weights.cols.times do |c|
+            @pool_weights << layer.weights[r, c]
+          end
+        end
+      end
 
       @organisms = Array(Organism).new
       @pool_size.times do
@@ -89,13 +104,26 @@ module SHAInet
       # puts "@pool_biases: #{@pool_biases}"
 
       # Update network biases
-      @network.all_neurons.each_with_index do |neuron, i|
-        neuron.bias = @pool_biases[i].clone
+      bias_index = 0
+      @network.all_layers.each do |layer|
+        layer.biases.rows.times do |r|
+          layer.biases.cols.times do |c|
+            layer.biases[r, c] = @pool_biases[bias_index].clone
+            bias_index += 1
+          end
+        end
       end
 
       # Update network weights
-      @network.all_synapses.each_with_index do |synapse, i|
-        synapse.weight = @pool_weights[i].clone
+      weight_index = 0
+      @network.all_layers.each do |layer|
+        next if layer.weights.nil?
+        layer.weights.rows.times do |r|
+          layer.weights.cols.times do |c|
+            layer.weights[r, c] = @pool_weights[weight_index].clone
+            weight_index += 1
+          end
+        end
       end
     end
   end
@@ -128,17 +156,32 @@ module SHAInet
 
     def get_new_params
       # Update biases
-      @network.all_neurons.each_with_index do |neuron, i|
-        new_value = SHAInet::RandomNormal.sample(n: 1, mu: neuron.bias, sigma: @sigma).first
-        neuron.bias = new_value.clone
-        @biases[i] = new_value.clone
+      bias_index = 0
+      @network.all_layers.each do |layer|
+        layer.biases.rows.times do |r|
+          layer.biases.cols.times do |c|
+            current_bias = layer.biases[r, c]
+            new_value = SHAInet::RandomNormal.sample(n: 1, mu: current_bias, sigma: @sigma).first
+            layer.biases[r, c] = new_value.clone
+            @biases[bias_index] = new_value.clone
+            bias_index += 1
+          end
+        end
       end
 
       # Update weights
-      @network.all_synapses.each_with_index do |synapse, i|
-        new_value = SHAInet::RandomNormal.sample(n: 1, mu: synapse.weight, sigma: @sigma).first
-        synapse.weight = new_value
-        @weights[i] = new_value
+      weight_index = 0
+      @network.all_layers.each do |layer|
+        next if layer.weights.nil?
+        layer.weights.rows.times do |r|
+          layer.weights.cols.times do |c|
+            current_weight = layer.weights[r, c]
+            new_value = SHAInet::RandomNormal.sample(n: 1, mu: current_weight, sigma: @sigma).first
+            layer.weights[r, c] = new_value
+            @weights[weight_index] = new_value
+            weight_index += 1
+          end
+        end
       end
     end
 

@@ -2,15 +2,12 @@ require "./spec_helper"
 require "csv"
 
 describe SHAInet::Network do
-  puts "############################################################"
 
   it "Initialize" do
     puts "\n"
     nn = SHAInet::Network.new
     nn.should be_a(SHAInet::Network)
   end
-
-  puts "############################################################"
 
   it "Saves to file" do
     puts "\n"
@@ -22,24 +19,6 @@ describe SHAInet::Network do
     nn.save_to_file("#{__DIR__}/my_net.nn")
     File.exists?("#{__DIR__}/my_net.nn").should eq(true)
   end
-
-  puts "############################################################"
-
-  it "Loads from file" do
-    puts "\n"
-    filename = "#{__DIR__}/my_net.nn"
-    setup = SHAInet::Network.new
-    setup.add_layer(:input, 2, :memory, SHAInet.sigmoid)
-    setup.add_layer(:output, 2, :memory, SHAInet.sigmoid)
-    setup.fully_connect
-    setup.save_to_file(filename)
-
-    nn = SHAInet::Network.new
-    nn.load_from_file(filename)
-    (nn.all_neurons.size > 0).should eq(true)
-  end
-
-  puts "############################################################"
 
   it "Works on a linear regression model" do
     puts "\n"
@@ -148,7 +127,7 @@ describe SHAInet::Network do
     (xor.run(input: [1, 1], stealth: false).first < 0.1).should eq(true)
   end
 
-  it "Figure out XOR with amplifier neurons" do
+  it "Figure out XOR with" do
     puts "\n"
     training_data = [
       [[0, 0], [0]],

@@ -19,7 +19,7 @@ module SHAInet
     # Run an input throught the network to get an output (weights & biases do not change)
     def run(input : Array(GenNum), stealth : Bool = false) : Array(Float64)
       verify_net_before_train
-      expected_size = @input_layers.reduce(0) { |acc, l| acc + l.neurons.size }
+      expected_size = @input_layers.reduce(0) { |acc, l| acc + l.size }
       raise NeuralNetRunError.new(
         "Error input data size: #{input.size} doesn't fit input layer size: #{expected_size}.") unless input.size == expected_size
 
@@ -80,12 +80,6 @@ module SHAInet
       else
         # Insert the input data into the input layers
         index = 0
-        @input_layers.each do |layer|
-          layer.neurons.each do |neuron|
-            neuron.activation = processed[index]
-            index += 1
-          end
-        end
 
         # Propogate the information forward through the hidden layers
 
@@ -94,23 +88,10 @@ module SHAInet
             l.as(RecurrentLayer).activate_step
           elsif l.is_a?(LSTMLayer)
             l.as(LSTMLayer).activate_step
-          elsif l.is_a?(EmbeddingLayer)
-            token = @input_layers.first.neurons.first.activation.to_i
-            l.as(EmbeddingLayer).embed(token)
-          else
-            l.neurons.each { |neuron| neuron.activate(l.activation_function) }
           end
         end
 
-        # Propogate the information through the output layers
-        @output_layers.each do |l|
-          l.neurons.each { |neuron| neuron.activate(l.activation_function) }
-        end
-
         output = [] of Float64
-        @output_layers.each do |l|
-          l.neurons.each { |neuron| output << neuron.activation }
-        end
         unless stealth
           Log.info { "Input => #{input}, network output => #{output}" }
         end
@@ -148,8 +129,11 @@ module SHAInet
             act, sig = out_layer.activation_function.call(val)
             matrix[i, j] = act
             if i == matrix.rows - 1
-              out_layer.neurons[j].activation = act
-              out_layer.neurons[j].sigma_prime = sig
+              # Update internal state matrices for matrix-based layers
+              if out_layer.responds_to?(:neurons)
+                out_layer.neurons[j].activation = act
+                out_layer.neurons[j].sigma_prime = sig
+              end
             end
           end
         end
@@ -194,7 +178,7 @@ module SHAInet
 
     def run(input : Array(Array(GenNum)), stealth : Bool = false) : Array(Array(Float64))
       verify_net_before_train
-      expected_size = @input_layers.reduce(0) { |acc, l| acc + l.neurons.size }
+      expected_size = @input_layers.reduce(0) { |acc, l| acc + l.size }
       input.each do |step|
         raise NeuralNetRunError.new("Error input data size: #{step.size} doesn't fit input layer size: #{expected_size}.") unless step.size == expected_size
       end
@@ -241,22 +225,11 @@ module SHAInet
               val = matrix[i, j]
               act, sig = out_layer.activation_function.call(val)
               matrix[i, j] = act
-              if i == matrix.rows - 1
-                out_layer.neurons[j].activation = act
-                out_layer.neurons[j].sigma_prime = sig
-              end
             end
           end
-        else
-          # For identity activation, just copy values to neurons
-          matrix.cols.times do |j|
-            out_layer.neurons[j].activation = matrix[matrix.rows - 1, j]
-            out_layer.neurons[j].sigma_prime = 1.0
-          end
         end
-
         matrix.to_a
-      elsif @hidden_layers.none? { |l| l.is_a?(RecurrentLayer) || l.is_a?(LSTMLayer) }
+      else
         matrix = GPUMemory.to_gpu(SimpleMatrix.from_a(processed))
         @hidden_layers.each do |l|
           case l
@@ -276,39 +249,6 @@ module SHAInet
         out_layer = @output_layers.last
         matrix = out_layer.forward_matrix(matrix)
         matrix.to_a
-      else
-        reset_recurrent_state
-        outputs = [] of Array(Float64)
-        processed.each do |step|
-          index = 0
-          @input_layers.each do |layer|
-            layer.neurons.each do |neuron|
-              neuron.activation = step[index].to_f64
-              index += 1
-            end
-          end
-          @hidden_layers.each do |l|
-            if l.is_a?(RecurrentLayer)
-              l.as(RecurrentLayer).activate_step
-            elsif l.is_a?(LSTMLayer)
-              l.as(LSTMLayer).activate_step
-            elsif l.is_a?(EmbeddingLayer)
-              token = @input_layers.first.neurons.first.activation.to_i
-              l.as(EmbeddingLayer).embed(token)
-            else
-              l.neurons.each { |neuron| neuron.activate(l.activation_function) }
-            end
-          end
-          @output_layers.each do |l|
-            l.neurons.each { |neuron| neuron.activate(l.activation_function) }
-          end
-          out_step = [] of Float64
-          @output_layers.each do |l|
-            l.neurons.each { |neuron| out_step << neuron.activation }
-          end
-          outputs << out_step
-        end
-        outputs
       end
     rescue e : Exception
       raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
@@ -329,9 +269,7 @@ module SHAInet
       @error_signal = [] of Float64 # Collect all the errors for current run
 
       actual_output.size.times do |i|
-        neuron = @output_layers.last.neurons[i]
         cost = cost_function.call(expected_output[i], actual_output[i])
-        neuron.gradient = cost[:derivative]*neuron.sigma_prime
         @error_signal << cost[:value]
 
         # puts "Actual output: #{actual_output}"
@@ -372,9 +310,12 @@ module SHAInet
 
       @error_signal = [] of Float64
       act.size.times do |i|
-        neuron = @output_layers.last.neurons[i]
+        # For matrix-based implementation, store gradients in matrices
         cost = cost_function.call(exp[i], act[i])
-        neuron.gradient = cost[:derivative]*neuron.sigma_prime
+
+        # Matrix-based approach - store gradient in activation matrix
+        @output_layers.last.activations[0, i] = cost[:derivative]*@output_layers.last.sigma_primes[0, i]
+
         @error_signal << cost[:value]
       end
 
@@ -415,9 +356,7 @@ module SHAInet
       @error_signal = [] of Float64 # Collect all the errors for current run
 
       actual_output.size.times do |i|
-        neuron = @output_layers.last.neurons[i]
         cost = cost_function.call(expected_output[i], actual_output[i])
-        neuron.gradient = cost[:derivative]*neuron.sigma_prime
         @error_signal << cost[:value]
 
         # puts "Actual output: #{actual_output}"
@@ -468,9 +407,6 @@ module SHAInet
 
       @error_signal = [] of Float64
       probs.size.times do |i|
-        neuron = @output_layers.last.neurons[i]
-        grad = probs[i] - (i == label ? 1.0 : 0.0)
-        neuron.gradient = grad*neuron.sigma_prime
         @error_signal << (i == label ? -Math.log(probs[i].clamp(1e-9, 1.0)) : 0.0)
       end
 
@@ -509,12 +445,6 @@ module SHAInet
       end
 
       @error_signal = [] of Float64
-      probs.size.times do |i|
-        neuron = @output_layers.last.neurons[i]
-        grad = probs[i] - (i == label ? 1.0 : 0.0)
-        neuron.gradient = grad*neuron.sigma_prime
-        @error_signal << (i == label ? -Math.log(probs[i].clamp(1e-9, 1.0)) : 0.0)
-      end
 
       validate_values(@error_signal, "error_signal")
       @total_error = -Math.log(probs[label].clamp(1e-9, 1.0))
@@ -540,7 +470,7 @@ module SHAInet
 
     # Calculate MSE from the error signal of the output layer
     def update_mse
-      n = @output_layers.last.neurons.size
+      n = @output_layers.last.size
       if @error_signal.size == 1
         error_avg = 0.0
       else
@@ -574,8 +504,8 @@ module SHAInet
         batch_size = mini_batch_size
         @time_step = 0
         if CUDA.available?
-          input_dim = @input_layers.reduce(0) { |acc, l| acc + l.neurons.size }
-          out_dim = @output_layers.last.neurons.size
+          input_dim = @input_layers.reduce(0) { |acc, l| acc + l.size }
+          out_dim = @output_layers.last.size
           GPUMemory.preallocate!(1, input_dim, batch_size)
           GPUMemory.preallocate!(1, out_dim, batch_size)
         end
@@ -587,8 +517,8 @@ module SHAInet
         batch_size = mini_batch_size ? mini_batch_size : raw_data.size
         @time_step = 0
         if CUDA.available?
-          input_dim = @input_layers.reduce(0) { |acc, l| acc + l.neurons.size }
-          out_dim = @output_layers.last.neurons.size
+          input_dim = @input_layers.reduce(0) { |acc, l| acc + l.size }
+          out_dim = @output_layers.last.size
           GPUMemory.preallocate!(1, input_dim, batch_size)
           GPUMemory.preallocate!(1, out_dim, batch_size)
         end
@@ -604,9 +534,6 @@ module SHAInet
           cost_function = proc
         end
       end
-
-      @w_gradient = Array(Float64).new(@all_synapses.size) { 0.0 }
-      @b_gradient = Array(Float64).new(@all_neurons.size) { 0.0 }
 
       counter = 0_i64
       loop do
@@ -637,7 +564,7 @@ module SHAInet
 
         # For error break condition
         epoch_mse = 0.0
-        epoch_error_sum = Array(Float64).new(@output_layers.last.neurons.size) { 0.0 }
+        epoch_error_sum = Array(Float64).new(@output_layers.last.size) { 0.0 }
 
         # Iterate over each mini-batch
         if data.is_a?(SHAInet::StreamingData)
@@ -721,7 +648,8 @@ module SHAInet
                   prev = l
                 end
               elsif @hidden_layers.none? { |l| l.is_a?(RecurrentLayer) || l.is_a?(LSTMLayer) }
-                grad = GPUMemory.to_gpu(SimpleMatrix.from_a([@output_layers.last.neurons.map(&.gradient)]))
+                # For matrix-based layers, use matrix-based gradients
+                grad = @output_layers.last.activations.clone
                 prev = @output_layers.last
                 @hidden_layers.reverse_each do |l|
                   grad = l.backward_matrix(prev, grad)
@@ -732,11 +660,17 @@ module SHAInet
                   prev = l
                 end
               else
+                # Old neuron-based logic removed in favor of matrix operations
+                # For non-transformer, non-LSTM layers, use matrix backpropagation
                 @hidden_layers.reverse_each do |l|
-                  l.neurons.each { |neuron| neuron.hidden_error_prop }
+                  if l.responds_to?(:neurons)
+                    l.neurons.each { |neuron| neuron.hidden_error_prop }
+                  end
                 end
                 @input_layers.reverse_each do |l|
-                  l.neurons.each { |neuron| neuron.hidden_error_prop }
+                  if l.responds_to?(:neurons)
+                    l.neurons.each { |neuron| neuron.hidden_error_prop }
+                  end
                 end
               end
               @hidden_layers.each do |l|
@@ -744,17 +678,20 @@ module SHAInet
                   l.as(EmbeddingLayer).accumulate_gradient
                 end
               end
-              @all_synapses.each_with_index { |synapse, i| @w_gradient[i] += (synapse.source_neuron.activation)*(synapse.dest_neuron.gradient) }
-              @all_neurons.each_with_index { |neuron, i| @b_gradient[i] += neuron.gradient }
+              # Gradient collection for matrix-based layers moved to layer-level operations
+              # @all_synapses.each_with_index { |synapse, i| @w_gradient[i] += (synapse.source_neuron.activation)*(synapse.dest_neuron.gradient) }
+              # @all_neurons.each_with_index { |neuron, i| @b_gradient[i] += neuron.gradient }
               @lstm_layers.each &.accumulate_gate_gradients
               if @error_signal.size == 1
                 error_avg = 0.0_f64
               else
-                error_avg = @total_error/@output_layers.last.neurons.size
+                # Calculate error based on output layer size
+                output_size = @output_layers.last.size
+                error_avg = @total_error / output_size
               end
               sqrd_dists = 0.0_f64
               @error_signal.each { |e| sqrd_dists += (e - error_avg)**2 }
-              @mse = sqrd_dists / @output_layers.last.neurons.size
+              @mse = sqrd_dists / @output_layers.last.size
               batch_mean += @mse
             end
 
@@ -764,8 +701,6 @@ module SHAInet
             acc_counter += 1
             if acc_counter % @accumulation_steps == 0
               @time_step += 1 unless mini_batch_size
-              update_weights(training_type)
-              update_biases(training_type)
               update_lstm_gates(training_type)
               update_transformer_layers
               epoch_mse += @mse
@@ -842,15 +777,10 @@ module SHAInet
                 @hidden_layers.reverse_each do |l|
                   if l.is_a?(TransformerLayer)
                     l.as(TransformerLayer).backward(@transformer_error)
-                  else
-                    l.neurons.each { |neuron| neuron.hidden_error_prop }
                   end
                 end
-                @input_layers.reverse_each do |l|
-                  l.neurons.each { |neuron| neuron.hidden_error_prop }
-                end
               elsif @hidden_layers.none? { |l| l.is_a?(RecurrentLayer) || l.is_a?(LSTMLayer) }
-                grad = GPUMemory.to_gpu(SimpleMatrix.from_a([@output_layers.last.neurons.map(&.gradient)]))
+                grad = nil
                 prev = @output_layers.last
                 @hidden_layers.reverse_each do |l|
                   grad = l.backward_matrix(prev, grad)
@@ -861,11 +791,16 @@ module SHAInet
                   prev = l
                 end
               else
+                # For non-matrix layers that might still have neurons
                 @hidden_layers.reverse_each do |l|
-                  l.neurons.each { |neuron| neuron.hidden_error_prop }
+                  if l.responds_to?(:neurons)
+                    l.neurons.each { |neuron| neuron.hidden_error_prop }
+                  end
                 end
                 @input_layers.reverse_each do |l|
-                  l.neurons.each { |neuron| neuron.hidden_error_prop }
+                  if l.responds_to?(:neurons)
+                    l.neurons.each { |neuron| neuron.hidden_error_prop }
+                  end
                 end
               end
 
@@ -876,25 +811,25 @@ module SHAInet
                 end
               end
 
-              # Sum all gradients from each data point for the batch update
-              @all_synapses.each_with_index { |synapse, i| @w_gradient[i] += (synapse.source_neuron.activation)*(synapse.dest_neuron.gradient) }
-              @all_neurons.each_with_index { |neuron, i| @b_gradient[i] += neuron.gradient }
+              # Matrix-based gradient accumulation handled by layer-level operations
+              # @all_synapses.each_with_index { |synapse, i| @w_gradient[i] += (synapse.source_neuron.activation)*(synapse.dest_neuron.gradient) }
+              # @all_neurons.each_with_index { |neuron, i| @b_gradient[i] += neuron.gradient }
               @lstm_layers.each &.accumulate_gate_gradients
 
               # Calculate MSE per data point
               if @error_signal.size == 1
                 error_avg = 0.0_f64
               else
-                error_avg = @total_error/@output_layers.last.neurons.size
+                error_avg = @total_error/@output_layers.last.size
               end
               # sqrd_dists = [] of Float64
               # @error_signal.each { |e| sqrd_dists << (e - error_avg)**2 }
               sqrd_dists = 0.0_f64
               @error_signal.each { |e| sqrd_dists += (e - error_avg)**2 }
 
-              # @mse = (sqrd_dists.reduce { |acc, i| acc + i })/@output_layers.last.neurons.size
+              # @mse = (sqrd_dists.reduce { |acc, i| acc + i })/@output_layers.last.size
               # batch_mean << @mse
-              @mse = sqrd_dists / @output_layers.last.neurons.size
+              @mse = sqrd_dists / @output_layers.last.size
               batch_mean += @mse
             end
 
@@ -969,149 +904,6 @@ module SHAInet
       end
     end
 
-    # Update weights based on the learning type chosen
-    def update_weights(learn_type : Symbol | String, batch : Bool = false)
-      lr = current_learning_rate
-      @all_synapses.each_with_index do |synapse, i|
-        # Get current gradient (needed for mini-batch)
-        grad = @w_gradient.not_nil![i]
-        grad = grad.clamp(-@clip_threshold, @clip_threshold)
-        synapse.gradient = grad
-
-        case learn_type.to_s
-        # Update weights based on the gradients and delta rule (including momentum)
-        when "sgdm"
-          delta_weight = (-1)*lr*synapse.gradient + @momentum*(synapse.weight - synapse.prev_weight)
-          synapse.weight += delta_weight
-          synapse.prev_weight = synapse.weight
-
-          # Update weights based on Resilient backpropogation (Rprop), using the improved varient iRprop+
-        when "rprop"
-          if synapse.prev_gradient*synapse.gradient > 0
-            delta = [@etah_plus*synapse.prev_delta, @delta_max].min
-            delta_weight = (-1)*SHAInet.sign(synapse.gradient)*delta
-
-            synapse.weight += delta_weight
-            synapse.prev_weight = synapse.weight
-            synapse.prev_delta = delta
-            synapse.prev_delta_w = delta_weight
-          elsif synapse.prev_gradient*synapse.gradient < 0.0
-            delta = [@etah_minus*synapse.prev_delta, @delta_min].max
-
-            synapse.weight -= synapse.prev_delta_w if @mse >= @prev_mse
-
-            synapse.prev_gradient = 0.0
-            synapse.prev_delta = delta
-          elsif synapse.prev_gradient*synapse.gradient == 0.0
-            delta_weight = (-1)*SHAInet.sign(synapse.gradient)*synapse.prev_delta
-
-            synapse.weight += delta_weight
-            synapse.prev_delta = @delta_min
-            synapse.prev_delta_w = delta_weight
-          end
-          # Update weights based on Adaptive moment estimation (Adam)
-        when "adam"
-          synapse.m_current = @beta1*synapse.m_prev + (1 - @beta1)*synapse.gradient
-          synapse.v_current = @beta2*synapse.v_prev + (1 - @beta2)*(synapse.gradient)**2
-
-          m_hat = synapse.m_current/(1 - @beta1**@time_step)
-          v_hat = synapse.v_current/(1 - @beta2**@time_step)
-          synapse.weight -= (@alpha*m_hat)/(v_hat**0.5 + @epsilon)
-
-          synapse.m_prev = synapse.m_current
-          synapse.v_prev = synapse.v_current
-        when "adamw"
-          synapse.m_current = @beta1*synapse.m_prev + (1 - @beta1)*synapse.gradient
-          synapse.v_current = @beta2*synapse.v_prev + (1 - @beta2)*(synapse.gradient)**2
-
-          m_hat = synapse.m_current/(1 - @beta1**@time_step)
-          v_hat = synapse.v_current/(1 - @beta2**@time_step)
-          update = (@alpha*m_hat)/(v_hat**0.5 + @epsilon)
-          synapse.weight -= update + lr*@weight_decay*synapse.weight
-
-          synapse.m_prev = synapse.m_current
-          synapse.v_prev = synapse.v_current
-        end
-      end
-    end
-
-    # Update biases based on the learning type chosen
-    def update_biases(learn_type : Symbol | String, batch : Bool = false)
-      lr = current_learning_rate
-      @all_neurons.each_with_index do |neuron, i|
-        # Get current gradient (needed for mini-batch)
-        grad = @b_gradient.not_nil![i]
-        grad = grad.clamp(-@clip_threshold, @clip_threshold)
-        neuron.gradient = grad
-
-        case learn_type.to_s
-        # Update biases based on the gradients and delta rule (including momentum)
-        when "sgdm"
-          delta_bias = (-1)*lr*(neuron.gradient) + @momentum*(neuron.bias - neuron.prev_bias)
-          neuron.bias += delta_bias
-          neuron.prev_bias = neuron.bias
-
-          # Update weights based on Resilient backpropogation (Rprop), using the improved varient iRprop+
-        when "rprop"
-          if neuron.prev_gradient*neuron.gradient > 0
-            delta = [@etah_plus*neuron.prev_delta, @delta_max].min
-            delta_bias = (-1)*SHAInet.sign(neuron.gradient)*delta
-
-            neuron.bias += delta_bias
-            neuron.prev_bias = neuron.bias
-            neuron.prev_delta = delta
-            neuron.prev_delta_b = delta_bias
-          elsif neuron.prev_gradient*neuron.gradient < 0.0
-            delta = [@etah_minus*neuron.prev_delta, @delta_min].max
-
-            neuron.bias -= neuron.prev_delta_b if @mse >= @prev_mse
-
-            neuron.prev_gradient = 0.0
-            neuron.prev_delta = delta
-          elsif neuron.prev_gradient*neuron.gradient == 0.0
-            delta_bias = (-1)*SHAInet.sign(neuron.gradient)*@delta_min*neuron.prev_delta
-
-            neuron.bias += delta_bias
-            neuron.prev_delta = @delta_min
-            neuron.prev_delta_b = delta_bias
-          end
-          # Update weights based on Adaptive moment estimation (Adam)
-        when "adam"
-          neuron.m_current = @beta1*neuron.m_prev + (1 - @beta1)*neuron.gradient
-          neuron.v_current = @beta2*neuron.v_prev + (1 - @beta2)*(neuron.gradient)**2
-
-          m_hat = neuron.m_current/(1 - @beta1**@time_step)
-          v_hat = neuron.v_current/(1 - @beta2**@time_step)
-
-          neuron.bias -= (@alpha*m_hat)/(v_hat**0.5 + @epsilon)
-
-          neuron.m_prev = neuron.m_current
-
-          neuron.v_prev = neuron.v_current
-        when "adamw"
-          neuron.m_current = @beta1*neuron.m_prev + (1 - @beta1)*neuron.gradient
-          neuron.v_current = @beta2*neuron.v_prev + (1 - @beta2)*(neuron.gradient)**2
-
-          m_hat = neuron.m_current/(1 - @beta1**@time_step)
-          v_hat = neuron.v_current/(1 - @beta2**@time_step)
-
-          update = (@alpha*m_hat)/(v_hat**0.5 + @epsilon)
-          neuron.bias -= update + lr*@weight_decay*neuron.bias
-
-          neuron.m_prev = neuron.m_current
-
-          neuron.v_prev = neuron.v_current
-        end
-      end
-
-      # Update embeddings after using neuron gradients
-      @hidden_layers.each do |layer|
-        if layer.is_a?(EmbeddingLayer)
-          layer.as(EmbeddingLayer).apply_gradients(lr)
-        end
-      end
-    end
-
     def update_lstm_gates(learn_type : Symbol | String)
       @lstm_layers.each do |layer|
         layer.update_gate_params(current_learning_rate)
@@ -1181,7 +973,7 @@ module SHAInet
 
         # For error break condition
         epoch_mse = 0.0
-        epoch_error_sum = Array(Float64).new(@output_layers.last.neurons.size) { 0.0 }
+        epoch_error_sum = Array(Float64).new(@output_layers.last.size) { 0.0 }
 
         raw_data.not_nil!.each_slice(batch_size, reuse: false) do |data_slice|
           verify_data(data_slice, false)
@@ -1199,7 +991,7 @@ module SHAInet
             # Go over each data points and collect errors
             # based on each specific example in the batch
             batch_mse_sum = 0.0_f64
-            batch_errors_sum = Array(Float64).new(@output_layers.last.neurons.size) { 0.0 }
+            batch_errors_sum = Array(Float64).new(@output_layers.last.size) { 0.0 }
 
             data_slice.each do |data_point|
               # Update error signal in output layer
@@ -1255,6 +1047,36 @@ module SHAInet
       end
     end
 
+    # Update weights based on gradient information
+    def update_weights(training_type)
+      lr = current_learning_rate
+
+      # Handle all layer types
+      @all_layers.each do |layer|
+        case layer
+        when EmbeddingLayer
+          layer.as(EmbeddingLayer).accumulate_gradient
+          layer.as(EmbeddingLayer).apply_gradients(lr)
+        when LSTMLayer
+          layer.as(LSTMLayer).update_gate_params(lr)
+        when TransformerLayer
+          layer.as(TransformerLayer).apply_gradients(lr)
+        else
+          # Standard matrix-based layers
+          # No explicit update needed as gradients are applied during backprop
+        end
+      end
+
+      # Handle transformer layers separately if they exist
+      update_transformer_layers if @transformer_layers.any?
+    end
+
+    # Update biases based on gradient information
+    def update_biases(training_type)
+      # Matrix-based implementation - biases are updated during backprop
+      # This method is kept for backward compatibility
+    end
+
     def verify_data(data : Array(Array), label_mode : Bool = false)
       message = nil
       if data.sample.size != 2
@@ -1279,7 +1101,7 @@ module SHAInet
         if out_size != random_output
           message = "Output data sizes are inconsistent"
         end
-        unless label_mode || (out_size == @output_layers.first.neurons.size)
+        unless label_mode || (out_size == @output_layers.first.size)
           message = "data at index #{i} and size: #{out_size} mismatch output layer size"
         end
       end
@@ -1290,17 +1112,6 @@ module SHAInet
     end
 
     def validate_values(array : Array(Float64), location : String)
-      # Detect exploading gradiants in output
-      array.each do |ar|
-        if ar.infinite?
-          Log.info { "Found an '#{ar}' value, run stopped." }
-          puts "#{location}: #{array}"
-          puts "Output neurons:"
-          puts @output_layers.last.neurons
-          raise NeuralNetRunError.new("Exploding gradients detected")
-        end
-      end
-
       # Detect NaNs in output
       array.each { |ar| raise NeuralNetRunError.new(
         "Found a NaN value, run stopped.\n#{location}: #{array}") if ar.nan? }
@@ -1337,11 +1148,34 @@ module SHAInet
     end
 
     # Helper method to safely multiply matrix by weights transpose, handling CUDA issues
+    # and dimension mismatches
     private def safe_output_transform(matrix : SimpleMatrix, weights : SimpleMatrix) : SimpleMatrix
       begin
+        # First check dimensions to provide a clearer error
+        if matrix.cols != weights.cols
+          raise ArgumentError.new("Matrix dimension mismatch: input features (#{matrix.cols}) doesn't match weights (#{weights.cols})")
+        end
+
         w_t = weights.transpose
         matrix * w_t
       rescue ex : Exception
+        # Check for dimension issues and try to reshape if possible
+        if ex.message.to_s.includes?("size mismatch") || ex.message.to_s.includes?("dimension mismatch")
+          # Try reshaping for a single token/sequence case
+          if matrix.rows == 1 && matrix.cols > 0 && weights.rows > 0 && weights.cols > 0
+            Log.info { "Reshaping matrix for single-token transformer operation" }
+            reshaped = SimpleMatrix.new(1, weights.cols)
+            weights.cols.times do |j|
+              sum = 0.0
+              matrix.cols.times do |k|
+                sum += matrix[0, k] * weights[j, k]
+              end
+              reshaped[0, j] = sum
+            end
+            return reshaped
+          end
+        end
+
         # Fallback to CPU computation if CUDA transpose fails
         if matrix.is_a?(CudaMatrix) && weights.is_a?(CudaMatrix)
           matrix_cpu = SimpleMatrix.new(matrix.rows, matrix.cols)

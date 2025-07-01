@@ -23,7 +23,7 @@ module SHAInet
     COST_FUNCTIONS   = ["mse", "c_ent", "c_ent_sm"] # , "exp", "hel_d", "kld", "gkld", "ita_sai_d"]
 
     # General network parameters
-    getter :input_layers, :output_layers, :hidden_layers, :recurrent_layers, :lstm_layers, :all_neurons, :all_synapses
+    getter :input_layers, :output_layers, :hidden_layers, :recurrent_layers, :lstm_layers
     getter :transformer_layers
     getter transformer_error : SimpleMatrix
     getter error_signal : Array(Float64), total_error : Float64, :mse, w_gradient : Array(Float64), b_gradient : Array(Float64)
@@ -52,9 +52,7 @@ module SHAInet
       @recurrent_layers = Array(RecurrentLayer).new
       @lstm_layers = Array(LSTMLayer).new
       @transformer_layers = Array(TransformerLayer).new
-      @layers = [] of MatrixLayer
-      @all_neurons = Array(Neuron).new   # Array of all current neurons in the network
-      @all_synapses = Array(Synapse).new # Array of all current synapses in the network
+      @all_layers = Array(Layer).new
       @error_signal = Array(Float64).new # Array of errors for each neuron in the output layers, based on specific input
       @total_error = 1_f64               # Sum of errors from output layer, based on a specific input
       @mse = 1_f64                       # MSE of netwrok, based on all errors of output layer for a specific input or batch
@@ -109,6 +107,7 @@ module SHAInet
               end
       # Neuron and synapse bookkeeping removed in favor of matrix-based layers
 
+      # Add layer to appropriate collections
       case l_type.to_s
       when "input"
         @input_layers << layer
@@ -136,6 +135,9 @@ module SHAInet
       else
         raise NeuralNetRunError.new("Must define correct layer type (:input, :hidden, :recurrent, :lstm, :embedding, :transformer, :output).")
       end
+
+      # Add to all_layers collection
+      @all_layers << layer
     end
 
     # Connect all the layers in order (input and output don't connect between themselves): input, hidden, output
@@ -182,36 +184,7 @@ module SHAInet
         else
           dest_layer.weights = mat_klass.new(dest_layer.size, src_layer.size, 0.0)
         end
-        # Connect each neuron from source layer to neuron with
-        # corresponding index in destination layer
-        # Matrix training is not implemented yet for this connection
-      when "ind_to_ind"
-        raise NeuralNetInitalizationError.new(
-          "Error initializing network, index to index connection requires layers of same size.") if src_layer.neurons.size != dest_layer.neurons.size
-        (0..src_layer.neurons.size).each do |index|
-          synapse = Synapse.new(src_layer.neurons[index], dest_layer.neurons[index])
-          src_layer.neurons[index].synapses_out << synapse
-          dest_layer.neurons[index].synapses_in << synapse
-          @all_synapses << synapse
-        end
-
-        # Randomly decide if each neuron from source layer will
-        # connect to a neuron from destination layer
-        # Matrix training is not implemented yet for this connection
-      when "random"
-        src_layer.neurons.each do |src_neuron|     # Source neuron
-          dest_layer.neurons.each do |dest_neuron| # Destination neuron
-            x = rand(0..1)
-            if x <= 0.5 # Currently set to 50% chance, this can be changed at will
-              synapse = Synapse.new(src_neuron, dest_neuron)
-              src_neuron.synapses_out << synapse
-              dest_neuron.synapses_in << synapse
-              @all_synapses << synapse
-            end
-          end
-        end
       end
-      # Synapse tracking removed
     rescue e : Exception
       raise NeuralNetRunError.new("Error in connect_ltl: #{e}")
     end
@@ -226,27 +199,9 @@ module SHAInet
     end
 
     def clean_dead_neurons
-      current_neuron_number = @all_neurons.size
-      @hidden_layers.each do |h_l|
-        h_l.neurons.each do |neuron|
-          kill = false
-          if neuron.bias == 0
-            neuron.synapses_in.each do |s|
-              if s.weight == 0
-                kill = true
-              end
-            end
-          end
-          if kill
-            # Kill neuron and all connected synapses
-            neuron.synapses_in.each { |s| @all_synapses.delete(s) }
-            neuron.synapses_out.each { |s| @all_synapses.delete(s) }
-            @all_neurons.delete(neuron)
-            h_l.neurons.delete(neuron)
-          end
-        end
-      end
-      Log.info { "Cleaned #{current_neuron_number - @all_neurons.size} dead neurons" }
+      # Matrix-based layers don't have individual neurons to clean
+      # This method is no longer needed but kept for API compatibility
+      Log.info { "Matrix-based layers don't require neuron cleanup" }
     end
 
     def verify_net_before_train
@@ -261,13 +216,21 @@ module SHAInet
     end
 
     def randomize_all_weights
-      raise NeuralNetRunError.new("Cannot randomize weights without synapses") if @all_synapses.empty?
-      @all_synapses.each &.randomize_weight
+      # Matrix-based layers handle weight initialization during layer creation
+      [@input_layers, @hidden_layers, @output_layers].flatten.each do |layer|
+        if layer.weights.is_a?(SimpleMatrix)
+          layer.weights.random_fill!
+        end
+      end
     end
 
     def randomize_all_biases
-      raise NeuralNetRunError.new("Cannot randomize biases without neurons") if @all_synapses.empty?
-      @all_neurons.each &.randomize_bias
+      # Matrix-based layers handle bias initialization during layer creation
+      [@input_layers, @hidden_layers, @output_layers].flatten.each do |layer|
+        if layer.biases.is_a?(SimpleMatrix)
+          layer.biases.random_fill!
+        end
+      end
     end
 
     def save_to_file(file_path : String)
@@ -448,8 +411,9 @@ module SHAInet
       Log.info { "--------------------------------" }
       Log.info { @output_layers }
       Log.info { "--------------------------------" }
-      Log.info { @all_synapses }
-      Log.info { "--------------------------------" }
     end
+
+    # Dummy layers property for compatibility with the matrix-based Network class
+    getter layers : Array(MatrixLayer) { [] of MatrixLayer }
   end
 end

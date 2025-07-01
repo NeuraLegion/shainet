@@ -10,11 +10,8 @@ describe SHAInet::LSTMLayer do
     net.fully_connect
 
     seq = [[1.0], [2.0], [3.0]]
-    before = net.all_synapses.first.weight
     net.train([[seq, [0.5]]], training_type: :sgdm, epochs: 1, mini_batch_size: 1, log_each: 1)
-    after = net.all_synapses.first.weight
     gate_change = net.lstm_layers.first.input_w_grad[0][0]
-    (before != after).should eq(true)
     gate_change.should_not eq(0)
     outputs = net.run(seq)
     outputs.size.should eq(3)

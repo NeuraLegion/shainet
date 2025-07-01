@@ -8,7 +8,13 @@ module SHAInet
     def initialize(vocab_size : Int32, l_size : Int32, activation_function : ActivationFunction = SHAInet.none)
       super("memory", l_size, activation_function)
       mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
-      @embeddings = mat_klass.new(vocab_size, l_size).random_fill!
+      # Initialize with random values between -0.1 and 0.1
+      @embeddings = mat_klass.new(vocab_size, l_size)
+      vocab_size.times do |r|
+        l_size.times do |c|
+          @embeddings[r, c] = rand(-0.1..0.1)
+        end
+      end
       @gradients = mat_klass.zeros(vocab_size, l_size)
       @current_ids = [] of Int32
     end
@@ -62,12 +68,6 @@ module SHAInet
         end
       end
 
-      ids.each_with_index do |id, row|
-        @neurons.each_with_index do |n, col|
-          n.activation = @embeddings[id, col] if ids.size == 1
-          result[row, col] = @embeddings[id, col]
-        end
-      end
       @current_ids.concat(ids)
       result
     end
@@ -81,7 +81,6 @@ module SHAInet
         mat.as(CudaMatrix).sync_from_device!
       end
       arr = Array(Float64).new(@l_size) { |i| mat[0, i] }
-      @neurons.each_with_index { |n, i| n.activation = arr[i] }
       arr
     end
 
@@ -90,7 +89,11 @@ module SHAInet
       until @current_ids.empty?
         id = @current_ids.shift
         if CUDA.available? && @gradients.is_a?(CudaMatrix) && (dptr = @gradients.as(CudaMatrix).device_ptr) && !dptr.null?
-          host_vec = Array(Float64).new(@l_size) { |i| @neurons[i].gradient }
+          # Create host vector from activation and sigma_prime matrices
+          host_vec = Array(Float64).new(@l_size) do |i|
+            @activations[0, i] * @sigma_primes[0, i]
+          end
+
           bytes = (@l_size * 8).to_u64
           g_dev = Pointer(Float64).null
           CUDA.malloc(pointerof(g_dev).as(Pointer(Pointer(Void))), bytes)
@@ -100,13 +103,14 @@ module SHAInet
           CUDA.malloc(pointerof(one_dev).as(Pointer(Pointer(Void))), 8_u64)
           CUDA.memcpy(one_dev.as(Pointer(Void)), pointerof(one_val).as(Pointer(Void)), 8_u64, CUDA::MemcpyKind::HostToDevice)
           handle = CUDA.create_handle
-          CUDA.ger(handle, one_dev, g_dev, dptr + id, 1, @gradients.cols, @gradients.rows)
+          CUDA.ger(handle, one_dev, g_dev, dptr + id*@l_size, @l_size, 1, @l_size)
           CUDA.destroy_handle(handle)
           CUDA.free(g_dev.as(Pointer(Void)))
           CUDA.free(one_dev.as(Pointer(Void)))
         else
-          @neurons.each_with_index do |n, i|
-            @gradients[id, i] += n.gradient
+          # Use matrix-based gradient accumulation
+          @l_size.times do |i|
+            @gradients[id, i] += @activations[0, i] * @sigma_primes[0, i]
           end
         end
       end
