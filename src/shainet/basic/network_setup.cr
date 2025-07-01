@@ -271,95 +271,60 @@ module SHAInet
     end
 
     def save_to_file(file_path : String)
-      dump_network = Array(Hash(String, String | Array(Hash(String, Array(Hash(String, String | Float64)) | Float64 | String | String)))).new
+      dump_network = [] of Hash(String, JSON::Any)
 
-      [@input_layers, @output_layers, @hidden_layers].flatten.each do |layer|
-        dump_layer = Hash(String, String | Array(Hash(String, Array(Hash(String, String | Float64)) | Float64 | String | String))).new
-        dump_neurons = Array(Hash(String, Array(Hash(String, String | Float64)) | Float64 | String | String)).new
-        layer.neurons.each do |neuron|
-          n = Hash(String, Array(Hash(String, String | Float64)) | Float64 | String | String).new
-          n["id"] = neuron.id
-          n["bias"] = neuron.bias
-          n["n_type"] = neuron.n_type.to_s
-          n["synapses_in"] = Array(Hash(String, String | Float64)).new
-          n["synapses_out"] = Array(Hash(String, String | Float64)).new
-          neuron.synapses_in.each do |s|
-            s_h = Hash(String, String | Float64).new
-            s_h["source"] = s.source_neuron.id
-            s_h["destination"] = s.dest_neuron.id
-            s_h["weight"] = s.weight
-            n["synapses_in"].as(Array(Hash(String, String | Float64))) << s_h
-          end
-          neuron.synapses_out.each do |s|
-            s_h = Hash(String, String | Float64).new
-            s_h["source"] = s.source_neuron.id
-            s_h["destination"] = s.dest_neuron.id
-            s_h["weight"] = s.weight
-            n["synapses_out"].as(Array(Hash(String, String | Float64))) << s_h
-          end
-          dump_neurons << n
-        end
+      [@input_layers, @hidden_layers, @output_layers].flatten.each do |layer|
+        dump_layer = Hash(String, JSON::Any).new
+        l_type = if @input_layers.includes?(layer)
+                   "input"
+                 elsif @hidden_layers.includes?(layer)
+                   "hidden"
+                 else
+                   "output"
+                 end
 
-        l_type = ""
-        if @input_layers.includes?(layer)
-          l_type = "input"
-        elsif @hidden_layers.includes?(layer)
-          l_type = "hidden"
-        else
-          l_type = "output"
-        end
-
-        dump_layer["l_type"] = l_type
-        dump_layer["neurons"] = dump_neurons
-        dump_layer["activation_function"] = layer.activation_function.to_s
+        dump_layer["l_type"] = JSON::Any.new(l_type)
+        dump_layer["weights"] = JSON.parse(layer.weights.to_a.to_json)
+        dump_layer["biases"] = JSON.parse(layer.biases.to_a.flatten.to_json)
+        dump_layer["activation_function"] = JSON::Any.new(layer.activation_function.to_s)
         dump_network << dump_layer
       end
+
       File.write(file_path, {"layers" => dump_network}.to_json)
       Log.info { "Network saved to: #{file_path}" }
     end
 
     def load_from_file(file_path : String)
-      net = NetDump.from_json(File.read(file_path))
-      net.layers.each do |layer|
-        l = Layer.new("memory", 0)
-        layer.neurons.each do |neuron|
-          n = Neuron.new(neuron.n_type, neuron.id)
-          n.bias = neuron.bias
-          l.neurons << n
-          @all_neurons << n
-        end
-        case layer.l_type
+      data = JSON.parse(File.read(file_path))
+      layers = data["layers"].as_a
+
+      layers.each do |layer_data|
+        l_type = layer_data["l_type"].as_s
+        size = layer_data["biases"].as_a.size
+        case l_type
         when "input"
-          @input_layers << l
+          add_layer(:input, size)
         when "output"
-          @output_layers << l
-        when "hidden"
-          @hidden_layers << l
+          add_layer(:output, size)
+        else
+          add_layer(:hidden, size)
         end
       end
-      net.layers.each do |layer|
-        layer.neurons.each do |n|
-          n.synapses_in.each do |s|
-            source = @all_neurons.find { |i| i.id == s.source }
-            destination = @all_neurons.find { |i| i.id == s.destination }
-            next unless source && destination
-            _s = Synapse.new(source, destination)
-            _s.weight = s.weight
-            neuron = @all_neurons.find { |i| i.id == n.id }
-            next unless neuron
-            neuron.not_nil!.synapses_in << _s
-            @all_synapses << _s
-          end
-          n.synapses_out.each do |s|
-            source = @all_neurons.find { |i| i.id == s.source }
-            destination = @all_neurons.find { |i| i.id == s.destination }
-            next unless source && destination
-            _s = Synapse.new(source, destination)
-            _s.weight = s.weight
-            neuron = @all_neurons.find { |i| i.id == n.id }
-            next unless neuron
-            neuron.not_nil!.synapses_out << _s
-            @all_synapses << _s
+
+      fully_connect
+
+      all_layers = @hidden_layers + @output_layers
+      layers.each_with_index do |layer_data, idx|
+        next if idx == 0 # input layer has no weights to set
+        dest_layer = all_layers[idx - 1]
+        w = layer_data["weights"].as_a.map { |r| r.as_a.map(&.as_f) }
+        b = layer_data["biases"].as_a.map(&.as_f)
+        dest_layer.weights = SimpleMatrix.from_a(w)
+        dest_layer.biases = SimpleMatrix.from_a([b])
+        dest_layer.neurons.each_with_index do |neuron, i|
+          neuron.bias = b[i]
+          neuron.synapses_in.each_with_index do |syn, j|
+            syn.weight = w[i][j]
           end
         end
       end

@@ -706,15 +706,19 @@ module SHAInet
               end
               all_errors += @total_error
               if @hidden_layers.any? &.is_a?(TransformerLayer)
+                grad = GPUMemory.keep_on_gpu(@transformer_error)
+                prev = @output_layers.last
                 @hidden_layers.reverse_each do |l|
                   if l.is_a?(TransformerLayer)
-                    l.as(TransformerLayer).backward(@transformer_error)
+                    grad = l.as(TransformerLayer).backward(grad)
                   else
-                    l.neurons.each { |neuron| neuron.hidden_error_prop }
+                    grad = l.backward_matrix(prev, grad)
                   end
+                  prev = l
                 end
                 @input_layers.reverse_each do |l|
-                  l.neurons.each { |neuron| neuron.hidden_error_prop }
+                  grad = l.backward_matrix(prev, grad)
+                  prev = l
                 end
               elsif @hidden_layers.none? { |l| l.is_a?(RecurrentLayer) || l.is_a?(LSTMLayer) }
                 grad = GPUMemory.to_gpu(SimpleMatrix.from_a([@output_layers.last.neurons.map(&.gradient)]))
