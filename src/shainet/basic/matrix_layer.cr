@@ -34,21 +34,15 @@ module SHAInet
       out
     end
 
-    def forward(input : SimpleMatrix | CudaMatrix)
-      if input.is_a?(CudaMatrix)
-        forward(input.as(CudaMatrix))
-      else
-        forward(input.as(SimpleMatrix))
-      end
-    end
-
-    def forward(input : CudaMatrix) : SimpleMatrix | CudaMatrix
+    def forward(input : CudaMatrix) : CudaMatrix
       @input = input
       w = @weights.as(CudaMatrix)
       b = @biases.as(CudaMatrix)
-      out = input * w
-      out.add_bias!(b)
-      out
+      GPUMemory.preserve_device(input) do
+        out = input * w
+        out.add_bias!(b)
+        out
+      end.as(CudaMatrix)
     end
 
     def backward(grad : SimpleMatrix) : SimpleMatrix
@@ -62,9 +56,10 @@ module SHAInet
       grad * @weights.as(SimpleMatrix).transpose
     end
 
-    def backward(grad : CudaMatrix) : SimpleMatrix | CudaMatrix
-      input = @input.as(CudaMatrix)
-      @g_w = @g_w + input.transpose * grad
+    def backward(grad : CudaMatrix) : CudaMatrix
+      input = @input
+      input_gpu = input.is_a?(CudaMatrix) ? input.as(CudaMatrix) : GPUMemory.to_gpu(input.as(SimpleMatrix))
+      @g_w = @g_w + input_gpu.transpose * grad
       if CUDA.available? && CUDA.kernels_available? && @g_b.is_a?(CudaMatrix)
         begin
           CUDA.row_sum(@g_b.as(CudaMatrix).device_ptr.not_nil!, grad.device_ptr.not_nil!, grad.rows, grad.cols)
@@ -83,7 +78,9 @@ module SHAInet
           end
         end
       end
-      grad * @weights.as(CudaMatrix).transpose
+      GPUMemory.preserve_device(grad) do
+        grad * @weights.as(CudaMatrix).transpose
+      end.as(CudaMatrix)
     end
 
     def update_weights(lr : Float64)
