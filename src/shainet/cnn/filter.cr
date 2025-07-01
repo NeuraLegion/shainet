@@ -3,210 +3,203 @@ require "log"
 module SHAInet
   class Filter
     getter input_surface : Array(Int32), window_size : Int32, stride : Int32, padding : Int32, activation_function : ActivationFunction
-    property bias : Float64, prev_bias : Float64, bias_grad : Float64, bias_grad_sum : Float64, bias_grad_batch : Float64
-    property prev_bias_grad : Float64, prev_delta : Float64, prev_delta_b : Float64
-    property m_current : Float64, v_current : Float64, m_prev : Float64, v_prev : Float64
+    property weights : SimpleMatrix
+    property biases : SimpleMatrix
+    property activations : SimpleMatrix
+    property gradients : SimpleMatrix
+    property output : Array(Float64)
+
+    # Add property for weight gradients
+    property weight_gradients : SimpleMatrix
+    property bias_gradient : Float64
 
     def initialize(@input_surface : Array(Int32), # expecting [width, height, channels]
                    @padding : Int32 = 0,
                    @window_size : Int32 = 1,
                    @stride : Int32 = 1,
                    @activation_function : ActivationFunction = SHAInet.none)
-      @bias = rand(-0.1..0.1).to_f64
-      @prev_bias = rand(-0.1..0.1).to_f64 # Needed for delta rule improvement using momentum
-      @bias_grad = Float64.new(0)
-      @bias_grad_sum = Float64.new(0)   # For conv-layer backprop
-      @bias_grad_batch = Float64.new(0) # For mini-batch backprop
 
-      # Parameters needed for Rprop
-      @prev_bias_grad = rand(-0.1..0.1).to_f64
-      @prev_delta = rand(0.0..0.1).to_f64
-      @prev_delta_b = rand(-0.1..0.1).to_f64
+      # Calculate weight dimensions based on input surface and window size
+      output_width = @input_surface[0]
+      output_height = @input_surface[1]
+      channels = @input_surface[2]
 
-      # Parameters needed for Adam
-      @m_current = Float64.new(0) # Current moment value
-      @v_current = Float64.new(0) # Current moment**2 value
-      @m_prev = Float64.new(0)    # Previous moment value
-      @v_prev = Float64.new(0)    # Previous moment**2 value
+      # Initialize weights, biases, activations, and gradients
+      @weights = SimpleMatrix.new(@window_size * @window_size * channels, 1)
+      @weights.random_fill!(-0.1, 0.1)  # Use standard method without bang
 
+      @biases = SimpleMatrix.new(1, 1)
+      @biases.random_fill!(-0.1, 0.1)
+
+      @activations = SimpleMatrix.new(output_height, output_width)
+      @gradients = SimpleMatrix.new(output_height, output_width)
+
+      # Initialize output array
+      @output = Array(Float64).new(output_width * output_height) { 0.0 }
+
+      # Initialize weight gradients
+      @weight_gradients = SimpleMatrix.new(@window_size * @window_size * channels, 1)
+      @bias_gradient = 0.0
     end
 
-    def propagate_forward(input_layer : ConvLayer | CNNLayer)
-      # Starting locations
-      input_x = input_y = -@padding
-      output_x = output_y = 0
+    # Forward pass using matrix operations - full convolution implementation
+    def forward(input_matrix : SimpleMatrix) : SimpleMatrix
+      # Parse dimensions
+      output_width = @input_surface[0]
+      output_height = @input_surface[1]
+      channels = @input_surface[2]
 
-      # Takes a small window from the input data (Channel/Filter x Width x Height) to preform feed forward
-      # Slides the window over the input data volume and updates each neuron of the filter
-      # The window depth is the number of all channels/filters (depending on previous layer)
-      while input_y < (input_layer.filters.first.neurons.size + @padding - @window_size + @stride)         # Break out of y
-        while input_x < (input_layer.filters.first.neurons.first.size + @padding - @window_size + @stride) # Break out of x
+      # Reshape input for convolution
+      input_width = Math.sqrt(input_matrix.cols / channels).to_i
+      input_height = input_width  # Assuming square input
 
-          # Create the window from previous layer(x,y are shared across all channels)
-          window = Array(Array(Array(Neuron))).new
+      # Initialize result matrix
+      result = SimpleMatrix.new(output_height, output_width)
 
-          input_layer.filters.size.times do |channel|
-            rows = Array(Array(Neuron)).new                      # Output xy matrix
-            input_channel = input_layer.filters[channel].neurons # Input data xy matrix
+      # Perform convolution by sliding the window over the input
+      output_height.times do |out_y|
+        output_width.times do |out_x|
+          # Initialize with bias
+          val = @biases[0, 0]
 
-            @window_size.times do |_row| # Iteration over y in the window
-              input_row = input_y + _row
+          # Calculate top-left corner of the window in the input
+          in_y_start = out_y * @stride - @padding
+          in_x_start = out_x * @stride - @padding
 
-              # When dealing with top padding
-              if input_row < 0
-                rows << Array(Neuron).new(@window_size) { @blank_neuron }
-                # puts "top pad"
-                # When dealing with bottom padding
-              elsif input_row > (input_channel.size - 1)
-                rows << Array(Neuron).new(@window_size) { @blank_neuron }
-                # puts "bottom pad"
-              else
-                row = Array(Neuron).new
-                @window_size.times do |_col|
-                  input_col = input_x + _col
+          # Convolve over the window
+          weight_idx = 0
+          channels.times do |c|
+            # Calculate channel offset in input
+            channel_offset = c * input_width * input_height
 
-                  # When dealing with left padding
-                  if input_col < 0
-                    row << @blank_neuron
+            @window_size.times do |wy|
+              @window_size.times do |wx|
+                # Calculate position in input
+                in_y = in_y_start + wy
+                in_x = in_x_start + wx
 
-                    # When dealing with right padding
-                  elsif input_col > (input_channel.size - 1)
-                    row << @blank_neuron
-
-                    # When dealing with all other locations within the input data
-                  else
-                    row << input_channel[input_y + _row][input_x + _col]
+                # Check if position is valid (not in padding)
+                if in_y >= 0 && in_y < input_height && in_x >= 0 && in_x < input_width
+                  # Get input value and corresponding weight
+                  input_idx = channel_offset + in_y * input_width + in_x
+                  if input_idx < input_matrix.cols
+                    input_val = input_matrix[0, input_idx]
+                    val += input_val * @weights[weight_idx, 0]
                   end
                 end
-                rows << row
-              end
-            end
-            window << rows
-          end
 
-          # # Gather the weighted activations from the entire window
-          input_sum = Float64.new(0)
-          @synapses.size.times do |channel|
-            @synapses[channel].size.times do |row|
-              @synapses[channel][row].size.times do |col| # Synapses are CnnSynpase in this case
-              # Save the weighted activations from previous layer
-                input_sum += @synapses[channel][row][col].weight*window[channel][row][col].activation
+                weight_idx += 1
               end
             end
           end
 
-          # # Add bias and apply activation function
-          target_neuron = @neurons[output_y][output_x]
-          target_neuron.input_sum = input_sum + @bias
-          target_neuron.activation, target_neuron.sigma_prime = @activation_function.call(target_neuron.input_sum)
-
-          # Go to next window horizontaly
-          input_x += @stride
-          output_x += 1
+          # Apply activation function
+          act, _ = @activation_function.call(val)
+          result[out_y, out_x] = act
+          @output[out_y * output_width + out_x] = act
         end
-        # Go to next window verticaly
-        input_x = -@padding
-        output_x = 0
-        input_y += @stride
-        output_y += 1
       end
+
+      # Store activations for backward pass
+      @activations = result.clone
+
+      result
     end
 
-    def propagate_backward(input_layer : ConvLayer | CNNLayer, batch : Bool = false)
-      # Starting locations
-      input_x = input_y = -@padding
-      output_x = output_y = 0
+    # Backward pass - proper convolution backpropagation
+    def backward(input_matrix : SimpleMatrix, gradient_matrix : SimpleMatrix) : SimpleMatrix
+      # Store gradients for this filter
+      @gradients = gradient_matrix.clone
 
-      # Similar to forward propogation, only in reverse
-      while input_y < (input_layer.filters.first.neurons.size + @padding - @window_size + @stride)         # Break out of y
-        while input_x < (input_layer.filters.first.neurons.first.size + @padding - @window_size + @stride) # Break out of x
+      # Parse dimensions
+      output_width = @input_surface[0]
+      output_height = @input_surface[1]
+      channels = @input_surface[2]
 
-          # Create the window from previous layer(x,y are shared across all channels)
-          window = Array(Array(Array(Neuron))).new
+      # Calculate input dimensions
+      input_width = Math.sqrt(input_matrix.cols / channels).to_i
+      input_height = input_width  # Assuming square input
 
-          input_layer.filters.size.times do |channel|
-            rows = Array(Array(Neuron)).new                      # Output xy matrix
-            input_channel = input_layer.filters[channel].neurons # Input data xy matrix
+      # Initialize gradients for previous layer
+      prev_gradients = SimpleMatrix.new(1, input_matrix.cols)
 
-            @window_size.times do |_row| # Iteration over y in the window
-              input_row = input_y + _row
+      # Initialize weight gradients
+      weight_gradients = SimpleMatrix.new(@weights.rows, @weights.cols)
+      bias_gradient = 0.0
 
-              # When dealing with top padding
-              if input_row < 0
-                rows << Array(Neuron).new(@window_size) { @blank_neuron }
-                # puts "top pad"
-                # When dealing with bottom padding
-              elsif input_row > (input_channel.size - 1)
-                rows << Array(Neuron).new(@window_size) { @blank_neuron }
-                # puts "bottom pad"
-              else
-                row = Array(Neuron).new
-                @window_size.times do |_col|
-                  input_col = input_x + _col
+      # Process each output gradient
+      output_height.times do |out_y|
+        output_width.times do |out_x|
+          # Get gradient for this output position
+          out_gradient = @gradients[out_y, out_x]
 
-                  # When dealing with left padding
-                  if input_col < 0
-                    row << @blank_neuron
+          # Add to bias gradient
+          bias_gradient += out_gradient
 
-                    # When dealing with right padding
-                  elsif input_col > (input_channel.size - 1)
-                    row << @blank_neuron
+          # Calculate input window position
+          in_y_start = out_y * @stride - @padding
+          in_x_start = out_x * @stride - @padding
 
-                    # When dealing with all other locations within the input data
-                  else
-                    row << input_channel[input_y + _row][input_x + _col]
+          # Calculate gradients for weights and inputs
+          weight_idx = 0
+          channels.times do |c|
+            # Calculate channel offset in input
+            channel_offset = c * input_width * input_height
+
+            @window_size.times do |wy|
+              @window_size.times do |wx|
+                # Calculate position in input
+                in_y = in_y_start + wy
+                in_x = in_x_start + wx
+
+                # Check if position is valid (not in padding)
+                if in_y >= 0 && in_y < input_height && in_x >= 0 && in_x < input_width
+                  # Get input index
+                  input_idx = channel_offset + in_y * input_width + in_x
+
+                  if input_idx < input_matrix.cols
+                    # Update weight gradient
+                    input_val = input_matrix[0, input_idx]
+                    weight_gradients[weight_idx, 0] += input_val * out_gradient
+
+                    # Update input gradient
+                    prev_gradients[0, input_idx] += @weights[weight_idx, 0] * out_gradient
                   end
                 end
-                rows << row
-              end
-            end
-            window << rows
-          end
 
-          # Propagate the weighted errors backwards to the entire window
-          source_neuron = @neurons[output_y][output_x]
-
-          # input_sum = Float64.new(0)
-          @synapses.size.times do |channel|
-            @synapses[channel].size.times do |row|
-              @synapses[channel][row].size.times do |col| # Synapses are CnnSynpase in this case
-
-              # Save the weighted activations from previous layer
-                synapse = @synapses[channel][row][col]
-                target_neuron = window[channel][row][col]
-                target_neuron.gradient = synapse.weight*source_neuron.gradient*target_neuron.sigma_prime
-                synapse.gradient_sum += target_neuron.activation*source_neuron.gradient
-                @bias_grad_sum += source_neuron.gradient
-
-                if batch == true
-                  target_neuron.gradient_batch += target_neuron.gradient
-                  synapse.gradient_batch += target_neuron.activation*source_neuron.gradient
-                  @bias_grad_batch += source_neuron.gradient
-                end
+                weight_idx += 1
               end
             end
           end
-
-          # Go to next window horizontaly
-          input_x += @stride
-          output_x += 1
         end
-        # Go to next window verticaly
-        input_x = -@padding
-        output_x = 0
-        input_y += @stride
-        output_y += 1
       end
+
+      # Store weight gradients for weight update
+      @weight_gradients = weight_gradients
+      @bias_gradient = bias_gradient
+
+      prev_gradients
     end
 
-    def clone
-      filter_old = self
-      filter_new = Filter.new(filter_old.input_surface, filter_old.padding, filter_old.window_size, filter_old.stride, filter_old.activation_function)
+    # Update weights based on gradients
+    def update_weights(learning_rate : Float64)
+      # Apply weight updates using calculated gradients
+      @weights.rows.times do |i|
+        @weights.cols.times do |j|
+          @weights[i, j] -= learning_rate * @weight_gradients[i, j]
+        end
+      end
 
-      filter_new.neurons = filter_old.neurons.clone
-      filter_new.synapses = filter_old.synapses.clone
-      filter_new.bias = filter_old.bias
-      return filter_new
+      # Update bias
+      @biases[0, 0] -= learning_rate * @bias_gradient
+
+      # Reset gradients for next iteration
+      @weight_gradients.rows.times do |i|
+        @weight_gradients.cols.times do |j|
+          @weight_gradients[i, j] = 0.0
+        end
+      end
+      @bias_gradient = 0.0
     end
   end
 end

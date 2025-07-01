@@ -5,7 +5,11 @@ module SHAInet
     Log = ::Log.for(self)
 
     getter filters : Array(Filter), prev_layer : CNNLayer | ConvLayer
-    getter output : Array(Float64), :all_neurons, :all_synapses
+    getter output : Array(Float64)
+    getter weights : SimpleMatrix
+    getter biases : SimpleMatrix
+    getter activations : SimpleMatrix
+    getter sigma_primes : SimpleMatrix
 
     def initialize(@master_network : CNN,
                    @prev_layer : CNNLayer | ConvLayer,
@@ -19,164 +23,174 @@ module SHAInet
       @filters = Array(Filter).new(filters) { Filter.new([width, height, filters]) }
 
       @output = Array(Float64).new(l_size) { 0.0 }
-      @all_neurons = Array(Neuron).new
-      @all_synapses = Array(Synapse).new
 
-      # @w_gradient = Array(Float64).new # Needed for batch train
-      # @b_gradient = Array(Float64).new # Needed for batch train
+      # Matrix-based properties (new)
+      input_size = get_input_size
+      @weights = SimpleMatrix.new(l_size, input_size)
+      @weights.random_fill!
 
-      # Connect the last layer to the neurons of this layer (fully connect)
-      @filters.first.neurons.first.each do |target_neuron|
-        @prev_layer.filters.size.times do |filter|
-          @prev_layer.filters[filter].neurons.size.times do |row|
-            @prev_layer.filters[filter].neurons[row].each do |source_neuron|
-              synapse = Synapse.new(source_neuron, target_neuron)
-              source_neuron.synapses_out << synapse
-              target_neuron.synapses_in << synapse
+      @biases = SimpleMatrix.new(l_size, 1)
+      @biases.random_fill!
 
-              @all_neurons << target_neuron
-              @all_synapses << synapse
-            end
-          end
+      # For storing activations and derivatives
+      @activations = SimpleMatrix.new(1, l_size) # Row vector for output
+      @sigma_primes = SimpleMatrix.new(1, l_size) # Row vector for derivatives
+    end
+
+    private def get_input_size
+      if @prev_layer.is_a?(ConvLayer)
+        total_inputs = 0
+        # Use safe access to prev_layer filters
+        @prev_layer.as(ConvLayer).filters.each do |filter|
+          # Approximate the input size from filter dimensions
+          filter_width = filter.input_surface[0]
+          filter_height = filter.input_surface[1]
+          total_inputs += filter_width * filter_height
         end
+        total_inputs
+      else
+        @prev_layer.output.size
       end
     end
 
     def activate
-      @filters.first.neurons.first.each_with_index do |neuron, i|
-        neuron.activate(@activation_function)
-        @output[i] = neuron.activation
+      # Get input from previous layer
+      input_vector = if @prev_layer.is_a?(ConvLayer)
+                      # Flatten all filter outputs into a single vector
+                      inputs = [] of Float64
+                      @prev_layer.as(ConvLayer).filters.each do |filter|
+                        filter.output.each do |val|
+                          inputs << val
+                        end
+                      end
+                      inputs
+                    else
+                      @prev_layer.output
+                    end
+
+      # Convert to matrix
+      input_matrix = SimpleMatrix.from_a([input_vector])
+
+      # Forward pass: input * weights^T + bias
+      z = input_matrix * @weights.transpose
+
+      # Add bias
+      l_size = @output.size
+      l_size.times do |i|
+        z[0, i] += @biases[i, 0]
+      end
+
+      # Apply activation function and store results
+      l_size.times do |i|
+        act, sigma_prime = @activation_function.call(z[0, i])
+        @activations[0, i] = act
+        @sigma_primes[0, i] = sigma_prime
+        @output[i] = act
       end
     end
 
     def error_prop(batch : Bool = false)
-      @prev_layer.filters.size.times do |filter|
-        @prev_layer.filters[filter].neurons.size.times do |row|
-          @prev_layer.filters[filter].neurons[row].size.times do |neuron|
-            target_neuron = @prev_layer.filters[filter].neurons[row][neuron]
-            target_neuron.hidden_error_prop
-            if batch == true
-              target_neuron.gradient_batch += target_neuron.gradient
-              target_neuron.synapses_out.each do |synapse|
-                synapse.gradient_batch += synapse.source_neuron.activation*synapse.dest_neuron.gradient
-              end
-            else
-              target_neuron.synapses_out.each do |synapse|
-                synapse.gradient = synapse.source_neuron.activation*synapse.dest_neuron.gradient
-              end
-            end
-          end
-        end
+      # Simplified to just call backward_matrix if available
+      if @prev_layer.responds_to?(:backward_matrix)
+        @prev_layer.backward_matrix(self, @activations)
       end
     end
 
-    # ameba:disable Metrics/CyclomaticComplexity
-    def update_wb(learn_type : Symbol | String, batch : Bool = false)
-      # Update all weights of the layer
-      @all_synapses.each do |synapse|
-        if batch == true
-          synapse.gradient = synapse.gradient_batch
-          synapse.gradient_batch = Float64.new(0) # Reset the gradient for next batch
-        end
-
-        case learn_type.to_s
-        # Update weights based on the gradients and delta rule (including momentum)
-        when "sgdm"
-          delta_weight = (-1)*@master_network.learning_rate*synapse.gradient + @master_network.momentum*(synapse.weight - synapse.prev_weight)
-          synapse.weight += delta_weight
-          synapse.prev_weight = synapse.weight
-
-          # Update weights based on Resilient backpropogation (Rprop), using the improved varient iRprop+
-        when "rprop"
-          if synapse.prev_gradient*synapse.gradient > 0
-            delta = [@master_network.etah_plus*synapse.prev_delta, @master_network.delta_max].min
-            delta_weight = (-1)*SHAInet.sign(synapse.gradient)*delta
-
-            synapse.weight += delta_weight
-            synapse.prev_weight = synapse.weight
-            synapse.prev_delta = delta
-            synapse.prev_delta_w = delta_weight
-          elsif synapse.prev_gradient*synapse.gradient < 0.0
-            delta = [@master_network.etah_minus*synapse.prev_delta, @master_network.delta_min].max
-
-            synapse.weight -= synapse.prev_delta_w if @master_network.mean_error >= @master_network.prev_mean_error
-
-            synapse.prev_gradient = 0.0
-            synapse.prev_delta = delta
-          elsif synapse.prev_gradient*synapse.gradient == 0.0
-            delta_weight = (-1)*SHAInet.sign(synapse.gradient)*synapse.prev_delta
-
-            synapse.weight += delta_weight
-            synapse.prev_delta = @master_network.delta_min
-            synapse.prev_delta_w = delta_weight
-          end
-          #
-          # Update weights based on Adaptive moment estimation (Adam)
-        when "adam"
-          synapse.m_current = @master_network.beta1*synapse.m_prev + (1 - @master_network.beta1)*synapse.gradient
-          synapse.v_current = @master_network.beta2*synapse.v_prev + (1 - @master_network.beta2)*(synapse.gradient)**2
-
-          m_hat = synapse.m_current/(1 - (@master_network.beta1)**@master_network.time_step)
-          v_hat = synapse.v_current/(1 - (@master_network.beta2)**@master_network.time_step)
-          synapse.weight -= (@master_network.alpha*m_hat)/(v_hat**0.5 + @master_network.epsilon)
-
-          synapse.m_prev = synapse.m_current
-          synapse.v_prev = synapse.v_current
+    def update_weights(learning_rate : Float64)
+      # Update weights based on gradients
+      @weights.rows.times do |i|
+        @weights.cols.times do |j|
+          @weights[i, j] -= learning_rate * @activations[0, i]
         end
       end
 
-      # Update all biases of the layer
-      @all_neurons.each do |neuron|
-        if batch == true
-          neuron.gradient = neuron.gradient_batch
-          neuron.gradient_batch = Float64.new(0)
+      # Update biases
+      @biases.rows.times do |i|
+        @biases[i, 0] -= learning_rate * @activations[0, i]
+      end
+    end
+
+    def forward_matrix(input_matrix : SimpleMatrix) : SimpleMatrix
+      # Process batch inputs
+      batch_size = input_matrix.rows
+
+      # Create output matrix for batch
+      output = SimpleMatrix.new(batch_size, @output.size)
+
+      # Process each example in the batch
+      batch_size.times do |b|
+        # Extract this example's input
+        example_input = SimpleMatrix.new(1, input_matrix.cols)
+        input_matrix.cols.times do |c|
+          example_input[0, c] = input_matrix[b, c]
         end
 
-        case learn_type.to_s
-        # Update biases based on the gradients and delta rule (including momentum)
-        when "sgdm"
-          delta_bias = (-1)*@master_network.learning_rate*(neuron.gradient) + @master_network.momentum*(neuron.bias - neuron.prev_bias)
-          neuron.bias += delta_bias
-          neuron.prev_bias = neuron.bias
+        # Forward pass
+        z = example_input * @weights.transpose
 
-          # Update weights based on Resilient backpropogation (Rprop), using the improved varient iRprop+
-        when "rprop"
-          if neuron.prev_gradient*neuron.gradient > 0
-            delta = [@master_network.etah_plus*neuron.prev_delta, @master_network.delta_max].min
-            delta_bias = (-1)*SHAInet.sign(neuron.gradient)*delta
+        # Add bias and apply activation
+        z.cols.times do |i|
+          z[0, i] += @biases[i, 0]
+          act, sigma_prime = @activation_function.call(z[0, i])
+          output[b, i] = act
 
-            neuron.bias += delta_bias
-            neuron.prev_bias = neuron.bias
-            neuron.prev_delta = delta
-            neuron.prev_delta_b = delta_bias
-          elsif neuron.prev_gradient*neuron.gradient < 0.0
-            delta = [@master_network.etah_minus*neuron.prev_delta, @master_network.delta_min].max
-
-            neuron.bias -= neuron.prev_delta_b if @master_network.mean_error >= @master_network.prev_mean_error
-
-            neuron.prev_gradient = 0.0
-            neuron.prev_delta = delta
-          elsif neuron.prev_gradient*neuron.gradient == 0.0
-            delta_bias = (-1)*SHAInet.sign(neuron.gradient)*@master_network.delta_min*neuron.prev_delta
-
-            neuron.bias += delta_bias
-            neuron.prev_delta = @master_network.delta_min
-            neuron.prev_delta_b = delta_bias
+          # Update internal state for last example (for backward pass)
+          if b == z.rows - 1
+            @activations[0, i] = act
+            @sigma_primes[0, i] = sigma_prime
           end
-          #
-          # Update weights based on Adaptive moment estimation (Adam)
-        when "adam"
-          neuron.m_current = @master_network.beta1*neuron.m_prev + (1 - @master_network.beta1)*neuron.gradient
-          neuron.v_current = @master_network.beta2*neuron.v_prev + (1 - @master_network.beta2)*(neuron.gradient)**2
-
-          m_hat = neuron.m_current/(1 - (@master_network.beta1)**@master_network.time_step)
-          v_hat = neuron.v_current/(1 - (@master_network.beta2)**@master_network.time_step)
-          neuron.bias -= (@master_network.alpha*m_hat)/(v_hat**0.5 + @master_network.epsilon)
-
-          neuron.m_prev = neuron.m_current
-          neuron.v_prev = neuron.v_current
         end
       end
+
+      output
+    end
+
+    def backward_matrix(prev_layer, gradient_matrix : SimpleMatrix) : SimpleMatrix
+      # Calculate the derivative of the loss with respect to pre-activation values
+      deltas = SimpleMatrix.new(1, @output.size)
+
+      # Apply derivative of activation function to gradient
+      @output.size.times do |i|
+        deltas[0, i] = gradient_matrix[0, i] * @sigma_primes[0, i]
+      end
+
+      # Get input from previous layer
+      input_vector = if prev_layer.is_a?(ConvLayer)
+                      # Flatten all filter outputs into a single vector
+                      inputs = [] of Float64
+                      prev_layer.as(ConvLayer).filters.each do |filter|
+                        filter.output.each do |val|
+                          inputs << val
+                        end
+                      end
+                      inputs
+                    else
+                      prev_layer.output
+                    end
+
+      # Convert to matrix
+      input_matrix = SimpleMatrix.from_a([input_vector])
+
+      # Calculate weight gradients: deltas^T * input
+      weight_gradients = deltas.transpose * input_matrix
+
+      # Calculate input gradients: deltas * weights
+      input_gradients = deltas * @weights
+
+      # Update weights
+      learning_rate = 0.01  # This should ideally be passed in
+      @weights.rows.times do |i|
+        @weights.cols.times do |j|
+          @weights[i, j] -= learning_rate * weight_gradients[i, j]
+        end
+      end
+
+      # Update biases
+      @biases.rows.times do |i|
+        @biases[i, 0] -= learning_rate * deltas[0, i]
+      end
+
+      input_gradients
     end
 
     def inspect(what : String)
@@ -185,28 +199,24 @@ module SHAInet
       puts "----------"
       case what
       when "weights"
-        @filters.first.neurons.first.each_with_index do |neuron, i|
-          puts "Neuron: #{i}, incoming weights:"
-          puts "#{neuron.synapses_in.map { |synapse| synapse.weight.round(4) }}"
+        puts "Matrix weights:"
+        @weights.rows.times do |r|
+          row_vals = (0...@weights.cols).map { |c| @weights[r, c].round(4) }
+          puts "Row #{r}: #{row_vals}"
         end
       when "bias"
-        @filters.first.neurons.first.each_with_index { |neuron, i| puts "Neuron: #{i}, bias: #{neuron.bias.round(4)}" }
+        puts "Matrix biases:"
+        @biases.rows.times do |r|
+          puts "Row #{r}: #{@biases[r, 0].round(4)}"
+        end
       when "activations"
-        @filters.each_with_index do |filter, f|
-          puts "---"
-          puts "Filter: #{f}, neuron activations are:"
-          filter.neurons.each do |row|
-            puts "#{row.map { |n| n.activation.round(4) }}"
-          end
+        puts "Matrix activations:"
+        @activations.rows.times do |r|
+          row_vals = (0...@activations.cols).map { |c| @activations[r, c].round(4) }
+          puts "Row #{r}: #{row_vals}"
         end
       when "gradients"
-        @filters.each_with_index do |filter, f|
-          puts "---"
-          puts "Filter: #{f}, neuron gradients are:"
-          filter.neurons.each do |row|
-            puts "#{row.map { |n| n.gradient.round(4) }}"
-          end
-        end
+        puts "No explicit gradients matrix"
       end
       puts "------------------------------------------------"
     end
