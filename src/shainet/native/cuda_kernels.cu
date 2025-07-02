@@ -147,4 +147,71 @@ void count_token_pairs(const int* a, const int* b, const int* freq,
     cudaDeviceSynchronize();
 }
 
+__global__ void layer_norm_backward_kernel(double* d_x, double* d_gamma, double* d_beta,
+                                           const double* d_out, const double* x,
+                                           const double* gamma, const double* mean,
+                                           const double* var, const double* norm,
+                                           int rows, int cols, double epsilon) {
+    int row = blockIdx.x;
+    if(row >= rows) return;
+    
+    const double *x_row = x + row * cols;
+    const double *dout_row = d_out + row * cols;
+    const double *norm_row = norm + row * cols;
+    double *dx_row = d_x + row * cols;
+    
+    double m = mean[row];
+    double v = var[row];
+    double denom = sqrt(v + epsilon);
+    double inv = 1.0 / denom;
+    double col_f = (double)cols;
+    
+    // Compute sum_dout_gamma and sum_dout_gamma_norm
+    double sum_dout_gamma = 0.0;
+    double sum_dout_gamma_norm = 0.0;
+    for(int j = 0; j < cols; ++j) {
+        double doutg = dout_row[j] * gamma[j];
+        sum_dout_gamma += doutg;
+        sum_dout_gamma_norm += doutg * (x_row[j] - m);
+        
+        // Accumulate gradients for gamma and beta
+        atomicAdd(&d_gamma[j], dout_row[j] * norm_row[j]);
+        atomicAdd(&d_beta[j], dout_row[j]);
+    }
+    
+    // Compute d_x
+    for(int j = 0; j < cols; ++j) {
+        double xm = x_row[j] - m;
+        double doutg = dout_row[j] * gamma[j];
+        dx_row[j] = inv * (doutg - sum_dout_gamma/col_f - xm * inv*inv / col_f * sum_dout_gamma_norm);
+    }
+}
+
+void layer_norm_backward(double* d_x, double* d_gamma, double* d_beta,
+                         const double* d_out, const double* x,
+                         const double* gamma, const double* mean,
+                         const double* var, const double* norm,
+                         int rows, int cols, double epsilon) {
+    layer_norm_backward_kernel<<<rows, 1>>>(d_x, d_gamma, d_beta, d_out, x,
+                                            gamma, mean, var, norm,
+                                            rows, cols, epsilon);
+    cudaDeviceSynchronize();
+}
+
+__global__ void sum_cols_kernel(double* out, const double* in, int rows, int cols) {
+    int col = blockIdx.x;
+    if(col >= cols) return;
+    
+    double sum = 0.0;
+    for(int i = 0; i < rows; ++i) {
+        sum += in[i * cols + col];
+    }
+    out[col] = sum;
+}
+
+void sum_cols(double* out, const double* in, int rows, int cols) {
+    sum_cols_kernel<<<cols, 1>>>(out, in, rows, cols);
+    cudaDeviceSynchronize();
+}
+
 } // extern "C"

@@ -218,6 +218,8 @@ module SHAInet
     @@set_cols_proc : Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Int32, Int32, Void)? = nil
     @@row_mean_var_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Int32, Void)? = nil
     @@layer_norm_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Int32, Float64, Void)? = nil
+    @@layer_norm_backward_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Int32, Float64, Void)? = nil
+    @@sum_cols_proc : Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Void)? = nil
 
     def softmax_rows(dst : Pointer(Float64), src : Pointer(Float64), rows : Int32, cols : Int32)
       unless fn = @@softmax_rows_proc
@@ -304,7 +306,7 @@ module SHAInet
       fn.call(dst, src, rows, dst_cols, start_col, len)
     end
 
-    def row_mean_var(mean : Pointer(Float64), var : Pointer(Float64), src : Pointer(Float64), rows : Int32, cols : Int32)
+    def row_mean_var(src : Pointer(Float64), mean : Pointer(Float64), var : Pointer(Float64), rows : Int32, cols : Int32)
       unless fn = @@row_mean_var_proc
         if @@kernels_handle.null?
           @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
@@ -318,7 +320,7 @@ module SHAInet
         end
       end
       raise "CUDA kernels not available" unless fn
-      fn.call(mean, var, src, rows, cols)
+      fn.call(src, mean, var, rows, cols)
     end
 
     def layer_norm(dst : Pointer(Float64), src : Pointer(Float64), mean : Pointer(Float64), var : Pointer(Float64), rows : Int32, cols : Int32, eps : Float64)
@@ -336,6 +338,43 @@ module SHAInet
       end
       raise "CUDA kernels not available" unless fn
       fn.call(dst, src, mean, var, rows, cols, eps)
+    end
+
+    def layer_norm_backward(d_x : Pointer(Float64), d_gamma : Pointer(Float64), d_beta : Pointer(Float64),
+                           d_out : Pointer(Float64), x : Pointer(Float64), gamma : Pointer(Float64),
+                           mean : Pointer(Float64), var : Pointer(Float64), norm : Pointer(Float64),
+                           rows : Int32, cols : Int32, eps : Float64)
+      unless fn = @@layer_norm_backward_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "layer_norm_backward")
+          unless sym.null?
+            @@layer_norm_backward_proc = Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Int32, Float64, Void).new(sym, Pointer(Void).null)
+            fn = @@layer_norm_backward_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(d_x, d_gamma, d_beta, d_out, x, gamma, mean, var, norm, rows, cols, eps)
+    end
+
+    def sum_cols(dst : Pointer(Float64), src : Pointer(Float64), rows : Int32, cols : Int32)
+      unless fn = @@sum_cols_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "sum_cols")
+          unless sym.null?
+            @@sum_cols_proc = Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@sum_cols_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(dst, src, rows, cols)
     end
 
     # In-place element-wise ReLU on GPU memory. This fallback implementation

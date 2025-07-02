@@ -49,9 +49,9 @@ module SHAInet
         cx = x.as(CudaMatrix)
         begin
           # Try to use CUDA kernels - if they fail, fallback to CPU
-          CUDA.row_mean_var(cuda_mean.device_ptr.not_nil!,
-            cuda_var.device_ptr.not_nil!,
-            cx.device_ptr.not_nil!, rows, cols)
+          CUDA.row_mean_var(cx.device_ptr.not_nil!,
+            cuda_mean.device_ptr.not_nil!,
+            cuda_var.device_ptr.not_nil!, rows, cols)
           CUDA.layer_norm(cuda_norm.device_ptr.not_nil!,
             cx.device_ptr.not_nil!,
             cuda_mean.device_ptr.not_nil!,
@@ -112,15 +112,81 @@ module SHAInet
 
     def backward(d_out : SimpleMatrix)
       x = @x.not_nil!
-      x.sync_from_device! if x.responds_to?(:sync_from_device!)
       rows = x.rows
       cols = x.cols
+
+      # If all tensors are CUDA and kernels are available, use GPU computation
+      if CUDA.fully_available? && d_out.is_a?(CudaMatrix) && x.is_a?(CudaMatrix) &&
+         @mean.is_a?(CudaMatrix) && @var.is_a?(CudaMatrix) && @norm.is_a?(CudaMatrix)
+
+        begin
+          # Create GPU matrices for gradients
+          d_x = CudaMatrix.new(rows, cols)
+          d_gamma = CudaMatrix.zeros(1, cols)
+          d_beta = CudaMatrix.zeros(1, cols)
+
+          # Convert gamma to GPU for computation
+          gamma_gpu = GPUMemory.keep_on_gpu(@gamma)
+
+          # Run CUDA kernel for backward pass
+          CUDA.layer_norm_backward(
+            d_x.device_ptr.not_nil!,
+            d_gamma.device_ptr.not_nil!,
+            d_beta.device_ptr.not_nil!,
+            d_out.as(CudaMatrix).device_ptr.not_nil!,
+            x.as(CudaMatrix).device_ptr.not_nil!,
+            gamma_gpu.as(CudaMatrix).device_ptr.not_nil!,
+            @mean.as(CudaMatrix).device_ptr.not_nil!,
+            @var.as(CudaMatrix).device_ptr.not_nil!,
+            @norm.as(CudaMatrix).device_ptr.not_nil!,
+            rows, cols, @epsilon
+          )
+
+          # Mark results as dirty on device
+          d_x.mark_device_dirty!
+          d_gamma.mark_device_dirty!
+          d_beta.mark_device_dirty!
+
+          # Only sync gradients when needed - accumulate gradients to CPU parameters
+          # without calling sync_from_device! unnecessarily
+          d_gamma.sync_from_device!
+          d_beta.sync_from_device!
+
+          # Accumulate gradients to parameters (always SimpleMatrix)
+          cols.times do |j|
+            @g_gamma[0, j] += d_gamma[0, j]
+            @g_beta[0, j] += d_beta[0, j]
+          end
+
+          return d_x
+        rescue e : Exception
+          # Fall back to CPU implementation
+        end
+      end
+
+      # CPU implementation or fallback
+      # Only sync x if it's a CUDA matrix since we need CPU access
+      if x.is_a?(CudaMatrix)
+        x.as(CudaMatrix).sync_from_device!
+      end
 
       # Use the same matrix type as the input for consistency
       mat_klass = d_out.is_a?(CudaMatrix) ? CudaMatrix : SimpleMatrix
       d_gamma = mat_klass.zeros(1, cols)
       d_beta = mat_klass.zeros(1, cols)
       d_x = mat_klass.new(rows, cols)
+
+      # Also sync other matrices if they're CUDA
+      if @mean.is_a?(CudaMatrix)
+        @mean.as(CudaMatrix).sync_from_device!
+      end
+      if @var.is_a?(CudaMatrix)
+        @var.as(CudaMatrix).sync_from_device!
+      end
+      if @norm.is_a?(CudaMatrix)
+        @norm.as(CudaMatrix).sync_from_device!
+      end
+
       rows.times do |i|
         denom = Math.sqrt(@var[i, 0] + @epsilon)
         inv = 1.0 / denom
@@ -140,10 +206,15 @@ module SHAInet
           d_x[i, j] = inv * (doutg - sum_dout_gamma/col_f - xm * inv*inv / col_f * sum_dout_gamma_norm)
         end
       end
+
       # Convert gradients to match parameter types if needed
       if d_gamma.is_a?(CudaMatrix)
-        @g_gamma = @g_gamma + SimpleMatrix.from_a(d_gamma.to_a)
-        @g_beta = @g_beta + SimpleMatrix.from_a(d_beta.to_a)
+        d_gamma.as(CudaMatrix).sync_from_device!
+        d_beta.as(CudaMatrix).sync_from_device!
+        cols.times do |j|
+          @g_gamma[0, j] += d_gamma[0, j]
+          @g_beta[0, j] += d_beta[0, j]
+        end
       else
         @g_gamma = @g_gamma + d_gamma
         @g_beta = @g_beta + d_beta

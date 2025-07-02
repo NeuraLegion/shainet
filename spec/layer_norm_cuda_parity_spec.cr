@@ -3,9 +3,6 @@ require "./spec_helper"
 describe "LayerNorm GPU parity" do
   it "matches CPU and GPU forward/backward" do
     pending! "CUDA not available" unless SHAInet::CUDA.available?
-    # TODO: This test needs to be updated for the new architecture where parameters
-    # remain SimpleMatrix but computations can use CUDA
-    pending! "Architecture changed - GPU parity test needs update"
 
     rows = 3
     cols = 4
@@ -34,6 +31,7 @@ describe "LayerNorm GPU parity" do
 
     x_gpu = SHAInet::GPUMemory.to_gpu(SHAInet::SimpleMatrix.from_a(data))
     dout_gpu = SHAInet::GPUMemory.to_gpu(SHAInet::SimpleMatrix.from_a(dout_data))
+
     out_gpu = gpu_ln.forward(x_gpu)
 
     # Sync GPU results if needed
