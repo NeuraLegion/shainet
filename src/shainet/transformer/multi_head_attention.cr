@@ -2,31 +2,30 @@ module SHAInet
   class MultiHeadAttention
     getter num_heads, d_model, head_dim
     @head_dim : Int32
-    @w_q : SimpleMatrix
-    @w_k : SimpleMatrix
-    @w_v : SimpleMatrix
-    @w_o : SimpleMatrix
-    @x : SimpleMatrix?
-    @q_heads : Array(SimpleMatrix)
-    @k_heads : Array(SimpleMatrix)
-    @v_heads : Array(SimpleMatrix)
-    @attn : Array(SimpleMatrix)
-    @out : SimpleMatrix
+    @w_q : SimpleMatrix | CudaMatrix
+    @w_k : SimpleMatrix | CudaMatrix
+    @w_v : SimpleMatrix | CudaMatrix
+    @w_o : SimpleMatrix | CudaMatrix
+    @x : SimpleMatrix | CudaMatrix | Nil
+    @q_heads : Array(SimpleMatrix | CudaMatrix)
+    @k_heads : Array(SimpleMatrix | CudaMatrix)
+    @v_heads : Array(SimpleMatrix | CudaMatrix)
+    @attn : Array(SimpleMatrix | CudaMatrix)
+    @out : SimpleMatrix | CudaMatrix
 
     # Gradient matrices - keep same type as weights
-    @g_w_q : SimpleMatrix
-    @g_w_k : SimpleMatrix
-    @g_w_v : SimpleMatrix
-    @g_w_o : SimpleMatrix
+    @g_w_q : SimpleMatrix | CudaMatrix
+    @g_w_k : SimpleMatrix | CudaMatrix
+    @g_w_v : SimpleMatrix | CudaMatrix
+    @g_w_o : SimpleMatrix | CudaMatrix
 
     getter w_q, w_k, w_v, w_o
     property g_w_q, g_w_k, g_w_v, g_w_o
 
     def initialize(@d_model : Int32, @num_heads : Int32)
       @head_dim = (@d_model // @num_heads)
-      # Always use SimpleMatrix for compatibility with existing tests
-      # CUDA operations will be automatically handled in forward/backward passes
-      mat_klass = SimpleMatrix
+      # Use CudaMatrix when CUDA is available for better performance
+      mat_klass = CUDA.fully_available? ? CudaMatrix : SimpleMatrix
 
       # Use consistent matrix type throughout - no more TensorMatrix mixing
       @w_q = mat_klass.new(@d_model, @d_model).random_fill!
@@ -34,35 +33,35 @@ module SHAInet
       @w_v = mat_klass.new(@d_model, @d_model).random_fill!
       @w_o = mat_klass.new(@d_model, @d_model).random_fill!
 
-      # Initialize gradients
+      # Initialize gradients with same type as weights
       @g_w_q = mat_klass.zeros(@d_model, @d_model)
       @g_w_k = mat_klass.zeros(@d_model, @d_model)
       @g_w_v = mat_klass.zeros(@d_model, @d_model)
       @g_w_o = mat_klass.zeros(@d_model, @d_model)
 
-      @q_heads = [] of SimpleMatrix
-      @k_heads = [] of SimpleMatrix
-      @v_heads = [] of SimpleMatrix
-      @attn = [] of SimpleMatrix
+      @q_heads = [] of (SimpleMatrix | CudaMatrix)
+      @k_heads = [] of (SimpleMatrix | CudaMatrix)
+      @v_heads = [] of (SimpleMatrix | CudaMatrix)
+      @attn = [] of (SimpleMatrix | CudaMatrix)
       @out = mat_klass.zeros(1, 1)
     end
 
     # `x` is expected to have each row representing a batch entry.
     # Sequence length should be encoded along the column dimension or through
     # multiple calls when processing sequences step-by-step.
-    def forward(x : SimpleMatrix, mask : SimpleMatrix? = nil)
+    def forward(x : SimpleMatrix | CudaMatrix, mask : SimpleMatrix | CudaMatrix | Nil = nil)
       @x = x
 
-      # Compute Q, K, V projections - keep on same device as input
+      # Compute Q, K, V projections - weights and input should be same type
       q = x * @w_q
       k = x * @w_k
       v = x * @w_v
 
-      @q_heads = [] of SimpleMatrix
-      @k_heads = [] of SimpleMatrix
-      @v_heads = [] of SimpleMatrix
-      @attn = [] of SimpleMatrix
-      outputs = [] of SimpleMatrix
+      @q_heads = [] of (SimpleMatrix | CudaMatrix)
+      @k_heads = [] of (SimpleMatrix | CudaMatrix)
+      @v_heads = [] of (SimpleMatrix | CudaMatrix)
+      @attn = [] of (SimpleMatrix | CudaMatrix)
+      outputs = [] of (SimpleMatrix | CudaMatrix)
 
       # Split into heads and compute attention - all operations stay on same device
       @num_heads.times do |h|
@@ -179,11 +178,21 @@ module SHAInet
       @w_v = @w_v - (@g_w_v * lr)
       @w_o = @w_o - (@g_w_o * lr)
 
+      # Sync updated weights to device if using CUDA
+      if CUDA.fully_available?
+        [@w_q, @w_k, @w_v, @w_o].each do |mat|
+          if mat.is_a?(CudaMatrix)
+            mat.sync_to_device!
+          end
+        end
+      end
+
       # Clear gradients
       zero_gradients
     end
 
     def zero_gradients
+      # Use same matrix type as weights for gradients
       mat_klass = @w_q.class
       @g_w_q = mat_klass.zeros(@d_model, @d_model)
       @g_w_k = mat_klass.zeros(@d_model, @d_model)

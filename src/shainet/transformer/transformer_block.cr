@@ -83,6 +83,12 @@ module SHAInet
       @norm2.apply_gradients(lr)
     end
 
+    # Override MatrixLayer's update_weights to prevent conflicts
+    # TransformerBlock manages its own weight updates through apply_gradients
+    def update_weights(learning_rate : Float64)
+      # No-op: weights are updated via apply_gradients in update_transformer_layers
+    end
+
     def zero_gradients
       @ffn.zero_gradients
       @mha.zero_gradients

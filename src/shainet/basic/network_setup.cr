@@ -170,6 +170,9 @@ module SHAInet
           # (batch_size x d_model) * (d_model x vocab_size) = (batch_size x vocab_size)
           dest_layer.weights = mat_klass.new(src_layer.size, dest_layer.size).random_fill!
           dest_layer.biases = mat_klass.new(1, dest_layer.size).random_fill!
+          # Also reinitialize gradient matrices with correct dimensions
+          dest_layer.g_w = mat_klass.zeros(src_layer.size, dest_layer.size)
+          dest_layer.g_b = mat_klass.zeros(1, dest_layer.size)
         elsif dest_layer.is_a?(MatrixLayer)
           # For MatrixLayer, reinitialize with correct dimensions
           dest_layer.weights = mat_klass.new(src_layer.size, dest_layer.size).random_fill!
