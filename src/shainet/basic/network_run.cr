@@ -7,10 +7,9 @@ require "../math/cuda_matrix"
 module SHAInet
   class Network
     # ------------
-    # There are no matrices in this implementation, instead the gradient values
-    # are stored in each neuron/synapse independently.
-    # When preforming propogation,
-    # all the math is done iteratively on each neuron/synapse locally.
+    # This is a matrix-based neural network implementation. All operations
+    # are performed on matrices rather than individual neurons/synapses.
+    # This approach provides better performance and GPU acceleration capabilities.
 
     # This file contains all the methods for running and training the network,
     # for methods regarding creating and maintaining go to network_setup.cr
@@ -135,10 +134,10 @@ module SHAInet
             act, sig = out_layer.activation_function.call(val)
             matrix[i, j] = act
             if i == matrix.rows - 1
-              # Update internal state matrices for matrix-based layers
-              if out_layer.responds_to?(:neurons)
-                out_layer.neurons[j].activation = act
-                out_layer.neurons[j].sigma_prime = sig
+              # Update internal state matrices for output layer
+              if out_layer.responds_to?(:activations) && out_layer.responds_to?(:sigma_primes)
+                out_layer.activations[0, j] = act
+                out_layer.sigma_primes[0, j] = sig
               end
             end
           end
@@ -274,7 +273,7 @@ module SHAInet
       # Test for NaNs & exploading gradients
       validate_values(actual_output, "actual_output")
 
-      # Get the error signal for the final layer, based on the cost function (error gradient is stored in the output neurons)
+      # Get the error signal for the final layer, based on the cost function
       @error_signal = [] of Float64 # Collect all the errors for current run
 
       actual_output.size.times do |i|
@@ -284,7 +283,6 @@ module SHAInet
         # puts "Actual output: #{actual_output}"
         # puts "Cost value: #{cost[:value]}"
         # puts "Cost derivative: #{cost[:derivative]}"
-        # puts "Neuron.sigma_prime: #{neuron.sigma_prime}"
         # puts "---"
       end
 
@@ -362,7 +360,7 @@ module SHAInet
       # Test for NaNs & exploading gradients
       validate_values(actual_output, "actual_output")
 
-      # Get the error signal for the final layer, based on the cost function (error gradient is stored in the output neurons)
+      # Get the error signal for the final layer, based on the cost function
       @error_signal = [] of Float64 # Collect all the errors for current run
 
       actual_output.size.times do |i|
@@ -372,7 +370,6 @@ module SHAInet
         # puts "Actual output: #{actual_output}"
         # puts "Cost value: #{cost[:value]}"
         # puts "Cost derivative: #{cost[:derivative]}"
-        # puts "Neuron.sigma_prime: #{neuron.sigma_prime}"
         # puts "---"
       end
 
@@ -722,8 +719,9 @@ module SHAInet
       end
     end
 
-    # NOTE: The update_weights and update_biases methods have been removed as they were legacy code
-    # replaced by the matrix-based implementation in the train method.
+    # Legacy neuron/synapse based weight update methods have been removed
+    # in favor of the matrix-based implementation in the train method
+    # and the layer-specific update_weights methods.
 
     def verify_data(data : Array(Array), label_mode : Bool = false)
       message = nil
