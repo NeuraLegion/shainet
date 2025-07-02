@@ -166,17 +166,20 @@ module SHAInet
     end
 
     # Run a batch of sequences by calling `run` for each sequence
+    # This is a convenience wrapper that can be consolidated with more direct matrix operations
     def run(input : Array(Array(Array(GenNum))), stealth : Bool = false) : Array(Array(Array(Float64)))
       input.map { |seq| run(seq, stealth: stealth) }
     end
 
     # Accept a sequence of integer tokens for embedding layers
+    # This is a convenience wrapper around the standard run method
     def run(input : Array(Array(Int32)), stealth : Bool = false) : Array(Array(Float64))
       seq = input.map { |x| x.map(&.to_f64) }
       run(seq, stealth: stealth)
     end
 
     # Accept integer input for embedding layers
+    # This is a convenience wrapper around the standard run method
     def run(input : Array(Int32), stealth : Bool = false) : Array(Float64)
       float_in = input.map(&.to_f64)
       run(float_in, stealth: stealth)
@@ -340,6 +343,7 @@ module SHAInet
     end
 
     # Accept integer input for embeddings
+    # This is a convenience wrapper around the standard evaluate method
     def evaluate(input_data : Array(Int32),
                  expected_output : Array(GenNum),
                  cost_function : CostFunction = SHAInet.quadratic_cost)
@@ -394,11 +398,10 @@ module SHAInet
       raise NeuralNetRunError.new("Error in evaluate: #{e}")
     end
 
-    def evaluate_sequence(input_data : Array(Array(Int32)),
-                          expected_output : Array(GenNum),
-                          cost_function : CostFunction = SHAInet.quadratic_cost)
+    # Convenience wrapper for integer inputs
+    def evaluate_sequence_label(input_data : Array(Array(Int32)), label : Int32)
       seq = input_data.map { |x| x.map(&.to_f64) }
-      evaluate_sequence(seq, expected_output, cost_function)
+      evaluate_sequence_label(seq, label)
     end
 
     # Evaluate a single example using a class label and softmax cross entropy
@@ -429,10 +432,12 @@ module SHAInet
       end
     end
 
+    # Convenience wrapper for integer inputs
     def evaluate_label(input_data : Array(Int32), label : Int32)
       evaluate_label(input_data.map(&.to_f64), label)
     end
 
+    # Convenience wrapper for matrix inputs
     def evaluate_label(input_data : SimpleMatrix, label : Int32)
       vec = input_data.to_a.first.map(&.to_f64)
       evaluate_label(vec, label)
@@ -469,6 +474,7 @@ module SHAInet
       end
     end
 
+    # Convenience wrapper for integer inputs
     def evaluate_sequence_label(input_data : Array(Array(Int32)), label : Int32)
       seq = input_data.map { |x| x.map(&.to_f64) }
       evaluate_sequence_label(seq, label)
@@ -485,28 +491,6 @@ module SHAInet
       sqrd_dists = 0.0
       @error_signal.each { |e| sqrd_dists += (e - error_avg)**2 }
       @mse = sqrd_dists / n
-    end
-
-    # This method is kept for matching syntax of previous versions.
-    # It is possible to use the "train" method instead
-    def train_batch(data : Array(Array) | SHAInet::TrainingData,
-                    training_type : Symbol | String = :sgdm,
-                    cost_function : Symbol | String | CostFunction = :mse,
-                    epochs : Int32 = 1,
-                    error_threshold : Float64 = 0.00000001,
-                    mini_batch_size : Int32 = 1,
-                    log_each : Int32 = 1,
-                    show_slice : Bool = false,
-                    autosave : NamedTuple(freq: Int32, path: String) | Nil = nil)
-      train(data: data,
-        training_type: training_type,
-        cost_function: cost_function,
-        epochs: epochs,
-        error_threshold: error_threshold,
-        mini_batch_size: mini_batch_size,
-        log_each: log_each,
-        show_slice: show_slice,
-        autosave: autosave)
     end
 
     # Clean matrix-based training method
@@ -738,171 +722,8 @@ module SHAInet
       end
     end
 
-    # Use evolutionary strategies for network optimization instread of gradient based approach
-    # ameba:disable Metrics/CyclomaticComplexity
-    def train_es(data : Array(Array(Array(GenNum))) | SHAInet::TrainingData,   # Input structure: data = [[Input = [] of Float64],[Expected result = [] of Float64]]
-                 pool_size : Int32,                                            # How many random direction to try each time
-                 learning_rate : Float64,                                      # How much of the noise i used for the parameter update
-                 sigma : Float64,                                              # Range of noise values
-                 cost_function : Symbol | String | CostFunction = :c_ent,      # Proc returns the function value and it's derivative
-                 epochs : Int32 = 1,                                           # a criteria of when to stop the training
-                 mini_batch_size : Int32 = 1,                                  # Size of batch
-                 error_threshold : Float64 = 0.0,                              # a criteria of when to stop the training
-                 log_each : Int32 = 1,                                         # determines what is the step for error printout
-                 show_slice : Bool = false,                                    # Show MSE for each slice
-                 autosave : NamedTuple(freq: Int32, path: String) | Nil = nil) # Save the network each X epochs)
-      # This methods accepts data as either a SHAInet::TrainingData object, or as an Array(Array(Array(GenNum)).
-      # In the case of SHAInet::TrainingData, we convert it to an Array(Array(Array(GenNum)) by calling #data on it.
-      raw_data = data.is_a?(SHAInet::TrainingData) ? data.data : data
-      Log.info { "Training started" }
-      start_time = Time.monotonic
-      batch_size = mini_batch_size ? mini_batch_size : raw_data.size
-
-      # Change String/Symbol into the corrent proc of the cost function
-      if cost_function.is_a?(Symbol) || cost_function.is_a?(String)
-        raise NeuralNetRunError.new("Must define correct cost function type (:mse, :c_ent, :c_ent_sm, :exp, :hel_d, :kld, :gkld, :ita_sai_d).") if COST_FUNCTIONS.any? { |x| x == cost_function.to_s } == false
-        proc = get_cost_proc(cost_function.to_s)
-        cost_function = proc
-      end
-
-      epoch = 0_i64
-      loop do
-        # Autosave the network
-        unless autosave.nil?
-          if epoch % autosave[:freq] == 0 && (epoch > 0)
-            # Log.info { "Network saved." }
-            save_to_file("#{autosave[:path]}/autosave_epoch_#{epoch}.nn")
-          end
-        end
-
-        # Break condtitions
-        if epoch >= epochs || (error_threshold >= @mse) && (epoch > 1)
-          log_summary(epoch)
-          Log.info { "Training finished. (Elapsed: #{Time.monotonic - start_time})" }
-          break
-        end
-
-        # Show training progress of epochs
-        if epoch % log_each == 0
-          log_summary(epoch)
-          # @all_neurons.each { |s| puts s.gradient }
-        end
-
-        # Counters for disply
-        display_counter = 0
-        slices = (data.size.to_f64 / mini_batch_size).ceil.to_i
-
-        # For error break condition
-        epoch_mse = 0.0
-        epoch_error_sum = Array(Float64).new(@output_layers.last.size) { 0.0 }
-
-        raw_data.not_nil!.each_slice(batch_size, reuse: false) do |data_slice|
-          verify_data(data_slice, false)
-
-          pool = Pool.new(
-            network: self,
-            pool_size: pool_size,
-            learning_rate: learning_rate,
-            sigma: sigma)
-
-          # Update wieghts & biases for the batch
-          pool.organisms.each do |organism|
-            organism.get_new_params # Get new weights & biases
-
-            # Go over each data points and collect errors
-            # based on each specific example in the batch
-            batch_mse_sum = 0.0_f64
-            batch_errors_sum = Array(Float64).new(@output_layers.last.size) { 0.0 }
-
-            data_slice.each do |data_point|
-              # Update error signal in output layer
-              input_d = data_point[0]
-              output_d = data_point[1]
-              output_arr = [] of Float64
-              if output_d.is_a?(Array)
-                output_d.as(Array).each do |v|
-                  if v.is_a?(Number)
-                    output_arr << v.to_f64
-                  end
-                end
-              else
-                output_arr << output_d.to_f64
-              end
-              if input_d.is_a?(Array) && input_d.as(Array).first.is_a?(Array)
-                seq_in = (input_d.as(Array).map { |x| x.as(Array).map(&.to_f64).as(Array(Float64)) }).as(Array(Array(Float64)))
-                evaluate_sequence(seq_in, output_arr.map(&.to_f64), cost_function.as(CostFunction))
-              else
-                input_arr = [] of Float64
-                input_d.as(Array).each do |v|
-                  if v.is_a?(Number)
-                    input_arr << v.to_f64
-                  end
-                end
-                evaluate(input_arr, output_arr.map(&.to_f64), cost_function.as(CostFunction))
-              end
-              update_mse
-              batch_mse_sum += @mse
-              @error_signal.size.times { |i| batch_errors_sum[i] += @error_signal[i] }
-            end
-
-            @mse = (batch_mse_sum / mini_batch_size) # Update MSE of the batch
-            @error_signal = batch_errors_sum
-            organism.update_reward
-          end
-
-          epoch_mse += @mse
-          @error_signal.size.times { |i| epoch_error_sum[i] += @error_signal[i] }
-          pool.pull_params
-
-          # Show training progress of the mini-batches
-          display_counter += 1
-          if epoch % log_each == 0
-            Log.info { "  Slice: (#{display_counter} / #{slices}), MSE: #{@mse}" } if show_slice
-            # Log.info { "@error_signal: #{@error_signal}" }
-          end
-        end
-        # Update epoch status
-        @mse = (epoch_mse / slices)
-        @error_signal.size.times { |i| @error_signal[i] = (epoch_error_sum[i] / slices) }
-        epoch += 1
-      end
-    end
-
-    # Update weights based on gradient information
-    def update_weights(training_type)
-      lr = current_learning_rate
-
-      # Handle all layer types
-      @all_layers.each do |layer|
-        case layer
-        when EmbeddingLayer
-          layer.as(EmbeddingLayer).accumulate_gradient
-          layer.as(EmbeddingLayer).apply_gradients(lr)
-        when LSTMLayer
-          layer.as(LSTMLayer).update_gate_params(lr)
-        when TransformerLayer
-          layer.as(TransformerLayer).apply_gradients(lr)
-        when MatrixLayer
-          # MatrixLayer has proper gradient computation and weight updates
-          layer.as(MatrixLayer).update_weights(lr)
-        else
-          # Standard matrix-based layers - apply accumulated gradients
-          # Temporarily disabled while fixing gradient computation
-          # if layer.responds_to?(:apply_gradients)
-          #   layer.apply_gradients(lr)
-          # end
-        end
-      end
-
-      # Handle transformer layers separately if they exist
-      update_transformer_layers if @transformer_layers.any?
-    end
-
-    # Update biases based on gradient information
-    def update_biases(training_type)
-      # Matrix-based implementation - biases are updated during backprop
-      # This method is kept for backward compatibility
-    end
+    # NOTE: The update_weights and update_biases methods have been removed as they were legacy code
+    # replaced by the matrix-based implementation in the train method.
 
     def verify_data(data : Array(Array), label_mode : Bool = false)
       message = nil
