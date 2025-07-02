@@ -47,6 +47,21 @@ module SHAInet
       @sigma_primes = nil
     end
 
+    # Constructor with custom activation function
+    def initialize(in_size : Int32, @size : Int32, @activation_function : ActivationFunction)
+      @n_type = "memory"
+      @l_size = @size
+      # Use SimpleMatrix for consistency during debugging
+      mat_klass = SimpleMatrix
+      @weights = mat_klass.new(in_size, @size).random_fill!
+      @biases = mat_klass.new(1, @size).random_fill!
+      @g_w = mat_klass.zeros(in_size, @size)
+      @g_b = mat_klass.zeros(1, @size)
+      @input = nil
+      @activations = nil
+      @sigma_primes = nil
+    end
+
     def inspect
       Log.info { @n_type }
     end
@@ -130,6 +145,11 @@ module SHAInet
           @g_b[i, j] = 0.0
         end
       end
+    end
+
+    # Getter for activations (for testing and debugging)
+    def activations
+      @activations.not_nil!
     end
   end
 end

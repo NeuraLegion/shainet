@@ -45,8 +45,27 @@ module SHAInet
         b = GPUMemory.keep_on_gpu(out_layer.biases)
         matrix = safe_output_transform(matrix, w)
 
-        # Delegate output computation to the matrix-based layer implementation
-        matrix = out_layer.forward(matrix)
+        # Use GPU-accelerated bias addition when available
+        if matrix.is_a?(CudaMatrix) && b.is_a?(CudaMatrix)
+          matrix.add_bias!(b)
+        else
+          matrix.rows.times do |i|
+            matrix.cols.times do |j|
+              matrix[i, j] += b[0, j]
+            end
+          end
+        end
+
+        # Apply activation function - for identity, no operation needed
+        unless out_layer.activation_function == SHAInet.identity
+          matrix.rows.times do |i|
+            matrix.cols.times do |j|
+              val = matrix[i, j]
+              act, sig = out_layer.activation_function.call(val)
+              matrix[i, j] = act
+            end
+          end
+        end
 
         output = matrix.to_a.first
         unless stealth
@@ -221,7 +240,7 @@ module SHAInet
         else
           matrix.rows.times do |i|
             matrix.cols.times do |j|
-              matrix[i, j] += b[j, 0]
+              matrix[i, j] += b[0, j]
             end
           end
         end
@@ -826,13 +845,12 @@ module SHAInet
     # and dimension mismatches
     private def safe_output_transform(matrix : SimpleMatrix, weights : SimpleMatrix) : SimpleMatrix
       begin
-        # First check dimensions to provide a clearer error
-        if matrix.cols != weights.cols
-          raise ArgumentError.new("Matrix dimension mismatch: input features (#{matrix.cols}) doesn't match weights (#{weights.cols})")
+        # For matrix * weights, we need matrix.cols == weights.rows
+        if matrix.cols != weights.rows
+          raise ArgumentError.new("Matrix dimension mismatch: input features (#{matrix.cols}) doesn't match weights input size (#{weights.rows})")
         end
 
-        w_t = weights.transpose
-        matrix * w_t
+        matrix * weights
       rescue ex : Exception
         # Check for dimension issues and try to reshape if possible
         if ex.message.to_s.includes?("size mismatch") || ex.message.to_s.includes?("dimension mismatch")

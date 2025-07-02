@@ -82,6 +82,12 @@ module SHAInet
       if mat.is_a?(CudaMatrix) && CUDA.available?
         mat.as(CudaMatrix).sync_from_device!
       end
+
+      # Set the activations for this layer
+      mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
+      @activations = mat_klass.new(1, @l_size)
+      @l_size.times { |i| @activations.not_nil![0, i] = mat[0, i] }
+
       arr = Array(Float64).new(@l_size) { |i| mat[0, i] }
       arr
     end

@@ -7,9 +7,7 @@ require "./matrix_layer"
 module SHAInet
   class Network
     # Notes:
-    # ------------
-    # This implementation uses matrix-based operations for efficient computation.
-    # Gradients, weights, and activations are stored in matrix form.
+
     #
     # This file contains all the methods for creating and maintaining
     # the network, for methods regarding running and training go to network_run.cr
@@ -179,15 +177,17 @@ module SHAInet
         # Matrix-based layers handle weight initialization internally
         # Use SimpleMatrix for now to avoid CUDA type mismatches during debugging
         mat_klass = SimpleMatrix
-        if dest_layer.is_a?(MatrixLayer)
+        if src_layer.is_a?(TransformerLayer)
+          # For transformer output, weights need to be (d_model, vocab_size) for correct matrix multiplication
+          # (batch_size x d_model) * (d_model x vocab_size) = (batch_size x vocab_size)
+          dest_layer.weights = mat_klass.new(src_layer.size, dest_layer.size).random_fill!
+          dest_layer.biases = mat_klass.new(1, dest_layer.size).random_fill!
+        elsif dest_layer.is_a?(MatrixLayer)
           # For MatrixLayer, reinitialize with correct dimensions
           dest_layer.weights = mat_klass.new(src_layer.size, dest_layer.size).random_fill!
           dest_layer.biases = mat_klass.new(1, dest_layer.size).random_fill!
           dest_layer.g_w = mat_klass.zeros(src_layer.size, dest_layer.size)
           dest_layer.g_b = mat_klass.zeros(1, dest_layer.size)
-        elsif src_layer.is_a?(TransformerLayer)
-          dest_layer.weights = mat_klass.new(dest_layer.size, src_layer.size).random_fill!
-          dest_layer.biases = mat_klass.new(dest_layer.size, 1).random_fill!
         else
           # Initialize weights randomly for all layer types
           dest_layer.weights = mat_klass.new(dest_layer.size, src_layer.size).random_fill!

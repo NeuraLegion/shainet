@@ -3,8 +3,7 @@ require "./spec_helper"
 describe SHAInet::MatrixLayer do
   it "computes forward output and propagates gradients" do
     mat_klass = SHAInet::CUDA.available? ? SHAInet::CudaMatrix : SHAInet::SimpleMatrix
-    layer = SHAInet::MatrixLayer.new(2, 3)
-
+    layer = SHAInet::MatrixLayer.new(2, 3, SHAInet.none)
     layer.weights = mat_klass.from_a([
       [0.1, 0.2, 0.3],
       [0.4, 0.5, 0.6],
