@@ -168,15 +168,15 @@ module SHAInet
     end
 
     def gemm(handle : LibCUBLAS::Handle, a : Pointer(Float64), b : Pointer(Float64), c : Pointer(Float64),
-             m : Int32, n : Int32, k : Int32)
+             m : Int32, n : Int32, k : Int32, lda : Int32, ldb : Int32, ldc : Int32)
       alpha = 1.0
       beta = 0.0
       LibCUBLAS.cublasDgemm_v2(handle,
         Operation::N.value, Operation::N.value,
         m, n, k,
-        pointerof(alpha), a, m,
-        b, k,
-        pointerof(beta), c, m)
+        pointerof(alpha), a, lda,
+        b, ldb,
+        pointerof(beta), c, ldc)
     end
 
     def geam(handle : LibCUBLAS::Handle, a : Pointer(Float64), b : Pointer(Float64), c : Pointer(Float64),

@@ -189,7 +189,12 @@ module SHAInet
 
         handle = CUDA.create_handle
         result = CudaMatrix.new(@rows, other.cols)
-        CUDA.gemm(handle, ptr_a, ptr_b, result.device_ptr.not_nil!, @rows, other.cols, @cols)
+        # CUBLAS assumes column-major, but we use row-major
+        # To compute C = A * B in row-major, we compute C^T = B^T * A^T
+        # So we swap the order: gemm(B, A, C) with dimensions swapped
+        CUDA.gemm(handle, ptr_b, ptr_a, result.device_ptr.not_nil!,
+          other.cols, @rows, other.rows,
+          other.cols, @cols, result.cols)
         CUDA.destroy_handle(handle)
 
         # Mark result as having newer GPU data
