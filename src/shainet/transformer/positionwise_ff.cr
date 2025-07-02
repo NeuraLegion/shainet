@@ -1,26 +1,26 @@
 module SHAInet
   class PositionWiseFF
     getter w1, b1, w2, b2
-    @w1 : SimpleMatrix
-    @b1 : SimpleMatrix
-    @w2 : SimpleMatrix
-    @b2 : SimpleMatrix
-    @g_w1 : SimpleMatrix
-    @g_w2 : SimpleMatrix
-    @g_b1 : SimpleMatrix
-    @g_b2 : SimpleMatrix
-    @x : SimpleMatrix?
-    @h : SimpleMatrix
-    @out : SimpleMatrix
+    @w1 : SimpleMatrix | CudaMatrix
+    @b1 : SimpleMatrix | CudaMatrix
+    @w2 : SimpleMatrix | CudaMatrix
+    @b2 : SimpleMatrix | CudaMatrix
+    @g_w1 : SimpleMatrix | CudaMatrix
+    @g_w2 : SimpleMatrix | CudaMatrix
+    @g_b1 : SimpleMatrix | CudaMatrix
+    @g_b2 : SimpleMatrix | CudaMatrix
+    @x : SimpleMatrix | CudaMatrix | Nil
+    @h : SimpleMatrix | CudaMatrix
+    @out : SimpleMatrix | CudaMatrix
 
-    property g_w1 : SimpleMatrix
-    property g_w2 : SimpleMatrix
-    property g_b1 : SimpleMatrix
-    property g_b2 : SimpleMatrix
+    property g_w1 : SimpleMatrix | CudaMatrix
+    property g_w2 : SimpleMatrix | CudaMatrix
+    property g_b1 : SimpleMatrix | CudaMatrix
+    property g_b2 : SimpleMatrix | CudaMatrix
 
     def initialize(d_model : Int32, hidden_dim : Int32)
-      # Always use SimpleMatrix for compatibility - CUDA operations handled in forward/backward
-      mat_klass = SimpleMatrix
+      # Use CudaMatrix when CUDA is available for better performance
+      mat_klass = CUDA.fully_available? ? CudaMatrix : SimpleMatrix
       @w1 = mat_klass.new(d_model, hidden_dim).random_fill!
       @b1 = mat_klass.new(1, hidden_dim).random_fill!
       @w2 = mat_klass.new(hidden_dim, d_model).random_fill!
@@ -33,7 +33,7 @@ module SHAInet
       @out = mat_klass.zeros(1, 1)
     end
 
-    def forward(x : SimpleMatrix)
+    def forward(x : SimpleMatrix | CudaMatrix)
       @x = x
       @h = x * @w1
       @h.add_bias!(@b1)
@@ -43,7 +43,7 @@ module SHAInet
       @out
     end
 
-    def backward(d_out : SimpleMatrix)
+    def backward(d_out : SimpleMatrix | CudaMatrix)
       dh = d_out * @w2.transpose
       @g_w2 = @g_w2 + (@h.transpose * d_out)
       mat_klass = @w1.class
@@ -105,6 +105,16 @@ module SHAInet
       @b1 = @b1 - @g_b1 * lr
       @w2 = @w2 - @g_w2 * lr
       @b2 = @b2 - @g_b2 * lr
+
+      # Sync updated weights to device if using CUDA
+      if CUDA.fully_available?
+        [@w1, @b1, @w2, @b2].each do |mat|
+          if mat.is_a?(CudaMatrix)
+            mat.sync_to_device!
+          end
+        end
+      end
+
       @g_w1 = mat_klass.zeros(@w1.rows, @w1.cols)
       @g_w2 = mat_klass.zeros(@w2.rows, @w2.cols)
       @g_b1 = mat_klass.zeros(@b1.rows, @b1.cols)
@@ -119,7 +129,7 @@ module SHAInet
       @g_b2 = mat_klass.zeros(@b2.rows, @b2.cols)
     end
 
-    private def relu_grad(m : SimpleMatrix, grad : SimpleMatrix)
+    private def relu_grad(m : SimpleMatrix | CudaMatrix, grad : SimpleMatrix | CudaMatrix)
       out = grad.clone
       m.rows.times do |i|
         m.cols.times do |j|

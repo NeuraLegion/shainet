@@ -107,7 +107,7 @@ void apply_layer_norm(double* out, const double* in,
     apply_layer_norm_kernel<<<rows, 1>>>(out, in, mean, var, rows, cols, epsilon);
     cudaDeviceSynchronize();
 }
-  
+
 __global__ void slice_cols_kernel(double* out, const double* in, int rows, int src_cols, int start, int len){
     int row = blockIdx.x;
     int col = threadIdx.x;

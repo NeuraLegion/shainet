@@ -24,13 +24,6 @@ describe "CUDA softmax and dropout" do
       out = SHAInet::TransformerDropout.apply(mat, 30)
       SHAInet::GPUMemory.batch_sync_from_device([out])
 
-      # Debug first run
-      if run_idx == 0
-        puts "First run debug:"
-        puts "out.device_dirty? = #{out.as(SHAInet::CudaMatrix).device_dirty?}"
-        puts "First few values: #{out[0, 0]}, #{out[0, 1]}, #{out[0, 2]}, #{out[0, 3]}"
-      end
-
       dropped = 0
       mat.rows.times do |i|
         mat.cols.times do |j|
@@ -40,7 +33,6 @@ describe "CUDA softmax and dropout" do
       total_ratio += dropped.to_f / (mat.rows * mat.cols)
     end
     average = total_ratio / runs
-    puts "Final average dropout ratio: #{average}"
     (average).should be_close(0.30, 0.05)
   end
 end
