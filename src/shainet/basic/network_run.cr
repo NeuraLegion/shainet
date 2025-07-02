@@ -72,7 +72,8 @@ module SHAInet
           Log.info { "Input => #{input}, network output => #{output}" }
         end
         output
-      elsif @hidden_layers.none? { |l| l.is_a?(RecurrentLayer) || l.is_a?(LSTMLayer) }
+      else
+        # Standard feedforward network processing
         matrix = GPUMemory.to_gpu(SimpleMatrix.from_a([processed]))
         @hidden_layers.each do |l|
           case l
@@ -97,25 +98,6 @@ module SHAInet
           matrix = out_layer.forward(matrix)
         end
         output = matrix.to_a.first
-        unless stealth
-          Log.info { "Input => #{input}, network output => #{output}" }
-        end
-        output
-      else
-        # Insert the input data into the input layers
-        index = 0
-
-        # Propogate the information forward through the hidden layers
-
-        @hidden_layers.each do |l|
-          if l.is_a?(RecurrentLayer)
-            l.as(RecurrentLayer).activate_step
-          elsif l.is_a?(LSTMLayer)
-            l.as(LSTMLayer).activate_step
-          end
-        end
-
-        output = [] of Float64
         unless stealth
           Log.info { "Input => #{input}, network output => #{output}" }
         end
@@ -148,7 +130,7 @@ module SHAInet
         matrix = safe_output_transform(matrix, w)
         matrix.rows.times do |i|
           matrix.cols.times do |j|
-            matrix[i, j] += b[j, 0]
+            matrix[i, j] += b[0, j]
             val = matrix[i, j]
             act, sig = out_layer.activation_function.call(val)
             matrix[i, j] = act
@@ -162,7 +144,8 @@ module SHAInet
           end
         end
         matrix
-      elsif @hidden_layers.none? { |l| l.is_a?(RecurrentLayer) || l.is_a?(LSTMLayer) }
+      else
+        # Standard matrix processing for non-transformer networks
         @hidden_layers.each do |l|
           case l
           when EmbeddingLayer
@@ -176,8 +159,6 @@ module SHAInet
         out_layer = @output_layers.last
         matrix = out_layer.forward(matrix)
         matrix
-      else
-        raise NeuralNetRunError.new("Matrix input not supported for recurrent networks")
       end
     rescue e : Exception
       raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
@@ -716,7 +697,6 @@ module SHAInet
       end
 
       update_transformer_layers if @transformer_layers.any?
-      update_lstm_gates(training_type) if @lstm_layers.any?
 
       batch_error
     end
@@ -751,12 +731,6 @@ module SHAInet
         @learning_rate * (@time_step.to_f64 / @warmup_steps)
       else
         @learning_rate
-      end
-    end
-
-    def update_lstm_gates(learn_type : Symbol | String)
-      @lstm_layers.each do |layer|
-        layer.update_gate_params(current_learning_rate)
       end
     end
 
