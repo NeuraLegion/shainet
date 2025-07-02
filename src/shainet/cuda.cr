@@ -209,32 +209,133 @@ module SHAInet
       # These methods fall back to CPU when the native library is missing.
     end
 
+    # Optional kernels implemented in src/shainet/native/cuda_kernels.cu
+    # These methods dynamically load from libshainet_cuda_kernels.so when available
+    @@softmax_rows_proc : Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Void)? = nil
+    @@dropout_proc : Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Float64, UInt64, Void)? = nil
+    @@gather_rows_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Int32), Int32, Int32, Void)? = nil
+    @@slice_cols_proc : Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Int32, Int32, Void)? = nil
+    @@set_cols_proc : Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Int32, Int32, Void)? = nil
+    @@row_mean_var_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Int32, Void)? = nil
+    @@layer_norm_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Int32, Float64, Void)? = nil
+
     def softmax_rows(dst : Pointer(Float64), src : Pointer(Float64), rows : Int32, cols : Int32)
-      raise "CUDA kernels not available"
+      unless fn = @@softmax_rows_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "softmax_rows")
+          unless sym.null?
+            @@softmax_rows_proc = Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@softmax_rows_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(dst, src, rows, cols)
     end
 
     def dropout(dst : Pointer(Float64), src : Pointer(Float64), rows : Int32, cols : Int32, drop_p : Float64, seed : UInt64)
-      raise "CUDA kernels not available"
+      unless fn = @@dropout_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "dropout")
+          unless sym.null?
+            @@dropout_proc = Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Float64, UInt64, Void).new(sym, Pointer(Void).null)
+            fn = @@dropout_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(dst, src, rows, cols, drop_p, seed)
     end
 
     def gather_rows(dst : Pointer(Float64), src : Pointer(Float64), ids : Pointer(Int32), rows : Int32, cols : Int32)
-      raise "CUDA kernels not available"
+      unless fn = @@gather_rows_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "gather_rows")
+          unless sym.null?
+            @@gather_rows_proc = Proc(Pointer(Float64), Pointer(Float64), Pointer(Int32), Int32, Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@gather_rows_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(dst, src, ids, rows, cols)
     end
 
     def slice_cols(dst : Pointer(Float64), src : Pointer(Float64), rows : Int32, src_cols : Int32, start_col : Int32, len : Int32)
-      raise "CUDA kernels not available"
+      unless fn = @@slice_cols_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "slice_cols")
+          unless sym.null?
+            @@slice_cols_proc = Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Int32, Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@slice_cols_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(dst, src, rows, src_cols, start_col, len)
     end
 
     def set_cols(dst : Pointer(Float64), src : Pointer(Float64), rows : Int32, dst_cols : Int32, start_col : Int32, len : Int32)
-      raise "CUDA kernels not available"
+      unless fn = @@set_cols_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "set_cols")
+          unless sym.null?
+            @@set_cols_proc = Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Int32, Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@set_cols_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(dst, src, rows, dst_cols, start_col, len)
     end
 
     def row_mean_var(mean : Pointer(Float64), var : Pointer(Float64), src : Pointer(Float64), rows : Int32, cols : Int32)
-      raise "CUDA kernels not available"
+      unless fn = @@row_mean_var_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "row_mean_var")
+          unless sym.null?
+            @@row_mean_var_proc = Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@row_mean_var_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(mean, var, src, rows, cols)
     end
 
     def layer_norm(dst : Pointer(Float64), src : Pointer(Float64), mean : Pointer(Float64), var : Pointer(Float64), rows : Int32, cols : Int32, eps : Float64)
-      raise "CUDA kernels not available"
+      unless fn = @@layer_norm_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "apply_layer_norm")  # Note: the actual function name is apply_layer_norm
+          unless sym.null?
+            @@layer_norm_proc = Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Int32, Float64, Void).new(sym, Pointer(Void).null)
+            fn = @@layer_norm_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(dst, src, mean, var, rows, cols, eps)
     end
 
     # In-place element-wise ReLU on GPU memory. This fallback implementation
@@ -289,12 +390,15 @@ module SHAInet
 
     # Count token pairs using a custom CUDA kernel when available.
     @@count_pairs_proc : Proc(Pointer(Int32), Pointer(Int32), Pointer(Int32), Pointer(Int32), Int32, Int32, Void)? = nil
+    @@kernels_handle : Pointer(Void) = Pointer(Void).null
 
     def count_token_pairs(counts : Pointer(Int32), a : Pointer(Int32), b : Pointer(Int32), freqs : Pointer(Int32), pair_count : Int32, vocab : Int32)
       unless fn = @@count_pairs_proc
-        handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
-        unless handle.null?
-          sym = LibC.dlsym(handle, "count_token_pairs")
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "count_token_pairs")
           unless sym.null?
             @@count_pairs_proc = Proc(Pointer(Int32), Pointer(Int32), Pointer(Int32), Pointer(Int32), Int32, Int32, Void).new(sym, Pointer(Void).null)
             fn = @@count_pairs_proc

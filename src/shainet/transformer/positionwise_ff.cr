@@ -48,7 +48,7 @@ module SHAInet
       @g_w2 = @g_w2 + (@h.transpose * d_out)
       mat_klass = @w1.class
       # Efficient bias gradient using GPU when available
-      if CUDA.available? && CUDA.kernels_available? && d_out.is_a?(CudaMatrix) && @g_b2.is_a?(CudaMatrix)
+      if CUDA.fully_available? && d_out.is_a?(CudaMatrix) && @g_b2.is_a?(CudaMatrix)
         begin
           CUDA.row_sum(@g_b2.as(CudaMatrix).device_ptr.not_nil!, d_out.as(CudaMatrix).device_ptr.not_nil!, d_out.rows, d_out.cols)
           GPUMemory.batch_sync_from_device([@g_b2])
@@ -72,7 +72,7 @@ module SHAInet
 
       drelu = relu_grad(@h, dh)
       @g_w1 = @g_w1 + (@x.not_nil!.transpose * drelu)
-      if CUDA.available? && CUDA.kernels_available? && drelu.is_a?(CudaMatrix) && @g_b1.is_a?(CudaMatrix)
+      if CUDA.fully_available? && drelu.is_a?(CudaMatrix) && @g_b1.is_a?(CudaMatrix)
         begin
           CUDA.row_sum(@g_b1.as(CudaMatrix).device_ptr.not_nil!, drelu.as(CudaMatrix).device_ptr.not_nil!, drelu.rows, drelu.cols)
           GPUMemory.batch_sync_from_device([@g_b1])

@@ -1,6 +1,7 @@
 #include <curand_kernel.h>
-extern "C" {
-__global__ void softmax_rows(double* out, const double* in, int rows, int cols) {
+
+// Device kernels
+__global__ void softmax_rows_kernel(double* out, const double* in, int rows, int cols) {
     int row = blockIdx.x;
     if(row >= rows) return;
     const double *row_in = in + row * cols;
@@ -16,7 +17,14 @@ __global__ void softmax_rows(double* out, const double* in, int rows, int cols) 
     }
 }
 
-__global__ void dropout(double* out, const double* in, int rows, int cols, double drop_p, unsigned long long seed) {
+// Host wrapper functions
+extern "C" {
+void softmax_rows(double* out, const double* in, int rows, int cols) {
+    softmax_rows_kernel<<<rows, 1>>>(out, in, rows, cols);
+    cudaDeviceSynchronize();
+}
+
+__global__ void dropout_kernel(double* out, const double* in, int rows, int cols, double drop_p, unsigned long long seed) {
     int row = blockIdx.x;
     if(row >= rows) return;
     curandState state;
@@ -29,7 +37,12 @@ __global__ void dropout(double* out, const double* in, int rows, int cols, doubl
     }
 }
 
-__global__ void gather_rows(double* out, const double* in, const int* ids, int rows, int cols) {
+void dropout(double* out, const double* in, int rows, int cols, double drop_p, unsigned long long seed) {
+    dropout_kernel<<<rows, 1>>>(out, in, rows, cols, drop_p, seed);
+    cudaDeviceSynchronize();
+}
+
+__global__ void gather_rows_kernel(double* out, const double* in, const int* ids, int rows, int cols) {
     int row = blockIdx.x;
     if(row >= rows) return;
     int id = ids[row];
@@ -40,8 +53,13 @@ __global__ void gather_rows(double* out, const double* in, const int* ids, int r
     }
 }
 
-__global__ void row_mean_var(const double* in, double* mean, double* var,
-                             int rows, int cols) {
+void gather_rows(double* out, const double* in, const int* ids, int rows, int cols) {
+    gather_rows_kernel<<<rows, 1>>>(out, in, ids, rows, cols);
+    cudaDeviceSynchronize();
+}
+
+__global__ void row_mean_var_kernel(const double* in, double* mean, double* var,
+                                    int rows, int cols) {
     int row = blockIdx.x;
     if(row >= rows) return;
     const double *row_in = in + row * cols;
@@ -57,9 +75,14 @@ __global__ void row_mean_var(const double* in, double* mean, double* var,
     var[row] = sq_sum / cols - m*m;
 }
 
-__global__ void apply_layer_norm(double* out, const double* in,
-                                 const double* mean, const double* var,
-                                 int rows, int cols, double epsilon) {
+void row_mean_var(const double* in, double* mean, double* var, int rows, int cols) {
+    row_mean_var_kernel<<<rows, 1>>>(in, mean, var, rows, cols);
+    cudaDeviceSynchronize();
+}
+
+__global__ void apply_layer_norm_kernel(double* out, const double* in,
+                                        const double* mean, const double* var,
+                                        int rows, int cols, double epsilon) {
     int row = blockIdx.x;
     if(row >= rows) return;
     const double *row_in = in + row * cols;
@@ -70,27 +93,51 @@ __global__ void apply_layer_norm(double* out, const double* in,
         row_out[j] = (row_in[j] - m) / denom;
     }
 }
+
+void apply_layer_norm(double* out, const double* in,
+                      const double* mean, const double* var,
+                      int rows, int cols, double epsilon) {
+    apply_layer_norm_kernel<<<rows, 1>>>(out, in, mean, var, rows, cols, epsilon);
+    cudaDeviceSynchronize();
+}
   
-__global__ void slice_cols(double* out, const double* in, int rows, int src_cols, int start, int len){
+__global__ void slice_cols_kernel(double* out, const double* in, int rows, int src_cols, int start, int len){
     int row = blockIdx.x;
     int col = threadIdx.x;
     if(row >= rows || col >= len) return;
     out[row * len + col] = in[row * src_cols + start + col];
 }
 
-__global__ void set_cols(double* out, const double* in, int rows, int dst_cols, int start, int len){
+void slice_cols(double* out, const double* in, int rows, int src_cols, int start, int len){
+    slice_cols_kernel<<<rows, len>>>(out, in, rows, src_cols, start, len);
+    cudaDeviceSynchronize();
+}
+
+__global__ void set_cols_kernel(double* out, const double* in, int rows, int dst_cols, int start, int len){
     int row = blockIdx.x;
     int col = threadIdx.x;
     if(row >= rows || col >= len) return;
     out[row * dst_cols + start + col] = in[row * len + col];
 }
 
-__global__ void count_token_pairs(const int* a, const int* b, const int* freq,
-                                  int pair_count, int vocab_size, int* counts){
+void set_cols(double* out, const double* in, int rows, int dst_cols, int start, int len){
+    set_cols_kernel<<<rows, len>>>(out, in, rows, dst_cols, start, len);
+    cudaDeviceSynchronize();
+}
+
+__global__ void count_token_pairs_kernel(const int* a, const int* b, const int* freq,
+                                         int pair_count, int vocab_size, int* counts){
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if(idx >= pair_count) return;
     int offset = a[idx] * vocab_size + b[idx];
     atomicAdd(&counts[offset], freq[idx]);
+}
+
+void count_token_pairs(const int* a, const int* b, const int* freq,
+                       int pair_count, int vocab_size, int* counts){
+    int blocks = (pair_count + 255) / 256;
+    count_token_pairs_kernel<<<blocks, 256>>>(a, b, freq, pair_count, vocab_size, counts);
+    cudaDeviceSynchronize();
 }
 
 } // extern "C"

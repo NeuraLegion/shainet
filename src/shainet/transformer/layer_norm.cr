@@ -40,7 +40,7 @@ module SHAInet
       cols = x.cols
 
       # Convert to CUDA if input is CUDA and CUDA is available
-      if CUDA.available? && CUDA.kernels_available? && x.is_a?(CudaMatrix)
+      if CUDA.fully_available? && x.is_a?(CudaMatrix)
         # Convert internal matrices to CUDA to match input
         cuda_mean = CudaMatrix.new(rows, 1)
         cuda_var = CudaMatrix.new(rows, 1)

@@ -11,7 +11,7 @@ module SHAInet
 
     def initialize(rows : Int32, cols : Int32, init : Float64 = 0.0)
       super(rows, cols, init)
-      if CUDA.available?
+      if CUDA.fully_available?
         @device_ptr = GPUMemory.alloc_buffer(@rows, @cols)
       else
         @device_ptr = Pointer(Float64).null
@@ -19,8 +19,16 @@ module SHAInet
     end
 
     def finalize
+      # Only finalize if we actually have a valid device pointer
       if dptr = @device_ptr
-        GPUMemory.release_buffer(dptr, @rows, @cols) unless dptr.null?
+        unless dptr.null?
+          begin
+            GPUMemory.release_buffer(dptr, @rows, @cols)
+          rescue
+            # If finalization fails, just ignore it - this can happen
+            # when CUDA context is no longer available
+          end
+        end
       end
     end
 
