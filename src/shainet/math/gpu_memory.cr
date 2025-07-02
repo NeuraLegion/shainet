@@ -7,7 +7,7 @@ module SHAInet
 
     # -- Simple GPU allocator -------------------------------------------------
     @@pool = Hash(Int32, Array(Pointer(Float64))).new { |h, k| h[k] = [] of Pointer(Float64) }
-    @@pool_limit : Int32 = (ENV["SHAINET_GPU_POOL_SIZE"]? || "32").to_i
+    @@pool_limit : Int32 = 2  # Very small pool to reduce memory pressure
 
     # Configure the maximum number of cached buffers
     def pool_limit
@@ -33,15 +33,32 @@ module SHAInet
 
     # Allocate device memory, reusing cached buffers when possible
     def alloc_buffer(rows : Int32, cols : Int32)
+      return Pointer(Float64).null unless CUDA.fully_available?
+
       size = rows * cols
+
+      # Sanity check - prevent excessive memory allocation
+      if size <= 0 || size > 100_000_000  # 100M elements = ~800MB
+        return Pointer(Float64).null
+      end
+
       bucket = @@pool[size]?
       if bucket && !bucket.empty?
-        bucket.pop
-      else
+        ptr = bucket.pop
+        return ptr unless ptr.null?
+      end
+
+      begin
         ptr = Pointer(Float64).null
         bytes = ((size) * 8).to_u64
         res = CUDA.malloc(pointerof(ptr).as(Pointer(Pointer(Void))), bytes)
-        res == 0 ? ptr : Pointer(Float64).null
+        if res == 0 && !ptr.null?
+          ptr
+        else
+          Pointer(Float64).null
+        end
+      rescue
+        Pointer(Float64).null
       end
     end
 

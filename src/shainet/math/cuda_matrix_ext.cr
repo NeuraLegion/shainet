@@ -6,8 +6,13 @@ module SHAInet
       result = CudaMatrix.new(@rows, @cols)
       if CUDA.available? && (dptr = self.device_ptr) && !dptr.null? && (rptr = result.device_ptr) && !rptr.null?
         begin
+          # Ensure source has up-to-date GPU data
+          self.sync_to_device! unless device_dirty?
+
           CUDA.softmax_rows(rptr, dptr, @rows, @cols)
-          result.sync_from_device!
+
+          # Mark result as having newer GPU data
+          result.mark_device_dirty!
           return result
         rescue
         end
@@ -28,8 +33,13 @@ module SHAInet
       if CUDA.available? && (dptr = self.device_ptr) && !dptr.null? && (rptr = result.device_ptr) && !rptr.null?
         seed = Random.rand(UInt64)
         begin
+          # Ensure source has up-to-date GPU data
+          self.sync_to_device! unless device_dirty?
+
           CUDA.dropout(rptr, dptr, @rows, @cols, prob, seed)
-          result.sync_from_device!
+
+          # Mark result as having newer GPU data
+          result.mark_device_dirty!
           return result
         rescue
         end

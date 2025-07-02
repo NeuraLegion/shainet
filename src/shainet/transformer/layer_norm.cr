@@ -57,12 +57,17 @@ module SHAInet
             cuda_mean.device_ptr.not_nil!,
             cuda_var.device_ptr.not_nil!,
             rows, cols, @epsilon)
-          GPUMemory.batch_sync_from_device([cuda_mean, cuda_var, cuda_norm])
 
-          # Store results for backward pass
-          @mean = SimpleMatrix.from_a(cuda_mean.to_a)
-          @var = SimpleMatrix.from_a(cuda_var.to_a)
-          @norm = SimpleMatrix.from_a(cuda_norm.to_a)
+          # Don't sync from device - keep data on GPU for performance
+          # Only sync the intermediate results when actually needed for backward pass
+          cuda_mean.mark_device_dirty!
+          cuda_var.mark_device_dirty!
+          cuda_norm.mark_device_dirty!
+
+          # Store GPU references for backward pass instead of syncing to CPU
+          @mean = cuda_mean  # Keep as CudaMatrix
+          @var = cuda_var    # Keep as CudaMatrix
+          @norm = cuda_norm  # Keep as CudaMatrix
 
           result = cuda_norm.clone
           # Apply gamma and beta - use their actual types for operations

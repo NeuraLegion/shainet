@@ -79,7 +79,11 @@ module SHAInet
     # compatibility with previous API versions.
     def embed(id : Int32) : Array(Float64)
       mat = embed([id])
+
+      # Only sync if we absolutely need to return an Array(Float64)
+      # For better performance, try to keep the caller working with matrices
       if mat.is_a?(CudaMatrix) && CUDA.available?
+        # Only sync when the caller actually needs the array
         mat.as(CudaMatrix).sync_from_device!
       end
 
@@ -136,8 +140,9 @@ module SHAInet
           end
         end
       end
+      # Don't sync gradients from device - keep them on GPU for performance
       if CUDA.available? && @gradients.is_a?(CudaMatrix)
-        @gradients.as(CudaMatrix).sync_from_device!
+        @gradients.as(CudaMatrix).mark_device_dirty!
       end
     end
 
@@ -153,8 +158,9 @@ module SHAInet
           CUDA.destroy_handle(handle)
           zeros = Array(Float64).new(total, 0.0)
           CUDA.memcpy(g_ptr.as(Pointer(Void)), zeros.to_unsafe.as(Pointer(Void)), (total * 8).to_u64, CUDA::MemcpyKind::HostToDevice)
-          @embeddings.as(CudaMatrix).sync_from_device!
-          @gradients.as(CudaMatrix).sync_from_device!
+          # Don't sync embeddings from device - keep them on GPU for performance
+          @embeddings.as(CudaMatrix).mark_device_dirty!
+          @gradients.as(CudaMatrix).mark_device_clean!  # gradients were zeroed on GPU
           return
         end
       end

@@ -51,7 +51,8 @@ module SHAInet
       if CUDA.fully_available? && d_out.is_a?(CudaMatrix) && @g_b2.is_a?(CudaMatrix)
         begin
           CUDA.row_sum(@g_b2.as(CudaMatrix).device_ptr.not_nil!, d_out.as(CudaMatrix).device_ptr.not_nil!, d_out.rows, d_out.cols)
-          GPUMemory.batch_sync_from_device([@g_b2])
+          # Don't sync from device - keep gradients on GPU for performance
+          @g_b2.as(CudaMatrix).mark_device_dirty!
         rescue e : Exception
           # Fallback to CPU computation
           d_out.rows.times do |i|
@@ -75,7 +76,8 @@ module SHAInet
       if CUDA.fully_available? && drelu.is_a?(CudaMatrix) && @g_b1.is_a?(CudaMatrix)
         begin
           CUDA.row_sum(@g_b1.as(CudaMatrix).device_ptr.not_nil!, drelu.as(CudaMatrix).device_ptr.not_nil!, drelu.rows, drelu.cols)
-          GPUMemory.batch_sync_from_device([@g_b1])
+          # Don't sync from device - keep gradients on GPU for performance
+          @g_b1.as(CudaMatrix).mark_device_dirty!
         rescue e : Exception
           # Fallback to CPU computation
           drelu.rows.times do |i|
