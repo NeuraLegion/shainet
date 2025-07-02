@@ -494,7 +494,7 @@ module SHAInet
     end
 
     # Clean matrix-based training method
-    def train(data : Array(Array) | SHAInet::TrainingData,
+    def train(data : Array(Array) | SHAInet::TrainingData | SHAInet::StreamingData,
               training_type : Symbol | String = :sgdm,
               cost_function : Symbol | String | CostFunction = :mse,
               epochs : Int32 = 1,
@@ -505,8 +505,15 @@ module SHAInet
               autosave : NamedTuple(freq: Int32, path: String) | Nil = nil)
       verify_net_before_train
 
+      stream = data.is_a?(SHAInet::StreamingData) ? data : nil
       # Convert TrainingData to raw data array
-      raw_data = data.is_a?(SHAInet::TrainingData) ? data.data : data
+      raw_data = if data.is_a?(SHAInet::TrainingData)
+                   data.data
+                 elsif data.is_a?(Array)
+                   data.as(Array)
+                 else
+                   [] of Array(Array(Float64))
+                 end
 
       # Validate and convert cost function
       if cost_function.is_a?(Symbol) || cost_function.is_a?(String)
@@ -516,10 +523,14 @@ module SHAInet
         cost_proc = cost_function
       end
 
-      Log.info { "Training started with #{epochs} epochs, #{raw_data.size} samples" }
+      if stream
+        Log.info { "Training started with #{epochs} epochs (streaming)" }
+      else
+        Log.info { "Training started with #{epochs} epochs, #{raw_data.size} samples" }
+      end
       start_time = Time.monotonic
 
-      batch_size = mini_batch_size.clamp(1, raw_data.size)
+      batch_size = stream ? mini_batch_size : mini_batch_size.clamp(1, raw_data.size)
 
       epochs.times do |epoch|
         # Autosave if configured
@@ -527,168 +538,37 @@ module SHAInet
           save_to_file("#{autosave[:path]}/autosave_epoch_#{epoch}.nn")
         end
 
-        # Shuffle data for each epoch
-        shuffled_data = raw_data.shuffle
-
+        # Shuffle or rewind data for each epoch
         total_error = 0.0
-        batch_count = 0
+        sample_count = 0
 
-        # Process data in mini-batches
-        shuffled_data.each_slice(batch_size) do |batch|
-          batch_error = 0.0
-
-          # Zero gradients for all matrix layers
-          @hidden_layers.each do |layer|
-            layer.zero_gradients if layer.is_a?(MatrixLayer)
+        if stream
+          stream.rewind if epoch > 0
+          while (batch = stream.next_batch(batch_size)).size > 0
+            batch_error = process_batch(batch, cost_proc, training_type)
+            total_error += batch_error
+            sample_count += batch.size
           end
-          @output_layers.each do |layer|
-            layer.zero_gradients if layer.is_a?(MatrixLayer)
+        else
+          shuffled_data = raw_data.shuffle
+          # Process data in mini-batches
+          shuffled_data.each_slice(batch_size) do |batch|
+            batch_error = process_batch(batch, cost_proc, training_type)
+            total_error += batch_error
+            sample_count += batch.size
           end
-
-          # Process each sample in the batch
-          batch.each do |sample|
-            # Extract input and expected output data (already as arrays)
-            input_data = sample[0].as(Array)
-            expected_output = sample[1].as(Array)
-
-            # Convert input to matrix for forward pass
-            # Handle nested arrays if present (e.g., sequences)
-            input_matrix = if input_data.size > 0 && input_data[0].is_a?(Array)
-                             # Handle nested array input (sequence data)
-                             rows = input_data.size
-                             cols = input_data[0].as(Array).size
-                             mat = SimpleMatrix.new(rows, cols)
-                             rows.times do |i|
-                               cols.times do |j|
-                                 mat[i, j] = input_data[i].as(Array)[j].as(GenNum).to_f64
-                               end
-                             end
-                             GPUMemory.to_gpu(mat)
-                           else
-                             # Handle flat array input (single sample)
-                             mat = SimpleMatrix.new(1, input_data.size)
-                             input_data.size.times do |i|
-                               mat[0, i] = input_data[i].as(GenNum).to_f64
-                             end
-                             GPUMemory.to_gpu(mat)
-                           end
-
-            # Forward pass - use matrix-based run to avoid array conversions
-            actual_matrix = run(input_matrix, stealth: true)
-
-            # Calculate error
-            sample_error = 0.0
-
-            # Handle expected output based on structure
-            if expected_output.size > 0 && expected_output[0].is_a?(Array)
-              # Handle nested expected output (sequence data)
-              rows = expected_output.size
-              cols = expected_output[0].as(Array).size
-              rows.times do |i|
-                cols.times do |j|
-                  expected = expected_output[i].as(Array)[j].as(GenNum).to_f64
-                  actual = actual_matrix[i, j]
-                  cost_result = cost_proc.call(expected, actual)
-                  sample_error += cost_result[:value]
-                end
-              end
-            else
-              # Handle flat expected output (single sample)
-              expected_output.size.times do |i|
-                expected = expected_output[i].as(GenNum).to_f64
-                actual = actual_matrix[0, i]
-                cost_result = cost_proc.call(expected, actual)
-                sample_error += cost_result[:value]
-              end
-            end
-
-            batch_error += sample_error
-
-            # Backward pass - compute gradients
-            output_layer = @output_layers.last
-            if output_layer.is_a?(MatrixLayer)
-              # Create gradient matrix for output error
-              if expected_output.size > 0 && expected_output[0].is_a?(Array)
-                # Handle nested expected output (sequence data)
-                rows = expected_output.size
-                cols = expected_output[0].as(Array).size
-                output_grad = SimpleMatrix.new(rows, cols)
-                rows.times do |i|
-                  cols.times do |j|
-                    expected = expected_output[i].as(Array)[j].as(GenNum).to_f64
-                    actual = actual_matrix[i, j]
-                    cost_result = cost_proc.call(expected, actual)
-                    output_grad[i, j] = cost_result[:derivative]
-                  end
-                end
-              else
-                # Handle flat expected output (single sample)
-                output_grad = SimpleMatrix.new(1, expected_output.size)
-                expected_output.size.times do |i|
-                  expected = expected_output[i].as(GenNum).to_f64
-                  actual = actual_matrix[0, i]
-                  cost_result = cost_proc.call(expected, actual)
-                  output_grad[0, i] = cost_result[:derivative]
-                end
-              end
-
-              # Move gradient to GPU if needed
-              output_grad = GPUMemory.to_gpu(output_grad)
-
-              # Backpropagate through layers
-              grad = output_layer.backward(output_grad)
-
-              # Backpropagate through hidden layers (in reverse order)
-              @hidden_layers.reverse_each do |layer|
-                if layer.is_a?(MatrixLayer)
-                  grad = layer.backward(grad)
-                elsif layer.is_a?(EmbeddingLayer)
-                  layer.accumulate_gradient
-                end
-              end
-            end
-          end
-
-          # Update weights after processing the batch
-          learning_rate = current_learning_rate
-
-          @hidden_layers.each do |layer|
-            if layer.is_a?(MatrixLayer)
-              layer.update_weights(learning_rate)
-            elsif layer.is_a?(EmbeddingLayer)
-              layer.apply_gradients(learning_rate)
-            end
-          end
-
-          @output_layers.each do |layer|
-            if layer.is_a?(MatrixLayer)
-              layer.update_weights(learning_rate)
-            end
-          end
-
-          # Update transformer layers if present
-          update_transformer_layers if @transformer_layers.any?
-
-          # Update LSTM layers if present
-          update_lstm_gates(training_type) if @lstm_layers.any?
-
-          total_error += batch_error
-          batch_count += 1
         end
 
-        # Calculate average error
-        avg_error = total_error / raw_data.size
+        avg_error = total_error / sample_count
         @total_error = total_error
-        @error_signal = [avg_error] # For compatibility with existing code
-        update_mse                  # Update MSE calculation
+        @error_signal = [avg_error]
+        update_mse
 
-        # Log progress
         if epoch % log_each == 0
           elapsed = Time.monotonic - start_time
           Log.info { "Epoch: #{epoch}, Error: #{avg_error.round(6)}, MSE: #{@mse.round(6)}, Time: #{elapsed.total_seconds.round(2)}s" }
         end
 
-        # Check for early stopping
         if avg_error < error_threshold
           Log.info { "Training stopped early. Error threshold reached: #{avg_error} < #{error_threshold}" }
           break
@@ -699,6 +579,155 @@ module SHAInet
 
       elapsed = Time.monotonic - start_time
       Log.info { "Training completed in #{elapsed.total_seconds.round(2)} seconds" }
+    end
+
+    private def process_batch(batch, cost_proc, training_type)
+      batch_error = 0.0
+
+      # Zero gradients for all matrix layers
+      @hidden_layers.each do |layer|
+        layer.zero_gradients if layer.is_a?(MatrixLayer)
+      end
+      @output_layers.each do |layer|
+        layer.zero_gradients if layer.is_a?(MatrixLayer)
+      end
+
+      batch.each do |sample|
+        input_data = sample[0]
+        expected_output = sample[1]
+
+        input_matrix = to_matrix(input_data)
+
+        actual_matrix = run(input_matrix, stealth: true)
+
+        sample_error = 0.0
+
+        if expected_output.is_a?(SimpleMatrix)
+          rows = expected_output.as(SimpleMatrix).rows
+          cols = expected_output.as(SimpleMatrix).cols
+          rows.times do |i|
+            cols.times do |j|
+              expected = expected_output.as(SimpleMatrix)[i, j]
+              actual = actual_matrix[i, j]
+              cost_result = cost_proc.call(expected, actual)
+              sample_error += cost_result[:value]
+            end
+          end
+        elsif expected_output.is_a?(Array) && expected_output.as(Array).size > 0 && expected_output.as(Array)[0].is_a?(Array)
+          rows = expected_output.as(Array).size
+          cols = expected_output.as(Array)[0].as(Array).size
+          rows.times do |i|
+            cols.times do |j|
+              expected = expected_output.as(Array)[i].as(Array)[j].as(GenNum).to_f64
+              actual = actual_matrix[i, j]
+              cost_result = cost_proc.call(expected, actual)
+              sample_error += cost_result[:value]
+            end
+          end
+        else
+          arr = expected_output.as(Array)
+          arr.size.times do |i|
+            expected = arr[i].as(GenNum).to_f64
+            actual = actual_matrix[0, i]
+            cost_result = cost_proc.call(expected, actual)
+            sample_error += cost_result[:value]
+          end
+        end
+
+        batch_error += sample_error
+
+        output_layer = @output_layers.last
+        if output_layer.is_a?(MatrixLayer)
+          if expected_output.is_a?(SimpleMatrix)
+            exp_mat = expected_output.as(SimpleMatrix)
+            output_grad = SimpleMatrix.new(exp_mat.rows, exp_mat.cols)
+            exp_mat.rows.times do |i|
+              exp_mat.cols.times do |j|
+                expected = exp_mat[i, j]
+                actual = actual_matrix[i, j]
+                cost_result = cost_proc.call(expected, actual)
+                output_grad[i, j] = cost_result[:derivative]
+              end
+            end
+          elsif expected_output.is_a?(Array) && expected_output.as(Array).size > 0 && expected_output.as(Array)[0].is_a?(Array)
+            rows = expected_output.as(Array).size
+            cols = expected_output.as(Array)[0].as(Array).size
+            output_grad = SimpleMatrix.new(rows, cols)
+            rows.times do |i|
+              cols.times do |j|
+                expected = expected_output.as(Array)[i].as(Array)[j].as(GenNum).to_f64
+                actual = actual_matrix[i, j]
+                cost_result = cost_proc.call(expected, actual)
+                output_grad[i, j] = cost_result[:derivative]
+              end
+            end
+          else
+            arr = expected_output.as(Array)
+            output_grad = SimpleMatrix.new(1, arr.size)
+            arr.size.times do |i|
+              expected = arr[i].as(GenNum).to_f64
+              actual = actual_matrix[0, i]
+              cost_result = cost_proc.call(expected, actual)
+              output_grad[0, i] = cost_result[:derivative]
+            end
+          end
+
+          output_grad = GPUMemory.to_gpu(output_grad)
+          grad = output_layer.backward(output_grad)
+
+          @hidden_layers.reverse_each do |layer|
+            if layer.is_a?(MatrixLayer)
+              grad = layer.backward(grad)
+            elsif layer.is_a?(EmbeddingLayer)
+              layer.accumulate_gradient
+            end
+          end
+        end
+      end
+
+      learning_rate = current_learning_rate
+
+      @hidden_layers.each do |layer|
+        if layer.is_a?(MatrixLayer)
+          layer.update_weights(learning_rate)
+        elsif layer.is_a?(EmbeddingLayer)
+          layer.apply_gradients(learning_rate)
+        end
+      end
+
+      @output_layers.each do |layer|
+        layer.update_weights(learning_rate) if layer.is_a?(MatrixLayer)
+      end
+
+      update_transformer_layers if @transformer_layers.any?
+      update_lstm_gates(training_type) if @lstm_layers.any?
+
+      batch_error
+    end
+
+    private def to_matrix(obj)
+      if obj.is_a?(SimpleMatrix)
+        GPUMemory.keep_on_gpu(obj.as(SimpleMatrix))
+      else
+        arr = obj.as(Array)
+        if arr.size > 0 && arr[0].is_a?(Array)
+          rows = arr.size
+          cols = arr[0].as(Array).size
+          mat = SimpleMatrix.new(rows, cols)
+          rows.times do |i|
+            cols.times do |j|
+              mat[i, j] = arr[i].as(Array)[j].as(GenNum).to_f64
+            end
+          end
+          GPUMemory.to_gpu(mat)
+        else
+          mat = SimpleMatrix.new(1, arr.size)
+          arr.size.times do |i|
+            mat[0, i] = arr[i].as(GenNum).to_f64
+          end
+          GPUMemory.to_gpu(mat)
+        end
+      end
     end
 
     def current_learning_rate
