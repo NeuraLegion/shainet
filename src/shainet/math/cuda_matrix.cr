@@ -63,7 +63,7 @@ module SHAInet
       buf = Array(Float64).new(@rows*@cols, 0.0)
       @rows.times do |i|
         @cols.times do |j|
-          buf[j*@rows + i] = self[i, j]
+          buf[i*@cols + j] = self[i, j]  # Row-major order
         end
       end
       bytes = ((@rows*@cols)*8).to_u64
@@ -78,7 +78,7 @@ module SHAInet
       CUDA.memcpy(buf.to_unsafe.as(Pointer(Void)), dptr.as(Pointer(Void)), bytes, CUDA::MemcpyKind::DeviceToHost)
       @rows.times do |i|
         @cols.times do |j|
-          self[i, j] = buf[j*@rows + i]
+          self[i, j] = buf[i*@cols + j]  # Row-major order
         end
       end
     end
