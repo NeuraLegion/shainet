@@ -1,4 +1,5 @@
 #include <curand_kernel.h>
+#include <cstdio>
 
 // Device kernels
 __global__ void softmax_rows_kernel(double* out, const double* in, int rows, int cols) {
@@ -21,7 +22,10 @@ __global__ void softmax_rows_kernel(double* out, const double* in, int rows, int
 extern "C" {
 void softmax_rows(double* out, const double* in, int rows, int cols) {
     softmax_rows_kernel<<<rows, 1>>>(out, in, rows, cols);
-    cudaDeviceSynchronize();
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in softmax_rows: %s\n", cudaGetErrorString(err));
+    }
 }
 
 __global__ void dropout_kernel(double* out, const double* in, int rows, int cols, double drop_p, unsigned long long seed) {
@@ -39,7 +43,10 @@ __global__ void dropout_kernel(double* out, const double* in, int rows, int cols
 
 void dropout(double* out, const double* in, int rows, int cols, double drop_p, unsigned long long seed) {
     dropout_kernel<<<rows, 1>>>(out, in, rows, cols, drop_p, seed);
-    cudaDeviceSynchronize();
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in dropout: %s\n", cudaGetErrorString(err));
+    }
 }
 
 __global__ void gather_rows_kernel(double* out, const double* in, const int* ids, int rows, int cols) {

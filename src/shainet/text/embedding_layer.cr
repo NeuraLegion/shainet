@@ -160,7 +160,7 @@ module SHAInet
           CUDA.memcpy(g_ptr.as(Pointer(Void)), zeros.to_unsafe.as(Pointer(Void)), (total * 8).to_u64, CUDA::MemcpyKind::HostToDevice)
           # Don't sync embeddings from device - keep them on GPU for performance
           @embeddings.as(CudaMatrix).mark_device_dirty!
-          @gradients.as(CudaMatrix).mark_device_clean!  # gradients were zeroed on GPU
+          @gradients.as(CudaMatrix).mark_device_clean! # gradients were zeroed on GPU
           return
         end
       end

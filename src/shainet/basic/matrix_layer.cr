@@ -22,8 +22,8 @@ module SHAInet
       @n_type = "memory"
       @l_size = @size
       @activation_function = SHAInet.sigmoid
-      # Use SimpleMatrix for consistency during debugging
-      mat_klass = SimpleMatrix
+      # Use CudaMatrix when CUDA is fully available, otherwise SimpleMatrix
+      mat_klass = CUDA.fully_available? ? CudaMatrix : SimpleMatrix
       @weights = mat_klass.new(in_size, @size).random_fill!
       @biases = mat_klass.new(1, @size).random_fill!
       @g_w = mat_klass.zeros(in_size, @size)
@@ -36,8 +36,8 @@ module SHAInet
     # Constructor for compatibility with Layer API
     def initialize(@n_type : String, @size : Int32, @activation_function : ActivationFunction = SHAInet.sigmoid)
       @l_size = @size
-      # Use SimpleMatrix for consistency during debugging
-      mat_klass = SimpleMatrix
+      # Use CudaMatrix when CUDA is fully available, otherwise SimpleMatrix
+      mat_klass = CUDA.fully_available? ? CudaMatrix : SimpleMatrix
       @weights = mat_klass.new(1, @size).random_fill!
       @biases = mat_klass.new(1, @size).random_fill!
       @g_w = mat_klass.zeros(1, @size)
@@ -51,8 +51,8 @@ module SHAInet
     def initialize(in_size : Int32, @size : Int32, @activation_function : ActivationFunction)
       @n_type = "memory"
       @l_size = @size
-      # Use SimpleMatrix for consistency during debugging
-      mat_klass = SimpleMatrix
+      # Use CudaMatrix when CUDA is fully available, otherwise SimpleMatrix
+      mat_klass = CUDA.fully_available? ? CudaMatrix : SimpleMatrix
       @weights = mat_klass.new(in_size, @size).random_fill!
       @biases = mat_klass.new(1, @size).random_fill!
       @g_w = mat_klass.zeros(in_size, @size)
@@ -71,9 +71,10 @@ module SHAInet
       @input = input
       mat_klass = input.class
 
-      # Ensure weights and biases are compatible with input type
-      w = mat_klass == @weights.class ? @weights : mat_klass.from_a(@weights.to_a)
-      b = mat_klass == @biases.class ? @biases : mat_klass.from_a(@biases.to_a)
+      # Assume weights and biases already match the input device type
+      # No conversion needed - they should have been allocated correctly
+      w = @weights
+      b = @biases
 
       # Linear transformation: input * weights + bias
       linear_result = input * w
@@ -121,8 +122,8 @@ module SHAInet
       end
 
       # Return gradient for previous layer: local_grad * W^T
-      w = local_grad.class == @weights.class ? @weights : local_grad.class.from_a(@weights.to_a)
-      local_grad * w.transpose
+      # No conversion needed - weights should already match the input device type
+      local_grad * @weights.transpose
     end
 
     # Update weights using accumulated gradients
@@ -131,6 +132,14 @@ module SHAInet
       # b := b - lr * ∂L/∂b
       @weights = @weights - @g_w * learning_rate
       @biases = @biases - @g_b * learning_rate
+
+      # Mark CudaMatrix weights/biases as dirty after update
+      if @weights.is_a?(CudaMatrix)
+        @weights.as(CudaMatrix).mark_device_dirty!
+      end
+      if @biases.is_a?(CudaMatrix)
+        @biases.as(CudaMatrix).mark_device_dirty!
+      end
     end
 
     # Reset gradients to zero

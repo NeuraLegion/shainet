@@ -65,9 +65,9 @@ module SHAInet
           cuda_norm.mark_device_dirty!
 
           # Store GPU references for backward pass instead of syncing to CPU
-          @mean = cuda_mean  # Keep as CudaMatrix
-          @var = cuda_var    # Keep as CudaMatrix
-          @norm = cuda_norm  # Keep as CudaMatrix
+          @mean = cuda_mean # Keep as CudaMatrix
+          @var = cuda_var   # Keep as CudaMatrix
+          @norm = cuda_norm # Keep as CudaMatrix
 
           result = cuda_norm.clone
           # Apply gamma and beta - use their actual types for operations

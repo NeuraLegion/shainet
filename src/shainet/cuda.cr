@@ -327,7 +327,7 @@ module SHAInet
           @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
         end
         unless @@kernels_handle.null?
-          sym = LibC.dlsym(@@kernels_handle, "apply_layer_norm")  # Note: the actual function name is apply_layer_norm
+          sym = LibC.dlsym(@@kernels_handle, "apply_layer_norm") # Note: the actual function name is apply_layer_norm
           unless sym.null?
             @@layer_norm_proc = Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Int32, Float64, Void).new(sym, Pointer(Void).null)
             fn = @@layer_norm_proc

@@ -7,7 +7,7 @@ module SHAInet
 
     # -- Simple GPU allocator -------------------------------------------------
     @@pool = Hash(Int32, Array(Pointer(Float64))).new { |h, k| h[k] = [] of Pointer(Float64) }
-    @@pool_limit : Int32 = 2  # Very small pool to reduce memory pressure
+    @@pool_limit : Int32 = 2 # Very small pool to reduce memory pressure
 
     # Configure the maximum number of cached buffers
     def pool_limit
@@ -38,7 +38,7 @@ module SHAInet
       size = rows * cols
 
       # Sanity check - prevent excessive memory allocation
-      if size <= 0 || size > 100_000_000  # 100M elements = ~800MB
+      if size <= 0 || size > 100_000_000 # 100M elements = ~800MB
         return Pointer(Float64).null
       end
 

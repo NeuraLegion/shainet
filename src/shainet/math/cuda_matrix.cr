@@ -8,7 +8,7 @@ module SHAInet
   # multiplication was previously using the GPU.
   class CudaMatrix < SimpleMatrix
     property device_ptr : Pointer(Float64)?
-    @device_dirty : Atomic::Flag = Atomic::Flag.new  # Track if GPU data is newer than CPU data
+    @device_dirty : Bool = false # Track if GPU data is newer than CPU data
 
     def initialize(rows : Int32, cols : Int32, init : Float64 = 0.0)
       super(rows, cols, init)
@@ -87,7 +87,7 @@ module SHAInet
         buf = Array(Float64).new(@rows*@cols, 0.0)
         @rows.times do |i|
           @cols.times do |j|
-            buf[i*@cols + j] = self[i, j]  # Row-major order
+            buf[i*@cols + j] = self[i, j] # Row-major order
           end
         end
         bytes = ((@rows*@cols)*8).to_u64
@@ -108,7 +108,7 @@ module SHAInet
     def sync_from_device!
       return unless dptr = @device_ptr
       return if dptr.null?
-      return unless device_dirty?  # Only sync if GPU data is newer
+      return unless device_dirty? # Only sync if GPU data is newer
 
       begin
         buf = Array(Float64).new(@rows*@cols, 0.0)
@@ -117,7 +117,7 @@ module SHAInet
         if result == 0
           @rows.times do |i|
             @cols.times do |j|
-              self[i, j] = buf[i*@cols + j]  # Row-major order
+              self[i, j] = buf[i*@cols + j] # Row-major order
             end
           end
           # Mark CPU data as up-to-date
@@ -225,23 +225,18 @@ module SHAInet
       @data[row * @cols + col] = value
     end
 
-    # Helper methods for device_dirty atomic flag
+    # Helper methods for device_dirty flag
     def device_dirty?
-      # Check if flag is set without modifying it
-      # We test_and_set, check the previous value, then restore it if it was clear
-      was_set = @device_dirty.test_and_set
-      @device_dirty.clear unless was_set
-      was_set
+      @device_dirty
     end
 
     def mark_device_dirty!
-      @device_dirty.test_and_set
+      @device_dirty = true
     end
 
     def mark_device_clean!
-      @device_dirty.clear
+      @device_dirty = false
     end
-
   end
 
   def self.zeros(rows : Int32, cols : Int32)

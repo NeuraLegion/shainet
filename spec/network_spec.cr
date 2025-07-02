@@ -23,10 +23,10 @@ describe SHAInet::Network do
     puts "\n"
     # Use simple synthetic data instead of CSV for more reliable testing
     inputs = [
-      [1.47], [1.50], [1.52], [1.55], [1.57], [1.60], [1.63], [1.65], [1.68]
+      [1.47], [1.50], [1.52], [1.55], [1.57], [1.60], [1.63], [1.65], [1.68],
     ]
     outputs = [
-      [52.21], [53.12], [54.48], [55.84], [57.20], [58.57], [59.93], [61.29], [63.11]
+      [52.21], [53.12], [54.48], [55.84], [57.20], [58.57], [59.93], [61.29], [63.11],
     ]
 
     # normalize the data
@@ -35,19 +35,19 @@ describe SHAInet::Network do
     # create a network
     model = SHAInet::Network.new
     model.add_layer(:input, 1, :memory, SHAInet.sigmoid)  # Use sigmoid for input
-    model.add_layer(:hidden, 3, :memory, SHAInet.sigmoid)  # Use sigmoid for hidden
-    model.add_layer(:output, 1, :memory, SHAInet.sigmoid)  # Use sigmoid for output
+    model.add_layer(:hidden, 3, :memory, SHAInet.sigmoid) # Use sigmoid for hidden
+    model.add_layer(:output, 1, :memory, SHAInet.sigmoid) # Use sigmoid for output
     model.fully_connect
 
     # Update learning rate (default is 0.005)
-    model.learning_rate = 0.7  # Higher learning rate
+    model.learning_rate = 0.7 # Higher learning rate
     model.momentum = 0.3
 
     # train the network using Stochastic Gradient Descent with momentum
     model.train(data: training.raw_data,
       training_type: :sgdm,
       cost_function: :mse,
-      epochs: 1000,  # More epochs for better learning
+      epochs: 1000, # More epochs for better learning
       error_threshold: 1e-6,
       log_each: 200)
 
