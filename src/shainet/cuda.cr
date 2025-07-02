@@ -341,9 +341,9 @@ module SHAInet
     end
 
     def layer_norm_backward(d_x : Pointer(Float64), d_gamma : Pointer(Float64), d_beta : Pointer(Float64),
-                           d_out : Pointer(Float64), x : Pointer(Float64), gamma : Pointer(Float64),
-                           mean : Pointer(Float64), var : Pointer(Float64), norm : Pointer(Float64),
-                           rows : Int32, cols : Int32, eps : Float64)
+                            d_out : Pointer(Float64), x : Pointer(Float64), gamma : Pointer(Float64),
+                            mean : Pointer(Float64), var : Pointer(Float64), norm : Pointer(Float64),
+                            rows : Int32, cols : Int32, eps : Float64)
       unless fn = @@layer_norm_backward_proc
         if @@kernels_handle.null?
           @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)

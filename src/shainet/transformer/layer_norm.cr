@@ -118,7 +118,6 @@ module SHAInet
       # If all tensors are CUDA and kernels are available, use GPU computation
       if CUDA.fully_available? && d_out.is_a?(CudaMatrix) && x.is_a?(CudaMatrix) &&
          @mean.is_a?(CudaMatrix) && @var.is_a?(CudaMatrix) && @norm.is_a?(CudaMatrix)
-
         begin
           # Create GPU matrices for gradients
           d_x = CudaMatrix.new(rows, cols)
