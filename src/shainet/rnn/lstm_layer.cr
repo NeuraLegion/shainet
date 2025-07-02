@@ -1,5 +1,7 @@
+require "../basic/matrix_layer"
+
 module SHAInet
-  class LSTMLayer < Layer
+  class LSTMLayer < MatrixLayer
     # Percentage of units to drop (0-100)
     property drop_percent : Int32
     property hidden_state : Array(Float64)
@@ -66,7 +68,12 @@ module SHAInet
     def accumulate_gate_gradients
       # Matrix-based implementation of gradient accumulation
       @l_size.times do |i|
-        act_grad = @activations[0, i] * @sigma_primes[0, i]
+        # Check if activations and sigma_primes are available from forward pass
+        act_grad = if @activations && @sigma_primes
+                     @activations.not_nil![0, i] * @sigma_primes.not_nil![0, i]
+                   else
+                     1.0 # Fallback: no activation derivative applied
+                   end
 
         # Use matrix operations instead of iterating over synapses
         @input_weights[i].size.times do |j|

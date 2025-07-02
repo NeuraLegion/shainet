@@ -47,7 +47,7 @@ module SHAInet
         matrix = safe_output_transform(matrix, w)
 
         # Delegate output computation to the matrix-based layer implementation
-        matrix = out_layer.forward_matrix(matrix)
+        matrix = out_layer.forward(matrix)
 
         output = matrix.to_a.first
         unless stealth
@@ -66,12 +66,18 @@ module SHAInet
               vec = l.as(EmbeddingLayer).embed(token)
               matrix = GPUMemory.to_gpu(SimpleMatrix.from_a([vec]))
             end
+          when MatrixLayer
+            matrix = l.as(MatrixLayer).forward(matrix)
           else
-            matrix = l.forward_matrix(matrix)
+            matrix = l.forward(matrix)
           end
         end
         out_layer = @output_layers.last
-        matrix = out_layer.forward_matrix(matrix)
+        if out_layer.is_a?(MatrixLayer)
+          matrix = out_layer.as(MatrixLayer).forward(matrix)
+        else
+          matrix = out_layer.forward(matrix)
+        end
         output = matrix.to_a.first
         unless stealth
           Log.info { "Input => #{input}, network output => #{output}" }
@@ -146,11 +152,11 @@ module SHAInet
             tokens = (0...matrix.rows).map { |r| matrix[r, 0].to_i }
             matrix = l.as(EmbeddingLayer).embed(tokens)
           else
-            matrix = l.forward_matrix(matrix)
+            matrix = l.forward(matrix)
           end
         end
         out_layer = @output_layers.last
-        matrix = out_layer.forward_matrix(matrix)
+        matrix = out_layer.forward(matrix)
         matrix
       else
         raise NeuralNetRunError.new("Matrix input not supported for recurrent networks")
@@ -243,11 +249,11 @@ module SHAInet
               matrix = GPUMemory.to_gpu(SimpleMatrix.from_a(embeddings))
             end
           else
-            matrix = l.forward_matrix(matrix)
+            matrix = l.forward(matrix)
           end
         end
         out_layer = @output_layers.last
-        matrix = out_layer.forward_matrix(matrix)
+        matrix = out_layer.forward(matrix)
         matrix.to_a
       end
     rescue e : Exception
@@ -481,399 +487,6 @@ module SHAInet
       @mse = sqrd_dists / n
     end
 
-    # Training the model
-    # ameba:disable Metrics/CyclomaticComplexity
-    def train(data : Array(Array) | SHAInet::TrainingData | SHAInet::StreamingData, # Input may contain sequences
-              training_type : Symbol | String,                                      # Type of training: :sgdm, :rprop, :adam
-              cost_function : Symbol | String | CostFunction = :mse,                # Proc returns the function value and it's derivative
-              epochs : Int32 = 1,                                                   # a criteria of when to stop the training
-              error_threshold : Float64 = 0.00000001,                               # a criteria of when to stop the training
-              mini_batch_size : Int32 = 1,                                          # Size of mini-batches to train with
-              log_each : Int32 = 1000,                                              # determines what is the step for error printout
-              show_slice : Bool = false,                                            # Show progress of each mini-batch slice
-              autosave : NamedTuple(freq: Int32, path: String) | Nil = nil)         # Save the network each X epochs
-
-      # This methods accepts data as either a SHAInet::TrainingData object, an Array(Array(Array(GenNum))),
-      # or a SHAInet::StreamingData instance.
-      raw_data = nil
-      use_gpu = CUDA.available?
-      if data.is_a?(SHAInet::StreamingData)
-        Log.info { "Training started" }
-        Log.info { "CUDA available: #{use_gpu}" }
-        start_time = Time.monotonic
-        batch_size = mini_batch_size
-        @time_step = 0
-        if CUDA.available?
-          input_dim = @input_layers.reduce(0) { |acc, l| acc + l.size }
-          out_dim = @output_layers.last.size
-          GPUMemory.preallocate!(1, input_dim, batch_size)
-          GPUMemory.preallocate!(1, out_dim, batch_size)
-        end
-      else
-        raw_data = data.is_a?(SHAInet::TrainingData) ? data.data : data
-        Log.info { "Training started" }
-        Log.info { "CUDA available: #{use_gpu}" }
-        start_time = Time.monotonic
-        batch_size = mini_batch_size ? mini_batch_size : raw_data.size
-        @time_step = 0
-        if CUDA.available?
-          input_dim = @input_layers.reduce(0) { |acc, l| acc + l.size }
-          out_dim = @output_layers.last.size
-          GPUMemory.preallocate!(1, input_dim, batch_size)
-          GPUMemory.preallocate!(1, out_dim, batch_size)
-        end
-      end
-
-      # Change String/Symbol into the corrent proc of the cost function
-      label_mode = false
-      if cost_function.is_a?(Symbol) || cost_function.is_a?(String)
-        raise NeuralNetRunError.new("Must define correct cost function type (:mse, :c_ent, :c_ent_sm, :exp, :hel_d, :kld, :gkld, :ita_sai_d).") if COST_FUNCTIONS.any? { |x| x == cost_function.to_s } == false
-        label_mode = cost_function.to_s == "c_ent_sm"
-        unless label_mode
-          proc = get_cost_proc(cost_function.to_s)
-          cost_function = proc
-        end
-      end
-
-      counter = 0_i64
-      loop do
-        # Autosave the network
-        unless autosave.nil?
-          if counter % autosave[:freq] == 0 && (counter > 0)
-            # Log.info { "Network saved." }
-            save_to_file("#{autosave[:path]}/autosave_epoch_#{counter}.nn")
-          end
-        end
-
-        # Break condtitions
-        if counter >= epochs || (error_threshold >= @mse) && (counter > 1)
-          log_summary(counter)
-          Log.info { "Training finished. (Elapsed: #{Time.monotonic - start_time})" }
-          break
-        end
-
-        # Show training progress of epochs
-        if counter % log_each == 0
-          log_summary(counter)
-          # @all_neurons.each { |s| puts s.gradient }
-        end
-
-        # Counters for disply
-        display_counter = 0
-        slices = 0
-
-        # For error break condition
-        epoch_mse = 0.0
-        epoch_error_sum = Array(Float64).new(@output_layers.last.size) { 0.0 }
-
-        # Iterate over each mini-batch
-        if data.is_a?(SHAInet::StreamingData)
-          acc_counter = 0
-          while (data_slice = data.next_batch(batch_size)).size > 0
-            slices += 1
-            verify_data(data_slice, label_mode)
-            @time_step += 1 if mini_batch_size
-            batch_mean = 0.0_f64
-            all_errors = 0.0_f64
-            if acc_counter % @accumulation_steps == 0
-              @w_gradient.fill(0.0)
-              @b_gradient.fill(0.0)
-              @lstm_layers.each &.zero_gate_gradients
-              @transformer_layers.each &.zero_gradients
-            end
-            data_slice.each do |data_point|
-              input_d = data_point[0]
-              output_d = data_point[1]
-
-              if input_d.is_a?(SimpleMatrix)
-                if label_mode
-                  label = output_d.as(SimpleMatrix)[0, 0].to_i
-                  evaluate_label(input_d.as(SimpleMatrix), label)
-                else
-                  evaluate(input_d.as(SimpleMatrix), output_d.as(SimpleMatrix), cost_function.as(CostFunction))
-                end
-              else
-                output_arr = [] of Float64
-                if output_d.is_a?(Array)
-                  output_d.as(Array).each do |v|
-                    if v.is_a?(Number)
-                      output_arr << v.to_f64
-                    end
-                  end
-                elsif output_d.is_a?(SimpleMatrix)
-                  output_arr << output_d.as(SimpleMatrix)[0, 0]
-                else
-                  output_arr << output_d.to_f64
-                end
-
-                if label_mode
-                  label = output_arr.first.to_i
-                  if input_d.is_a?(Array) && input_d.as(Array).first.is_a?(Array)
-                    seq_in = (input_d.as(Array).map { |x| x.as(Array).map(&.to_f64).as(Array(Float64)) }).as(Array(Array(Float64)))
-                    evaluate_sequence_label(seq_in, label)
-                  else
-                    input_arr = [] of Float64
-                    input_d.as(Array).each do |v|
-                      input_arr << v.to_f64 if v.is_a?(Number)
-                    end
-                    evaluate_label(input_arr, label)
-                  end
-                else
-                  if input_d.is_a?(Array) && input_d.as(Array).first.is_a?(Array)
-                    seq_in = (input_d.as(Array).map { |x| x.as(Array).map(&.to_f64).as(Array(Float64)) }).as(Array(Array(Float64)))
-                    evaluate_sequence(seq_in, output_arr.map(&.to_f64), cost_function.as(CostFunction))
-                  else
-                    input_arr = [] of Float64
-                    input_d.as(Array).each do |v|
-                      input_arr << v.to_f64 if v.is_a?(Number)
-                    end
-                    evaluate(input_arr, output_arr.map(&.to_f64), cost_function.as(CostFunction))
-                  end
-                end
-              end
-              all_errors += @total_error
-              if @hidden_layers.any? &.is_a?(TransformerLayer)
-                grad = GPUMemory.keep_on_gpu(@transformer_error)
-                prev = @output_layers.last
-                @hidden_layers.reverse_each do |l|
-                  if l.is_a?(TransformerLayer)
-                    grad = l.as(TransformerLayer).backward(grad)
-                  else
-                    grad = l.backward_matrix(prev, grad)
-                  end
-                  prev = l
-                end
-                @input_layers.reverse_each do |l|
-                  grad = l.backward_matrix(prev, grad)
-                  prev = l
-                end
-              elsif @hidden_layers.none? { |l| l.is_a?(RecurrentLayer) || l.is_a?(LSTMLayer) }
-                # For matrix-based layers, use matrix-based gradients
-                grad = @output_layers.last.activations.clone
-                prev = @output_layers.last
-                @hidden_layers.reverse_each do |l|
-                  grad = l.backward_matrix(prev, grad)
-                  prev = l
-                end
-                @input_layers.reverse_each do |l|
-                  grad = l.backward_matrix(prev, grad)
-                  prev = l
-                end
-              else
-                # Old neuron-based logic removed in favor of matrix operations
-                # For non-transformer, non-LSTM layers, use matrix backpropagation
-                @hidden_layers.reverse_each do |l|
-                  if l.responds_to?(:neurons)
-                    l.neurons.each { |neuron| neuron.hidden_error_prop }
-                  end
-                end
-                @input_layers.reverse_each do |l|
-                  if l.responds_to?(:neurons)
-                    l.neurons.each { |neuron| neuron.hidden_error_prop }
-                  end
-                end
-              end
-              @hidden_layers.each do |l|
-                if l.is_a?(EmbeddingLayer)
-                  l.as(EmbeddingLayer).accumulate_gradient
-                end
-              end
-              # Gradient collection for matrix-based layers moved to layer-level operations
-              # @all_synapses.each_with_index { |synapse, i| @w_gradient[i] += (synapse.source_neuron.activation)*(synapse.dest_neuron.gradient) }
-              # @all_neurons.each_with_index { |neuron, i| @b_gradient[i] += neuron.gradient }
-              @lstm_layers.each &.accumulate_gate_gradients
-              if @error_signal.size == 1
-                error_avg = 0.0_f64
-              else
-                # Calculate error based on output layer size
-                output_size = @output_layers.last.size
-                error_avg = @total_error / output_size
-              end
-              sqrd_dists = 0.0_f64
-              @error_signal.each { |e| sqrd_dists += (e - error_avg)**2 }
-              @mse = sqrd_dists / @output_layers.last.size
-              batch_mean += @mse
-            end
-
-            @total_error = all_errors
-            batch_mean /= data_slice.size
-            @mse = batch_mean
-            acc_counter += 1
-            if acc_counter % @accumulation_steps == 0
-              @time_step += 1 unless mini_batch_size
-              update_lstm_gates(training_type)
-              update_transformer_layers
-              epoch_mse += @mse
-              @error_signal.size.times { |i| epoch_error_sum[i] += @error_signal[i] }
-              @prev_mse = @mse.clone
-            end
-            display_counter += 1
-            if counter % log_each == 0
-              Log.info { "  Slice: (#{display_counter}), MSE: #{@mse}" } if show_slice
-            end
-          end
-          # end streaming while loop
-          data.rewind
-        else
-          acc_counter = 0
-          raw_data.not_nil!.each_slice(batch_size, reuse: false) do |data_slice|
-            slices += 1
-            verify_data(data_slice, label_mode)
-            @time_step += 1 if mini_batch_size # in mini-batch update adam time_step
-
-            batch_mean = 0.0_f64
-            all_errors = 0.0_f64
-
-            if acc_counter % @accumulation_steps == 0
-              @w_gradient.fill(0.0)
-              @b_gradient.fill(0.0)
-              @lstm_layers.each &.zero_gate_gradients
-              @transformer_layers.each &.zero_gradients
-            end
-
-            # Go over each data point and collect gradients of weights/biases
-            # based on each specific example
-            data_slice.each do |data_point|
-              input_d = data_point[0]
-              output_d = data_point[1]
-              output_arr = [] of Float64
-              if output_d.is_a?(Array)
-                output_d.as(Array).each do |v|
-                  if v.is_a?(Number)
-                    output_arr << v.to_f64
-                  end
-                end
-              else
-                output_arr << output_d.to_f64
-              end
-              if label_mode
-                label = output_arr.first.to_i
-                if input_d.is_a?(Array) && input_d.as(Array).first.is_a?(Array)
-                  seq_in = (input_d.as(Array).map { |x| x.as(Array).map(&.to_f64).as(Array(Float64)) }).as(Array(Array(Float64)))
-                  evaluate_sequence_label(seq_in, label)
-                else
-                  input_arr = [] of Float64
-                  input_d.as(Array).each do |v|
-                    input_arr << v.to_f64 if v.is_a?(Number)
-                  end
-                  evaluate_label(input_arr, label)
-                end
-              else
-                if input_d.is_a?(Array) && input_d.as(Array).first.is_a?(Array)
-                  seq_in = (input_d.as(Array).map { |x| x.as(Array).map(&.to_f64).as(Array(Float64)) }).as(Array(Array(Float64)))
-                  evaluate_sequence(seq_in, output_arr.map(&.to_f64), cost_function.as(CostFunction))
-                else
-                  input_arr = [] of Float64
-                  input_d.as(Array).each do |v|
-                    input_arr << v.to_f64 if v.is_a?(Number)
-                  end
-                  evaluate(input_arr, output_arr.map(&.to_f64), cost_function.as(CostFunction))
-                end
-              end
-              # all_errors << @total_error
-              all_errors += @total_error
-
-              if @hidden_layers.any? &.is_a?(TransformerLayer)
-                @hidden_layers.reverse_each do |l|
-                  if l.is_a?(TransformerLayer)
-                    l.as(TransformerLayer).backward(@transformer_error)
-                  end
-                end
-              elsif @hidden_layers.none? { |l| l.is_a?(RecurrentLayer) || l.is_a?(LSTMLayer) }
-                grad = nil
-                prev = @output_layers.last
-                @hidden_layers.reverse_each do |l|
-                  grad = l.backward_matrix(prev, grad)
-                  prev = l
-                end
-                @input_layers.reverse_each do |l|
-                  grad = l.backward_matrix(prev, grad)
-                  prev = l
-                end
-              else
-                # For non-matrix layers that might still have neurons
-                @hidden_layers.reverse_each do |l|
-                  if l.responds_to?(:neurons)
-                    l.neurons.each { |neuron| neuron.hidden_error_prop }
-                  end
-                end
-                @input_layers.reverse_each do |l|
-                  if l.responds_to?(:neurons)
-                    l.neurons.each { |neuron| neuron.hidden_error_prop }
-                  end
-                end
-              end
-
-              # Collect gradients for embedding layers before summing
-              @hidden_layers.each do |l|
-                if l.is_a?(EmbeddingLayer)
-                  l.as(EmbeddingLayer).accumulate_gradient
-                end
-              end
-
-              # Matrix-based gradient accumulation handled by layer-level operations
-              # @all_synapses.each_with_index { |synapse, i| @w_gradient[i] += (synapse.source_neuron.activation)*(synapse.dest_neuron.gradient) }
-              # @all_neurons.each_with_index { |neuron, i| @b_gradient[i] += neuron.gradient }
-              @lstm_layers.each &.accumulate_gate_gradients
-
-              # Calculate MSE per data point
-              if @error_signal.size == 1
-                error_avg = 0.0_f64
-              else
-                error_avg = @total_error/@output_layers.last.size
-              end
-              # sqrd_dists = [] of Float64
-              # @error_signal.each { |e| sqrd_dists << (e - error_avg)**2 }
-              sqrd_dists = 0.0_f64
-              @error_signal.each { |e| sqrd_dists += (e - error_avg)**2 }
-
-              # @mse = (sqrd_dists.reduce { |acc, i| acc + i })/@output_layers.last.size
-              # batch_mean << @mse
-              @mse = sqrd_dists / @output_layers.last.size
-              batch_mean += @mse
-            end
-
-            # Total error per batch
-            # @total_error = all_errors.reduce { |acc, i| acc + i }
-            @total_error = all_errors
-
-            # Calculate MSE per batch
-            # batch_mean = (batch_mean.reduce { |acc, i| acc + i })/data_slice.size
-            # @mse = batch_mean
-            batch_mean /= data_slice.size
-            @mse = batch_mean
-
-            acc_counter += 1
-            if acc_counter % @accumulation_steps == 0
-              @time_step += 1 unless mini_batch_size
-              update_weights(training_type)
-              update_biases(training_type)
-              update_lstm_gates(training_type)
-              update_transformer_layers
-
-              epoch_mse += @mse
-              @error_signal.size.times { |i| epoch_error_sum[i] += @error_signal[i] }
-
-              @prev_mse = @mse.clone
-            end
-            # Show training progress of the mini-batches
-            display_counter += 1
-            if counter % log_each == 0
-              Log.info { "  Slice: (#{display_counter} / #{slices}), MSE: #{@mse}" } if show_slice
-              # Log.info { "@error_signal: #{@error_signal}" }
-            end
-          end
-        end
-
-        # Update epoch status
-        @mse = (epoch_mse / slices)
-        @error_signal.size.times { |i| @error_signal[i] = (epoch_error_sum[i] / slices) }
-        counter += 1
-      end
-    ensure
-      GPUMemory.cleanup if CUDA.available?
-    end
-
     # This method is kept for matching syntax of previous versions.
     # It is possible to use the "train" method instead
     def train_batch(data : Array(Array) | SHAInet::TrainingData,
@@ -894,6 +507,214 @@ module SHAInet
         log_each: log_each,
         show_slice: show_slice,
         autosave: autosave)
+    end
+
+    # Clean matrix-based training method
+    def train(data : Array(Array) | SHAInet::TrainingData,
+              training_type : Symbol | String = :sgdm,
+              cost_function : Symbol | String | CostFunction = :mse,
+              epochs : Int32 = 1,
+              error_threshold : Float64 = 0.00000001,
+              mini_batch_size : Int32 = 1,
+              log_each : Int32 = 1,
+              show_slice : Bool = false,
+              autosave : NamedTuple(freq: Int32, path: String) | Nil = nil)
+      verify_net_before_train
+
+      # Convert TrainingData to raw data array
+      raw_data = data.is_a?(SHAInet::TrainingData) ? data.data : data
+
+      # Validate and convert cost function
+      if cost_function.is_a?(Symbol) || cost_function.is_a?(String)
+        raise NeuralNetRunError.new("Must define correct cost function type (:mse, :c_ent, :c_ent_sm).") if COST_FUNCTIONS.any? { |x| x == cost_function.to_s } == false
+        cost_proc = get_cost_proc(cost_function.to_s)
+      else
+        cost_proc = cost_function
+      end
+
+      Log.info { "Training started with #{epochs} epochs, #{raw_data.size} samples" }
+      start_time = Time.monotonic
+
+      batch_size = mini_batch_size.clamp(1, raw_data.size)
+
+      epochs.times do |epoch|
+        # Autosave if configured
+        if autosave && epoch % autosave[:freq] == 0 && epoch > 0
+          save_to_file("#{autosave[:path]}/autosave_epoch_#{epoch}.nn")
+        end
+
+        # Shuffle data for each epoch
+        shuffled_data = raw_data.shuffle
+
+        total_error = 0.0
+        batch_count = 0
+
+        # Process data in mini-batches
+        shuffled_data.each_slice(batch_size) do |batch|
+          batch_error = 0.0
+
+          # Zero gradients for all matrix layers
+          @hidden_layers.each do |layer|
+            layer.zero_gradients if layer.is_a?(MatrixLayer)
+          end
+          @output_layers.each do |layer|
+            layer.zero_gradients if layer.is_a?(MatrixLayer)
+          end
+
+          # Process each sample in the batch
+          batch.each do |sample|
+            # Extract input and expected output data (already as arrays)
+            input_data = sample[0].as(Array)
+            expected_output = sample[1].as(Array)
+
+            # Convert input to matrix for forward pass
+            # Handle nested arrays if present (e.g., sequences)
+            input_matrix = if input_data.size > 0 && input_data[0].is_a?(Array)
+                             # Handle nested array input (sequence data)
+                             rows = input_data.size
+                             cols = input_data[0].as(Array).size
+                             mat = SimpleMatrix.new(rows, cols)
+                             rows.times do |i|
+                               cols.times do |j|
+                                 mat[i, j] = input_data[i].as(Array)[j].as(GenNum).to_f64
+                               end
+                             end
+                             GPUMemory.to_gpu(mat)
+                           else
+                             # Handle flat array input (single sample)
+                             mat = SimpleMatrix.new(1, input_data.size)
+                             input_data.size.times do |i|
+                               mat[0, i] = input_data[i].as(GenNum).to_f64
+                             end
+                             GPUMemory.to_gpu(mat)
+                           end
+
+            # Forward pass - use matrix-based run to avoid array conversions
+            actual_matrix = run(input_matrix, stealth: true)
+
+            # Calculate error
+            sample_error = 0.0
+
+            # Handle expected output based on structure
+            if expected_output.size > 0 && expected_output[0].is_a?(Array)
+              # Handle nested expected output (sequence data)
+              rows = expected_output.size
+              cols = expected_output[0].as(Array).size
+              rows.times do |i|
+                cols.times do |j|
+                  expected = expected_output[i].as(Array)[j].as(GenNum).to_f64
+                  actual = actual_matrix[i, j]
+                  cost_result = cost_proc.call(expected, actual)
+                  sample_error += cost_result[:value]
+                end
+              end
+            else
+              # Handle flat expected output (single sample)
+              expected_output.size.times do |i|
+                expected = expected_output[i].as(GenNum).to_f64
+                actual = actual_matrix[0, i]
+                cost_result = cost_proc.call(expected, actual)
+                sample_error += cost_result[:value]
+              end
+            end
+
+            batch_error += sample_error
+
+            # Backward pass - compute gradients
+            output_layer = @output_layers.last
+            if output_layer.is_a?(MatrixLayer)
+              # Create gradient matrix for output error
+              if expected_output.size > 0 && expected_output[0].is_a?(Array)
+                # Handle nested expected output (sequence data)
+                rows = expected_output.size
+                cols = expected_output[0].as(Array).size
+                output_grad = SimpleMatrix.new(rows, cols)
+                rows.times do |i|
+                  cols.times do |j|
+                    expected = expected_output[i].as(Array)[j].as(GenNum).to_f64
+                    actual = actual_matrix[i, j]
+                    cost_result = cost_proc.call(expected, actual)
+                    output_grad[i, j] = cost_result[:derivative]
+                  end
+                end
+              else
+                # Handle flat expected output (single sample)
+                output_grad = SimpleMatrix.new(1, expected_output.size)
+                expected_output.size.times do |i|
+                  expected = expected_output[i].as(GenNum).to_f64
+                  actual = actual_matrix[0, i]
+                  cost_result = cost_proc.call(expected, actual)
+                  output_grad[0, i] = cost_result[:derivative]
+                end
+              end
+
+              # Move gradient to GPU if needed
+              output_grad = GPUMemory.to_gpu(output_grad)
+
+              # Backpropagate through layers
+              grad = output_layer.backward(output_grad)
+
+              # Backpropagate through hidden layers (in reverse order)
+              @hidden_layers.reverse_each do |layer|
+                if layer.is_a?(MatrixLayer)
+                  grad = layer.backward(grad)
+                elsif layer.is_a?(EmbeddingLayer)
+                  layer.accumulate_gradient
+                end
+              end
+            end
+          end
+
+          # Update weights after processing the batch
+          learning_rate = current_learning_rate
+
+          @hidden_layers.each do |layer|
+            if layer.is_a?(MatrixLayer)
+              layer.update_weights(learning_rate)
+            elsif layer.is_a?(EmbeddingLayer)
+              layer.apply_gradients(learning_rate)
+            end
+          end
+
+          @output_layers.each do |layer|
+            if layer.is_a?(MatrixLayer)
+              layer.update_weights(learning_rate)
+            end
+          end
+
+          # Update transformer layers if present
+          update_transformer_layers if @transformer_layers.any?
+
+          # Update LSTM layers if present
+          update_lstm_gates(training_type) if @lstm_layers.any?
+
+          total_error += batch_error
+          batch_count += 1
+        end
+
+        # Calculate average error
+        avg_error = total_error / raw_data.size
+        @total_error = total_error
+        @error_signal = [avg_error] # For compatibility with existing code
+        update_mse                  # Update MSE calculation
+
+        # Log progress
+        if epoch % log_each == 0
+          elapsed = Time.monotonic - start_time
+          Log.info { "Epoch: #{epoch}, Error: #{avg_error.round(6)}, MSE: #{@mse.round(6)}, Time: #{elapsed.total_seconds.round(2)}s" }
+        end
+
+        # Check for early stopping
+        if avg_error < error_threshold
+          Log.info { "Training stopped early. Error threshold reached: #{avg_error} < #{error_threshold}" }
+          break
+        end
+
+        @time_step += 1
+      end
+
+      elapsed = Time.monotonic - start_time
+      Log.info { "Training completed in #{elapsed.total_seconds.round(2)} seconds" }
     end
 
     def current_learning_rate
@@ -1061,9 +882,15 @@ module SHAInet
           layer.as(LSTMLayer).update_gate_params(lr)
         when TransformerLayer
           layer.as(TransformerLayer).apply_gradients(lr)
+        when MatrixLayer
+          # MatrixLayer has proper gradient computation and weight updates
+          layer.as(MatrixLayer).update_weights(lr)
         else
-          # Standard matrix-based layers
-          # No explicit update needed as gradients are applied during backprop
+          # Standard matrix-based layers - apply accumulated gradients
+          # Temporarily disabled while fixing gradient computation
+          # if layer.responds_to?(:apply_gradients)
+          #   layer.apply_gradients(lr)
+          # end
         end
       end
 

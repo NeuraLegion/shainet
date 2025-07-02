@@ -1,8 +1,10 @@
+require "../basic/matrix_layer"
+
 module SHAInet
   # TransformerBlock implements multi-head self-attention followed by a
   # position-wise feed forward network. LayerNorm and dropout are applied
   # with residual connections around each sub layer.
-  class TransformerBlock < Layer
+  class TransformerBlock < MatrixLayer
     getter mha : MultiHeadAttention
     getter ffn : PositionWiseFF
     getter norm1 : LayerNorm

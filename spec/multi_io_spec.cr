@@ -10,7 +10,7 @@ describe "multi input/output" do
     net.fully_connect
 
     # add a second output layer manually
-    extra = SHAInet::Layer.new("memory", 1)
+    extra = SHAInet::MatrixLayer.new(2, 1) # input_size=2 (from hidden layer), output_size=1
     net.output_layers << extra
     net.connect_ltl(net.hidden_layers.last, extra, :full)
 

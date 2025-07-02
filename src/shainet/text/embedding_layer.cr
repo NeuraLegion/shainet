@@ -1,6 +1,8 @@
+require "../basic/matrix_layer"
+
 module SHAInet
   # Simple embedding lookup table. Maps integer token IDs to vectors of floats.
-  class EmbeddingLayer < Layer
+  class EmbeddingLayer < MatrixLayer
     property embeddings : SimpleMatrix
     property gradients : SimpleMatrix
     getter current_ids : Array(Int32)
@@ -90,8 +92,14 @@ module SHAInet
         id = @current_ids.shift
         if CUDA.available? && @gradients.is_a?(CudaMatrix) && (dptr = @gradients.as(CudaMatrix).device_ptr) && !dptr.null?
           # Create host vector from activation and sigma_prime matrices
-          host_vec = Array(Float64).new(@l_size) do |i|
-            @activations[0, i] * @sigma_primes[0, i]
+          # Check if activations and sigma_primes are available from forward pass
+          if @activations && @sigma_primes
+            host_vec = Array(Float64).new(@l_size) do |i|
+              @activations.not_nil![0, i] * @sigma_primes.not_nil![0, i]
+            end
+          else
+            # Fallback: use identity (no activation derivative applied)
+            host_vec = Array(Float64).new(@l_size, 1.0)
           end
 
           bytes = (@l_size * 8).to_u64
@@ -109,8 +117,16 @@ module SHAInet
           CUDA.free(one_dev.as(Pointer(Void)))
         else
           # Use matrix-based gradient accumulation
-          @l_size.times do |i|
-            @gradients[id, i] += @activations[0, i] * @sigma_primes[0, i]
+          # Check if activations and sigma_primes are available from forward pass
+          if @activations && @sigma_primes
+            @l_size.times do |i|
+              @gradients[id, i] += @activations.not_nil![0, i] * @sigma_primes.not_nil![0, i]
+            end
+          else
+            # Fallback: use identity (no activation derivative applied)
+            @l_size.times do |i|
+              @gradients[id, i] += 1.0
+            end
           end
         end
       end

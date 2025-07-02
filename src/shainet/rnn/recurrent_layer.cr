@@ -1,5 +1,7 @@
+require "../basic/matrix_layer"
+
 module SHAInet
-  class RecurrentLayer < Layer
+  class RecurrentLayer < MatrixLayer
     property hidden_state
 
     def initialize(n_type : String, l_size : Int32, activation_function : ActivationFunction = SHAInet.sigmoid)

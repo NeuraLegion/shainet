@@ -2,6 +2,7 @@ require "log"
 require "json"
 require "../pytorch_import"
 require "../math/simple_matrix"
+require "./matrix_layer"
 
 module SHAInet
   class Network
@@ -44,13 +45,13 @@ module SHAInet
 
     # First creates an empty shell of the entire network
     def initialize
-      @input_layers = Array(Layer).new
-      @output_layers = Array(Layer).new
-      @hidden_layers = Array(Layer).new
+      @input_layers = Array(MatrixLayer).new
+      @output_layers = Array(MatrixLayer).new
+      @hidden_layers = Array(MatrixLayer).new
       @recurrent_layers = Array(RecurrentLayer).new
       @lstm_layers = Array(LSTMLayer).new
       @transformer_layers = Array(TransformerLayer).new
-      @all_layers = Array(Layer).new
+      @all_layers = Array(MatrixLayer).new
       @error_signal = Array(Float64).new # Array of errors for each element in the output layers
       @total_error = 1_f64               # Sum of errors from output layer, based on a specific input
       @mse = 1_f64                       # MSE of network, based on all errors of output layer for a specific input or batch
@@ -101,7 +102,9 @@ module SHAInet
               when "transformer"
                 TransformerLayer.new(l_size, num_heads, ff_hidden, drop_percent)
               else
-                Layer.new(n_type.to_s, l_size, activation_function)
+                # Use MatrixLayer for regular feedforward layers - it has proper GPU support and gradient computation
+                # Note: MatrixLayer will be properly connected with correct input size in connect_ltl
+                MatrixLayer.new(1, l_size) # Temporary size, will be updated during connection
               end
 
       # Add layer to appropriate collections
@@ -168,18 +171,27 @@ module SHAInet
     end
 
     # Connect two specific layers
-    def connect_ltl(src_layer : Layer, dest_layer : Layer, connection_type : Symbol | String)
+    def connect_ltl(src_layer : MatrixLayer, dest_layer : MatrixLayer, connection_type : Symbol | String)
       raise NeuralNetInitalizationError.new("Error initilizing network, must choose correct connection type.") if CONNECTION_TYPES.any? { |x| x == connection_type.to_s } == false
       case connection_type.to_s
       # Connect source layer to destination layer with full connections
       when "full"
         # Matrix-based layers handle weight initialization internally
-        mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
-        if src_layer.is_a?(TransformerLayer)
+        # Use SimpleMatrix for now to avoid CUDA type mismatches during debugging
+        mat_klass = SimpleMatrix
+        if dest_layer.is_a?(MatrixLayer)
+          # For MatrixLayer, reinitialize with correct dimensions
+          dest_layer.weights = mat_klass.new(src_layer.size, dest_layer.size).random_fill!
+          dest_layer.biases = mat_klass.new(1, dest_layer.size).random_fill!
+          dest_layer.g_w = mat_klass.zeros(src_layer.size, dest_layer.size)
+          dest_layer.g_b = mat_klass.zeros(1, dest_layer.size)
+        elsif src_layer.is_a?(TransformerLayer)
           dest_layer.weights = mat_klass.new(dest_layer.size, src_layer.size).random_fill!
           dest_layer.biases = mat_klass.new(dest_layer.size, 1).random_fill!
         else
-          dest_layer.weights = mat_klass.new(dest_layer.size, src_layer.size, 0.0)
+          # Initialize weights randomly for all layer types
+          dest_layer.weights = mat_klass.new(dest_layer.size, src_layer.size).random_fill!
+          dest_layer.biases = mat_klass.new(dest_layer.size, 1).random_fill!
         end
       end
     rescue e : Exception
@@ -244,8 +256,10 @@ module SHAInet
                  end
 
         dump_layer["l_type"] = JSON::Any.new(l_type)
-        dump_layer["weights"] = JSON.parse(layer.weights.to_a.to_json)
-        dump_layer["biases"] = JSON.parse(layer.biases.to_a.flatten.to_json)
+        if layer.weights
+          dump_layer["weights"] = JSON.parse(layer.weights.not_nil!.to_a.to_json)
+          dump_layer["biases"] = JSON.parse(layer.biases.not_nil!.to_a.flatten.to_json)
+        end
         dump_layer["activation_function"] = JSON::Any.new(layer.activation_function.to_s)
         dump_network << dump_layer
       end
