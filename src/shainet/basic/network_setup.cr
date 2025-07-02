@@ -46,8 +46,6 @@ module SHAInet
       @input_layers = Array(MatrixLayer).new
       @output_layers = Array(MatrixLayer).new
       @hidden_layers = Array(MatrixLayer).new
-      @recurrent_layers = Array(RecurrentLayer).new
-      @lstm_layers = Array(LSTMLayer).new
       @transformer_layers = Array(TransformerLayer).new
       @all_layers = Array(MatrixLayer).new
       @error_signal = Array(Float64).new # Array of errors for each element in the output layers
@@ -90,10 +88,6 @@ module SHAInet
         return
       end
       layer = case l_type.to_s
-              when "recurrent"
-                RecurrentLayer.new(n_type.to_s, l_size, activation_function)
-              when "lstm"
-                LSTMLayer.new(n_type.to_s, l_size, activation_function)
               when "embedding"
                 raise NeuralNetRunError.new("vocab_size required for embedding layer") if vocab_size <= 0
                 EmbeddingLayer.new(vocab_size, l_size, activation_function)
@@ -111,12 +105,6 @@ module SHAInet
         @input_layers << layer
       when "hidden"
         @hidden_layers << layer
-      when "recurrent"
-        @hidden_layers << layer
-        @recurrent_layers << layer.as(RecurrentLayer)
-      when "lstm"
-        @hidden_layers << layer
-        @lstm_layers << layer.as(LSTMLayer)
       when "embedding"
         @hidden_layers << layer
       when "transformer"
@@ -221,7 +209,6 @@ module SHAInet
       elsif @output_layers.empty?
         raise NeuralNetRunError.new("No output layers defined")
       end
-      @lstm_layers.each &.setup_gate_params
     end
 
     def randomize_all_weights

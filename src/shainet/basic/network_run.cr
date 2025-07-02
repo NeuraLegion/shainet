@@ -30,7 +30,7 @@ module SHAInet
           case l
           when EmbeddingLayer
             token = input.first.to_i
-            if CUDA.available?
+            if CUDA.fully_available?
               matrix = l.as(EmbeddingLayer).embed([token])
             else
               vec = l.as(EmbeddingLayer).embed(token)
@@ -79,7 +79,7 @@ module SHAInet
           case l
           when EmbeddingLayer
             token = input.first.to_i
-            if CUDA.available?
+            if CUDA.fully_available?
               matrix = l.as(EmbeddingLayer).embed([token])
             else
               vec = l.as(EmbeddingLayer).embed(token)
@@ -200,7 +200,7 @@ module SHAInet
           when EmbeddingLayer
             raise NeuralNetRunError.new("Embedding input mismatch") unless matrix.cols == 1
             tokens = (0...matrix.rows).map { |r| matrix[r, 0].to_i }
-            if CUDA.available?
+            if CUDA.fully_available?
               matrix = l.as(EmbeddingLayer).embed(tokens)
             else
               embeddings = tokens.map { |id| l.as(EmbeddingLayer).embed(id) }
@@ -244,7 +244,7 @@ module SHAInet
           when EmbeddingLayer
             raise NeuralNetRunError.new("Embedding input mismatch") unless matrix.cols == 1
             tokens = (0...matrix.rows).map { |r| matrix[r, 0].to_i }
-            if CUDA.available?
+            if CUDA.fully_available?
               matrix = l.as(EmbeddingLayer).embed(tokens)
             else
               embeddings = tokens.map { |id| l.as(EmbeddingLayer).embed(id) }

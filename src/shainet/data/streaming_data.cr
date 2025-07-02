@@ -37,7 +37,7 @@ module SHAInet
         batch << [input, output]
       end
 
-      return batch unless @gpu_batches && CUDA.available?
+      return batch unless @gpu_batches && CUDA.fully_available?
 
       gpu_batch = [] of Array(SimpleMatrix)
       batch.each do |ex|
@@ -50,7 +50,7 @@ module SHAInet
 
     # Similar to `next_batch` but returns GPU matrices when CUDA is available.
     def next_batch_gpu(batch_size : Int32)
-      return next_batch(batch_size) unless CUDA.available?
+      return next_batch(batch_size) unless CUDA.fully_available?
 
       prev = @gpu_batches
       @gpu_batches = true

@@ -304,5 +304,10 @@ module SHAInet
       raise "CUDA kernels not available" unless fn
       fn.call(counts, a, b, freqs, pair_count, vocab)
     end
+
+    # Check if both CUDA runtime and custom kernels are available
+    def fully_available?
+      available? && kernels_available?
+    end
   end
 end

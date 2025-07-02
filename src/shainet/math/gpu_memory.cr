@@ -20,7 +20,7 @@ module SHAInet
 
     # Preallocate +count+ buffers of given shape
     def preallocate!(rows : Int32, cols : Int32, count : Int32)
-      return unless CUDA.available?
+      return unless CUDA.fully_available?
       size = rows * cols
       count.times do
         ptr = Pointer(Float64).null
@@ -74,7 +74,7 @@ module SHAInet
 
     # Convert SimpleMatrix to CudaMatrix if CUDA is available and input is not already CudaMatrix
     def to_gpu(matrix : SimpleMatrix)
-      return matrix if matrix.is_a?(CudaMatrix) || !CUDA.available?
+      return matrix if matrix.is_a?(CudaMatrix) || !CUDA.fully_available?
 
       result = CudaMatrix.new(matrix.rows, matrix.cols)
       matrix.rows.times do |i|
@@ -90,7 +90,7 @@ module SHAInet
     def keep_on_gpu(matrix : SimpleMatrix)
       if matrix.is_a?(CudaMatrix)
         matrix
-      elsif CUDA.available?
+      elsif CUDA.fully_available?
         to_gpu(matrix)
       else
         matrix
@@ -99,7 +99,7 @@ module SHAInet
 
     # Create a new matrix of the same type as the input
     def like(matrix : SimpleMatrix, rows : Int32, cols : Int32, init : Float64 = 0.0)
-      if matrix.is_a?(CudaMatrix) && CUDA.available?
+      if matrix.is_a?(CudaMatrix) && CUDA.fully_available?
         result = CudaMatrix.new(rows, cols, init)
         result.sync_to_device!
         result
@@ -123,7 +123,7 @@ module SHAInet
       result = yield input
 
       # Ensure result is same type as input
-      if input.is_a?(CudaMatrix) && !result.is_a?(CudaMatrix) && CUDA.available?
+      if input.is_a?(CudaMatrix) && !result.is_a?(CudaMatrix) && CUDA.fully_available?
         gpu_result = to_gpu(result)
         gpu_result
       else
@@ -164,7 +164,7 @@ module SHAInet
       # If CUDA is available and any matrix is on GPU, move all to GPU
       has_gpu = matrices.any? { |m| m.is_a?(CudaMatrix) }
 
-      if has_gpu && CUDA.available?
+      if has_gpu && CUDA.fully_available?
         matrices.map { |m| to_gpu(m) }
       else
         # Otherwise ensure all are CPU matrices (SimpleMatrix)
