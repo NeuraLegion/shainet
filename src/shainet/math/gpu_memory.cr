@@ -160,7 +160,7 @@ module SHAInet
     # Batch sync multiple CudaMatrix objects to device efficiently
     def batch_sync_to_device(matrices : Array(SimpleMatrix))
       matrices.each do |matrix|
-        if matrix.is_a?(CudaMatrix)
+        if matrix.is_a?(CudaMatrix) && !matrix.device_dirty?
           matrix.sync_to_device!
         end
       end

@@ -174,8 +174,8 @@ module SHAInet
         end
       end
       if CUDA.available? && @embeddings.is_a?(CudaMatrix)
-        @embeddings.as(CudaMatrix).sync_to_device!
-        @gradients.as(CudaMatrix).sync_to_device!
+        @embeddings.as(CudaMatrix).sync_to_device! unless @embeddings.as(CudaMatrix).device_dirty?
+        @gradients.as(CudaMatrix).sync_to_device! unless @gradients.as(CudaMatrix).device_dirty?
       end
     end
   end

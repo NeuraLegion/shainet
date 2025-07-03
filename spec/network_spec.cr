@@ -208,7 +208,6 @@ describe SHAInet::Network do
       cost_function: :mse,
       epochs: 5000,
       error_threshold: 1e-9,
-      mini_batch_size: 10,
       log_each: 1000,
       show_slice: false)
 

@@ -182,7 +182,7 @@ module SHAInet
       if CUDA.fully_available?
         [@w_q, @w_k, @w_v, @w_o].each do |mat|
           if mat.is_a?(CudaMatrix)
-            mat.sync_to_device!
+            mat.sync_to_device! unless mat.device_dirty?
           end
         end
       end

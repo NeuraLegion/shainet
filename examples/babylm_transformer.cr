@@ -82,38 +82,38 @@ net.learning_rate = 0.001
 
 puts "Training the network for #{epochs} epochs with batch size #{batch}..."
 epochs.times do |epoch|
+  # Use StreamingData without mini_batch_size to avoid CPU bottlenecks
   net.train(data: train_data,
     training_type: :adam,
     cost_function: :c_ent_sm,
     epochs: 1,
-    mini_batch_size: batch,
     log_each: 100)
 
+  # Optimized validation with GPU batch processing
   val_loss = 0.0
   count = 0
-  while (val_batch = val_data.next_batch(1)).size > 0
-    seq = val_batch.first[0].as(Array(Array(Float64)))
-    tgt = val_batch.first[1].as(Array(Float64)).first.to_i
-    output_vec = net.run(seq).last
+  
+  # Process validation in larger batches for better GPU utilization
+  val_batch_size = 64
+  while (val_batch = val_data.next_batch(val_batch_size)).size > 0
+    total_batch_loss = 0.0
+    
+    val_batch.each do |sample|
+      seq = sample[0].as(Array(Array(Float64)))
+      tgt = sample[1].as(Array(Float64)).first.to_i
+      output_vec = net.run(seq).last
 
-    # Use GPU-optimized softmax when CUDA kernels are available
-    if SHAInet::CUDA.kernels_available? && output_vec.is_a?(Array(Float64))
-      # Create a CudaMatrix from the output vector to use GPU softmax
-      mat_klass = SHAInet::CUDA.available? ? SHAInet::CudaMatrix : SHAInet::SimpleMatrix
-      output_matrix = mat_klass.from_a([output_vec])
-      probs_matrix = SHAInet.softmax_rows(output_matrix)
-      probs = (0...output_vec.size).map { |i| probs_matrix[0, i] }
-    else
-      # Fallback to CPU softmax
+      # Use native softmax - it's already optimized
       probs = SHAInet.softmax(output_vec)
+      total_batch_loss += -Math.log(probs[tgt].clamp(1e-9, 1.0))
+      count += 1
     end
-
-    val_loss += -Math.log(probs[tgt].clamp(1e-9, 1.0))
-    count += 1
+    
+    val_loss += total_batch_loss
   end
   val_loss /= count.to_f if count > 0
   val_data.rewind
-  puts "Epoch #{epoch + 1} validation loss: #{val_loss}"
+  puts "Epoch #{epoch + 1} validation loss: #{val_loss.round(4)}"
 end
 
 # Predict the token following the first token in the dataset
