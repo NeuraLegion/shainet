@@ -233,4 +233,27 @@ void mul_row_vector(double* matrix, const double* vec, int rows, int cols) {
     }
 }
 
+__global__ void transpose_kernel(double* out, const double* in, int rows, int cols) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= rows * cols) return;
+
+    int row = idx / cols;
+    int col = idx % cols;
+
+    // Transpose: out[col][row] = in[row][col]
+    // In row-major: out[col * rows + row] = in[row * cols + col]
+    out[col * rows + row] = in[row * cols + col];
+}
+
+void transpose(double* out, const double* in, int rows, int cols) {
+    int threads_per_block = 256;
+    int blocks = (rows * cols + threads_per_block - 1) / threads_per_block;
+
+    transpose_kernel<<<blocks, threads_per_block>>>(out, in, rows, cols);
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in transpose: %s\n", cudaGetErrorString(err));
+    }
+}
+
 } // extern "C"

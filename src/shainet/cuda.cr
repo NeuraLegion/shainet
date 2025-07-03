@@ -221,6 +221,7 @@ module SHAInet
     @@layer_norm_backward_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Int32, Float64, Void)? = nil
     @@sum_cols_proc : Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Void)? = nil
     @@mul_row_vector_proc : Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Void)? = nil
+    @@transpose_proc : Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Void)? = nil
 
     def softmax_rows(dst : Pointer(Float64), src : Pointer(Float64), rows : Int32, cols : Int32)
       unless fn = @@softmax_rows_proc
@@ -393,6 +394,23 @@ module SHAInet
       end
       raise "CUDA kernels not available" unless fn
       fn.call(matrix, vec, rows, cols)
+    end
+
+    def transpose(output : Pointer(Float64), input : Pointer(Float64), rows : Int32, cols : Int32)
+      unless fn = @@transpose_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "transpose")
+          unless sym.null?
+            @@transpose_proc = Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@transpose_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(output, input, rows, cols)
     end
 
     # In-place element-wise ReLU on GPU memory. This fallback implementation

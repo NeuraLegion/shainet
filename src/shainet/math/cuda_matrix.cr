@@ -63,7 +63,21 @@ module SHAInet
     def transpose
       result = CudaMatrix.new(@cols, @rows)
 
-      # For GPU matrices, avoid unnecessary CPU access
+      # Use GPU kernel for transpose when CUDA is fully available
+      if CUDA.fully_available? && (src_ptr = self.device_ptr) && (dst_ptr = result.device_ptr) &&
+         !src_ptr.null? && !dst_ptr.null?
+        # Make sure source data is on GPU
+        self.sync_to_device! unless device_dirty?
+
+        # Use GPU kernel for transpose
+        CUDA.transpose(dst_ptr, src_ptr, @rows, @cols)
+
+        # Mark result as dirty on device
+        result.mark_device_dirty!
+        return result
+      end
+
+      # CPU fallback
       if CUDA.available? && device_dirty?
         # Keep the transpose operation minimal and let GPU handle it later
         # For now, sync to CPU and do CPU transpose, but mark result for GPU
