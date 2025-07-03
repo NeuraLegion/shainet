@@ -3,13 +3,13 @@ require "../basic/matrix_layer"
 module SHAInet
   # Simple embedding lookup table. Maps integer token IDs to vectors of floats.
   class EmbeddingLayer < MatrixLayer
-    property embeddings : SimpleMatrix
-    property gradients : SimpleMatrix
+    property embeddings : SimpleMatrix | CudaMatrix
+    property gradients : SimpleMatrix | CudaMatrix
     getter current_ids : Array(Int32)
 
     def initialize(vocab_size : Int32, l_size : Int32, activation_function : ActivationFunction = SHAInet.none)
       super("memory", l_size, activation_function)
-      mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
+      mat_klass = CUDA.fully_available? ? CudaMatrix : SimpleMatrix
       # Initialize with random values between -0.1 and 0.1
       @embeddings = mat_klass.new(vocab_size, l_size)
       vocab_size.times do |r|
@@ -19,6 +19,22 @@ module SHAInet
       end
       @gradients = mat_klass.zeros(vocab_size, l_size)
       @current_ids = [] of Int32
+    end
+
+    # Convert embeddings and gradients to GPU
+    def to_gpu!
+      if CUDA.fully_available? && !@embeddings.is_a?(CudaMatrix)
+        @embeddings = @embeddings.as(SimpleMatrix).to_cuda
+        @gradients = @gradients.as(SimpleMatrix).to_cuda
+      end
+    end
+
+    # Convert embeddings and gradients to CPU
+    def to_cpu!
+      if @embeddings.is_a?(CudaMatrix)
+        @embeddings = @embeddings.as(CudaMatrix).to_simple
+        @gradients = @gradients.as(CudaMatrix).to_simple
+      end
     end
 
     # Migration helper for legacy models using hash based storage
@@ -38,35 +54,61 @@ module SHAInet
       Array.new(@l_size) { |i| @embeddings[id, i] }
     end
 
-    # Retrieve embeddings for multiple ids as a matrix. When CUDA is available
-    # the returned matrix keeps the values on the device without syncing them
-    # back to the host. Gradients are tracked for later accumulation.
-    def embed(ids : Array(Int32))
-      mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
-      result = mat_klass.zeros(ids.size, @l_size)
-      if CUDA.available? && @embeddings.is_a?(CudaMatrix) && result.is_a?(CudaMatrix)
-        e_ptr = @embeddings.as(CudaMatrix).device_ptr
-        r_ptr = result.as(CudaMatrix).device_ptr
-        if e_ptr && r_ptr && !e_ptr.null? && !r_ptr.null?
+    # GPU path - retrieve embeddings for multiple ids as a CudaMatrix
+    def embed(ids : Array(Int32)) : CudaMatrix
+      if !CUDA.fully_available? || !@embeddings.is_a?(CudaMatrix)
+        # If we can't use GPU, ensure embeddings are converted to CudaMatrix first
+        to_gpu! unless @embeddings.is_a?(CudaMatrix)
+        # If still not CudaMatrix after conversion attempt, fallback to CPU + conversion
+        return embed_cpu(ids).to_cuda unless @embeddings.is_a?(CudaMatrix)
+      end
+
+      result = CudaMatrix.zeros(ids.size, @l_size)
+      e_ptr = @embeddings.as(CudaMatrix).device_ptr
+      r_ptr = result.device_ptr
+
+      if e_ptr && r_ptr && !e_ptr.null? && !r_ptr.null?
+        begin
+          bytes = (ids.size * 4).to_u64
+          ids_dev = Pointer(Int32).null
+          CUDA.malloc(pointerof(ids_dev).as(Pointer(Pointer(Void))), bytes)
+          CUDA.memcpy(ids_dev.as(Pointer(Void)), ids.to_unsafe.as(Pointer(Void)), bytes, CUDA::MemcpyKind::HostToDevice)
           begin
-            bytes = (ids.size * 4).to_u64
-            ids_dev = Pointer(Int32).null
-            CUDA.malloc(pointerof(ids_dev).as(Pointer(Pointer(Void))), bytes)
-            CUDA.memcpy(ids_dev.as(Pointer(Void)), ids.to_unsafe.as(Pointer(Void)), bytes, CUDA::MemcpyKind::HostToDevice)
-            begin
-              CUDA.gather_rows(r_ptr, e_ptr, ids_dev, ids.size, @l_size)
-            rescue
-              ids.each_with_index do |id, row|
-                src = e_ptr + id*@l_size
-                dst = r_ptr + row*@l_size
-                CUDA.memcpy(dst.as(Pointer(Void)), src.as(Pointer(Void)), (@l_size*8).to_u64, CUDA::MemcpyKind::DeviceToDevice)
-              end
-            end
-            CUDA.free(ids_dev.as(Pointer(Void)))
-            @current_ids.concat(ids)
-            return result
+            CUDA.gather_rows(r_ptr, e_ptr, ids_dev, ids.size, @l_size)
           rescue
+            ids.each_with_index do |id, row|
+              src = e_ptr + id*@l_size
+              dst = r_ptr + row*@l_size
+              CUDA.memcpy(dst.as(Pointer(Void)), src.as(Pointer(Void)), (@l_size*8).to_u64, CUDA::MemcpyKind::DeviceToDevice)
+            end
           end
+          CUDA.free(ids_dev.as(Pointer(Void)))
+          @current_ids.concat(ids)
+          return result
+        rescue
+          # If CUDA operations fail, fall back to CPU then convert
+          return embed_cpu(ids).to_cuda
+        end
+      end
+
+      @current_ids.concat(ids)
+      result
+    end
+
+    # CPU path - retrieve embeddings for multiple ids as a SimpleMatrix
+    def embed_cpu(ids : Array(Int32)) : SimpleMatrix
+      result = SimpleMatrix.zeros(ids.size, @l_size)
+
+      # Use CPU embeddings if available, otherwise sync from GPU
+      embeddings = if @embeddings.is_a?(SimpleMatrix)
+                     @embeddings.as(SimpleMatrix)
+                   else
+                     @embeddings.as(CudaMatrix).to_simple
+                   end
+
+      ids.each_with_index do |id, row|
+        @l_size.times do |col|
+          result[row, col] = embeddings[id, col]
         end
       end
 
@@ -78,17 +120,21 @@ module SHAInet
     # provided token id. Returns the embedding vector as an Array for
     # compatibility with previous API versions.
     def embed(id : Int32) : Array(Float64)
-      mat = embed([id])
+      mat = if CUDA.fully_available? && @embeddings.is_a?(CudaMatrix)
+              embed([id])
+            else
+              embed_cpu([id])
+            end
 
       # Only sync if we absolutely need to return an Array(Float64)
       # For better performance, try to keep the caller working with matrices
-      if mat.is_a?(CudaMatrix) && CUDA.available?
+      if mat.is_a?(CudaMatrix) && CUDA.fully_available?
         # Only sync when the caller actually needs the array
         mat.as(CudaMatrix).sync_from_device!
       end
 
       # Set the activations for this layer
-      mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
+      mat_klass = CUDA.fully_available? ? CudaMatrix : SimpleMatrix
       @activations = mat_klass.new(1, @l_size)
       @l_size.times { |i| @activations.not_nil![0, i] = mat[0, i] }
 
@@ -100,7 +146,7 @@ module SHAInet
     def accumulate_gradient
       until @current_ids.empty?
         id = @current_ids.shift
-        if CUDA.available? && @gradients.is_a?(CudaMatrix) && (dptr = @gradients.as(CudaMatrix).device_ptr) && !dptr.null?
+        if CUDA.fully_available? && @gradients.is_a?(CudaMatrix) && (dptr = @gradients.as(CudaMatrix).device_ptr) && !dptr.null?
           # Create host vector from activation and sigma_prime matrices
           # Check if activations and sigma_primes are available from forward pass
           if @activations && @sigma_primes
@@ -141,14 +187,14 @@ module SHAInet
         end
       end
       # Don't sync gradients from device - keep them on GPU for performance
-      if CUDA.available? && @gradients.is_a?(CudaMatrix)
+      if CUDA.fully_available? && @gradients.is_a?(CudaMatrix)
         @gradients.as(CudaMatrix).mark_device_dirty!
       end
     end
 
     # Update embeddings using stored gradients and clear them
     def apply_gradients(lr : Float64)
-      if CUDA.available? && @embeddings.is_a?(CudaMatrix) && @gradients.is_a?(CudaMatrix)
+      if CUDA.fully_available? && @embeddings.is_a?(CudaMatrix) && @gradients.is_a?(CudaMatrix)
         e_ptr = @embeddings.as(CudaMatrix).device_ptr
         g_ptr = @gradients.as(CudaMatrix).device_ptr
         if e_ptr && g_ptr && !e_ptr.null? && !g_ptr.null?
@@ -173,7 +219,7 @@ module SHAInet
           @gradients[r, c] = 0.0
         end
       end
-      if CUDA.available? && @embeddings.is_a?(CudaMatrix)
+      if CUDA.fully_available? && @embeddings.is_a?(CudaMatrix)
         @embeddings.as(CudaMatrix).sync_to_device! unless @embeddings.as(CudaMatrix).device_dirty?
         @gradients.as(CudaMatrix).sync_to_device! unless @gradients.as(CudaMatrix).device_dirty?
       end

@@ -2,7 +2,7 @@ require "./spec_helper"
 
 describe "CUDA availability" do
   it "returns a boolean" do
-    value = SHAInet::CUDA.available?
+    value = SHAInet::CUDA.fully_available?
     value.should be_a(Bool)
   end
 

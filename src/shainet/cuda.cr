@@ -74,14 +74,12 @@ module SHAInet
       if rt.null?
         err = LibC.dlerror
         msg = err.null? ? "unknown" : String.new(err)
-        Log.debug { "Failed to load libcudart.so: #{msg}. LD_LIBRARY_PATH=#{ENV["LD_LIBRARY_PATH"]?}" }
       end
 
       blas = LibC.dlopen("libcublas.so", LibC::RTLD_LAZY)
       if blas.null?
         err = LibC.dlerror
         msg = err.null? ? "unknown" : String.new(err)
-        Log.debug { "Failed to load libcublas.so: #{msg}. LD_LIBRARY_PATH=#{ENV["LD_LIBRARY_PATH"]?}" }
       end
 
       if rt.null? || blas.null?
@@ -117,7 +115,6 @@ module SHAInet
       if handle.null?
         err = LibC.dlerror
         msg = err.null? ? "unknown" : String.new(err)
-        Log.debug { "Failed to load libcudnn.so: #{msg}. LD_LIBRARY_PATH=#{ENV["LD_LIBRARY_PATH"]?}" }
         false
       else
         LibC.dlclose(handle)
@@ -134,7 +131,6 @@ module SHAInet
       if handle.null?
         err = LibC.dlerror
         msg = err.null? ? "unknown" : String.new(err)
-        Log.debug { "Failed to load libshainet_cuda_kernels.so: #{msg}. LD_LIBRARY_PATH=#{ENV["LD_LIBRARY_PATH"]?}" }
         false
       else
         LibC.dlclose(handle)
@@ -157,14 +153,42 @@ module SHAInet
       LibCUDARuntime.cudaMemcpy(dst, src, bytes, kind.value)
     end
 
+    # Handle pool to avoid creating/destroying handles frequently
+    @@handle_pool = [] of LibCUBLAS::Handle
+    @@handle_pool_mutex = Mutex.new
+    @@max_pool_size = 4 # Limit pool size to avoid resource exhaustion
+
     def create_handle
+      @@handle_pool_mutex.synchronize do
+        if !@@handle_pool.empty?
+          return @@handle_pool.pop
+        end
+      end
+
       handle = Pointer(LibCUBLAS::Handle).malloc(1)
       raise "cublasCreate failed" unless LibCUBLAS.cublasCreate_v2(handle) == 0
       handle.value
     end
 
     def destroy_handle(handle : LibCUBLAS::Handle)
+      @@handle_pool_mutex.synchronize do
+        if @@handle_pool.size < @@max_pool_size
+          @@handle_pool << handle
+          return
+        end
+      end
+
       LibCUBLAS.cublasDestroy_v2(handle)
+    end
+
+    # Cleanup all pooled handles
+    def cleanup_handles
+      @@handle_pool_mutex.synchronize do
+        @@handle_pool.each do |handle|
+          LibCUBLAS.cublasDestroy_v2(handle)
+        end
+        @@handle_pool.clear
+      end
     end
 
     def gemm(handle : LibCUBLAS::Handle, a : Pointer(Float64), b : Pointer(Float64), c : Pointer(Float64),
@@ -509,7 +533,7 @@ module SHAInet
       bytes = (rows * 8).to_u64
       malloc(pointerof(ones_dev).as(Pointer(Pointer(Void))), bytes)
       memcpy(ones_dev.as(Pointer(Void)), ones_host.to_unsafe.as(Pointer(Void)), bytes, MemcpyKind::HostToDevice)
-      ger(handle, ones_dev, bias, mat, rows, cols)
+      ger(handle, ones_dev, bias, mat, rows, cols, cols)
       destroy_handle(handle)
       free(ones_dev.as(Pointer(Void)))
     end

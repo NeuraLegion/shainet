@@ -2,7 +2,7 @@ require "./spec_helper"
 
 describe "LayerNorm GPU parity" do
   it "matches CPU and GPU forward/backward" do
-    pending! "CUDA not available" unless SHAInet::CUDA.available?
+    pending! "CUDA not available" unless SHAInet::CUDA.fully_available?
 
     rows = 3
     cols = 4

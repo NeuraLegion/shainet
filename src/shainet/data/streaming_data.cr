@@ -39,7 +39,7 @@ module SHAInet
 
       return batch unless @gpu_batches && CUDA.fully_available?
 
-      gpu_batch = [] of Array(SimpleMatrix)
+      gpu_batch = [] of Array(SimpleMatrix | CudaMatrix)
       batch.each do |ex|
         inp = to_matrix(ex[0])
         out_m = to_matrix(ex[1])

@@ -115,7 +115,7 @@ module SHAInet
     end
 
     # Create a new matrix of the same type as the input
-    def like(matrix : SimpleMatrix, rows : Int32, cols : Int32, init : Float64 = 0.0)
+    def like(matrix : SimpleMatrix | CudaMatrix, rows : Int32, cols : Int32, init : Float64 = 0.0)
       if matrix.is_a?(CudaMatrix) && CUDA.fully_available?
         result = CudaMatrix.new(rows, cols, init)
         result.sync_to_device!
@@ -126,12 +126,12 @@ module SHAInet
     end
 
     # Create zeros matrix of same type as input
-    def zeros_like(matrix : SimpleMatrix, rows : Int32, cols : Int32)
+    def zeros_like(matrix : SimpleMatrix | CudaMatrix, rows : Int32, cols : Int32)
       like(matrix, rows, cols, 0.0)
     end
 
     # Create ones matrix of same type as input
-    def ones_like(matrix : SimpleMatrix, rows : Int32, cols : Int32)
+    def ones_like(matrix : SimpleMatrix | CudaMatrix, rows : Int32, cols : Int32)
       like(matrix, rows, cols, 1.0)
     end
 

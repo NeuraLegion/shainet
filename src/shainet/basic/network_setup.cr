@@ -41,6 +41,8 @@ module SHAInet
     property accumulation_steps : Int32
     property mixed_precision : Bool
 
+    @cached_expanded_grad : SimpleMatrix | CudaMatrix | Nil
+
     # First creates an empty shell of the entire network
     def initialize
       @input_layers = Array(MatrixLayer).new
@@ -74,6 +76,11 @@ module SHAInet
       @weight_decay = 0.0
       @accumulation_steps = 1
       @mixed_precision = false
+
+      # Gradient transformation caching for efficient transformer backward pass
+      @cached_expanded_grad = nil
+      @cached_seq_len = 0
+      @cached_d_model = 0
     end
 
     # Create and populate a layer

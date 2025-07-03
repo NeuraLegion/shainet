@@ -23,7 +23,7 @@ describe SHAInet::CudaMatrix do
     matrix.relu!
     matrix.add_bias!(bias)
 
-    if SHAInet::CUDA.available?
+    if SHAInet::CUDA.fully_available?
       matrix.as(SHAInet::CudaMatrix).device_ptr.should_not be_nil
     end
 

@@ -52,7 +52,7 @@ describe SHAInet::StreamingData do
   end
 
   it "returns GPU matrices when enabled" do
-    pending! "CUDA not available" unless SHAInet::CUDA.available?
+    pending! "CUDA not available" unless SHAInet::CUDA.fully_available?
     File.open("/tmp/stream_gpu.txt", "w") do |f|
       f.puts "[[0,0],[0]]"
     end

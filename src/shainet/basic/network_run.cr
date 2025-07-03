@@ -27,7 +27,14 @@ module SHAInet
       processed = @mixed_precision ? input.map { |v| v.to_f32.to_f64 } : input.map(&.to_f64)
       matrix = GPUMemory.to_gpu(SimpleMatrix.from_a([processed]))
       result_matrix = run(matrix, stealth: stealth)
-      output = result_matrix.to_a.first
+
+      # Efficient array extraction - only sync once if needed
+      output = if result_matrix.is_a?(CudaMatrix)
+                 result_matrix.sync_from_device! if result_matrix.device_dirty?
+                 result_matrix.to_a.first
+               else
+                 result_matrix.to_a.first
+               end
 
       unless stealth
         Log.info { "Input => #{input}, network output => #{output}" }
@@ -37,139 +44,139 @@ module SHAInet
       raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
     end
 
-    # Run using a pre-constructed matrix. Useful when batches are already on the GPU.
-    # GPU-compatible version that preserves matrix type (SimpleMatrix or CudaMatrix)
-    def run(input : SimpleMatrix | CudaMatrix, stealth : Bool = false) : SimpleMatrix | CudaMatrix
+    # GPU path - all CudaMatrix operations
+    def run(input : CudaMatrix, stealth : Bool = false) : CudaMatrix
       verify_net_before_train
 
-      if CUDA.fully_available? && input.is_a?(CudaMatrix)
-        # CUDA path - matrix is already on GPU
-        matrix = input.as(CudaMatrix)
+      matrix = input
 
-        if @hidden_layers.any? &.is_a?(TransformerLayer)
-          @hidden_layers.each do |l|
-            case l
-            when EmbeddingLayer
-              raise NeuralNetRunError.new("Embedding input mismatch") unless matrix.cols == 1
-              tokens = (0...matrix.rows).map { |r| matrix[r, 0].to_i }
-              matrix = l.as(EmbeddingLayer).embed(tokens)
-            when TransformerLayer
-              matrix = l.as(TransformerLayer).forward(matrix)
-            end
+      if @hidden_layers.any? &.is_a?(TransformerLayer)
+        @hidden_layers.each do |l|
+          case l
+          when EmbeddingLayer
+            # Ensure embedding layer is on GPU for GPU path
+            l.as(EmbeddingLayer).to_gpu!
+            raise NeuralNetRunError.new("Embedding input mismatch") unless matrix.cols == 1
+            tokens = (0...matrix.rows).map { |r| matrix[r, 0].to_i }
+            matrix = l.as(EmbeddingLayer).embed(tokens)
+          when TransformerLayer
+            # Ensure transformer layer is on GPU for GPU path
+            l.as(TransformerLayer).to_gpu!
+            matrix = l.as(TransformerLayer).forward(matrix)
           end
-          out_layer = @output_layers.last
-          w = GPUMemory.keep_on_gpu(out_layer.weights).as(CudaMatrix)
-          b = GPUMemory.keep_on_gpu(out_layer.biases).as(CudaMatrix)
-          matrix = safe_output_transform(matrix, w).as(CudaMatrix)
-
-          # GPU-accelerated bias addition
-          matrix.add_bias!(b)
-
-          # Apply activation function - for identity, no operation needed
-          unless out_layer.activation_function == SHAInet.identity
-            matrix.rows.times do |i|
-              matrix.cols.times do |j|
-                val = matrix[i, j]
-                act, sig = out_layer.activation_function.call(val)
-                matrix[i, j] = act
-                if i == matrix.rows - 1
-                  # Update internal state matrices for output layer
-                  if out_layer.responds_to?(:activations) && out_layer.responds_to?(:sigma_primes)
-                    out_layer.activations[0, j] = act
-                    out_layer.sigma_primes[0, j] = sig
-                  end
-                end
-              end
-            end
-          end
-          matrix
-        else
-          # Standard matrix processing for non-transformer networks
-          @hidden_layers.each do |l|
-            case l
-            when EmbeddingLayer
-              raise NeuralNetRunError.new("Embedding input mismatch") unless matrix.cols == 1
-              tokens = (0...matrix.rows).map { |r| matrix[r, 0].to_i }
-              matrix = l.as(EmbeddingLayer).embed(tokens)
-            else
-              matrix = l.forward(matrix)
-            end
-          end
-          out_layer = @output_layers.last
-          matrix = out_layer.forward(matrix)
-          matrix
         end
-      else
-        # CPU path - use SimpleMatrix or convert CudaMatrix to SimpleMatrix
-        matrix = if input.is_a?(CudaMatrix)
-                   cpu_matrix = SimpleMatrix.new(input.rows, input.cols)
-                   input.rows.times do |i|
-                     input.cols.times do |j|
-                       cpu_matrix[i, j] = input[i, j]
-                     end
-                   end
-                   cpu_matrix
-                 else
-                   input.as(SimpleMatrix)
-                 end
+        out_layer = @output_layers.last
+        # Ensure output layer is on GPU for GPU path
+        out_layer.to_gpu!
+        w = out_layer.weights.as(CudaMatrix)
+        b = out_layer.biases.as(CudaMatrix)
+        matrix = safe_output_transform(matrix.as(CudaMatrix), w)
+        matrix.add_bias!(b)
 
-        if @hidden_layers.any? &.is_a?(TransformerLayer)
-          @hidden_layers.each do |l|
-            case l
-            when EmbeddingLayer
-              raise NeuralNetRunError.new("Embedding input mismatch") unless matrix.cols == 1
-              tokens = (0...matrix.rows).map { |r| matrix[r, 0].to_i }
-              matrix = l.as(EmbeddingLayer).embed(tokens)
-            when TransformerLayer
-              matrix = l.as(TransformerLayer).forward(matrix)
-            end
-          end
-          out_layer = @output_layers.last
-          w = out_layer.weights
-          b = out_layer.biases
-          matrix = safe_output_transform(matrix, w).as(SimpleMatrix)
-
-          # CPU bias addition
+        # Apply activation function - for identity, no operation needed
+        unless out_layer.activation_function == SHAInet.identity
           matrix.rows.times do |i|
             matrix.cols.times do |j|
-              matrix[i, j] += b[0, j]
-            end
-          end
-
-          # Apply activation function - for identity, no operation needed
-          unless out_layer.activation_function == SHAInet.identity
-            matrix.rows.times do |i|
-              matrix.cols.times do |j|
-                val = matrix[i, j]
-                act, sig = out_layer.activation_function.call(val)
-                matrix[i, j] = act
-                if i == matrix.rows - 1
-                  # Update internal state matrices for output layer
-                  if out_layer.responds_to?(:activations) && out_layer.responds_to?(:sigma_primes)
-                    out_layer.activations[0, j] = act
-                    out_layer.sigma_primes[0, j] = sig
-                  end
+              val = matrix[i, j]
+              act, sig = out_layer.activation_function.call(val)
+              matrix[i, j] = act
+              if i == matrix.rows - 1
+                # Update internal state matrices for output layer
+                if out_layer.responds_to?(:activations) && out_layer.responds_to?(:sigma_primes)
+                  out_layer.activations[0, j] = act
+                  out_layer.sigma_primes[0, j] = sig
                 end
               end
             end
           end
-          matrix
-        else
-          # Standard matrix processing for non-transformer networks
-          @hidden_layers.each do |l|
-            case l
-            when EmbeddingLayer
-              raise NeuralNetRunError.new("Embedding input mismatch") unless matrix.cols == 1
-              tokens = (0...matrix.rows).map { |r| matrix[r, 0].to_i }
-              matrix = l.as(EmbeddingLayer).embed(tokens)
-            else
-              matrix = l.forward(matrix)
+        end
+        matrix.as(CudaMatrix)
+      else
+        # Standard matrix processing for non-transformer networks
+        @hidden_layers.each do |l|
+          case l
+          when EmbeddingLayer
+            # Ensure embedding layer is on GPU for GPU path
+            l.as(EmbeddingLayer).to_gpu!
+            raise NeuralNetRunError.new("Embedding input mismatch") unless matrix.cols == 1
+            tokens = (0...matrix.rows).map { |r| matrix[r, 0].to_i }
+            matrix = l.as(EmbeddingLayer).embed(tokens)
+          else
+            matrix = l.forward(matrix)
+          end
+        end
+        out_layer = @output_layers.last
+        # Ensure output layer is on GPU for GPU path
+        out_layer.to_gpu!
+        matrix = out_layer.forward(matrix)
+        matrix.as(CudaMatrix)
+      end
+    rescue e : Exception
+      raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
+    end
+
+    # CPU path - all SimpleMatrix operations
+    def run(input : SimpleMatrix, stealth : Bool = false) : SimpleMatrix
+      verify_net_before_train
+
+      matrix = input
+
+      if @hidden_layers.any? &.is_a?(TransformerLayer)
+        @hidden_layers.each do |l|
+          case l
+          when EmbeddingLayer
+            raise NeuralNetRunError.new("Embedding input mismatch") unless matrix.cols == 1
+            tokens = (0...matrix.rows).map { |r| matrix[r, 0].to_i }
+            matrix = l.as(EmbeddingLayer).embed_cpu(tokens)
+          when TransformerLayer
+            matrix = l.as(TransformerLayer).forward(matrix)
+          end
+        end
+        out_layer = @output_layers.last
+        w = out_layer.weights.as(SimpleMatrix)
+        b = out_layer.biases.as(SimpleMatrix)
+        matrix = safe_output_transform(matrix.as(SimpleMatrix), w)
+
+        # CPU bias addition
+        matrix.rows.times do |i|
+          matrix.cols.times do |j|
+            matrix[i, j] += b[0, j]
+          end
+        end
+
+        # Apply activation function - for identity, no operation needed
+        unless out_layer.activation_function == SHAInet.identity
+          matrix.rows.times do |i|
+            matrix.cols.times do |j|
+              val = matrix[i, j]
+              act, sig = out_layer.activation_function.call(val)
+              matrix[i, j] = act
+              if i == matrix.rows - 1
+                # Update internal state matrices for output layer
+                if out_layer.responds_to?(:activations) && out_layer.responds_to?(:sigma_primes)
+                  out_layer.activations[0, j] = act
+                  out_layer.sigma_primes[0, j] = sig
+                end
+              end
             end
           end
-          out_layer = @output_layers.last
-          matrix = out_layer.forward(matrix)
-          matrix
         end
+        matrix.as(SimpleMatrix)
+      else
+        # Standard matrix processing for non-transformer networks
+        @hidden_layers.each do |l|
+          case l
+          when EmbeddingLayer
+            raise NeuralNetRunError.new("Embedding input mismatch") unless matrix.cols == 1
+            tokens = (0...matrix.rows).map { |r| matrix[r, 0].to_i }
+            matrix = l.as(EmbeddingLayer).embed(tokens)
+          else
+            matrix = l.forward(matrix)
+          end
+        end
+        out_layer = @output_layers.last
+        matrix = out_layer.forward(matrix)
+        matrix.as(SimpleMatrix)
       end
     rescue e : Exception
       raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
@@ -209,7 +216,14 @@ module SHAInet
       end
       matrix = GPUMemory.to_gpu(SimpleMatrix.from_a(processed))
       result_matrix = run(matrix, stealth: stealth)
-      result_matrix.to_a
+
+      # Efficient array extraction - sync only once if needed
+      if result_matrix.is_a?(CudaMatrix)
+        result_matrix.sync_from_device! if result_matrix.device_dirty?
+        result_matrix.to_a
+      else
+        result_matrix.to_a
+      end
     rescue e : Exception
       raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
     end
@@ -243,8 +257,27 @@ module SHAInet
       @total_error = @error_signal.reduce(0.0) { |acc, i| acc + i }
 
       if @hidden_layers.any? &.is_a?(TransformerLayer)
-        exp = GPUMemory.to_gpu(SimpleMatrix.from_a([expected_output.map(&.to_f64)]))
-        act = GPUMemory.to_gpu(SimpleMatrix.from_a([actual_output]))
+        # Create matrices efficiently using GPU when available
+        exp_data = expected_output.map(&.to_f64)
+
+        exp = if CUDA.fully_available?
+                mat = CudaMatrix.new(1, exp_data.size)
+                exp_data.each_with_index { |val, i| mat[0, i] = val }
+                mat.sync_to_device!
+                mat
+              else
+                SimpleMatrix.from_a([exp_data])
+              end
+
+        act = if CUDA.fully_available?
+                mat = CudaMatrix.new(1, actual_output.size)
+                actual_output.each_with_index { |val, i| mat[0, i] = val }
+                mat.sync_to_device!
+                mat
+              else
+                SimpleMatrix.from_a([actual_output])
+              end
+
         diff = act - exp
         w = GPUMemory.keep_on_gpu(@output_layers.last.weights)
         @transformer_error = diff * w
@@ -283,8 +316,23 @@ module SHAInet
       @total_error = @error_signal.reduce(0.0) { |acc, i| acc + i }
 
       if @hidden_layers.any? &.is_a?(TransformerLayer)
-        exp_m = GPUMemory.to_gpu(SimpleMatrix.from_a([exp]))
-        act_m = GPUMemory.to_gpu(SimpleMatrix.from_a([act]))
+        # Use existing matrices efficiently - avoid recreating if possible
+        exp_m = if expected_output.rows == 1 && expected_output.cols == exp.size
+                  expected_output
+                else
+                  GPUMemory.like(actual_matrix, 1, exp.size).tap do |m|
+                    exp.each_with_index { |val, i| m[0, i] = val }
+                  end
+                end
+
+        act_m = if actual_matrix.rows == 1 && actual_matrix.cols == act.size
+                  actual_matrix
+                else
+                  GPUMemory.like(actual_matrix, 1, act.size).tap do |m|
+                    act.each_with_index { |val, i| m[0, i] = val }
+                  end
+                end
+
         diff = act_m - exp_m
         w = GPUMemory.keep_on_gpu(@output_layers.last.weights)
         @transformer_error = diff * w
@@ -373,9 +421,27 @@ module SHAInet
       @total_error = -Math.log(probs[label].clamp(1e-9, 1.0))
 
       if @hidden_layers.any? &.is_a?(TransformerLayer)
-        exp = GPUMemory.to_gpu(SimpleMatrix.zeros(1, probs.size))
-        exp[0, label] = 1.0
-        act = GPUMemory.to_gpu(SimpleMatrix.from_a([probs]))
+        # Create one-hot and probs matrices efficiently on GPU
+        exp = if CUDA.fully_available?
+                mat = CudaMatrix.zeros(1, probs.size)
+                mat[0, label] = 1.0
+                mat.sync_to_device!
+                mat
+              else
+                mat = SimpleMatrix.zeros(1, probs.size)
+                mat[0, label] = 1.0
+                mat
+              end
+
+        act = if CUDA.fully_available?
+                mat = CudaMatrix.new(1, probs.size)
+                probs.each_with_index { |val, i| mat[0, i] = val }
+                mat.sync_to_device!
+                mat
+              else
+                SimpleMatrix.from_a([probs])
+              end
+
         diff = act - exp
         w = GPUMemory.keep_on_gpu(@output_layers.last.weights)
         @transformer_error = diff * w
@@ -411,9 +477,27 @@ module SHAInet
       @total_error = -Math.log(probs[label].clamp(1e-9, 1.0))
 
       if @hidden_layers.any? &.is_a?(TransformerLayer)
-        exp_row = GPUMemory.to_gpu(SimpleMatrix.zeros(1, probs.size))
-        exp_row[0, label] = 1.0
-        act_row = GPUMemory.to_gpu(SimpleMatrix.from_a([probs]))
+        # Create one-hot and probs matrices efficiently on GPU
+        exp_row = if CUDA.fully_available?
+                    mat = CudaMatrix.zeros(1, probs.size)
+                    mat[0, label] = 1.0
+                    mat.sync_to_device!
+                    mat
+                  else
+                    mat = SimpleMatrix.zeros(1, probs.size)
+                    mat[0, label] = 1.0
+                    mat
+                  end
+
+        act_row = if CUDA.fully_available?
+                    mat = CudaMatrix.new(1, probs.size)
+                    probs.each_with_index { |val, i| mat[0, i] = val }
+                    mat.sync_to_device!
+                    mat
+                  else
+                    SimpleMatrix.from_a([probs])
+                  end
+
         diff = act_row - exp_row
         w = GPUMemory.keep_on_gpu(@output_layers.last.weights)
         trans = diff * w
@@ -546,7 +630,16 @@ module SHAInet
         input_data = sample[0]
         expected_output = sample[1]
 
-        input_matrix = to_matrix(input_data)
+        # Handle different input types explicitly
+        input_matrix = case input_data
+                       when SimpleMatrix
+                         input_data
+                       when CudaMatrix
+                         input_data
+                       else
+                         # Convert raw data to matrix, using GPU if available
+                         to_matrix(input_data)
+                       end
 
         actual_matrix = run(input_matrix, stealth: true)
 
@@ -558,6 +651,17 @@ module SHAInet
           rows.times do |i|
             cols.times do |j|
               expected = expected_output.as(SimpleMatrix)[i, j]
+              actual = actual_matrix[i, j]
+              cost_result = cost_proc.call(expected, actual)
+              sample_error += cost_result[:value]
+            end
+          end
+        elsif expected_output.is_a?(CudaMatrix)
+          rows = expected_output.as(CudaMatrix).rows
+          cols = expected_output.as(CudaMatrix).cols
+          rows.times do |i|
+            cols.times do |j|
+              expected = expected_output.as(CudaMatrix)[i, j]
               actual = actual_matrix[i, j]
               cost_result = cost_proc.call(expected, actual)
               sample_error += cost_result[:value]
@@ -611,6 +715,17 @@ module SHAInet
                 output_grad[i, j] = cost_result[:derivative]
               end
             end
+          elsif expected_output.is_a?(CudaMatrix)
+            exp_mat = expected_output.as(CudaMatrix)
+            output_grad = GPUMemory.like(actual_matrix, exp_mat.rows, exp_mat.cols)
+            exp_mat.rows.times do |i|
+              exp_mat.cols.times do |j|
+                expected = exp_mat[i, j]
+                actual = actual_matrix[i, j]
+                cost_result = cost_proc.call(expected, actual)
+                output_grad[i, j] = cost_result[:derivative]
+              end
+            end
           else
             arr = expected_output.as(Array)
             output_grad = GPUMemory.like(actual_matrix, 1, arr.size)
@@ -622,7 +737,7 @@ module SHAInet
             end
           end
 
-          output_grad = GPUMemory.to_gpu(output_grad)
+          # output_grad is already GPU-compatible from GPUMemory.like()
           grad = output_layer.backward(output_grad)
 
           # Handle transformer layers backward pass with proper gradient reshaping
@@ -637,28 +752,48 @@ module SHAInet
             if grad.rows == 1 && grad.cols != d_model
               # We have output gradients (1 x vocab_size), need to transform to (seq_len x d_model)
               # This requires going through the output layer weights transpose
-              output_weights = GPUMemory.keep_on_gpu(@output_layers.last.weights)
+
+              # Use appropriate matrix type based on whether grad is CudaMatrix or SimpleMatrix
+              if grad.is_a?(CudaMatrix)
+                output_weights = @output_layers.last.weights.as(CudaMatrix)
+              else
+                output_weights = @output_layers.last.weights.as(SimpleMatrix)
+              end
 
               # Transform: (1 x vocab_size) * (vocab_size x d_model) -> (1 x d_model)
               if grad.cols == output_weights.rows
-                transformed_grad = grad * output_weights.transpose
+                if grad.is_a?(CudaMatrix)
+                  transformed_grad = grad * output_weights.as(CudaMatrix).transpose
+                else
+                  transformed_grad = grad * output_weights.as(SimpleMatrix).transpose
+                end
               else
                 # Fallback: create zero gradients with correct dimensions
                 mat_klass = grad.is_a?(CudaMatrix) ? CudaMatrix : SimpleMatrix
                 transformed_grad = mat_klass.zeros(1, d_model)
               end
 
-              # Expand to full sequence dimensions with gradients only at last position
-              mat_klass = grad.is_a?(CudaMatrix) ? CudaMatrix : SimpleMatrix
-              expanded_grad = mat_klass.zeros(seq_len, d_model)
+              # Check if we can reuse cached gradient matrix
+              if @cached_expanded_grad.nil? || @cached_seq_len != seq_len || @cached_d_model != d_model ||
+                 @cached_expanded_grad.not_nil!.class != transformed_grad.class
+                # Create new cached matrix
+                @cached_expanded_grad = if transformed_grad.is_a?(CudaMatrix)
+                                          CudaMatrix.zeros(seq_len, d_model)
+                                        else
+                                          SimpleMatrix.zeros(seq_len, d_model)
+                                        end
+                @cached_seq_len = seq_len
+                @cached_d_model = d_model
+              end
 
-              # Copy gradients to the last token position (where prediction came from)
+              # Reuse cached matrix - zero only the last row that we'll update
+              expanded_grad = @cached_expanded_grad.not_nil!
+              # Zero out only the last row efficiently
               d_model.times do |j|
                 expanded_grad[seq_len - 1, j] = transformed_grad[0, j]
               end
 
               grad = expanded_grad
-              puts "DEBUG: Transformed gradient from (1x#{output_weights.rows}) through weights (#{output_weights.rows}x#{output_weights.cols}) to (#{seq_len}x#{d_model})"
             end
 
             @transformer_layers.reverse_each do |layer|
@@ -695,29 +830,32 @@ module SHAInet
       batch_error
     end
 
+    # Convert raw data (arrays) to matrix format
+    # This method is only called when input is NOT already a matrix
     private def to_matrix(obj) : SimpleMatrix | CudaMatrix
-      if obj.is_a?(SimpleMatrix)
-        GPUMemory.keep_on_gpu(obj.as(SimpleMatrix))
-      else
-        arr = obj.as(Array)
-        if arr.size > 0 && arr[0].is_a?(Array)
-          rows = arr.size
-          cols = arr[0].as(Array).size
-          mat = SimpleMatrix.new(rows, cols)
-          rows.times do |i|
-            cols.times do |j|
-              mat[i, j] = arr[i].as(Array)[j].as(GenNum).to_f64
+      arr = obj.as(Array)
+      mat = if arr.size > 0 && arr[0].is_a?(Array)
+              # 2D array input
+              rows = arr.size
+              cols = arr[0].as(Array).size
+              SimpleMatrix.new(rows, cols).tap do |m|
+                rows.times do |i|
+                  cols.times do |j|
+                    m[i, j] = arr[i].as(Array)[j].as(GenNum).to_f64
+                  end
+                end
+              end
+            else
+              # 1D array input (convert to row vector)
+              SimpleMatrix.new(1, arr.size).tap do |m|
+                arr.size.times do |i|
+                  m[0, i] = arr[i].as(GenNum).to_f64
+                end
+              end
             end
-          end
-          GPUMemory.to_gpu(mat)
-        else
-          mat = SimpleMatrix.new(1, arr.size)
-          arr.size.times do |i|
-            mat[0, i] = arr[i].as(GenNum).to_f64
-          end
-          GPUMemory.to_gpu(mat)
-        end
-      end
+
+      # Convert to GPU if available
+      GPUMemory.to_gpu(mat)
     end
 
     def current_learning_rate
@@ -734,44 +872,6 @@ module SHAInet
         layer.apply_gradients(lr)
       end
     end
-
-    # Legacy neuron/synapse based weight update methods have been removed
-    # in favor of the matrix-based implementation in the train method
-    # and the layer-specific update_weights methods.
-
-    # def verify_data(data : Array(Array), label_mode : Bool = false)
-    #   message = nil
-    #   if data.sample.size != 2
-    #     message = "Train data must have two arrays, one for input one for output"
-    #   end
-    #   sample_input = data.sample.first
-    #   return if sample_input.is_a?(SimpleMatrix)
-    #   if sample_input.is_a?(Array) && sample_input.as(Array).first.is_a?(Array)
-    #     return
-    #   end
-    #   sample_input_arr = sample_input.is_a?(Array) ? sample_input.as(Array) : [sample_input]
-    #   random_input = sample_input_arr.size
-    #   sample_out = data.sample.last
-    #   random_output = sample_out.is_a?(SimpleMatrix) ? sample_out.as(SimpleMatrix).cols : sample_out.as(Array).size
-    #   data.each_with_index do |test, i|
-    #     inp = test.first
-    #     if !inp.is_a?(SimpleMatrix) && inp.as(Array).size != random_input
-    #       message = "Input data sizes are inconsistent"
-    #     end
-    #     out = test.last
-    #     out_size = out.is_a?(SimpleMatrix) ? out.as(SimpleMatrix).cols : out.size
-    #     if out_size != random_output
-    #       message = "Output data sizes are inconsistent"
-    #     end
-    #     unless label_mode || (out_size == @output_layers.first.size)
-    #       message = "data at index #{i} and size: #{out_size} mismatch output layer size"
-    #     end
-    #   end
-    #   if message
-    #     Log.error { "#{message}: #{data}" }
-    #     raise NeuralNetTrainError.new(message)
-    #   end
-    # end
 
     def validate_values(array : Array(Float64), location : String)
       # Detect NaNs in output
@@ -809,17 +909,62 @@ module SHAInet
       correct.to_f/(correct + incorrect).to_f
     end
 
-    # Helper method to safely multiply matrix by weights transpose, handling CUDA issues
-    # and dimension mismatches. For transformers, uses last token for prediction.
-    # GPU-compatible version that preserves matrix type (SimpleMatrix or CudaMatrix)
-    private def safe_output_transform(matrix : SimpleMatrix | CudaMatrix,
-                                      weights : SimpleMatrix | CudaMatrix) : SimpleMatrix | CudaMatrix
+    # GPU path - all CudaMatrix operations
+    private def safe_output_transform(matrix : CudaMatrix, weights : CudaMatrix) : CudaMatrix
       begin
         # For transformer architectures, use only the last token's representation
         if @hidden_layers.any? &.is_a?(TransformerLayer)
           # Extract last token (row) from transformer output for language modeling
-          # Create a matrix of the same type as the input (GPU-compatible)
-          last_token = GPUMemory.like(matrix, 1, matrix.cols)
+          last_token = CudaMatrix.new(1, matrix.cols)
+          matrix.cols.times do |j|
+            last_token[0, j] = matrix[matrix.rows - 1, j]
+          end
+          last_token.sync_to_device!
+
+          # Now multiply: last_token (1 x d_model) * weights (d_model x vocab_size)
+          if last_token.cols != weights.rows
+            raise ArgumentError.new("Transformer output dimension mismatch: d_model (#{last_token.cols}) doesn't match weights input size (#{weights.rows})")
+          end
+
+          return last_token * weights
+        end
+
+        # For matrix * weights, we need matrix.cols == weights.rows
+        if matrix.cols != weights.rows
+          raise ArgumentError.new("Matrix dimension mismatch: input features (#{matrix.cols}) doesn't match weights input size (#{weights.rows})")
+        end
+
+        matrix * weights
+      rescue ex : Exception
+        # Check for dimension issues and try to reshape if possible
+        if ex.message.to_s.includes?("size mismatch") || ex.message.to_s.includes?("dimension mismatch")
+          # Try reshaping for a single token/sequence case
+          if matrix.rows == 1 && matrix.cols > 0 && weights.rows > 0 && weights.cols > 0
+            Log.info { "Reshaping matrix for single-token transformer operation" }
+            reshaped = CudaMatrix.new(1, weights.cols)
+            weights.cols.times do |j|
+              sum = 0.0
+              matrix.cols.times do |k|
+                sum += matrix[0, k] * weights[j, k]
+              end
+              reshaped[0, j] = sum
+            end
+            reshaped.sync_to_device!
+            return reshaped
+          end
+        end
+
+        raise ex
+      end
+    end
+
+    # CPU path - all SimpleMatrix operations
+    private def safe_output_transform(matrix : SimpleMatrix, weights : SimpleMatrix) : SimpleMatrix
+      begin
+        # For transformer architectures, use only the last token's representation
+        if @hidden_layers.any? &.is_a?(TransformerLayer)
+          # Extract last token (row) from transformer output for language modeling
+          last_token = SimpleMatrix.new(1, matrix.cols)
           matrix.cols.times do |j|
             last_token[0, j] = matrix[matrix.rows - 1, j]
           end
@@ -844,7 +989,7 @@ module SHAInet
           # Try reshaping for a single token/sequence case
           if matrix.rows == 1 && matrix.cols > 0 && weights.rows > 0 && weights.cols > 0
             Log.info { "Reshaping matrix for single-token transformer operation" }
-            reshaped = GPUMemory.like(matrix, 1, weights.cols)
+            reshaped = SimpleMatrix.new(1, weights.cols)
             weights.cols.times do |j|
               sum = 0.0
               matrix.cols.times do |k|
@@ -856,17 +1001,7 @@ module SHAInet
           end
         end
 
-        # Fallback to CPU computation if CUDA operations fail
-        if matrix.is_a?(CudaMatrix) && weights.is_a?(CudaMatrix)
-          matrix_cpu = SimpleMatrix.new(matrix.rows, matrix.cols)
-          matrix.rows.times { |i| matrix.cols.times { |j| matrix_cpu[i, j] = matrix[i, j] } }
-          w_cpu = SimpleMatrix.new(weights.rows, weights.cols)
-          weights.rows.times { |i| weights.cols.times { |j| w_cpu[i, j] = weights[i, j] } }
-          result = matrix_cpu * w_cpu.transpose
-          GPUMemory.to_gpu(result)
-        else
-          raise ex
-        end
+        raise ex
       end
     end
   end

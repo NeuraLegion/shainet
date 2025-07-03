@@ -42,10 +42,10 @@ d_model = 64 # Moderate increase from 8
 seq_len = 16 # Keep original sequence length
 token_count = tokenizer.vocab.size
 net = SHAInet::Network.new
-net.add_layer(:input, 1, :memory, SHAInet.none)
-net.add_layer(:embedding, d_model, :memory, SHAInet.none, vocab_size: token_count)
+net.add_layer(:input, 1, SHAInet.none)
+net.add_layer(:embedding, d_model, SHAInet.none, vocab_size: token_count)
 2.times { net.add_layer(:transformer, d_model) } # Reduce to 2 layers
-net.add_layer(:output, token_count, :memory, SHAInet.identity)
+net.add_layer(:output, token_count, SHAInet.identity)
 net.fully_connect
 
 puts "Network built"
@@ -105,41 +105,41 @@ batch = 32
 net.learning_rate = 0.001
 
 puts "Training the network for #{epochs} epochs with batch size #{batch}..."
-epochs.times do |epoch|
-  # Use StreamingData without mini_batch_size to avoid CPU bottlenecks
-  net.train(data: train_data,
-    training_type: :adam,
-    cost_function: :c_ent_sm,
-    epochs: 1,
-    log_each: 100)
+# Train for all epochs at once with proper logging
+net.train(data: train_data,
+  training_type: :adam,
+  cost_function: :c_ent_sm,
+  epochs: epochs,
+  mini_batch_size: batch,
+  log_each: 5) # Log every 5 epochs instead of every 100 samples
 
-  # Optimized validation with GPU batch processing
-  val_loss = 0.0
-  count = 0
+# Validation after training is complete
+puts "Training complete. Running validation..."
+val_loss = 0.0
+count = 0
 
-  # Process validation in larger batches for better GPU utilization
-  val_batch_size = 64
-  while (val_batch = val_data.next_batch(val_batch_size)).size > 0
-    total_batch_loss = 0.0
+# Process validation in larger batches for better GPU utilization
+val_batch_size = 64
+while (val_batch = val_data.next_batch(val_batch_size)).size > 0
+  total_batch_loss = 0.0
 
-    val_batch.each do |sample|
-      seq = sample[0].as(Array(Array(Float64))).map { |token_arr| token_arr.map(&.to_i) }
-      tgt = sample[1].as(Array(Float64))
-      pred_id = tgt.index(tgt.max) || 0
-      output_vec = net.run(seq).last
+  val_batch.each do |sample|
+    seq = sample[0].as(Array(Array(Float64))).map { |token_arr| token_arr.map(&.to_i) }
+    tgt = sample[1].as(Array(Float64))
+    pred_id = tgt.index(tgt.max) || 0
+    output_vec = net.run(seq).last
 
-      # Use native softmax - it's already optimized
-      probs = SHAInet.softmax(output_vec)
-      total_batch_loss += -Math.log(probs[pred_id].clamp(1e-9, 1.0))
-      count += 1
-    end
-
-    val_loss += total_batch_loss
+    # Use native softmax - it's already optimized
+    probs = SHAInet.softmax(output_vec)
+    total_batch_loss += -Math.log(probs[pred_id].clamp(1e-9, 1.0))
+    count += 1
   end
-  val_loss /= count.to_f if count > 0
-  val_data.rewind
-  puts "Epoch #{epoch + 1} validation loss: #{val_loss.round(4)}"
+
+  val_loss += total_batch_loss
 end
+val_loss /= count.to_f if count > 0
+val_data.rewind
+puts "Final validation loss: #{val_loss.round(4)}"
 
 # Predict the token following a sequence from the dataset
 test_seq = ids[0, seq_len].map { |id| [id] }

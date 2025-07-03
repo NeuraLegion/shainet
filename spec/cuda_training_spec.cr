@@ -14,7 +14,7 @@ describe "CUDA training" do
     net.train(data: training, training_type: :sgdm, epochs: 1, mini_batch_size: 1, log_each: 1)
 
     layer = net.hidden_layers.first.as(SHAInet::EmbeddingLayer)
-    if SHAInet::CUDA.available?
+    if SHAInet::CUDA.fully_available?
       layer.embeddings.should be_a(SHAInet::CudaMatrix)
     else
       layer.embeddings.should be_a(SHAInet::SimpleMatrix)

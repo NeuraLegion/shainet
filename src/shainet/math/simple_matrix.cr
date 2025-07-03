@@ -190,5 +190,16 @@ module SHAInet
       end
       self
     end
+
+    # Convert SimpleMatrix to CudaMatrix for GPU operations
+    def to_cuda : CudaMatrix
+      result = CudaMatrix.new(@rows, @cols)
+      @rows.times do |i|
+        @cols.times do |j|
+          result[i, j] = self[i, j]
+        end
+      end
+      result
+    end
   end
 end

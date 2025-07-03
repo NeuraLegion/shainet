@@ -14,7 +14,7 @@ describe SHAInet::Tokenizer do
     tokenizer = SHAInet::Tokenizer.new
     tokenizer.build("hello world")
     matrix = tokenizer.encode_matrix("hello world")
-    if SHAInet::CUDA.available?
+    if SHAInet::CUDA.fully_available?
       matrix.should be_a(SHAInet::CudaMatrix)
     else
       matrix.should be_a(SHAInet::SimpleMatrix)

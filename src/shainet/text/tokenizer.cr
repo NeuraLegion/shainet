@@ -36,7 +36,7 @@ module SHAInet
     # training language models.
     def encode_matrix(text : String)
       ids = encode(text)
-      mat_klass = CUDA.available? ? CudaMatrix : SimpleMatrix
+      mat_klass = CUDA.fully_available? ? CudaMatrix : SimpleMatrix
       mat_klass.from_a([ids.map(&.to_f64)])
     end
 

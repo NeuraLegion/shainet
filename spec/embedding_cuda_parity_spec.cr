@@ -2,7 +2,7 @@ require "./spec_helper"
 
 describe "Embedding GPU parity" do
   it "matches CPU and GPU updates" do
-    pending! "CUDA not available" unless SHAInet::CUDA.available?
+    pending! "CUDA not available" unless SHAInet::CUDA.fully_available?
 
     # Create embedding layers with fixed values
     vocab_size = 3

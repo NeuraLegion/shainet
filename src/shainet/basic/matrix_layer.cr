@@ -66,15 +66,39 @@ module SHAInet
       Log.info { @n_type }
     end
 
-    # Forward pass - the main method that should be used
-    def forward(input : SimpleMatrix | CudaMatrix) : SimpleMatrix | CudaMatrix
-      @input = input
-      mat_klass = input.class
+    # Convert layer matrices to GPU
+    def to_gpu!
+      if CUDA.fully_available?
+        @weights = @weights.as(SimpleMatrix).to_cuda unless @weights.is_a?(CudaMatrix)
+        @biases = @biases.as(SimpleMatrix).to_cuda unless @biases.is_a?(CudaMatrix)
+        @g_w = @g_w.as(SimpleMatrix).to_cuda unless @g_w.is_a?(CudaMatrix)
+        @g_b = @g_b.as(SimpleMatrix).to_cuda unless @g_b.is_a?(CudaMatrix)
+        @input = @input.as(SimpleMatrix).to_cuda if @input && @input.is_a?(SimpleMatrix)
+        @activations = @activations.as(SimpleMatrix).to_cuda if @activations && @activations.is_a?(SimpleMatrix)
+        @sigma_primes = @sigma_primes.as(SimpleMatrix).to_cuda if @sigma_primes && @sigma_primes.is_a?(SimpleMatrix)
+      end
+    end
 
-      # Assume weights and biases already match the input device type
-      # No conversion needed - they should have been allocated correctly
-      w = @weights
-      b = @biases
+    # Convert layer matrices to CPU
+    def to_cpu!
+      if @weights.is_a?(CudaMatrix)
+        @weights = @weights.as(CudaMatrix).to_simple
+        @biases = @biases.as(CudaMatrix).to_simple
+        @g_w = @g_w.as(CudaMatrix).to_simple
+        @g_b = @g_b.as(CudaMatrix).to_simple
+        @input = @input.as(CudaMatrix).to_simple if @input && @input.is_a?(CudaMatrix)
+        @activations = @activations.as(CudaMatrix).to_simple if @activations && @activations.is_a?(CudaMatrix)
+        @sigma_primes = @sigma_primes.as(CudaMatrix).to_simple if @sigma_primes && @sigma_primes.is_a?(CudaMatrix)
+      end
+    end
+
+    # GPU path - all CudaMatrix operations
+    def forward(input : CudaMatrix) : CudaMatrix
+      @input = input
+
+      # Weights and biases should already be CudaMatrix in GPU path
+      w = @weights.as(CudaMatrix)
+      b = @biases.as(CudaMatrix)
 
       # Linear transformation: input * weights + bias
       linear_result = input * w
@@ -82,30 +106,34 @@ module SHAInet
 
       # Apply activation function and store derivatives for backprop
       @activations = linear_result.clone
-      @sigma_primes = mat_klass.new(linear_result.rows, linear_result.cols)
+      @sigma_primes = CudaMatrix.new(linear_result.rows, linear_result.cols)
 
-      # Use GPU kernels for activation when CUDA is fully available
-      if CUDA.fully_available? && linear_result.is_a?(CudaMatrix) && @activation_function == SHAInet.sigmoid
-        activations_cuda = @activations.as(CudaMatrix)
-        sigma_primes_cuda = @sigma_primes.as(CudaMatrix)
-        linear_cuda = linear_result.as(CudaMatrix)
+      activations_cuda = @activations.as(CudaMatrix)
+      sigma_primes_cuda = @sigma_primes.as(CudaMatrix)
 
-        # Ensure all matrices are synced to GPU
-        linear_cuda.sync_to_device! unless linear_cuda.device_dirty?
+      # Ensure all matrices are synced to GPU
+      linear_result.sync_to_device! unless linear_result.device_dirty?
 
-        size = linear_result.rows * linear_result.cols
+      size = linear_result.rows * linear_result.cols
+
+      case @activation_function
+      when SHAInet.sigmoid
         CUDA.sigmoid_forward(
           activations_cuda.device_ptr.not_nil!,
           sigma_primes_cuda.device_ptr.not_nil!,
-          linear_cuda.device_ptr.not_nil!,
+          linear_result.device_ptr.not_nil!,
           size
         )
-
         # Mark results as dirty on device
         activations_cuda.mark_device_dirty!
         sigma_primes_cuda.mark_device_dirty!
+      when SHAInet.none
+        # Identity function: input passes through unchanged, derivatives are all 1.0
+        @activations = linear_result
+        @sigma_primes = CudaMatrix.ones(linear_result.rows, linear_result.cols)
+        @sigma_primes.as(CudaMatrix).mark_device_dirty!
       else
-        # CPU fallback for non-sigmoid or non-CUDA cases
+        # For other activation functions, fall back to CPU
         linear_result.rows.times do |i|
           linear_result.cols.times do |j|
             val = linear_result[i, j]
@@ -116,95 +144,142 @@ module SHAInet
         end
       end
 
-      @activations.not_nil!
+      @activations.as(CudaMatrix)
     end
 
-    # Backward pass - accumulates gradients and returns gradient for previous layer
-    def backward(grad : SimpleMatrix | CudaMatrix) : SimpleMatrix | CudaMatrix
+    # CPU path - all SimpleMatrix operations
+    def forward(input : SimpleMatrix) : SimpleMatrix
+      @input = input
+
+      # Weights and biases should already be SimpleMatrix in CPU path
+      w = @weights.as(SimpleMatrix)
+      b = @biases.as(SimpleMatrix)
+
+      # Linear transformation: input * weights + bias
+      linear_result = input * w
+      linear_result.add_bias!(b)
+
+      # Apply activation function and store derivatives for backprop
+      @activations = linear_result.clone
+      @sigma_primes = SimpleMatrix.new(linear_result.rows, linear_result.cols)
+
+      # CPU activation computation
+      linear_result.rows.times do |i|
+        linear_result.cols.times do |j|
+          val = linear_result[i, j]
+          activation_val, derivative_val = @activation_function.call(val)
+          @activations.not_nil![i, j] = activation_val
+          @sigma_primes.not_nil![i, j] = derivative_val
+        end
+      end
+
+      @activations.as(SimpleMatrix)
+    end
+
+    # GPU path backward - all CudaMatrix operations
+    def backward(grad : CudaMatrix) : CudaMatrix
       return grad if @input.nil? || @sigma_primes.nil?
 
-      input = @input.not_nil!
-      sigma_primes = @sigma_primes.not_nil!
+      input = @input.as(CudaMatrix)
+      sigma_primes = @sigma_primes.as(CudaMatrix)
 
       # Apply activation derivative: grad ⊙ σ'
       local_grad = grad.clone
 
-      # Use GPU kernel for gradient computation when CUDA is fully available
-      if CUDA.fully_available? && local_grad.is_a?(CudaMatrix) && sigma_primes.is_a?(CudaMatrix)
-        local_grad_cuda = local_grad.as(CudaMatrix)
-        grad_cuda = grad.as(CudaMatrix)
-        sigma_primes_cuda = sigma_primes.as(CudaMatrix)
+      # Use GPU kernel for gradient computation
+      grad.sync_to_device! unless grad.device_dirty?
+      sigma_primes.sync_to_device! unless sigma_primes.device_dirty?
 
-        # Ensure matrices are synced to GPU
-        grad_cuda.sync_to_device! unless grad_cuda.device_dirty?
-        sigma_primes_cuda.sync_to_device! unless sigma_primes_cuda.device_dirty?
+      size = local_grad.rows * local_grad.cols
+      CUDA.apply_gradient(
+        local_grad.device_ptr.not_nil!,
+        grad.device_ptr.not_nil!,
+        sigma_primes.device_ptr.not_nil!,
+        size
+      )
 
-        size = local_grad.rows * local_grad.cols
-        CUDA.apply_gradient(
-          local_grad_cuda.device_ptr.not_nil!,
-          grad_cuda.device_ptr.not_nil!,
-          sigma_primes_cuda.device_ptr.not_nil!,
-          size
-        )
+      local_grad.mark_device_dirty!
 
-        local_grad_cuda.mark_device_dirty!
-      else
-        # CPU fallback
-        local_grad.rows.times do |i|
-          local_grad.cols.times do |j|
-            local_grad[i, j] = grad[i, j] * sigma_primes[i, j]
-          end
+      # Accumulate weight gradients: ∂L/∂W += input^T * local_grad
+      @g_w = @g_w.as(CudaMatrix) + input.transpose * local_grad
+
+      # Accumulate bias gradients: ∂L/∂b += sum(local_grad, axis=0)
+      g_b_cuda = @g_b.as(CudaMatrix)
+      local_grad.sync_to_device! unless local_grad.device_dirty?
+      g_b_cuda.sync_to_device! unless g_b_cuda.device_dirty?
+
+      CUDA.accumulate_bias_grad(
+        g_b_cuda.device_ptr.not_nil!,
+        local_grad.device_ptr.not_nil!,
+        local_grad.rows,
+        local_grad.cols
+      )
+
+      g_b_cuda.mark_device_dirty!
+
+      # Return gradient for previous layer: local_grad * W^T
+      local_grad * @weights.as(CudaMatrix).transpose
+    end
+
+    # CPU path backward - all SimpleMatrix operations
+    def backward(grad : SimpleMatrix) : SimpleMatrix
+      return grad if @input.nil? || @sigma_primes.nil?
+
+      input = @input.as(SimpleMatrix)
+      sigma_primes = @sigma_primes.as(SimpleMatrix)
+
+      # Apply activation derivative: grad ⊙ σ'
+      local_grad = grad.clone
+
+      # CPU gradient computation
+      local_grad.rows.times do |i|
+        local_grad.cols.times do |j|
+          local_grad[i, j] = grad[i, j] * sigma_primes[i, j]
         end
       end
 
       # Accumulate weight gradients: ∂L/∂W += input^T * local_grad
-      @g_w = @g_w + input.transpose * local_grad
+      @g_w = @g_w.as(SimpleMatrix) + input.transpose * local_grad
 
       # Accumulate bias gradients: ∂L/∂b += sum(local_grad, axis=0)
-      if CUDA.fully_available? && local_grad.is_a?(CudaMatrix) && @g_b.is_a?(CudaMatrix)
-        local_grad_cuda = local_grad.as(CudaMatrix)
-        g_b_cuda = @g_b.as(CudaMatrix)
-
-        # Ensure matrices are synced to GPU
-        local_grad_cuda.sync_to_device! unless local_grad_cuda.device_dirty?
-        g_b_cuda.sync_to_device! unless g_b_cuda.device_dirty?
-
-        CUDA.accumulate_bias_grad(
-          g_b_cuda.device_ptr.not_nil!,
-          local_grad_cuda.device_ptr.not_nil!,
-          local_grad.rows,
-          local_grad.cols
-        )
-
-        g_b_cuda.mark_device_dirty!
-      else
-        # CPU fallback
-        local_grad.rows.times do |i|
-          local_grad.cols.times do |j|
-            @g_b[0, j] += local_grad[i, j]
-          end
+      local_grad.rows.times do |i|
+        local_grad.cols.times do |j|
+          @g_b[0, j] += local_grad[i, j]
         end
       end
 
       # Return gradient for previous layer: local_grad * W^T
-      # No conversion needed - weights should already match the input device type
-      local_grad * @weights.transpose
+      local_grad * @weights.as(SimpleMatrix).transpose
     end
 
-    # Update weights using accumulated gradients
+    # Update weights using accumulated gradients - device-specific versions
     def update_weights(learning_rate : Float64)
+      # Check device type and call appropriate method
+      if @weights.is_a?(CudaMatrix)
+        update_weights_gpu(learning_rate)
+      else
+        update_weights_cpu(learning_rate)
+      end
+    end
+
+    # GPU path weight update - all CudaMatrix operations
+    private def update_weights_gpu(learning_rate : Float64)
       # W := W - lr * ∂L/∂W
       # b := b - lr * ∂L/∂b
-      @weights = @weights - @g_w * learning_rate
-      @biases = @biases - @g_b * learning_rate
+      @weights = @weights.as(CudaMatrix) - @g_w.as(CudaMatrix) * learning_rate
+      @biases = @biases.as(CudaMatrix) - @g_b.as(CudaMatrix) * learning_rate
 
       # Mark CudaMatrix weights/biases as dirty after update
-      if @weights.is_a?(CudaMatrix)
-        @weights.as(CudaMatrix).mark_device_dirty!
-      end
-      if @biases.is_a?(CudaMatrix)
-        @biases.as(CudaMatrix).mark_device_dirty!
-      end
+      @weights.as(CudaMatrix).mark_device_dirty!
+      @biases.as(CudaMatrix).mark_device_dirty!
+    end
+
+    # CPU path weight update - all SimpleMatrix operations
+    private def update_weights_cpu(learning_rate : Float64)
+      # W := W - lr * ∂L/∂W
+      # b := b - lr * ∂L/∂b
+      @weights = @weights.as(SimpleMatrix) - @g_w.as(SimpleMatrix) * learning_rate
+      @biases = @biases.as(SimpleMatrix) - @g_b.as(SimpleMatrix) * learning_rate
     end
 
     # Reset gradients to zero
@@ -224,17 +299,9 @@ module SHAInet
         CUDA.zero_matrix(g_b_cuda.device_ptr.not_nil!, b_size)
         g_b_cuda.mark_device_dirty!
       else
-        # CPU fallback
-        @g_w.rows.times do |i|
-          @g_w.cols.times do |j|
-            @g_w[i, j] = 0.0
-          end
-        end
-        @g_b.rows.times do |i|
-          @g_b.cols.times do |j|
-            @g_b[i, j] = 0.0
-          end
-        end
+        # CPU fallback - create new zero matrices
+        @g_w = SimpleMatrix.zeros(@g_w.rows, @g_w.cols)
+        @g_b = SimpleMatrix.zeros(@g_b.rows, @g_b.cols)
       end
     end
 

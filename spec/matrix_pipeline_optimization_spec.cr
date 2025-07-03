@@ -3,7 +3,7 @@ require "./spec_helper"
 describe "Matrix Pipeline Optimization" do
   it "maintains matrix type consistency throughout transformer pipeline" do
     # Test matrix type consistency
-    mat_klass = SHAInet::CUDA.available? ? SHAInet::CudaMatrix : SHAInet::SimpleMatrix
+    mat_klass = SHAInet::CUDA.fully_available? ? SHAInet::CudaMatrix : SHAInet::SimpleMatrix
 
     # Test MultiHeadAttention
     d_model = 8
@@ -46,7 +46,7 @@ describe "Matrix Pipeline Optimization" do
     d_model = 16
 
     # Test that operations work regardless of whether CUDA kernels are available
-    if SHAInet::CUDA.available?
+    if SHAInet::CUDA.fully_available?
       input = SHAInet::CudaMatrix.new(4, d_model).random_fill!
       input.should be_a(SHAInet::CudaMatrix)
     else

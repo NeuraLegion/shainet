@@ -2,7 +2,7 @@ require "./spec_helper"
 
 describe "Embedding GPU lookup" do
   it "retrieves embeddings on the device" do
-    pending! "CUDA not available" unless SHAInet::CUDA.available?
+    pending! "CUDA not available" unless SHAInet::CUDA.fully_available?
 
     # Create a simple embedding layer with fixed values
     layer = SHAInet::EmbeddingLayer.new(5, 4)

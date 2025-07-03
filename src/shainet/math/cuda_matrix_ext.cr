@@ -64,7 +64,7 @@ module SHAInet
         @cols.times { |j| sum += Math.exp(self[i, j]) }
         @cols.times { |j| result[i, j] = Math.exp(self[i, j]) / sum }
       end
-      result.sync_to_device! if CUDA.available?
+      result.sync_to_device! if CUDA.fully_available?
       result
     end
 
@@ -97,7 +97,7 @@ module SHAInet
           result[i, j] = rand < prob ? 0.0 : self[i, j]
         end
       end
-      result.sync_to_device! if CUDA.available?
+      result.sync_to_device! if CUDA.fully_available?
       result
     end
   end
