@@ -450,23 +450,14 @@ module SHAInet
   # Multiply each column by the corresponding value in a row vector in-place.
   def mul_row_vector!(vec : CudaMatrix)
     raise ArgumentError.new("vector size mismatch") unless vec.rows == 1 && vec.cols == @cols
-    if CUDA.available? && (dptr = self.device_ptr) && (vptr = vec.device_ptr) && !dptr.null? && !vptr.null?
-      handle = CUDA.create_handle
-      @cols.times do |j|
-        alpha = vec[0, j]
-        # Use row-major addressing: each column starts at j*@rows offset in the flattened array
-        # But wait - this is wrong for row-major! In row-major, we need to scale each element individually
-        # Let's fall back to CPU for now to avoid memory corruption
-      end
-      CUDA.destroy_handle(handle)
-      # Fall back to CPU implementation for safety
-      @rows.times do |i|
-        @cols.times do |j|
-          self[i, j] *= vec[0, j]
-        end
-      end
-      self.sync_to_device! if CUDA.available?
+
+    if CUDA.fully_available? && (dptr = self.device_ptr) && (vptr = vec.device_ptr) && !dptr.null? && !vptr.null?
+      # Use GPU kernel for column-wise scaling
+      CUDA.mul_row_vector(dptr, vptr, @rows, @cols)
+      # Mark result as dirty on device
+      mark_device_dirty!
     else
+      # CPU fallback
       @rows.times do |i|
         @cols.times do |j|
           self[i, j] *= vec[0, j]

@@ -220,6 +220,7 @@ module SHAInet
     @@layer_norm_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Int32, Float64, Void)? = nil
     @@layer_norm_backward_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Int32, Float64, Void)? = nil
     @@sum_cols_proc : Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Void)? = nil
+    @@mul_row_vector_proc : Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Void)? = nil
 
     def softmax_rows(dst : Pointer(Float64), src : Pointer(Float64), rows : Int32, cols : Int32)
       unless fn = @@softmax_rows_proc
@@ -375,6 +376,23 @@ module SHAInet
       end
       raise "CUDA kernels not available" unless fn
       fn.call(dst, src, rows, cols)
+    end
+
+    def mul_row_vector(matrix : Pointer(Float64), vec : Pointer(Float64), rows : Int32, cols : Int32)
+      unless fn = @@mul_row_vector_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "mul_row_vector")
+          unless sym.null?
+            @@mul_row_vector_proc = Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@mul_row_vector_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(matrix, vec, rows, cols)
     end
 
     # In-place element-wise ReLU on GPU memory. This fallback implementation
