@@ -6,7 +6,7 @@ module SHAInet
     extend self
 
     # :nodoc:
-    @[Link("cudart", ldflags: "-L/usr/local/cuda/targets/x86_64-linux/lib")]
+    @[Link("cudart")]
     lib LibCUDARuntime
       fun cudaRuntimeGetVersion(version : Pointer(Int32)) : Int32
       fun cudaMalloc(ptr : Pointer(Pointer(Void)), size : LibC::SizeT) : Int32
@@ -14,7 +14,7 @@ module SHAInet
       fun cudaMemcpy(dst : Pointer(Void), src : Pointer(Void), count : LibC::SizeT, kind : Int32) : Int32
     end
 
-    @[Link("cublas", ldflags: "-L/usr/local/cuda/targets/x86_64-linux/lib")]
+    @[Link("cublas")]
     lib LibCUBLAS
       type Handle = Void*
 
@@ -222,6 +222,10 @@ module SHAInet
     @@sum_cols_proc : Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Void)? = nil
     @@mul_row_vector_proc : Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Void)? = nil
     @@transpose_proc : Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Void)? = nil
+    @@sigmoid_forward_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Void)? = nil
+    @@apply_gradient_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Void)? = nil
+    @@accumulate_bias_grad_proc : Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Void)? = nil
+    @@zero_matrix_proc : Proc(Pointer(Float64), Int32, Void)? = nil
 
     def softmax_rows(dst : Pointer(Float64), src : Pointer(Float64), rows : Int32, cols : Int32)
       unless fn = @@softmax_rows_proc
@@ -411,6 +415,74 @@ module SHAInet
       end
       raise "CUDA kernels not available" unless fn
       fn.call(output, input, rows, cols)
+    end
+
+    def sigmoid_forward(activations : Pointer(Float64), derivatives : Pointer(Float64), linear : Pointer(Float64), size : Int32)
+      unless fn = @@sigmoid_forward_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "sigmoid_forward")
+          unless sym.null?
+            @@sigmoid_forward_proc = Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@sigmoid_forward_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(activations, derivatives, linear, size)
+    end
+
+    def apply_gradient(local_grad : Pointer(Float64), grad : Pointer(Float64), derivatives : Pointer(Float64), size : Int32)
+      unless fn = @@apply_gradient_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "apply_gradient")
+          unless sym.null?
+            @@apply_gradient_proc = Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@apply_gradient_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(local_grad, grad, derivatives, size)
+    end
+
+    def accumulate_bias_grad(bias_grad : Pointer(Float64), local_grad : Pointer(Float64), rows : Int32, cols : Int32)
+      unless fn = @@accumulate_bias_grad_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "accumulate_bias_grad")
+          unless sym.null?
+            @@accumulate_bias_grad_proc = Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@accumulate_bias_grad_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(bias_grad, local_grad, rows, cols)
+    end
+
+    def zero_matrix(matrix : Pointer(Float64), size : Int32)
+      unless fn = @@zero_matrix_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "zero_matrix")
+          unless sym.null?
+            @@zero_matrix_proc = Proc(Pointer(Float64), Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@zero_matrix_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(matrix, size)
     end
 
     # In-place element-wise ReLU on GPU memory. This fallback implementation

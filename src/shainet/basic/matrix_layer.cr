@@ -84,12 +84,35 @@ module SHAInet
       @activations = linear_result.clone
       @sigma_primes = mat_klass.new(linear_result.rows, linear_result.cols)
 
-      linear_result.rows.times do |i|
-        linear_result.cols.times do |j|
-          val = linear_result[i, j]
-          activation_val, derivative_val = @activation_function.call(val)
-          @activations.not_nil![i, j] = activation_val
-          @sigma_primes.not_nil![i, j] = derivative_val
+      # Use GPU kernels for activation when CUDA is fully available
+      if CUDA.fully_available? && linear_result.is_a?(CudaMatrix) && @activation_function == SHAInet.sigmoid
+        activations_cuda = @activations.as(CudaMatrix)
+        sigma_primes_cuda = @sigma_primes.as(CudaMatrix)
+        linear_cuda = linear_result.as(CudaMatrix)
+
+        # Ensure all matrices are synced to GPU
+        linear_cuda.sync_to_device! unless linear_cuda.device_dirty?
+
+        size = linear_result.rows * linear_result.cols
+        CUDA.sigmoid_forward(
+          activations_cuda.device_ptr.not_nil!,
+          sigma_primes_cuda.device_ptr.not_nil!,
+          linear_cuda.device_ptr.not_nil!,
+          size
+        )
+
+        # Mark results as dirty on device
+        activations_cuda.mark_device_dirty!
+        sigma_primes_cuda.mark_device_dirty!
+      else
+        # CPU fallback for non-sigmoid or non-CUDA cases
+        linear_result.rows.times do |i|
+          linear_result.cols.times do |j|
+            val = linear_result[i, j]
+            activation_val, derivative_val = @activation_function.call(val)
+            @activations.not_nil![i, j] = activation_val
+            @sigma_primes.not_nil![i, j] = derivative_val
+          end
         end
       end
 
@@ -105,9 +128,32 @@ module SHAInet
 
       # Apply activation derivative: grad ⊙ σ'
       local_grad = grad.clone
-      local_grad.rows.times do |i|
-        local_grad.cols.times do |j|
-          local_grad[i, j] = grad[i, j] * sigma_primes[i, j]
+
+      # Use GPU kernel for gradient computation when CUDA is fully available
+      if CUDA.fully_available? && local_grad.is_a?(CudaMatrix) && sigma_primes.is_a?(CudaMatrix)
+        local_grad_cuda = local_grad.as(CudaMatrix)
+        grad_cuda = grad.as(CudaMatrix)
+        sigma_primes_cuda = sigma_primes.as(CudaMatrix)
+
+        # Ensure matrices are synced to GPU
+        grad_cuda.sync_to_device! unless grad_cuda.device_dirty?
+        sigma_primes_cuda.sync_to_device! unless sigma_primes_cuda.device_dirty?
+
+        size = local_grad.rows * local_grad.cols
+        CUDA.apply_gradient(
+          local_grad_cuda.device_ptr.not_nil!,
+          grad_cuda.device_ptr.not_nil!,
+          sigma_primes_cuda.device_ptr.not_nil!,
+          size
+        )
+
+        local_grad_cuda.mark_device_dirty!
+      else
+        # CPU fallback
+        local_grad.rows.times do |i|
+          local_grad.cols.times do |j|
+            local_grad[i, j] = grad[i, j] * sigma_primes[i, j]
+          end
         end
       end
 
@@ -115,9 +161,28 @@ module SHAInet
       @g_w = @g_w + input.transpose * local_grad
 
       # Accumulate bias gradients: ∂L/∂b += sum(local_grad, axis=0)
-      local_grad.rows.times do |i|
-        local_grad.cols.times do |j|
-          @g_b[0, j] += local_grad[i, j]
+      if CUDA.fully_available? && local_grad.is_a?(CudaMatrix) && @g_b.is_a?(CudaMatrix)
+        local_grad_cuda = local_grad.as(CudaMatrix)
+        g_b_cuda = @g_b.as(CudaMatrix)
+
+        # Ensure matrices are synced to GPU
+        local_grad_cuda.sync_to_device! unless local_grad_cuda.device_dirty?
+        g_b_cuda.sync_to_device! unless g_b_cuda.device_dirty?
+
+        CUDA.accumulate_bias_grad(
+          g_b_cuda.device_ptr.not_nil!,
+          local_grad_cuda.device_ptr.not_nil!,
+          local_grad.rows,
+          local_grad.cols
+        )
+
+        g_b_cuda.mark_device_dirty!
+      else
+        # CPU fallback
+        local_grad.rows.times do |i|
+          local_grad.cols.times do |j|
+            @g_b[0, j] += local_grad[i, j]
+          end
         end
       end
 
@@ -144,14 +209,31 @@ module SHAInet
 
     # Reset gradients to zero
     def zero_gradients
-      @g_w.rows.times do |i|
-        @g_w.cols.times do |j|
-          @g_w[i, j] = 0.0
+      # Use GPU kernel for zeroing when CUDA is fully available
+      if CUDA.fully_available? && @g_w.is_a?(CudaMatrix) && @g_b.is_a?(CudaMatrix)
+        g_w_cuda = @g_w.as(CudaMatrix)
+        g_b_cuda = @g_b.as(CudaMatrix)
+
+        # Zero weight gradients
+        w_size = @g_w.rows * @g_w.cols
+        CUDA.zero_matrix(g_w_cuda.device_ptr.not_nil!, w_size)
+        g_w_cuda.mark_device_dirty!
+
+        # Zero bias gradients
+        b_size = @g_b.rows * @g_b.cols
+        CUDA.zero_matrix(g_b_cuda.device_ptr.not_nil!, b_size)
+        g_b_cuda.mark_device_dirty!
+      else
+        # CPU fallback
+        @g_w.rows.times do |i|
+          @g_w.cols.times do |j|
+            @g_w[i, j] = 0.0
+          end
         end
-      end
-      @g_b.rows.times do |i|
-        @g_b.cols.times do |j|
-          @g_b[i, j] = 0.0
+        @g_b.rows.times do |i|
+          @g_b.cols.times do |j|
+            @g_b[i, j] = 0.0
+          end
         end
       end
     end

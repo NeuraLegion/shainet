@@ -256,4 +256,87 @@ void transpose(double* out, const double* in, int rows, int cols) {
     }
 }
 
+__global__ void sigmoid_forward_kernel(double* activations, double* derivatives, const double* linear, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= size) return;
+    
+    double val = linear[idx];
+    // Sigmoid: 1 / (1 + exp(-x))
+    double exp_neg_val = exp(-val);
+    double sigmoid_val = 1.0 / (1.0 + exp_neg_val);
+    
+    activations[idx] = sigmoid_val;
+    // Sigmoid derivative: σ(x) * (1 - σ(x))
+    derivatives[idx] = sigmoid_val * (1.0 - sigmoid_val);
+}
+
+void sigmoid_forward(double* activations, double* derivatives, const double* linear, int size) {
+    int threads_per_block = 256;
+    int blocks = (size + threads_per_block - 1) / threads_per_block;
+    
+    sigmoid_forward_kernel<<<blocks, threads_per_block>>>(activations, derivatives, linear, size);
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in sigmoid_forward: %s\n", cudaGetErrorString(err));
+    }
+}
+
+__global__ void apply_gradient_kernel(double* local_grad, const double* grad, const double* derivatives, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= size) return;
+
+    local_grad[idx] = grad[idx] * derivatives[idx];
+}
+
+void apply_gradient(double* local_grad, const double* grad, const double* derivatives, int size) {
+    int threads_per_block = 256;
+    int blocks = (size + threads_per_block - 1) / threads_per_block;
+
+    apply_gradient_kernel<<<blocks, threads_per_block>>>(local_grad, grad, derivatives, size);
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in apply_gradient: %s\n", cudaGetErrorString(err));
+    }
+}
+
+__global__ void accumulate_bias_grad_kernel(double* bias_grad, const double* local_grad, int rows, int cols) {
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col >= cols) return;
+
+    double sum = 0.0;
+    for (int row = 0; row < rows; row++) {
+        sum += local_grad[row * cols + col];
+    }
+    atomicAdd(&bias_grad[col], sum);
+}
+
+void accumulate_bias_grad(double* bias_grad, const double* local_grad, int rows, int cols) {
+    int threads_per_block = 256;
+    int blocks = (cols + threads_per_block - 1) / threads_per_block;
+
+    accumulate_bias_grad_kernel<<<blocks, threads_per_block>>>(bias_grad, local_grad, rows, cols);
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in accumulate_bias_grad: %s\n", cudaGetErrorString(err));
+    }
+}
+
+__global__ void zero_matrix_kernel(double* matrix, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= size) return;
+
+    matrix[idx] = 0.0;
+}
+
+void zero_matrix(double* matrix, int size) {
+    int threads_per_block = 256;
+    int blocks = (size + threads_per_block - 1) / threads_per_block;
+
+    zero_matrix_kernel<<<blocks, threads_per_block>>>(matrix, size);
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in zero_matrix: %s\n", cudaGetErrorString(err));
+    }
+}
+
 } // extern "C"
