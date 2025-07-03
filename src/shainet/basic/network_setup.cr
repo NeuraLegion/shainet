@@ -80,10 +80,10 @@ module SHAInet
     # l_type is: :input, :hidden or :output
     # l_size = size of the layer
     # n_type = advanced option for layer types
-    def add_layer(l_type : Symbol | String, l_size : Int32, n_type : Symbol | String = "memory", activation_function : ActivationFunction = SHAInet.sigmoid, num_heads : Int32 = 1, ff_hidden : Int32 = l_size*4, drop_percent : Int32 = 0, blocks : Int32 = 1, *, vocab_size : Int32 = 0)
+    def add_layer(l_type : Symbol | String, l_size : Int32, activation_function : ActivationFunction = SHAInet.sigmoid, num_heads : Int32 = 1, ff_hidden : Int32 = l_size*4, drop_percent : Int32 = 0, blocks : Int32 = 1, *, vocab_size : Int32 = 0)
       if l_type.to_s == "transformer" && blocks > 1
         blocks.times do
-          add_layer(l_type, l_size, n_type, activation_function, num_heads, ff_hidden, drop_percent, 1)
+          add_layer(l_type, l_size, activation_function, num_heads, ff_hidden, drop_percent, 1)
         end
         return
       end
@@ -119,7 +119,7 @@ module SHAInet
           connect_ltl(@hidden_layers.last, @output_layers.first, :full)
         end
       else
-        raise NeuralNetRunError.new("Must define correct layer type (:input, :hidden, :recurrent, :lstm, :embedding, :transformer, :output).")
+        raise NeuralNetRunError.new("Must define correct layer type (:input, :hidden, :embedding, :transformer, :output).")
       end
 
       # Add to all_layers collection

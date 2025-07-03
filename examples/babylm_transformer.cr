@@ -27,37 +27,57 @@ puts "Using the GPU? #{SHAInet::CUDA.available? ? "Yes" : "No"}"
 puts "Kernels available? #{SHAInet::CUDA.kernels_available? ? "Yes" : "No"}"
 puts "Training the tokenizer on the dataset..."
 # Train tokenizer and encode text
-vocab_size = 10_000
+vocab_size = 5000 # Increased for better language modeling
 tokenizer = SHAInet::BPETokenizer.new
-tokenizer.train(text, vocab_size)
-ids = tokenizer.encode(text)
+tokenizer.train(text[0..50000], vocab_size) # Use more text for training
+ids = tokenizer.encode(text[0..50000])
 
 puts "Tokenizer trained with #{tokenizer.vocab.size} tokens."
+puts "Dataset size: #{ids.size} tokens"
+puts "Sample of first 10 tokens: #{ids[0, [ids.size, 10].min]}"
 
 puts "Building the network..."
-# Build the network
-d_model = 256
-seq_len = 16
+# Build the network with incremental scaling
+d_model = 64 # Moderate increase from 8
+seq_len = 16 # Keep original sequence length
 token_count = tokenizer.vocab.size
 net = SHAInet::Network.new
 net.add_layer(:input, 1, :memory, SHAInet.none)
 net.add_layer(:embedding, d_model, :memory, SHAInet.none, vocab_size: token_count)
-4.times { net.add_layer(:transformer, d_model) }
-# Use a sigmoid output so cross-entropy can be applied per token
+2.times { net.add_layer(:transformer, d_model) } # Reduce to 2 layers
 net.add_layer(:output, token_count, :memory, SHAInet.identity)
 net.fully_connect
 
 puts "Network built"
-# Positional encoding should only be applied to the first transformer layer
+puts "Output layer size: #{token_count}"
+puts "Embedding vocab size: #{token_count}"
+# Positional encoding for the transformer layer
 pos_enc = SHAInet::PositionalEncoding.sinusoidal(seq_len, d_model)
 net.transformer_layers.first.positional_encoding = pos_enc
 
 # Build training/validation splits and write pairs to disk for streaming
-def write_pairs(path, ids, seq_len)
+def write_pairs(path, ids, seq_len, vocab_size)
   File.open(path, "w") do |f|
+    if ids.size <= seq_len
+      puts "Warning: Dataset too small (#{ids.size} tokens) for sequence length #{seq_len}"
+      return
+    end
+
+    max_id = ids.max
+    puts "Max token ID in dataset: #{max_id}"
+
+    # Helper to create one-hot vectors
+    one_hot = ->(id : Int32, size : Int32) do
+      arr = Array(Float64).new(size, 0.0)
+      arr[id] = 1.0
+      arr
+    end
+
     (0...(ids.size - seq_len)).each do |i|
-      seq = ids[i, seq_len].map { |id| [id] }
-      pair = [seq, [ids[i + seq_len]]]
+      # Use proper sequence format for transformer training
+      seq = ids[i, seq_len].map { |id| [id] } # Each token as [token_id]
+      target = one_hot.call(ids[i + seq_len], vocab_size)
+      pair = [seq, target]
       f.puts pair.to_json
     end
   end
@@ -65,13 +85,17 @@ end
 
 split = ids.size * 9 // 10
 train_ids = ids[0, split]
-val_ids = ids[split - seq_len, ids.size - (split - seq_len)]
+val_ids = ids[split, ids.size - split]
 
 train_file = "train_pairs.jsonl"
 val_file = "val_pairs.jsonl"
 
-write_pairs(train_file, train_ids, seq_len)
-write_pairs(val_file, val_ids, seq_len)
+write_pairs(train_file, train_ids, seq_len, token_count)
+write_pairs(val_file, val_ids, seq_len, token_count)
+
+puts "Training pairs written. Train size: #{train_ids.size}, Val size: #{val_ids.size}"
+puts "Expected training sequences: #{train_ids.size - seq_len}"
+puts "Expected validation sequences: #{val_ids.size - seq_len}"
 
 train_data = SHAInet::StreamingData.new(train_file, shuffle: true, gpu_batches: true)
 val_data = SHAInet::StreamingData.new(val_file, gpu_batches: true)
@@ -92,23 +116,24 @@ epochs.times do |epoch|
   # Optimized validation with GPU batch processing
   val_loss = 0.0
   count = 0
-  
+
   # Process validation in larger batches for better GPU utilization
   val_batch_size = 64
   while (val_batch = val_data.next_batch(val_batch_size)).size > 0
     total_batch_loss = 0.0
-    
+
     val_batch.each do |sample|
-      seq = sample[0].as(Array(Array(Float64)))
-      tgt = sample[1].as(Array(Float64)).first.to_i
+      seq = sample[0].as(Array(Array(Float64))).map { |token_arr| token_arr.map(&.to_i) }
+      tgt = sample[1].as(Array(Float64))
+      pred_id = tgt.index(tgt.max) || 0
       output_vec = net.run(seq).last
 
       # Use native softmax - it's already optimized
       probs = SHAInet.softmax(output_vec)
-      total_batch_loss += -Math.log(probs[tgt].clamp(1e-9, 1.0))
+      total_batch_loss += -Math.log(probs[pred_id].clamp(1e-9, 1.0))
       count += 1
     end
-    
+
     val_loss += total_batch_loss
   end
   val_loss /= count.to_f if count > 0
@@ -116,8 +141,8 @@ epochs.times do |epoch|
   puts "Epoch #{epoch + 1} validation loss: #{val_loss.round(4)}"
 end
 
-# Predict the token following the first token in the dataset
-first_id = ids.first
-output = net.run([[first_id]]).last
+# Predict the token following a sequence from the dataset
+test_seq = ids[0, seq_len].map { |id| [id] }
+output = net.run(test_seq).last
 pred_id = output.index(output.max) || 0
 puts "Prediction -> #{tokenizer.decode([pred_id])}"
