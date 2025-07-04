@@ -208,8 +208,14 @@ module SHAInet
         end
       end
 
-      # CPU fallback - Only sync x if it's a CUDA matrix since we need CPU access
+      # CPU fallback - sync ALL matrices from device first
       x.sync_from_device!
+      d_out.sync_from_device! # This was missing!
+
+      # Sync gamma if it's on GPU
+      if @gamma.is_a?(CudaMatrix)
+        @gamma.as(CudaMatrix).sync_from_device!
+      end
 
       # Use CPU matrices for computation
       d_gamma = SimpleMatrix.zeros(1, cols)

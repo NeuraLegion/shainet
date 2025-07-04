@@ -18,6 +18,13 @@ __global__ void softmax_rows_kernel(double* out, const double* in, int rows, int
     }
 }
 
+__global__ void relu_backward_kernel(double* output, const double* input, const double* grad, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= size) return;
+    
+    output[idx] = input[idx] > 0.0 ? grad[idx] : 0.0;
+}
+
 // Host wrapper functions
 extern "C" {
 void softmax_rows(double* out, const double* in, int rows, int cols) {
@@ -25,6 +32,17 @@ void softmax_rows(double* out, const double* in, int rows, int cols) {
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
         printf("CUDA Error in softmax_rows: %s\n", cudaGetErrorString(err));
+    }
+}
+
+void relu_backward(double* output, const double* input, const double* grad, int size) {
+    int threads_per_block = 256;
+    int blocks = (size + threads_per_block - 1) / threads_per_block;
+    
+    relu_backward_kernel<<<blocks, threads_per_block>>>(output, input, grad, size);
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in relu_backward: %s\n", cudaGetErrorString(err));
     }
 }
 
@@ -336,6 +354,34 @@ void zero_matrix(double* matrix, int size) {
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
         printf("CUDA Error in zero_matrix: %s\n", cudaGetErrorString(err));
+    }
+}
+
+__global__ void softmax_backward_kernel(double* output, const double* grad, const double* softmax_out, int rows, int cols) {
+    int row = blockIdx.x;
+    if (row >= rows) return;
+    
+    const double* grad_row = grad + row * cols;
+    const double* softmax_row = softmax_out + row * cols;
+    double* output_row = output + row * cols;
+    
+    // Compute sum of softmax * grad for this row
+    double sum = 0.0;
+    for (int j = 0; j < cols; j++) {
+        sum += softmax_row[j] * grad_row[j];
+    }
+    
+    // Compute softmax backward: softmax * (grad - sum)
+    for (int j = 0; j < cols; j++) {
+        output_row[j] = softmax_row[j] * (grad_row[j] - sum);
+    }
+}
+
+void softmax_backward(double* output, const double* grad, const double* softmax_out, int rows, int cols) {
+    softmax_backward_kernel<<<rows, 1>>>(output, grad, softmax_out, rows, cols);
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in softmax_backward: %s\n", cudaGetErrorString(err));
     }
 }
 

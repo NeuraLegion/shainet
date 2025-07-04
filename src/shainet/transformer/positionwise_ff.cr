@@ -96,7 +96,8 @@ module SHAInet
           CUDA.row_sum(@g_b2.as(CudaMatrix).device_ptr.not_nil!, d_out.device_ptr.not_nil!, d_out.rows, d_out.cols)
           @g_b2.as(CudaMatrix).mark_device_dirty!
         rescue e : Exception
-          # Fallback to CPU computation
+          # Fallback to CPU computation - sync matrices first
+          d_out.sync_from_device!
           d_out.rows.times do |i|
             d_out.cols.times do |j|
               @g_b2[0, j] += d_out[i, j]
@@ -104,6 +105,8 @@ module SHAInet
           end
         end
       else
+        # Sync matrix before CPU access
+        d_out.sync_from_device!
         db2 = CudaMatrix.zeros(1, d_out.cols)
         d_out.rows.times do |i|
           d_out.cols.times do |j|
@@ -121,7 +124,8 @@ module SHAInet
           CUDA.row_sum(@g_b1.as(CudaMatrix).device_ptr.not_nil!, drelu.device_ptr.not_nil!, drelu.rows, drelu.cols)
           @g_b1.as(CudaMatrix).mark_device_dirty!
         rescue e : Exception
-          # Fallback to CPU computation
+          # Fallback to CPU computation - sync matrices first
+          drelu.sync_from_device!
           drelu.rows.times do |i|
             drelu.cols.times do |j|
               @g_b1[0, j] += drelu[i, j]
@@ -129,6 +133,8 @@ module SHAInet
           end
         end
       else
+        # Sync matrix before CPU access
+        drelu.sync_from_device!
         db1 = CudaMatrix.zeros(1, drelu.cols)
         drelu.rows.times do |i|
           drelu.cols.times do |j|
@@ -229,13 +235,30 @@ module SHAInet
     end
 
     private def relu_grad(m : CudaMatrix, grad : CudaMatrix) : CudaMatrix
-      out = grad.clone
-      m.rows.times do |i|
-        m.cols.times do |j|
-          out[i, j] = m[i, j] > 0 ? grad[i, j] : 0.0
+      # Use GPU kernel for ReLU gradient if available
+      if CUDA.fully_available?
+        begin
+          result = grad.clone
+          # Use CUDA kernel for ReLU backward pass
+          CUDA.relu_backward(result.device_ptr.not_nil!, m.device_ptr.not_nil!, grad.device_ptr.not_nil!, m.rows * m.cols)
+          result.mark_device_dirty!
+          return result
+        rescue e : Exception
+          # Fall back to CPU computation if CUDA fails
         end
       end
-      out
+
+      # CPU fallback - sync matrices to host first
+      m.sync_from_device!
+      grad.sync_from_device!
+      result = grad.clone
+      m.rows.times do |i|
+        m.cols.times do |j|
+          result[i, j] = m[i, j] > 0 ? grad[i, j] : 0.0
+        end
+      end
+      result.sync_to_device!
+      result
     end
 
     private def relu_grad(m : SimpleMatrix, grad : SimpleMatrix) : SimpleMatrix

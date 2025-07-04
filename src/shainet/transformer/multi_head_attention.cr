@@ -381,7 +381,24 @@ module SHAInet
 
     # GPU version of softmax backward
     private def softmax_backward(d_out : CudaMatrix, softmax_out : CudaMatrix) : CudaMatrix
-      # Efficient softmax gradient computation on GPU
+      # Use GPU kernel for softmax backward if available
+      if CUDA.fully_available?
+        begin
+          result = CudaMatrix.new(d_out.rows, d_out.cols)
+          # Use CUDA kernel for softmax backward pass
+          CUDA.softmax_backward(result.device_ptr.not_nil!, d_out.device_ptr.not_nil!, softmax_out.device_ptr.not_nil!, d_out.rows, d_out.cols)
+          result.mark_device_dirty!
+          return result
+        rescue e : Exception
+          # Fall back to CPU computation if CUDA fails
+        end
+      end
+
+      # CPU fallback - sync matrices to host first
+      d_out.sync_from_device!
+      softmax_out.sync_from_device!
+
+      # Efficient softmax gradient computation on CPU
       result = CudaMatrix.new(d_out.rows, d_out.cols)
 
       d_out.rows.times do |i|

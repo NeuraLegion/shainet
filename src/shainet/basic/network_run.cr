@@ -75,6 +75,9 @@ module SHAInet
 
         # Apply activation function - for identity, no operation needed
         unless out_layer.activation_function == SHAInet.identity
+          # For non-identity activation functions, we need CPU access to apply element-wise functions
+          # This is a limitation - complex activation functions require CPU processing
+          matrix.sync_from_device!
           matrix.rows.times do |i|
             matrix.cols.times do |j|
               val = matrix[i, j]
@@ -89,6 +92,7 @@ module SHAInet
               end
             end
           end
+          matrix.sync_to_device!
         end
         matrix.as(CudaMatrix)
       else
@@ -598,9 +602,15 @@ module SHAInet
         @error_signal = [avg_error]
         update_mse
 
+        # Aggressive GPU memory cleanup at end of each epoch
+        if CUDA.fully_available?
+          SHAInet::CudaMatrix.force_cleanup_all
+        end
+
         if epoch % log_each == 0
           elapsed = Time.monotonic - start_time
-          Log.info { "Epoch: #{epoch}, Error: #{avg_error.round(6)}, MSE: #{@mse.round(6)}, Time: #{elapsed.total_seconds.round(2)}s" }
+          gpu_stats = SHAInet::CudaMatrix.gpu_memory_stats
+          Log.info { "Epoch: #{epoch}, Error: #{avg_error.round(6)}, MSE: #{@mse.round(6)}, Time: #{elapsed.total_seconds.round(2)}s, GPU: #{gpu_stats[:active_matrices]} matrices, #{gpu_stats[:total_allocated_bytes]} bytes" }
         end
 
         if avg_error < error_threshold
@@ -642,6 +652,11 @@ module SHAInet
                        end
 
         actual_matrix = run(input_matrix, stealth: true)
+
+        # Ensure we can access the actual matrix elements - sync if needed
+        if actual_matrix.is_a?(CudaMatrix)
+          actual_matrix.sync_from_device!
+        end
 
         sample_error = 0.0
 
@@ -809,6 +824,15 @@ module SHAInet
             end
           end
         end
+
+        # Explicit GPU memory cleanup after processing each sample
+        # Force cleanup of temporary matrices created during forward/backward pass
+        if actual_matrix.is_a?(CudaMatrix)
+          actual_matrix.cleanup!
+        end
+
+        # Also clean up any temporary matrices created during gradient computation
+        GC.collect
       end
 
       learning_rate = current_learning_rate
@@ -826,6 +850,11 @@ module SHAInet
       end
 
       update_transformer_layers if @transformer_layers.any?
+
+      # Force GPU memory cleanup after each batch to prevent accumulation
+      CudaMatrix.force_cleanup_all
+      GPUMemory.force_cleanup_if_needed
+      GC.collect
 
       batch_error
     end

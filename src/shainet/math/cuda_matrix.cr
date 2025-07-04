@@ -1,6 +1,5 @@
 require "./simple_matrix"
 require "../cuda"
-require "./gpu_memory"
 
 module SHAInet
   # Basic GPU matrix wrapper. Allocates device memory when CUDA is
@@ -12,22 +11,99 @@ module SHAInet
     @rows : Int32
     @cols : Int32
     @data : Array(Float64)
+    @gpu_memory_size : UInt64 = 0_u64 # Track our own GPU memory size
+
+    # Global GPU memory tracking
+    @@total_gpu_memory_allocated = 0_u64
+    @@active_matrices = 0
+    @@max_gpu_memory = 16_000_000_000_u64 # 16GB limit (use most of available GPU memory)
+    @@allocation_attempts = 0
+    @@allocation_failures = 0
 
     getter rows, cols
+
+    def self.gpu_memory_stats
+      {
+        active_matrices:       @@active_matrices,
+        total_allocated_bytes: @@total_gpu_memory_allocated,
+        max_allowed_bytes:     @@max_gpu_memory,
+        total_attempts:        @@allocation_attempts,
+        allocation_failures:   @@allocation_failures,
+      }
+    end
+
+    def self.print_detailed_stats
+      Log.info { "GPU Memory Statistics:" }
+      Log.info { "  Total attempts: #{@@allocation_attempts}" }
+      Log.info { "  Failed attempts: #{@@allocation_failures}" }
+      Log.info { "  Success rate: #{@@allocation_attempts > 0 ? (100.0 * (@@allocation_attempts - @@allocation_failures) / @@allocation_attempts).round(2) : 0}%" }
+      Log.info { "  Active matrices: #{@@active_matrices}" }
+      Log.info { "  Total GPU memory: #{@@total_gpu_memory_allocated} bytes (#{(@@total_gpu_memory_allocated / 1024.0 / 1024.0).round(2)} MB)" }
+      Log.info { "  Memory limit: #{@@max_gpu_memory} bytes (#{(@@max_gpu_memory / 1024.0 / 1024.0).round(2)} MB)" }
+      Log.info { "  Usage %: #{(100.0 * @@total_gpu_memory_allocated / @@max_gpu_memory).round(2)}%" }
+      Log.info { "  Average size per matrix: #{@@active_matrices > 0 ? (@@total_gpu_memory_allocated / @@active_matrices).round(2) : 0} bytes" }
+    end
+
+    def self.force_cleanup_all
+      old_count = @@active_matrices
+      old_bytes = @@total_gpu_memory_allocated
+
+      # Multiple rounds of aggressive garbage collection
+      5.times do
+        GC.collect
+        Fiber.yield # Allow finalizers to run
+      end
+
+      Log.info { "GPU Memory cleanup: #{old_count} -> #{@@active_matrices} matrices, #{old_bytes} -> #{@@total_gpu_memory_allocated} bytes (freed #{old_bytes - @@total_gpu_memory_allocated} bytes)" }
+    end
 
     def initialize(@rows : Int32, @cols : Int32, init : Float64 = 0.0)
       @data = Array(Float64).new(@rows * @cols, init)
       @device_ptr = Pointer(Float64).null
 
-      # Only allocate GPU memory if CUDA is fully available
+      # Each CudaMatrix manages its own GPU memory directly
       if CUDA.fully_available?
-        begin
-          ptr = GPUMemory.alloc_buffer(@rows, @cols)
-          @device_ptr = ptr unless ptr.null?
-        rescue ex
-          # If GPU allocation fails, continue with CPU-only mode
-          @device_ptr = Pointer(Float64).null
+        size = @rows * @cols
+        bytes = (size * 8).to_u64
+
+        # Check if we would exceed memory limits or are getting close
+        if @@total_gpu_memory_allocated + bytes > @@max_gpu_memory ||
+           @@total_gpu_memory_allocated > (@@max_gpu_memory * 0.8).to_u64 # 80% threshold
+          Log.warn { "CudaMatrix.initialize: GPU memory usage high (#{@@total_gpu_memory_allocated}/#{@@max_gpu_memory} bytes, #{@@active_matrices} matrices). Forcing cleanup..." }
+          # Force very aggressive cleanup
+          3.times { GC.collect }
+          # Try again after cleanup
+          if @@total_gpu_memory_allocated + bytes > @@max_gpu_memory
+            Log.warn { "CudaMatrix.initialize: Still would exceed limit after cleanup. Using CPU-only mode for #{@rows}x#{@cols}" }
+            return
+          end
         end
+
+        Log.debug { "CudaMatrix.initialize: Attempting direct GPU memory allocation for #{@rows}x#{@cols} matrix (#{bytes} bytes). Current usage: #{@@active_matrices} matrices, #{@@total_gpu_memory_allocated} bytes" }
+        @@allocation_attempts += 1
+        begin
+          ptr = Pointer(Float64).null
+          result = CUDA.malloc(pointerof(ptr).as(Pointer(Pointer(Void))), bytes)
+
+          if result == 0 && !ptr.null?
+            @device_ptr = ptr
+            @gpu_memory_size = bytes
+            @@total_gpu_memory_allocated += bytes
+            @@active_matrices += 1
+            Log.debug { "CudaMatrix.initialize: Successfully allocated #{bytes} bytes GPU memory at #{ptr.address} for #{@rows}x#{@cols}. Total: #{@@active_matrices} matrices, #{@@total_gpu_memory_allocated} bytes" }
+          else
+            @@allocation_failures += 1
+            Log.warn { "CudaMatrix.initialize: Direct GPU allocation failed with result #{result} for #{@rows}x#{@cols}. Total usage: #{@@active_matrices} matrices, #{@@total_gpu_memory_allocated} bytes" }
+            @device_ptr = Pointer(Float64).null
+            @gpu_memory_size = 0_u64
+          end
+        rescue ex
+          Log.error { "CudaMatrix.initialize: GPU allocation exception for #{@rows}x#{@cols}: #{ex}" }
+          @device_ptr = Pointer(Float64).null
+          @gpu_memory_size = 0_u64
+        end
+      else
+        Log.debug { "CudaMatrix.initialize: CUDA not available, using CPU-only mode for #{@rows}x#{@cols}" }
       end
     end
 
@@ -94,20 +170,19 @@ module SHAInet
     end
 
     def finalize
-      # Only finalize if we have a valid device pointer and CUDA is still available
+      # Each CudaMatrix cleans up its own GPU memory directly
       if dptr = @device_ptr
         unless dptr.null?
           begin
-            # Double-check CUDA is still available before releasing
-            if CUDA.fully_available?
-              GPUMemory.release_buffer(dptr, @rows, @cols)
-            else
-              # If CUDA is no longer available, try direct cleanup
-              CUDA.free(dptr.as(Pointer(Void))) rescue nil
-            end
-          rescue
-            # If all cleanup fails, just ignore it - this can happen
-            # when CUDA context is no longer available during shutdown
+            Log.debug { "CudaMatrix.finalize: Freeing #{@gpu_memory_size} bytes GPU memory at #{dptr.address} for #{@rows}x#{@cols}" }
+            CUDA.free(dptr.as(Pointer(Void)))
+            @@total_gpu_memory_allocated -= @gpu_memory_size
+            @@active_matrices -= 1
+            @device_ptr = Pointer(Float64).null
+            @gpu_memory_size = 0_u64
+            Log.debug { "CudaMatrix.finalize: Freed GPU memory. Remaining: #{@@active_matrices} matrices, #{@@total_gpu_memory_allocated} bytes" }
+          rescue ex
+            Log.warn { "CudaMatrix.finalize: Failed to free GPU memory for #{@rows}x#{@cols}: #{ex}" }
           end
         end
       end
@@ -133,18 +208,35 @@ module SHAInet
       # Use GPU kernel for transpose when CUDA is fully available
       if CUDA.fully_available? && (src_ptr = self.device_ptr) && (dst_ptr = result.device_ptr) &&
          !src_ptr.null? && !dst_ptr.null?
-        # Make sure source data is on GPU
-        self.sync_to_device! unless device_dirty?
+        begin
+          # Make sure source data is on GPU
+          self.sync_to_device! unless device_dirty?
 
-        # Use GPU kernel for transpose
-        CUDA.transpose(dst_ptr, src_ptr, @rows, @cols)
+          # Double-check pointers are still valid after sync
+          src_ptr_check = self.device_ptr
+          dst_ptr_check = result.device_ptr
+          return transpose_cpu if !src_ptr_check || src_ptr_check.null? || !dst_ptr_check || dst_ptr_check.null?
 
-        # Mark result as dirty on device
-        result.mark_device_dirty!
-        return result
+          # Use GPU kernel for transpose with error handling
+          CUDA.transpose(dst_ptr, src_ptr, @rows, @cols)
+
+          # Mark result as dirty on device
+          result.mark_device_dirty!
+          return result
+        rescue e
+          # GPU operation failed, fall back to CPU
+          Log.warn { "GPU transpose failed (#{e}), falling back to CPU" }
+          return transpose_cpu
+        end
       end
 
       # CPU fallback
+      transpose_cpu
+    end
+
+    private def transpose_cpu
+      result = CudaMatrix.new(@cols, @rows)
+
       if CUDA.fully_available? && device_dirty?
         # Keep the transpose operation minimal and let GPU handle it later
         # For now, sync to CPU and do CPU transpose, but mark result for GPU
@@ -164,24 +256,31 @@ module SHAInet
       return unless dptr = @device_ptr
       return if dptr.null?
 
+      Log.debug { "CudaMatrix.sync_to_device!: Syncing #{@rows}x#{@cols} matrix to GPU at #{dptr.address}" }
+
       begin
-        buf = Array(Float64).new(@rows*@cols, 0.0)
-        @rows.times do |i|
-          @cols.times do |j|
-            buf[i*@cols + j] = self[i, j] # Row-major order
-          end
+        # Use regular memory for host-device transfer (avoiding pinned memory limits)
+        size = @rows * @cols
+        bytes = (size * 8).to_u64
+
+        # Create a stable buffer that won't be moved by GC
+        buffer = Slice(Float64).new(size) do |i|
+          row = i // @cols
+          col = i % @cols
+          unsafe_get(row, col)
         end
-        bytes = ((@rows*@cols)*8).to_u64
-        result = CUDA.memcpy(dptr.as(Pointer(Void)), buf.to_unsafe.as(Pointer(Void)), bytes, CUDA::MemcpyKind::HostToDevice)
-        if result != 0
-          # Memory copy failed, invalidate device pointer
+
+        copy_result = CUDA.memcpy(dptr.as(Pointer(Void)), buffer.to_unsafe.as(Pointer(Void)), bytes, CUDA::MemcpyKind::HostToDevice)
+
+        if copy_result != 0
+          Log.error { "CudaMatrix.sync_to_device!: GPU memcpy failed with result #{copy_result} for #{@rows}x#{@cols}" }
           @device_ptr = Pointer(Float64).null
         else
-          # Mark GPU data as up-to-date
+          Log.debug { "CudaMatrix.sync_to_device!: Successfully synced #{@rows}x#{@cols} to GPU" }
           mark_device_clean!
         end
-      rescue
-        # If sync fails, invalidate device pointer to prevent future issues
+      rescue ex : Exception
+        Log.error { "CudaMatrix.sync_to_device!: Exception during sync for #{@rows}x#{@cols}: #{ex}" }
         @device_ptr = Pointer(Float64).null
       end
     end
@@ -192,23 +291,24 @@ module SHAInet
       return unless device_dirty? # Only sync if GPU data is newer
 
       begin
-        buf = Array(Float64).new(@rows*@cols, 0.0)
-        bytes = ((@rows*@cols)*8).to_u64
-        result = CUDA.memcpy(buf.to_unsafe.as(Pointer(Void)), dptr.as(Pointer(Void)), bytes, CUDA::MemcpyKind::DeviceToHost)
-        if result == 0
-          @rows.times do |i|
-            @cols.times do |j|
-              self[i, j] = buf[i*@cols + j] # Row-major order
-            end
+        size = @rows * @cols
+        bytes = (size * 8).to_u64
+
+        # Use regular memory copy (avoiding pinned memory limits)
+        buffer = Slice(Float64).new(size, 0.0)
+        copy_result = CUDA.memcpy(buffer.to_unsafe.as(Pointer(Void)), dptr.as(Pointer(Void)), bytes, CUDA::MemcpyKind::DeviceToHost)
+
+        if copy_result == 0
+          size.times do |i|
+            row = i // @cols
+            col = i % @cols
+            unsafe_set(row, col, buffer[i])
           end
-          # Mark CPU data as up-to-date
           mark_device_clean!
         else
-          # Memory copy failed, invalidate device pointer
           @device_ptr = Pointer(Float64).null
         end
       rescue
-        # If sync fails, invalidate device pointer to prevent future issues
         @device_ptr = Pointer(Float64).null
       end
     end
@@ -264,7 +364,11 @@ module SHAInet
 
     def *(other : CudaMatrix)
       raise ArgumentError.new("size mismatch for multiplication") unless @cols == other.rows
+
+      Log.debug { "CudaMatrix.*: Multiplying #{@rows}x#{@cols} * #{other.rows}x#{other.cols}" }
+
       if CUDA.fully_available? && (ptr_a = self.device_ptr) && (ptr_b = other.device_ptr) && !ptr_a.null? && !ptr_b.null?
+        Log.debug { "CudaMatrix.*: Using GPU path for matrix multiplication" }
         # Ensure both operands have up-to-date GPU data
         self.sync_to_device! unless device_dirty?
         other.sync_to_device! unless other.device_dirty?
@@ -281,9 +385,11 @@ module SHAInet
 
         # Mark result as having newer GPU data
         result.mark_device_dirty!
+        Log.debug { "CudaMatrix.*: GPU matrix multiplication completed successfully" }
         result
       else
         # CPU fallback
+        Log.warn { "CudaMatrix.*: Falling back to CPU for matrix multiplication - CUDA.fully_available?=#{CUDA.fully_available?}, self.device_ptr=#{device_ptr ? "valid" : "null"}, other.device_ptr=#{other.device_ptr ? "valid" : "null"}" }
         raise ArgumentError.new("size mismatch for multiplication") unless @cols == other.rows
         result = CudaMatrix.new(@rows, other.cols)
         @rows.times do |i|
@@ -526,6 +632,20 @@ module SHAInet
       Array.new(@rows) do |i|
         Array.new(@cols) do |j|
           self[i, j]
+        end
+      end
+    end
+
+    # Force cleanup of GPU memory for this matrix
+    def cleanup!
+      if dptr = @device_ptr
+        unless dptr.null?
+          Log.debug { "CudaMatrix.cleanup!: Explicitly freeing #{@gpu_memory_size} bytes GPU memory at #{dptr.address} for #{@rows}x#{@cols}" }
+          CUDA.free(dptr.as(Pointer(Void)))
+          @@total_gpu_memory_allocated -= @gpu_memory_size
+          @@active_matrices -= 1
+          @device_ptr = Pointer(Float64).null
+          @gpu_memory_size = 0_u64
         end
       end
     end

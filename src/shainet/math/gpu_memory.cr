@@ -9,6 +9,10 @@ module SHAInet
     @@pool = Hash(Int32, Array(Pointer(Float64))).new { |h, k| h[k] = [] of Pointer(Float64) }
     @@pool_limit : Int32 = 2 # Very small pool to reduce memory pressure
 
+    # Debug counter to track active GPU allocations
+    @@active_allocations = 0
+    @@total_allocated_bytes = 0_u64
+
     # Configure the maximum number of cached buffers
     def pool_limit
       @@pool_limit
@@ -31,7 +35,7 @@ module SHAInet
       end
     end
 
-    # Allocate device memory, reusing cached buffers when possible
+    # Allocate device memory, no longer using pools
     def alloc_buffer(rows : Int32, cols : Int32)
       return Pointer(Float64).null unless CUDA.fully_available?
 
@@ -39,25 +43,28 @@ module SHAInet
 
       # Sanity check - prevent excessive memory allocation
       if size <= 0 || size > 100_000_000 # 100M elements = ~800MB
+        Log.warn { "GPUMemory.alloc_buffer: Invalid size #{size} for #{rows}x#{cols}" }
         return Pointer(Float64).null
       end
 
-      bucket = @@pool[size]?
-      if bucket && !bucket.empty?
-        ptr = bucket.pop
-        return ptr unless ptr.null?
-      end
-
+      # NO MORE POOLING - always allocate fresh
       begin
         ptr = Pointer(Float64).null
         bytes = ((size) * 8).to_u64
+        Log.debug { "GPUMemory.alloc_buffer: Attempting fresh allocation of #{bytes} bytes for #{rows}x#{cols}" }
         res = CUDA.malloc(pointerof(ptr).as(Pointer(Pointer(Void))), bytes)
+        Log.debug { "GPUMemory.alloc_buffer: CUDA.malloc returned #{res}, ptr=#{ptr.null? ? "null" : "valid"}" }
         if res == 0 && !ptr.null?
+          @@active_allocations += 1
+          @@total_allocated_bytes += bytes
+          Log.debug { "GPUMemory.alloc_buffer: Successful allocation for #{rows}x#{cols} (#{@@active_allocations} active, #{@@total_allocated_bytes} total bytes)" }
           ptr
         else
+          Log.warn { "GPUMemory.alloc_buffer: Failed allocation for #{rows}x#{cols} - res=#{res}, ptr=#{ptr.null? ? "null" : "valid"} (#{@@active_allocations} active, #{@@total_allocated_bytes} total bytes)" }
           Pointer(Float64).null
         end
-      rescue
+      rescue e
+        Log.error { "GPUMemory.alloc_buffer: Exception during allocation for #{rows}x#{cols}: #{e}" }
         Pointer(Float64).null
       end
     end
@@ -66,27 +73,38 @@ module SHAInet
     def release_buffer(ptr : Pointer(Float64), rows : Int32, cols : Int32)
       return if ptr.null?
       size = rows * cols
-      bucket = @@pool[size]?
-      if bucket.nil?
-        bucket = [] of Pointer(Float64)
-        @@pool[size] = bucket
-      end
-      arr = bucket.not_nil!
-      if arr.size < @@pool_limit
-        arr << ptr
-      else
-        CUDA.free(ptr.as(Pointer(Void)))
-      end
+      bytes = size * 8
+
+      # Always decrement counters when buffer is released
+      @@active_allocations -= 1
+      @@total_allocated_bytes -= bytes
+
+      # DISABLE POOLING - always free immediately to prevent memory accumulation
+      CUDA.free(ptr.as(Pointer(Void)))
+      Log.debug { "GPUMemory.release_buffer: Immediately freed buffer for #{rows}x#{cols} (#{@@active_allocations} active, #{@@total_allocated_bytes} total bytes)" }
     end
 
-    # Free all cached buffers
+    # Free all cached buffers and reset counters
     def cleanup
+      total_freed = 0
       @@pool.each_value do |arr|
         arr.each do |ptr|
           CUDA.free(ptr.as(Pointer(Void)))
+          total_freed += 1
         end
       end
       @@pool.clear
+      Log.debug { "GPUMemory.cleanup: Freed #{total_freed} cached buffers, resetting counters" }
+      @@active_allocations = 0
+      @@total_allocated_bytes = 0_u64
+    end
+
+    # Force cleanup of pooled buffers if memory usage is high
+    def force_cleanup_if_needed
+      if @@active_allocations > 100 || @@total_allocated_bytes > 10_000_000 # 10MB
+        Log.warn { "GPUMemory: High memory usage detected (#{@@active_allocations} active, #{@@total_allocated_bytes} bytes), forcing cleanup" }
+        cleanup
+      end
     end
 
     # Convert SimpleMatrix to CudaMatrix if CUDA is available and input is not already CudaMatrix

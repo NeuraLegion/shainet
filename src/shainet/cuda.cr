@@ -12,6 +12,8 @@ module SHAInet
       fun cudaMalloc(ptr : Pointer(Pointer(Void)), size : LibC::SizeT) : Int32
       fun cudaFree(ptr : Pointer(Void)) : Int32
       fun cudaMemcpy(dst : Pointer(Void), src : Pointer(Void), count : LibC::SizeT, kind : Int32) : Int32
+      fun cudaMallocHost(ptr : Pointer(Pointer(Void)), size : LibC::SizeT) : Int32
+      fun cudaFreeHost(ptr : Pointer(Void)) : Int32
     end
 
     @[Link("cublas")]
@@ -142,7 +144,10 @@ module SHAInet
     end
 
     def malloc(ptr : Pointer(Pointer(Void)), size : LibC::SizeT)
-      LibCUDARuntime.cudaMalloc(ptr, size)
+      Log.debug { "CUDA.malloc: Attempting allocation of #{size} bytes" }
+      result = LibCUDARuntime.cudaMalloc(ptr, size)
+      Log.debug { "CUDA.malloc: cudaMalloc returned #{result}, ptr=#{ptr.value.null? ? "null" : "valid"}" }
+      result
     end
 
     def free(ptr : Pointer(Void))
@@ -151,6 +156,17 @@ module SHAInet
 
     def memcpy(dst : Pointer(Void), src : Pointer(Void), bytes : LibC::SizeT, kind : MemcpyKind)
       LibCUDARuntime.cudaMemcpy(dst, src, bytes, kind.value)
+    end
+
+    def malloc_host(ptr : Pointer(Pointer(Void)), size : LibC::SizeT)
+      Log.debug { "CUDA.malloc_host: Attempting pinned allocation of #{size} bytes" }
+      result = LibCUDARuntime.cudaMallocHost(ptr, size)
+      Log.debug { "CUDA.malloc_host: cudaMallocHost returned #{result}, ptr=#{ptr.value.null? ? "null" : "valid"}" }
+      result
+    end
+
+    def free_host(ptr : Pointer(Void))
+      LibCUDARuntime.cudaFreeHost(ptr)
     end
 
     # Handle pool to avoid creating/destroying handles frequently
@@ -252,6 +268,12 @@ module SHAInet
     @@zero_matrix_proc : Proc(Pointer(Float64), Int32, Void)? = nil
 
     def softmax_rows(dst : Pointer(Float64), src : Pointer(Float64), rows : Int32, cols : Int32)
+      # Validate inputs
+      if dst.null? || src.null? || rows <= 0 || cols <= 0
+        Log.error { "CUDA softmax_rows: invalid parameters - dst: #{dst.null? ? "null" : "valid"}, src: #{src.null? ? "null" : "valid"}, rows: #{rows}, cols: #{cols}" }
+        return
+      end
+
       unless fn = @@softmax_rows_proc
         if @@kernels_handle.null?
           @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
@@ -265,7 +287,13 @@ module SHAInet
         end
       end
       raise "CUDA kernels not available" unless fn
-      fn.call(dst, src, rows, cols)
+
+      begin
+        fn.call(dst, src, rows, cols)
+      rescue e
+        Log.error { "CUDA Error in softmax_rows: #{e}" }
+        raise e
+      end
     end
 
     def dropout(dst : Pointer(Float64), src : Pointer(Float64), rows : Int32, cols : Int32, drop_p : Float64, seed : UInt64)
@@ -303,6 +331,12 @@ module SHAInet
     end
 
     def slice_cols(dst : Pointer(Float64), src : Pointer(Float64), rows : Int32, src_cols : Int32, start_col : Int32, len : Int32)
+      # Validate inputs
+      if dst.null? || src.null? || rows <= 0 || src_cols <= 0 || len <= 0 || start_col < 0 || (start_col + len) > src_cols
+        Log.error { "CUDA slice_cols: invalid parameters - dst: #{dst.null? ? "null" : "valid"}, src: #{src.null? ? "null" : "valid"}, rows: #{rows}, src_cols: #{src_cols}, start_col: #{start_col}, len: #{len}" }
+        return
+      end
+
       unless fn = @@slice_cols_proc
         if @@kernels_handle.null?
           @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
@@ -316,10 +350,22 @@ module SHAInet
         end
       end
       raise "CUDA kernels not available" unless fn
-      fn.call(dst, src, rows, src_cols, start_col, len)
+
+      begin
+        fn.call(dst, src, rows, src_cols, start_col, len)
+      rescue e
+        Log.error { "CUDA Error in slice_cols: #{e}" }
+        raise e
+      end
     end
 
     def set_cols(dst : Pointer(Float64), src : Pointer(Float64), rows : Int32, dst_cols : Int32, start_col : Int32, len : Int32)
+      # Validate inputs
+      if dst.null? || src.null? || rows <= 0 || dst_cols <= 0 || len <= 0 || start_col < 0 || (start_col + len) > dst_cols
+        Log.error { "CUDA set_cols: invalid parameters - dst: #{dst.null? ? "null" : "valid"}, src: #{src.null? ? "null" : "valid"}, rows: #{rows}, dst_cols: #{dst_cols}, start_col: #{start_col}, len: #{len}" }
+        return
+      end
+
       unless fn = @@set_cols_proc
         if @@kernels_handle.null?
           @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
@@ -333,7 +379,13 @@ module SHAInet
         end
       end
       raise "CUDA kernels not available" unless fn
-      fn.call(dst, src, rows, dst_cols, start_col, len)
+
+      begin
+        fn.call(dst, src, rows, dst_cols, start_col, len)
+      rescue e
+        Log.error { "CUDA Error in set_cols: #{e}" }
+        raise e
+      end
     end
 
     def row_mean_var(src : Pointer(Float64), mean : Pointer(Float64), var : Pointer(Float64), rows : Int32, cols : Int32)
@@ -425,6 +477,15 @@ module SHAInet
     end
 
     def transpose(output : Pointer(Float64), input : Pointer(Float64), rows : Int32, cols : Int32)
+      # Validate inputs
+      if output.null? || input.null? || rows <= 0 || cols <= 0
+        Log.error { "CUDA transpose: invalid parameters - output: #{output.null? ? "null" : "valid"}, input: #{input.null? ? "null" : "valid"}, rows: #{rows}, cols: #{cols}" }
+        return
+      end
+
+      # Add detailed logging for transpose operations
+      Log.debug { "CUDA transpose: output=#{output.address}, input=#{input.address}, rows=#{rows}, cols=#{cols}, size=#{rows*cols}" }
+
       unless fn = @@transpose_proc
         if @@kernels_handle.null?
           @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
@@ -438,7 +499,16 @@ module SHAInet
         end
       end
       raise "CUDA kernels not available" unless fn
-      fn.call(output, input, rows, cols)
+
+      begin
+        fn.call(output, input, rows, cols)
+        Log.debug { "CUDA transpose completed successfully" }
+      rescue e
+        Log.error { "CUDA Error in transpose: #{e}, output=#{output.address}, input=#{input.address}, rows=#{rows}, cols=#{cols}" }
+        Log.warn { "Falling back to CPU transpose due to GPU error" }
+        # GPU operation failed - let the caller handle the fallback
+        raise e
+      end
     end
 
     def sigmoid_forward(activations : Pointer(Float64), derivatives : Pointer(Float64), linear : Pointer(Float64), size : Int32)
@@ -493,6 +563,15 @@ module SHAInet
     end
 
     def zero_matrix(matrix : Pointer(Float64), size : Int32)
+      # Validate inputs
+      if matrix.null? || size <= 0
+        Log.error { "CUDA zero_matrix: invalid parameters - matrix: #{matrix.null? ? "null" : "valid"}, size: #{size}" }
+        return
+      end
+
+      # Add detailed logging for zero_matrix operations
+      Log.debug { "CUDA zero_matrix: matrix=#{matrix.address}, size=#{size}" }
+
       unless fn = @@zero_matrix_proc
         if @@kernels_handle.null?
           @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
@@ -506,7 +585,14 @@ module SHAInet
         end
       end
       raise "CUDA kernels not available" unless fn
-      fn.call(matrix, size)
+
+      begin
+        fn.call(matrix, size)
+        Log.debug { "CUDA zero_matrix completed successfully" }
+      rescue e
+        Log.error { "CUDA Error in zero_matrix: #{e}, matrix=#{matrix.address}, size=#{size}" }
+        raise e
+      end
     end
 
     # In-place element-wise ReLU on GPU memory. This fallback implementation
@@ -524,18 +610,18 @@ module SHAInet
       memcpy(ptr.as(Pointer(Void)), host.to_unsafe.as(Pointer(Void)), bytes, MemcpyKind::HostToDevice)
     end
 
-    # Add a bias row vector to each row of a matrix in GPU memory. Uses the
-    # cuBLAS GER routine for the rank-1 update.
+    # Add a bias row vector to each row of a matrix in GPU memory.
+    # Uses multiple AXPY operations instead of DGER to avoid row-major/column-major issues.
     def add_bias(mat : Pointer(Float64), bias : Pointer(Float64), rows : Int32, cols : Int32)
       handle = create_handle
-      ones_host = Array(Float64).new(rows, 1.0)
-      ones_dev = Pointer(Float64).null
-      bytes = (rows * 8).to_u64
-      malloc(pointerof(ones_dev).as(Pointer(Pointer(Void))), bytes)
-      memcpy(ones_dev.as(Pointer(Void)), ones_host.to_unsafe.as(Pointer(Void)), bytes, MemcpyKind::HostToDevice)
-      ger(handle, ones_dev, bias, mat, rows, cols, cols)
+
+      # Add bias to each row using AXPY: row_i += 1.0 * bias
+      rows.times do |i|
+        row_start = mat + (i * cols) # Pointer to start of row i
+        axpy(handle, 1.0, bias, row_start, cols)
+      end
+
       destroy_handle(handle)
-      free(ones_dev.as(Pointer(Void)))
     end
 
     # Accumulate the sum over rows of a matrix into an existing row vector.
@@ -583,6 +669,68 @@ module SHAInet
     # Check if both CUDA runtime and custom kernels are available
     def fully_available?
       available? && kernels_available?
+    end
+
+    # ReLU backward kernel
+    @@relu_backward_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Void)? = nil
+
+    def relu_backward(dst : Pointer(Float64), input : Pointer(Float64), grad : Pointer(Float64), size : Int32)
+      if dst.null? || input.null? || grad.null? || size <= 0
+        Log.error { "CUDA relu_backward: invalid parameters - dst: #{dst.null? ? "null" : "valid"}, input: #{input.null? ? "null" : "valid"}, grad: #{grad.null? ? "null" : "valid"}, size: #{size}" }
+        return
+      end
+
+      unless fn = @@relu_backward_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "relu_backward")
+          unless sym.null?
+            @@relu_backward_proc = Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@relu_backward_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+
+      begin
+        fn.call(dst, input, grad, size)
+      rescue e
+        Log.error { "CUDA Error in relu_backward: #{e}" }
+        raise e
+      end
+    end
+
+    # Softmax backward kernel
+    @@softmax_backward_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Int32, Void)? = nil
+
+    def softmax_backward(dst : Pointer(Float64), grad : Pointer(Float64), softmax_out : Pointer(Float64), rows : Int32, cols : Int32)
+      if dst.null? || grad.null? || softmax_out.null? || rows <= 0 || cols <= 0
+        Log.error { "CUDA softmax_backward: invalid parameters - dst: #{dst.null? ? "null" : "valid"}, grad: #{grad.null? ? "null" : "valid"}, softmax_out: #{softmax_out.null? ? "null" : "valid"}, rows: #{rows}, cols: #{cols}" }
+        return
+      end
+
+      unless fn = @@softmax_backward_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "softmax_backward")
+          unless sym.null?
+            @@softmax_backward_proc = Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@softmax_backward_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+
+      begin
+        fn.call(dst, grad, softmax_out, rows, cols)
+      rescue e
+        Log.error { "CUDA Error in softmax_backward: #{e}" }
+        raise e
+      end
     end
   end
 end
