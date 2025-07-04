@@ -851,11 +851,6 @@ module SHAInet
 
       update_transformer_layers if @transformer_layers.any?
 
-      # Force GPU memory cleanup after each batch to prevent accumulation
-      CudaMatrix.force_cleanup_all
-      GPUMemory.force_cleanup_if_needed
-      GC.collect
-
       batch_error
     end
 
@@ -1031,6 +1026,44 @@ module SHAInet
         end
 
         raise ex
+      end
+    end
+
+    # Optimized helper to extract tokens from GPU matrix without elementwise access
+    # Uses GPU-to-CPU batch transfer instead of per-element sync
+    private def extract_tokens_gpu(matrix : CudaMatrix) : Array(Int32)
+      # Sync entire matrix from GPU in one operation instead of elementwise access
+      matrix.sync_from_device! if matrix.device_dirty?
+      # Extract tokens as a batch operation from column 0
+      Array.new(matrix.rows) { |r| matrix.unsafe_get(r, 0).to_i }
+    end
+
+    # Optimized matrix creation from arrays using batch operations
+    private def create_matrix_from_arrays(data : Array(Array(Float64)), use_gpu : Bool = true) : SimpleMatrix | CudaMatrix
+      return SimpleMatrix.from_a(data) unless use_gpu && CUDA.fully_available?
+
+      # Create GPU matrix directly from array data in batch
+      rows = data.size
+      cols = data[0].size
+      result = CudaMatrix.new(rows, cols)
+
+      # Copy data in batch instead of elementwise
+      flat_data = data.flatten
+      result.raw_data.copy_from(flat_data.to_unsafe, flat_data.size)
+      result.sync_to_device!
+      result
+    end
+
+    # Optimized matrix population from single array using batch operations
+    private def populate_matrix_batch(matrix : CudaMatrix | SimpleMatrix, data : Array(Float64), row : Int32)
+      if matrix.is_a?(CudaMatrix)
+        # Use raw data access for batch copy instead of elementwise assignment
+        start_idx = row * matrix.cols
+        matrix.raw_data.to_slice[start_idx, data.size].copy_from(data.to_unsafe, data.size)
+        matrix.sync_to_device!
+      else
+        # For SimpleMatrix, still do elementwise but at least batch the operation
+        data.each_with_index { |val, col| matrix[row, col] = val }
       end
     end
   end

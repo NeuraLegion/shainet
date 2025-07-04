@@ -48,62 +48,51 @@ module SHAInet
       old_count = @@active_matrices
       old_bytes = @@total_gpu_memory_allocated
 
-      # Multiple rounds of aggressive garbage collection
-      5.times do
-        GC.collect
-        Fiber.yield # Allow finalizers to run
-      end
+      # Single garbage collection to allow finalizers to run
+      GC.collect
+      Fiber.yield # Allow finalizers to run
 
-      Log.info { "GPU Memory cleanup: #{old_count} -> #{@@active_matrices} matrices, #{old_bytes} -> #{@@total_gpu_memory_allocated} bytes (freed #{old_bytes - @@total_gpu_memory_allocated} bytes)" }
+      Log.debug { "GPU Memory cleanup: #{old_count} -> #{@@active_matrices} matrices, #{old_bytes} -> #{@@total_gpu_memory_allocated} bytes (freed #{old_bytes - @@total_gpu_memory_allocated} bytes)" }
     end
 
     def initialize(@rows : Int32, @cols : Int32, init : Float64 = 0.0)
       @data = Array(Float64).new(@rows * @cols, init)
       @device_ptr = Pointer(Float64).null
 
-      # Each CudaMatrix manages its own GPU memory directly
-      if CUDA.fully_available?
-        size = @rows * @cols
-        bytes = (size * 8).to_u64
+      # CudaMatrix requires CUDA to be available
+      raise RuntimeError.new("CudaMatrix requires CUDA to be available") unless CUDA.fully_available?
 
-        # Check if we would exceed memory limits or are getting close
-        if @@total_gpu_memory_allocated + bytes > @@max_gpu_memory ||
-           @@total_gpu_memory_allocated > (@@max_gpu_memory * 0.8).to_u64 # 80% threshold
-          Log.warn { "CudaMatrix.initialize: GPU memory usage high (#{@@total_gpu_memory_allocated}/#{@@max_gpu_memory} bytes, #{@@active_matrices} matrices). Forcing cleanup..." }
-          # Force very aggressive cleanup
-          3.times { GC.collect }
-          # Try again after cleanup
-          if @@total_gpu_memory_allocated + bytes > @@max_gpu_memory
-            Log.warn { "CudaMatrix.initialize: Still would exceed limit after cleanup. Using CPU-only mode for #{@rows}x#{@cols}" }
-            return
-          end
+      size = @rows * @cols
+      bytes = (size * 8).to_u64
+
+      # Check if we would exceed memory limits or are getting close
+      if @@total_gpu_memory_allocated + bytes > @@max_gpu_memory ||
+         @@total_gpu_memory_allocated > (@@max_gpu_memory * 0.8).to_u64 # 80% threshold
+        Log.warn { "CudaMatrix.initialize: GPU memory usage high (#{@@total_gpu_memory_allocated}/#{@@max_gpu_memory} bytes, #{@@active_matrices} matrices). Forcing cleanup..." }
+        # Force cleanup
+        GC.collect
+        # Try again after cleanup
+        if @@total_gpu_memory_allocated + bytes > @@max_gpu_memory
+          raise RuntimeError.new("GPU memory limit exceeded: would use #{@@total_gpu_memory_allocated + bytes}/#{@@max_gpu_memory} bytes")
         end
+      end
 
-        Log.debug { "CudaMatrix.initialize: Attempting direct GPU memory allocation for #{@rows}x#{@cols} matrix (#{bytes} bytes). Current usage: #{@@active_matrices} matrices, #{@@total_gpu_memory_allocated} bytes" }
-        @@allocation_attempts += 1
-        begin
-          ptr = Pointer(Float64).null
-          result = CUDA.malloc(pointerof(ptr).as(Pointer(Pointer(Void))), bytes)
+      Log.debug { "CudaMatrix.initialize: Attempting GPU memory allocation for #{@rows}x#{@cols} matrix (#{bytes} bytes). Current usage: #{@@active_matrices} matrices, #{@@total_gpu_memory_allocated} bytes" }
+      @@allocation_attempts += 1
 
-          if result == 0 && !ptr.null?
-            @device_ptr = ptr
-            @gpu_memory_size = bytes
-            @@total_gpu_memory_allocated += bytes
-            @@active_matrices += 1
-            Log.debug { "CudaMatrix.initialize: Successfully allocated #{bytes} bytes GPU memory at #{ptr.address} for #{@rows}x#{@cols}. Total: #{@@active_matrices} matrices, #{@@total_gpu_memory_allocated} bytes" }
-          else
-            @@allocation_failures += 1
-            Log.warn { "CudaMatrix.initialize: Direct GPU allocation failed with result #{result} for #{@rows}x#{@cols}. Total usage: #{@@active_matrices} matrices, #{@@total_gpu_memory_allocated} bytes" }
-            @device_ptr = Pointer(Float64).null
-            @gpu_memory_size = 0_u64
-          end
-        rescue ex
-          Log.error { "CudaMatrix.initialize: GPU allocation exception for #{@rows}x#{@cols}: #{ex}" }
-          @device_ptr = Pointer(Float64).null
-          @gpu_memory_size = 0_u64
-        end
+      ptr = Pointer(Float64).null
+      result = CUDA.malloc(pointerof(ptr).as(Pointer(Pointer(Void))), bytes)
+
+      if result == 0 && !ptr.null?
+        @device_ptr = ptr
+        @gpu_memory_size = bytes
+        @@total_gpu_memory_allocated += bytes
+        @@active_matrices += 1
+        Log.debug { "CudaMatrix.initialize: Successfully allocated #{bytes} bytes GPU memory at #{ptr.address} for #{@rows}x#{@cols}. Total: #{@@active_matrices} matrices, #{@@total_gpu_memory_allocated} bytes" }
       else
-        Log.debug { "CudaMatrix.initialize: CUDA not available, using CPU-only mode for #{@rows}x#{@cols}" }
+        @@allocation_failures += 1
+        Log.error { "CudaMatrix.initialize: GPU allocation failed with result #{result} for #{@rows}x#{@cols}. Total usage: #{@@active_matrices} matrices, #{@@total_gpu_memory_allocated} bytes" }
+        raise RuntimeError.new("Failed to allocate #{bytes} bytes of GPU memory (CUDA error: #{result})")
       end
     end
 
@@ -137,14 +126,14 @@ module SHAInet
           m.unsafe_set(i, j, val.to_f64)
         end
       end
-      m.sync_to_device! if CUDA.fully_available?
+      m.sync_to_device!
       m
     end
 
     def self.zeros(rows : Int32, cols : Int32)
       m = new(rows, cols)
       # Initial data is already zero, just sync to GPU
-      m.sync_to_device! if CUDA.fully_available?
+      m.sync_to_device!
       m
     end
 
@@ -155,7 +144,7 @@ module SHAInet
           m.unsafe_set(i, j, 1.0)
         end
       end
-      m.sync_to_device! if CUDA.fully_available?
+      m.sync_to_device!
       m
     end
 
@@ -188,67 +177,28 @@ module SHAInet
       end
     end
 
-    def self.from_a(array : Array(Array(GenNum)))
-      m = new(array.size, array.first.size)
-      array.each_with_index do |row, i|
-        row.each_with_index do |val, j|
-          m.unsafe_set(i, j, val.to_f64)
-        end
-      end
-      m.sync_to_device! if CUDA.fully_available?
-      m
-    end
-
     # Return the transposed matrix. When CUDA is available the returned
     # instance keeps the device buffer in sync so that further GPU
     # operations can be used without additional copies.
     def transpose
       result = CudaMatrix.new(@cols, @rows)
 
-      # Use GPU kernel for transpose when CUDA is fully available
-      if CUDA.fully_available? && (src_ptr = self.device_ptr) && (dst_ptr = result.device_ptr) &&
-         !src_ptr.null? && !dst_ptr.null?
-        begin
-          # Make sure source data is on GPU
-          self.sync_to_device! unless device_dirty?
+      # Use GPU kernel for transpose - fail fast if not available
+      raise RuntimeError.new("GPU transpose requires valid device pointers") unless (src_ptr = self.device_ptr) && (dst_ptr = result.device_ptr) && !src_ptr.null? && !dst_ptr.null?
 
-          # Double-check pointers are still valid after sync
-          src_ptr_check = self.device_ptr
-          dst_ptr_check = result.device_ptr
-          return transpose_cpu if !src_ptr_check || src_ptr_check.null? || !dst_ptr_check || dst_ptr_check.null?
+      # Make sure source data is on GPU
+      self.sync_to_device! unless device_dirty?
 
-          # Use GPU kernel for transpose with error handling
-          CUDA.transpose(dst_ptr, src_ptr, @rows, @cols)
+      # Double-check pointers are still valid after sync
+      src_ptr_check = self.device_ptr
+      dst_ptr_check = result.device_ptr
+      raise RuntimeError.new("Device pointers became invalid after sync") if !src_ptr_check || src_ptr_check.null? || !dst_ptr_check || dst_ptr_check.null?
 
-          # Mark result as dirty on device
-          result.mark_device_dirty!
-          return result
-        rescue e
-          # GPU operation failed, fall back to CPU
-          Log.warn { "GPU transpose failed (#{e}), falling back to CPU" }
-          return transpose_cpu
-        end
-      end
+      # Use GPU kernel for transpose
+      CUDA.transpose(dst_ptr, src_ptr, @rows, @cols)
 
-      # CPU fallback
-      transpose_cpu
-    end
-
-    private def transpose_cpu
-      result = CudaMatrix.new(@cols, @rows)
-
-      if CUDA.fully_available? && device_dirty?
-        # Keep the transpose operation minimal and let GPU handle it later
-        # For now, sync to CPU and do CPU transpose, but mark result for GPU
-        sync_from_device!
-      end
-
-      @rows.times do |i|
-        @cols.times do |j|
-          result.unsafe_set(j, i, unsafe_get(i, j))
-        end
-      end
-      result.sync_to_device! if CUDA.fully_available?
+      # Mark result as dirty on device
+      result.mark_device_dirty!
       result
     end
 
@@ -315,291 +265,201 @@ module SHAInet
 
     def slice_cols(start_col : Int32, length : Int32)
       result = CudaMatrix.new(@rows, length)
-      if CUDA.fully_available? && (sptr = self.device_ptr) && (dptr = result.device_ptr) && !sptr.null? && !dptr.null?
-        begin
-          # Ensure source has up-to-date GPU data
-          self.sync_to_device! unless device_dirty?
+      raise RuntimeError.new("GPU slice_cols requires valid device pointers") unless (sptr = self.device_ptr) && (dptr = result.device_ptr) && !sptr.null? && !dptr.null?
 
-          CUDA.slice_cols(dptr, sptr, @rows, @cols, start_col, length)
+      # Ensure source has up-to-date GPU data
+      self.sync_to_device! unless device_dirty?
 
-          # Mark result as having newer GPU data
-          result.mark_device_dirty!
-          return result
-        rescue
-        end
-      end
-      @rows.times do |i|
-        length.times do |j|
-          result.unsafe_set(i, j, self[i, start_col + j])
-        end
-      end
-      result.sync_to_device! if CUDA.fully_available?
+      CUDA.slice_cols(dptr, sptr, @rows, @cols, start_col, length)
+
+      # Mark result as having newer GPU data
+      result.mark_device_dirty!
       result
     end
 
     def set_cols!(start_col : Int32, other : CudaMatrix)
       raise ArgumentError.new("row mismatch") unless other.rows == @rows
-      if CUDA.fully_available? && (dptr = self.device_ptr) && (sptr = other.device_ptr) && !dptr.null? && !sptr.null?
-        begin
-          # Ensure both matrices have up-to-date GPU data
-          self.sync_to_device! unless device_dirty?
-          other.sync_to_device! unless other.device_dirty?
+      raise RuntimeError.new("GPU set_cols! requires valid device pointers") unless (dptr = self.device_ptr) && (sptr = other.device_ptr) && !dptr.null? && !sptr.null?
 
-          CUDA.set_cols(dptr, sptr, @rows, @cols, start_col, other.cols)
+      # Ensure both matrices have up-to-date GPU data
+      self.sync_to_device! unless device_dirty?
+      other.sync_to_device! unless other.device_dirty?
 
-          # Mark self as having newer GPU data
-          mark_device_dirty!
-          return self
-        rescue
-        end
-      end
-      other.cols.times do |j|
-        @rows.times do |i|
-          self.unsafe_set(i, start_col + j, other[i, j])
-        end
-      end
-      self.sync_to_device! if CUDA.fully_available?
+      CUDA.set_cols(dptr, sptr, @rows, @cols, start_col, other.cols)
+
+      # Mark self as having newer GPU data
+      mark_device_dirty!
       self
     end
 
     def *(other : CudaMatrix)
       raise ArgumentError.new("size mismatch for multiplication") unless @cols == other.rows
+      raise RuntimeError.new("GPU multiplication requires valid device pointers") unless (ptr_a = self.device_ptr) && (ptr_b = other.device_ptr) && !ptr_a.null? && !ptr_b.null?
 
       Log.debug { "CudaMatrix.*: Multiplying #{@rows}x#{@cols} * #{other.rows}x#{other.cols}" }
 
-      if CUDA.fully_available? && (ptr_a = self.device_ptr) && (ptr_b = other.device_ptr) && !ptr_a.null? && !ptr_b.null?
-        Log.debug { "CudaMatrix.*: Using GPU path for matrix multiplication" }
-        # Ensure both operands have up-to-date GPU data
-        self.sync_to_device! unless device_dirty?
-        other.sync_to_device! unless other.device_dirty?
+      # Ensure both operands have up-to-date GPU data
+      self.sync_to_device! unless device_dirty?
+      other.sync_to_device! unless other.device_dirty?
 
-        handle = CUDA.create_handle
-        result = CudaMatrix.new(@rows, other.cols)
-        # CUBLAS assumes column-major, but we use row-major
-        # To compute C = A * B in row-major, we compute C^T = B^T * A^T
-        # So we swap the order: gemm(B, A, C) with dimensions swapped
-        CUDA.gemm(handle, ptr_b, ptr_a, result.device_ptr.not_nil!,
-          other.cols, @rows, other.rows,
-          other.cols, @cols, result.cols)
-        CUDA.destroy_handle(handle)
+      handle = CUDA.create_handle
+      result = CudaMatrix.new(@rows, other.cols)
+      raise RuntimeError.new("Failed to allocate result matrix on GPU") unless result.device_ptr && !result.device_ptr.not_nil!.null?
 
-        # Mark result as having newer GPU data
-        result.mark_device_dirty!
-        Log.debug { "CudaMatrix.*: GPU matrix multiplication completed successfully" }
-        result
-      else
-        # CPU fallback
-        Log.warn { "CudaMatrix.*: Falling back to CPU for matrix multiplication - CUDA.fully_available?=#{CUDA.fully_available?}, self.device_ptr=#{device_ptr ? "valid" : "null"}, other.device_ptr=#{other.device_ptr ? "valid" : "null"}" }
-        raise ArgumentError.new("size mismatch for multiplication") unless @cols == other.rows
-        result = CudaMatrix.new(@rows, other.cols)
-        @rows.times do |i|
-          other.cols.times do |j|
-            sum = 0.0
-            @cols.times do |k|
-              sum += self[i, k] * other[k, j]
-            end
-            result.unsafe_set(i, j, sum)
-          end
-        end
-        result.sync_to_device! if CUDA.fully_available?
-        result
-      end
+      # CUBLAS assumes column-major, but we use row-major
+      # To compute C = A * B in row-major, we compute C^T = B^T * A^T
+      # So we swap the order: gemm(B, A, C) with dimensions swapped
+      CUDA.gemm(handle, ptr_b, ptr_a, result.device_ptr.not_nil!,
+        other.cols, @rows, other.rows,
+        other.cols, @cols, result.cols)
+      CUDA.destroy_handle(handle)
+
+      # Mark result as having newer GPU data
+      result.mark_device_dirty!
+      Log.debug { "CudaMatrix.*: GPU matrix multiplication completed successfully" }
+      result
     end
 
     # Clean CudaMatrix + CudaMatrix addition
     def +(other : CudaMatrix) : CudaMatrix
       raise ArgumentError.new("size mismatch") unless @rows == other.rows && @cols == other.cols
-      if CUDA.fully_available? && (ptr_a = self.device_ptr) && (ptr_b = other.device_ptr) && !ptr_a.null? && !ptr_b.null?
-        # Ensure both operands have up-to-date GPU data
-        self.sync_to_device! unless device_dirty?
-        other.sync_to_device! unless other.device_dirty?
+      raise RuntimeError.new("GPU addition requires valid device pointers") unless (ptr_a = self.device_ptr) && (ptr_b = other.device_ptr) && !ptr_a.null? && !ptr_b.null?
 
-        handle = CUDA.create_handle
-        result = CudaMatrix.new(@rows, @cols)
-        CUDA.geam(handle, ptr_a, ptr_b, result.device_ptr.not_nil!, @rows, @cols, 1.0, 1.0)
-        CUDA.destroy_handle(handle)
+      # Ensure both operands have up-to-date GPU data
+      self.sync_to_device! unless device_dirty?
+      other.sync_to_device! unless other.device_dirty?
 
-        # Mark result as having newer GPU data
-        result.mark_device_dirty!
-        result
-      else
-        result = CudaMatrix.new(@rows, @cols)
-        @rows.times do |i|
-          @cols.times do |j|
-            result.unsafe_set(i, j, self[i, j] + other[i, j])
-          end
-        end
-        result.sync_to_device! if CUDA.fully_available?
-        result
-      end
+      handle = CUDA.create_handle
+      result = CudaMatrix.new(@rows, @cols)
+      raise RuntimeError.new("Failed to allocate result matrix on GPU") unless result.device_ptr && !result.device_ptr.not_nil!.null?
+
+      CUDA.geam(handle, ptr_a, ptr_b, result.device_ptr.not_nil!, @rows, @cols, 1.0, 1.0)
+      CUDA.destroy_handle(handle)
+
+      # Mark result as having newer GPU data
+      result.mark_device_dirty!
+      result
     end
 
     def clone
       dup = CudaMatrix.new(@rows, @cols)
-      if CUDA.fully_available? && (sptr = self.device_ptr) && (dptr = dup.device_ptr) && !sptr.null? && !dptr.null?
-        # If we have GPU data, copy it directly on GPU
-        if device_dirty?
-          # GPU -> GPU copy
-          bytes = (@rows * @cols * 8).to_u64
-          result = CUDA.memcpy(dptr.as(Pointer(Void)), sptr.as(Pointer(Void)), bytes, CUDA::MemcpyKind::DeviceToDevice)
-          if result == 0
-            dup.mark_device_dirty!
-            return dup
-          end
-        end
+      raise RuntimeError.new("GPU clone requires valid device pointers") unless (sptr = self.device_ptr) && (dptr = dup.device_ptr) && !sptr.null? && !dptr.null?
+
+      # If we have GPU data, copy it directly on GPU
+      if device_dirty?
+        # GPU -> GPU copy
+        bytes = (@rows * @cols * 8).to_u64
+        result = CUDA.memcpy(dptr.as(Pointer(Void)), sptr.as(Pointer(Void)), bytes, CUDA::MemcpyKind::DeviceToDevice)
+        raise RuntimeError.new("GPU-to-GPU memcpy failed") if result != 0
+
+        dup.mark_device_dirty!
+        return dup
       end
 
-      # Fallback: CPU copy
+      # CPU -> GPU copy (sync to device)
       @rows.times do |i|
         @cols.times do |j|
           dup.unsafe_set(i, j, unsafe_get(i, j))
         end
       end
-      dup.sync_to_device! if CUDA.fully_available?
+      dup.sync_to_device!
       dup
     end
 
     # In-place element-wise addition.
     def add!(other : CudaMatrix)
       raise ArgumentError.new("size mismatch") unless other.rows == @rows && other.cols == @cols
-      if CUDA.fully_available? && (ptr_a = self.device_ptr) && (ptr_b = other.device_ptr) && !ptr_a.null? && !ptr_b.null?
-        # Ensure both matrices have up-to-date GPU data
-        self.sync_to_device! unless device_dirty?
-        other.sync_to_device! unless other.device_dirty?
+      raise RuntimeError.new("GPU add! requires valid device pointers") unless (ptr_a = self.device_ptr) && (ptr_b = other.device_ptr) && !ptr_a.null? && !ptr_b.null?
 
-        handle = CUDA.create_handle
-        CUDA.geam(handle, ptr_a, ptr_b, ptr_a, @rows, @cols, 1.0, 1.0)
-        CUDA.destroy_handle(handle)
+      # Ensure both matrices have up-to-date GPU data
+      self.sync_to_device! unless device_dirty?
+      other.sync_to_device! unless other.device_dirty?
 
-        # Mark self as having newer GPU data
-        mark_device_dirty!
-      else
-        @rows.times do |i|
-          @cols.times do |j|
-            self[i, j] += other[i, j]
-          end
-        end
-        self.sync_to_device! if CUDA.fully_available?
-      end
+      handle = CUDA.create_handle
+      CUDA.geam(handle, ptr_a, ptr_b, ptr_a, @rows, @cols, 1.0, 1.0)
+      CUDA.destroy_handle(handle)
+
+      # Mark self as having newer GPU data
+      mark_device_dirty!
       self
     end
 
     def -(other : CudaMatrix)
       raise ArgumentError.new("size mismatch") unless @rows == other.rows && @cols == other.cols
-      if CUDA.fully_available? && (ptr_a = self.device_ptr) && (ptr_b = other.device_ptr) && !ptr_a.null? && !ptr_b.null?
-        # Ensure both operands have up-to-date GPU data
-        self.sync_to_device! unless device_dirty?
-        other.sync_to_device! unless other.device_dirty?
+      raise RuntimeError.new("GPU subtraction requires valid device pointers") unless (ptr_a = self.device_ptr) && (ptr_b = other.device_ptr) && !ptr_a.null? && !ptr_b.null?
 
-        handle = CUDA.create_handle
-        result = CudaMatrix.new(@rows, @cols)
-        CUDA.geam(handle, ptr_a, ptr_b, result.device_ptr.not_nil!, @rows, @cols, 1.0, -1.0)
-        CUDA.destroy_handle(handle)
+      # Ensure both operands have up-to-date GPU data
+      self.sync_to_device! unless device_dirty?
+      other.sync_to_device! unless other.device_dirty?
 
-        # Mark result as having newer GPU data
-        result.mark_device_dirty!
-        result
-      else
-        result = CudaMatrix.new(@rows, @cols)
-        @rows.times do |i|
-          @cols.times do |j|
-            result.unsafe_set(i, j, self[i, j] - other[i, j])
-          end
-        end
-        result.sync_to_device! if CUDA.fully_available?
-        result
-      end
+      handle = CUDA.create_handle
+      result = CudaMatrix.new(@rows, @cols)
+      raise RuntimeError.new("Failed to allocate result matrix on GPU") unless result.device_ptr && !result.device_ptr.not_nil!.null?
+
+      CUDA.geam(handle, ptr_a, ptr_b, result.device_ptr.not_nil!, @rows, @cols, 1.0, -1.0)
+      CUDA.destroy_handle(handle)
+
+      # Mark result as having newer GPU data
+      result.mark_device_dirty!
+      result
     end
 
     def *(scalar : Number)
-      if CUDA.fully_available? && (dptr = self.device_ptr) && !dptr.null?
-        # Ensure self has up-to-date GPU data
-        self.sync_to_device! unless device_dirty?
+      raise RuntimeError.new("GPU scalar multiplication requires valid device pointer") unless (dptr = self.device_ptr) && !dptr.null?
 
-        handle = CUDA.create_handle
-        out = self.clone
-        ptr = out.device_ptr.not_nil!
-        CUDA.scal(handle, ptr, (@rows*@cols), scalar.to_f64)
-        CUDA.destroy_handle(handle)
+      # Ensure self has up-to-date GPU data
+      self.sync_to_device! unless device_dirty?
 
-        # Mark result as having newer GPU data
-        out.mark_device_dirty!
-        out
-      else
-        result = CudaMatrix.new(@rows, @cols)
-        @rows.times do |i|
-          @cols.times do |j|
-            result.unsafe_set(i, j, self[i, j] * scalar.to_f64)
-          end
-        end
-        result.sync_to_device! if CUDA.fully_available?
-        result
-      end
+      handle = CUDA.create_handle
+      out = self.clone
+      ptr = out.device_ptr.not_nil!
+      CUDA.scal(handle, ptr, (@rows*@cols), scalar.to_f64)
+      CUDA.destroy_handle(handle)
+
+      # Mark result as having newer GPU data
+      out.mark_device_dirty!
+      out
     end
 
     # Add a bias row vector to each row in-place.
     def add_bias!(bias : CudaMatrix)
       raise ArgumentError.new("bias size mismatch") unless bias.rows == 1 && bias.cols == @cols
-      if CUDA.fully_available? && (dptr = self.device_ptr) && (bptr = bias.device_ptr) && !dptr.null? && !bptr.null?
-        # Ensure both matrices have up-to-date GPU data
-        self.sync_to_device! unless device_dirty?
-        bias.sync_to_device! unless bias.device_dirty?
+      raise RuntimeError.new("GPU add_bias! requires valid device pointers") unless (dptr = self.device_ptr) && (bptr = bias.device_ptr) && !dptr.null? && !bptr.null?
 
-        CUDA.add_bias(dptr, bptr, @rows, @cols)
+      # Ensure both matrices have up-to-date GPU data
+      self.sync_to_device! unless device_dirty?
+      bias.sync_to_device! unless bias.device_dirty?
 
-        # Mark self as having newer GPU data
-        mark_device_dirty!
-      else
-        @rows.times do |i|
-          @cols.times do |j|
-            self[i, j] += bias[0, j]
-          end
-        end
-        self.sync_to_device! if CUDA.fully_available?
-      end
+      CUDA.add_bias(dptr, bptr, @rows, @cols)
+
+      # Mark self as having newer GPU data
+      mark_device_dirty!
       self
     end
 
     # Element-wise ReLU activation in-place.
     def relu!
-      if CUDA.fully_available? && (dptr = self.device_ptr) && !dptr.null?
-        # Ensure self has up-to-date GPU data
-        self.sync_to_device! unless device_dirty?
+      raise RuntimeError.new("GPU ReLU requires valid device pointer") unless (dptr = self.device_ptr) && !dptr.null?
 
-        CUDA.relu(dptr, (@rows*@cols))
+      # Ensure self has up-to-date GPU data
+      self.sync_to_device! unless device_dirty?
 
-        # Mark self as having newer GPU data
-        mark_device_dirty!
-      else
-        @rows.times do |i|
-          @cols.times do |j|
-            v = self[i, j]
-            self[i, j] = v > 0 ? v : 0.0
-          end
-        end
-        self.sync_to_device! if CUDA.fully_available?
-      end
+      CUDA.relu(dptr, (@rows*@cols))
+
+      # Mark self as having newer GPU data
+      mark_device_dirty!
       self
     end
 
     # Multiply each column by the corresponding value in a row vector in-place.
     def mul_row_vector!(vec : CudaMatrix)
       raise ArgumentError.new("vector size mismatch") unless vec.rows == 1 && vec.cols == @cols
+      raise RuntimeError.new("GPU mul_row_vector! requires valid device pointers") unless (dptr = self.device_ptr) && (vptr = vec.device_ptr) && !dptr.null? && !vptr.null?
 
-      if CUDA.fully_available? && (dptr = self.device_ptr) && (vptr = vec.device_ptr) && !dptr.null? && !vptr.null?
-        # Use GPU kernel for column-wise scaling
-        CUDA.mul_row_vector(dptr, vptr, @rows, @cols)
-        # Mark result as dirty on device
-        mark_device_dirty!
-      else
-        # CPU fallback
-        @rows.times do |i|
-          @cols.times do |j|
-            self[i, j] *= vec[0, j]
-          end
-        end
-        self.sync_to_device! if CUDA.fully_available?
-      end
+      # Use GPU kernel for column-wise scaling
+      CUDA.mul_row_vector(dptr, vptr, @rows, @cols)
+      # Mark result as dirty on device
+      mark_device_dirty!
       self
     end
 
@@ -648,6 +508,13 @@ module SHAInet
           @gpu_memory_size = 0_u64
         end
       end
+      sync_to_device!
+      self
+    end
+
+    # Provide access to raw data for batch operations
+    def raw_data
+      @data
     end
   end
 end
