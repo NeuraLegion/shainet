@@ -655,6 +655,16 @@ module SHAInet
           else
             Log.info { "Epoch: #{epoch}, Error: #{avg_error.round(6)}, MSE: #{@mse.round(6)}, Time: #{elapsed.total_seconds.round(2)}s, GPU: #{gpu_stats[:active_matrices]} matrices, #{gpu_stats[:total_allocated_bytes]} bytes" }
           end
+
+          # Log matrix pool statistics
+          if CUDA.fully_available?
+            pool_stats = CudaMatrix.pool_stats
+            Log.info { "  Matrix pool: #{pool_stats[:total_pooled]} matrices pooled across #{pool_stats[:pools].size} sizes" }
+            if pool_stats[:pools].size > 0
+              top_pools = pool_stats[:pools].to_a.sort_by(&.[1]).reverse.first(3)
+              Log.info { "    Top pool sizes: #{top_pools.map { |k, v| "#{k}(#{v})" }.join(", ")}" }
+            end
+          end
         end
 
         if avg_error < error_threshold

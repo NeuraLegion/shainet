@@ -33,9 +33,9 @@ module SHAInet
     # Detailed sync tracking by source
     @@sync_sources = Hash(String, UInt64).new(0_u64)
 
-    # Matrix workspace pool to reduce allocations
+    # Disable workspace pool - use in-place operations instead
     @@matrix_pool = Hash(String, Array(CudaMatrix)).new { |h, k| h[k] = [] of CudaMatrix }
-    @@pool_enabled = true
+    @@pool_enabled = false
     @@max_pool_size = 100
 
     getter rows, cols
@@ -171,15 +171,15 @@ module SHAInet
     end
 
     def self.zeros(rows : Int32, cols : Int32)
-      # Use workspace pool for temporary matrices
-      m = get_workspace(rows, cols, "matrix_zeros_creation")
+      # Create new matrix directly - zeros are often used for weight matrices that persist
+      m = new(rows, cols)
       m.zero! # Use optimized GPU zero kernel
       m
     end
 
     def self.ones(rows : Int32, cols : Int32)
-      # Use workspace pool for temporary matrices
-      m = get_workspace(rows, cols, "matrix_ones_creation")
+      # Create new matrix directly - ones are often used for weight matrices that persist
+      m = new(rows, cols)
       m.fill!(1.0)
       m
     end
@@ -213,10 +213,9 @@ module SHAInet
       end
     end
 
-    # Return the transposed matrix. When CUDA is available the returned
-    # instance keeps the device buffer in sync so that further GPU
-    # operations can be used without additional copies.
+    # Return the transposed matrix - CREATE NEW MATRIX (used sparingly)
     def transpose
+      # Create new matrix directly - transpose is unavoidable allocation
       result = CudaMatrix.new(@cols, @rows)
 
       # Use GPU kernel for transpose - fail fast if not available
@@ -224,11 +223,6 @@ module SHAInet
 
       # Make sure source data is on GPU
       self.sync_to_device!("transpose_operation") unless device_dirty?
-
-      # Double-check pointers are still valid after sync
-      src_ptr_check = self.device_ptr
-      dst_ptr_check = result.device_ptr
-      raise RuntimeError.new("Device pointers became invalid after sync") if !src_ptr_check || src_ptr_check.null? || !dst_ptr_check || dst_ptr_check.null?
 
       # Use GPU kernel for transpose
       CUDA.transpose(dst_ptr, src_ptr, @rows, @cols)
@@ -322,6 +316,7 @@ module SHAInet
     end
 
     def slice_cols(start_col : Int32, length : Int32)
+      # Create new matrix directly - slice operations create new views
       result = CudaMatrix.new(@rows, length)
       raise RuntimeError.new("GPU slice_cols requires valid device pointers") unless (sptr = self.device_ptr) && (dptr = result.device_ptr) && !sptr.null? && !dptr.null?
 
@@ -350,7 +345,7 @@ module SHAInet
       self
     end
 
-    # Optimized cuBLAS matrix multiplication with workspace pool
+    # Optimized cuBLAS matrix multiplication
     def *(other : CudaMatrix)
       raise ArgumentError.new("size mismatch for multiplication") unless @cols == other.rows
       raise RuntimeError.new("GPU multiplication requires valid device pointers") unless (ptr_a = self.device_ptr) && (ptr_b = other.device_ptr) && !ptr_a.null? && !ptr_b.null?
@@ -361,8 +356,8 @@ module SHAInet
       self.sync_to_device!("matrix_multiply") unless device_dirty?
       other.sync_to_device!("matrix_multiply") unless other.device_dirty?
 
-      # Use workspace pool for result to reduce allocations
-      result = CudaMatrix.get_workspace(@rows, other.cols, "matrix_multiply")
+      # Create result matrix directly - matrix multiplication creates new data
+      result = CudaMatrix.new(@rows, other.cols)
       raise RuntimeError.new("Failed to allocate result matrix on GPU") unless result.device_ptr && !result.device_ptr.not_nil!.null?
 
       handle = CUDA.create_handle
@@ -392,8 +387,8 @@ module SHAInet
       self.sync_to_device!("matrix_addition") unless device_dirty?
       other.sync_to_device!("matrix_addition") unless other.device_dirty?
 
-      # Use workspace pool for result to reduce allocations
-      result = CudaMatrix.get_workspace(@rows, @cols, "matrix_addition")
+      # Create result matrix directly - don't use workspace pool for arithmetic operations
+      result = CudaMatrix.new(@rows, @cols)
       raise RuntimeError.new("Failed to allocate result matrix on GPU") unless result.device_ptr && !result.device_ptr.not_nil!.null?
 
       # Try cuDNN first for element-wise operations
@@ -427,8 +422,8 @@ module SHAInet
       self.sync_to_device!("matrix_subtraction") unless device_dirty?
       other.sync_to_device!("matrix_subtraction") unless other.device_dirty?
 
-      # Use workspace pool for result to reduce allocations
-      result = CudaMatrix.get_workspace(@rows, @cols, "matrix_subtraction")
+      # Create result matrix directly - don't use workspace pool for arithmetic operations
+      result = CudaMatrix.new(@rows, @cols)
       raise RuntimeError.new("Failed to allocate result matrix on GPU") unless result.device_ptr && !result.device_ptr.not_nil!.null?
 
       handle = CUDA.create_handle
@@ -839,7 +834,7 @@ module SHAInet
 
     # Matrix workspace pool to reduce allocations
     @@matrix_pool = Hash(String, Array(CudaMatrix)).new { |h, k| h[k] = [] of CudaMatrix }
-    @@pool_enabled = true
+    @@pool_enabled = false
     @@max_pool_size = 100
 
     # Get a matrix from the pool or create a new one
@@ -895,6 +890,54 @@ module SHAInet
         total_pooled: total_pooled,
         pools:        @@matrix_pool.transform_values(&.size),
       }
+    end
+
+    # In-place matrix multiplication with accumulation: self = alpha * A * B + beta * self
+    def gemm!(a : CudaMatrix, b : CudaMatrix, alpha : Float64 = 1.0, beta : Float64 = 0.0)
+      raise ArgumentError.new("size mismatch for in-place GEMM") unless a.cols == b.rows && @rows == a.rows && @cols == b.cols
+      raise RuntimeError.new("GPU in-place GEMM requires valid device pointers") unless (ptr_a = a.device_ptr) && (ptr_b = b.device_ptr) && (ptr_c = self.device_ptr) && !ptr_a.null? && !ptr_b.null? && !ptr_c.null?
+
+      # Ensure all operands have up-to-date GPU data
+      a.sync_to_device!("gemm_inplace") unless a.device_dirty?
+      b.sync_to_device!("gemm_inplace") unless b.device_dirty?
+      self.sync_to_device!("gemm_inplace") unless device_dirty?
+
+      handle = CUDA.create_handle
+      begin
+        # In-place GEMM: C = alpha * A * B + beta * C
+        CUDA.gemm_accumulate(handle, ptr_a, ptr_b, ptr_c,
+          a.rows, b.cols, a.cols,
+          a.cols, b.cols, @cols, alpha, beta)
+      ensure
+        CUDA.destroy_handle(handle)
+      end
+
+      # Mark self as having newer GPU data
+      mark_device_dirty!
+      self
+    end
+
+    # In-place weight update: self = self - lr * gradient
+    def weight_update!(gradient : CudaMatrix, learning_rate : Float64)
+      raise ArgumentError.new("size mismatch for weight update") unless @rows == gradient.rows && @cols == gradient.cols
+      raise RuntimeError.new("GPU weight update requires valid device pointers") unless (grad_ptr = gradient.device_ptr) && (weight_ptr = self.device_ptr) && !grad_ptr.null? && !weight_ptr.null?
+
+      # Ensure both matrices have up-to-date GPU data
+      self.sync_to_device!("weight_update") unless device_dirty?
+      gradient.sync_to_device!("weight_update") unless gradient.device_dirty?
+
+      handle = CUDA.create_handle
+      begin
+        # Use AXPY: weights = weights - lr * gradients
+        total_elements = @rows * @cols
+        CUDA.axpy(handle, -learning_rate, grad_ptr, weight_ptr, total_elements)
+      ensure
+        CUDA.destroy_handle(handle)
+      end
+
+      # Mark self as having newer GPU data
+      mark_device_dirty!
+      self
     end
   end
 end

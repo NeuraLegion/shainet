@@ -349,54 +349,57 @@ module SHAInet
         d_k_heads = [] of CudaMatrix
         d_v_heads = [] of CudaMatrix
 
-        @num_heads.times do |h|
-          d_out_h = d_concat.slice_cols(h * @head_dim, @head_dim)
+        # Store workspace matrices for cleanup
+        temp_grad_q = CudaMatrix.get_workspace(@d_model, x.rows, "mha_temp_grad_q")
+        temp_grad_k = CudaMatrix.get_workspace(@d_model, x.rows, "mha_temp_grad_k")
+        temp_grad_v = CudaMatrix.get_workspace(@d_model, x.rows, "mha_temp_grad_v")
 
-          # Use workspace matrices for gradients
-          d_v_workspace = CudaMatrix.get_workspace(@head_dim, x.rows, "mha_d_v")
-          d_attn_workspace = CudaMatrix.get_workspace(x.rows, x.rows, "mha_d_attn")
-          d_scores_workspace = CudaMatrix.get_workspace(x.rows, x.rows, "mha_d_scores")
-          d_q_workspace = CudaMatrix.get_workspace(x.rows, @head_dim, "mha_d_q")
-          d_k_workspace = CudaMatrix.get_workspace(x.rows, @head_dim, "mha_d_k")
+        begin
+          @num_heads.times do |h|
+            d_out_h = d_concat.slice_cols(h * @head_dim, @head_dim)
 
-          begin
+            # Use temporary workspace matrices for computations
+            d_v_temp = CudaMatrix.get_workspace(x.rows, @head_dim, "mha_d_v_temp")
+            d_attn_temp = CudaMatrix.get_workspace(x.rows, x.rows, "mha_d_attn_temp")
+            d_scores_temp = CudaMatrix.get_workspace(x.rows, x.rows, "mha_d_scores_temp")
+            d_q_temp = CudaMatrix.get_workspace(x.rows, @head_dim, "mha_d_q_temp")
+            d_k_temp = CudaMatrix.get_workspace(x.rows, @head_dim, "mha_d_k_temp")
+
             # Gradient w.r.t. V
-            d_v_workspace.copy_from!(@attn[h].as(CudaMatrix).transpose * d_out_h)
-            d_v_heads << d_v_workspace
+            d_v_temp.copy_from!(@attn[h].as(CudaMatrix).transpose * d_out_h)
+            d_v_heads << d_v_temp
 
             # Gradient w.r.t. attention weights
-            d_attn_workspace.copy_from!(d_out_h * @v_heads[h].as(CudaMatrix).transpose)
+            d_attn_temp.copy_from!(d_out_h * @v_heads[h].as(CudaMatrix).transpose)
 
             # Gradient w.r.t. scores (softmax backward)
-            d_scores_workspace.copy_from!(softmax_backward(d_attn_workspace, @attn[h].as(CudaMatrix)))
+            d_scores_temp.copy_from!(softmax_backward(d_attn_temp, @attn[h].as(CudaMatrix)))
 
             # Scale by 1/sqrt(d_k) in-place
-            d_scores_workspace.scale!(1.0 / Math.sqrt(@head_dim.to_f))
+            d_scores_temp.scale!(1.0 / Math.sqrt(@head_dim.to_f))
 
             # Gradients w.r.t. Q and K
-            d_q_workspace.copy_from!(d_scores_workspace * @k_heads[h].as(CudaMatrix))
-            d_k_workspace.copy_from!(d_scores_workspace.transpose * @q_heads[h].as(CudaMatrix))
+            d_q_temp.copy_from!(d_scores_temp * @k_heads[h].as(CudaMatrix))
+            d_k_temp.copy_from!(d_scores_temp.transpose * @q_heads[h].as(CudaMatrix))
 
-            d_q_heads << d_q_workspace
-            d_k_heads << d_k_workspace
-          ensure
-            # Note: Don't return these to pool yet as they're still referenced in the arrays
+            d_q_heads << d_q_temp
+            d_k_heads << d_k_temp
           end
-        end
 
-        # Concatenate head gradients (use pre-allocated workspace matrices)
-        d_q_concat = @workspace_d_q_concat.not_nil!
-        d_k_concat = @workspace_d_k_concat.not_nil!
-        d_v_concat = @workspace_d_v_concat.not_nil!
+          # Concatenate head gradients (use pre-allocated workspace matrices)
+          d_q_concat = @workspace_d_q_concat.not_nil!
+          d_k_concat = @workspace_d_k_concat.not_nil!
+          d_v_concat = @workspace_d_v_concat.not_nil!
 
-        d_q_concat.zero!
-        d_k_concat.zero!
-        d_v_concat.zero!
+          d_q_concat.zero!
+          d_k_concat.zero!
+          d_v_concat.zero!
 
-        @num_heads.times do |h|
-          d_q_concat.set_cols!(h * @head_dim, d_q_heads[h])
-          d_k_concat.set_cols!(h * @head_dim, d_k_heads[h])
-          d_v_concat.set_cols!(h * @head_dim, d_v_heads[h])
+          @num_heads.times do |h|
+            d_q_concat.set_cols!(h * @head_dim, d_q_heads[h])
+            d_k_concat.set_cols!(h * @head_dim, d_k_heads[h])
+            d_v_concat.set_cols!(h * @head_dim, d_v_heads[h])
+          end
         end
 
         # Use workspace pools for weight gradients
@@ -432,31 +435,29 @@ module SHAInet
           CudaMatrix.return_workspace(temp_grad_q)
           CudaMatrix.return_workspace(temp_grad_k)
           CudaMatrix.return_workspace(temp_grad_v)
+
+          # Return head gradient matrices to pool
+          d_q_heads.each { |m| CudaMatrix.return_workspace(m) }
+          d_k_heads.each { |m| CudaMatrix.return_workspace(m) }
+          d_v_heads.each { |m| CudaMatrix.return_workspace(m) }
         end
       ensure
         # Return main workspace matrices to pool
         CudaMatrix.return_workspace(temp_grad_o)
         CudaMatrix.return_workspace(d_concat)
-
-        # Return head gradient matrices to pool
-        d_q_heads.each { |m| CudaMatrix.return_workspace(m) }
-        d_k_heads.each { |m| CudaMatrix.return_workspace(m) }
-        d_v_heads.each { |m| CudaMatrix.return_workspace(m) }
       end
+
+      # Return the gradient w.r.t. input
+      d_x
     end
 
     # GPU path for applying gradients
     def apply_gradients(lr : Float64, device : CudaMatrix.class)
-      @w_q = @w_q.as(CudaMatrix) - (@g_w_q.as(CudaMatrix) * lr)
-      @w_k = @w_k.as(CudaMatrix) - (@g_w_k.as(CudaMatrix) * lr)
-      @w_v = @w_v.as(CudaMatrix) - (@g_w_v.as(CudaMatrix) * lr)
-      @w_o = @w_o.as(CudaMatrix) - (@g_w_o.as(CudaMatrix) * lr)
-
-      # Mark updated weights as dirty on device
-      @w_q.as(CudaMatrix).mark_device_dirty!
-      @w_k.as(CudaMatrix).mark_device_dirty!
-      @w_v.as(CudaMatrix).mark_device_dirty!
-      @w_o.as(CudaMatrix).mark_device_dirty!
+      # Use in-place weight updates to eliminate matrix creation
+      @w_q.as(CudaMatrix).weight_update!(@g_w_q.as(CudaMatrix), lr)
+      @w_k.as(CudaMatrix).weight_update!(@g_w_k.as(CudaMatrix), lr)
+      @w_v.as(CudaMatrix).weight_update!(@g_w_v.as(CudaMatrix), lr)
+      @w_o.as(CudaMatrix).weight_update!(@g_w_o.as(CudaMatrix), lr)
 
       # Clear gradients
       zero_gradients(CudaMatrix)

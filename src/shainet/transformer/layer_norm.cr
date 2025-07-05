@@ -376,14 +376,36 @@ module SHAInet
 
     # GPU path gradient application - all CudaMatrix operations with in-place operations
     private def apply_gradients_gpu(lr : Float64)
-      # Use in-place operations to reduce allocations
-      gamma_scaled = @g_gamma.as(CudaMatrix) * lr
-      beta_scaled = @g_beta.as(CudaMatrix) * lr
+      # Use CUDA AXPY to perform: gamma = gamma - lr * g_gamma (in-place)
+      # Use CUDA AXPY to perform: beta = beta - lr * g_beta (in-place)
 
-      @gamma.as(CudaMatrix).sub!(gamma_scaled)
-      @beta.as(CudaMatrix).sub!(beta_scaled)
+      if CUDA.fully_available?
+        g_ptr = @gamma.as(CudaMatrix).device_ptr
+        gg_ptr = @g_gamma.as(CudaMatrix).device_ptr
+        b_ptr = @beta.as(CudaMatrix).device_ptr
+        gb_ptr = @g_beta.as(CudaMatrix).device_ptr
 
-      # Clear gradients in-place        @g_gamma.as(CudaMatrix).zero!
+        if g_ptr && gg_ptr && b_ptr && gb_ptr && !g_ptr.null? && !gg_ptr.null? && !b_ptr.null? && !gb_ptr.null?
+          handle = CUDA.create_handle
+
+          # gamma := gamma - lr * g_gamma (using axpy with negative lr)
+          gamma_size = @gamma.rows * @gamma.cols
+          CUDA.axpy(handle, -lr, gg_ptr, g_ptr, gamma_size)
+
+          # beta := beta - lr * g_beta (using axpy with negative lr)
+          beta_size = @beta.rows * @beta.cols
+          CUDA.axpy(handle, -lr, gb_ptr, b_ptr, beta_size)
+
+          CUDA.destroy_handle(handle)
+
+          # Mark parameters as dirty (updated on GPU)
+          @gamma.as(CudaMatrix).mark_device_dirty!
+          @beta.as(CudaMatrix).mark_device_dirty!
+        end
+      end
+
+      # Clear gradients in-place
+      @g_gamma.as(CudaMatrix).zero!
       @g_beta.as(CudaMatrix).zero!
     end
 

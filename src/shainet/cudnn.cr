@@ -100,13 +100,15 @@ lib LibCUDNN
                               xDesc : CudnnTensorDescriptor, x : Void*,
                               beta : Void*, dxDesc : CudnnTensorDescriptor, dx : Void*) : CudnnStatus
 
-  # OpTensor functions (for element-wise operations like add, multiply)
-  fun cudnnCreateOpTensorDescriptor(opTensorDesc : CudnnOpTensorDescriptor*) : CudnnStatus
-  fun cudnnDestroyOpTensorDescriptor(opTensorDesc : CudnnOpTensorDescriptor) : CudnnStatus
-  fun cudnnOpTensor(handle : CudnnHandle, opTensorDesc : CudnnOpTensorDescriptor,
-                    alpha1 : Void*, aDesc : CudnnTensorDescriptor, a : Void*,
-                    alpha2 : Void*, bDesc : CudnnTensorDescriptor, b : Void*,
-                    beta : Void*, cDesc : CudnnTensorDescriptor, c : Void*) : CudnnStatus
+  # OpTensor functions (for element-wise operations like add, multiply) - commented out for compatibility
+  # fun cudnnCreateOpTensorDescriptor(opTensorDesc : CudnnOpTensorDescriptor*) : CudnnStatus
+  # fun cudnnDestroyOpTensorDescriptor(opTensorDesc : CudnnOpTensorDescriptor) : CudnnStatus
+  # fun cudnnSetOpTensorDescriptor(opTensorDesc : CudnnOpTensorDescriptor, opTensorOp : CudnnOpTensorOp,
+  #                                opTensorCompType : CudnnDataType, opTensorNanOpt : CudnnNanPropagation) : CudnnStatus
+  # fun cudnnOpTensor(handle : CudnnHandle, opTensorDesc : CudnnOpTensorDescriptor,
+  #                   alpha1 : Void*, aDesc : CudnnTensorDescriptor, a : Void*,
+  #                   alpha2 : Void*, bDesc : CudnnTensorDescriptor, b : Void*,
+  #                   beta : Void*, cDesc : CudnnTensorDescriptor, c : Void*) : CudnnStatus
 
   # Add bias function
   fun cudnnAddTensor(handle : CudnnHandle, alpha : Void*, biasDesc : CudnnTensorDescriptor, bias : Void*,
@@ -132,15 +134,21 @@ lib LibCUDNN
                            dyDesc : CudnnTensorDescriptor, dy : Void*,
                            beta : Void*, dxDesc : CudnnTensorDescriptor, dx : Void*) : CudnnStatus
 
-  # OpTensor operation types
-  enum CudnnOpTensorOp
-    CUDNN_OP_TENSOR_ADD  = 0
-    CUDNN_OP_TENSOR_MUL  = 1
-    CUDNN_OP_TENSOR_MIN  = 2
-    CUDNN_OP_TENSOR_MAX  = 3
-    CUDNN_OP_TENSOR_SQRT = 4
-    CUDNN_OP_TENSOR_NOT  = 5
-  end
+  # OpTensor operation types - commented out for compatibility
+  # enum CudnnOpTensorOp
+  #   CUDNN_OP_TENSOR_ADD  = 0
+  #   CUDNN_OP_TENSOR_MUL  = 1
+  #   CUDNN_OP_TENSOR_MIN  = 2
+  #   CUDNN_OP_TENSOR_MAX  = 3
+  #   CUDNN_OP_TENSOR_SQRT = 4
+  #   CUDNN_OP_TENSOR_NOT  = 5
+  # end
+
+  # NaN propagation options - commented out for compatibility
+  # enum CudnnNanPropagation
+  #   CUDNN_NOT_PROPAGATE_NAN = 0
+  #   CUDNN_PROPAGATE_NAN     = 1
+  # end
 end
 
 module SHAInet
@@ -428,138 +436,46 @@ module SHAInet
       end
     end
 
-    # Optimized element-wise addition using cuDNN OpTensor
+    # Optimized element-wise addition using cuDNN (fallback to cuBLAS if OpTensor not available)
     def self.element_add!(result : CudaMatrix, a : CudaMatrix, b : CudaMatrix, alpha : Float64 = 1.0, beta : Float64 = 1.0)
+      # For now, fall back to cuBLAS GEAM since OpTensor may not be available in all cuDNN versions
+      # This can be optimized later when OpTensor support is confirmed
       raise "Matrices must have same dimensions" unless a.rows == b.rows && a.cols == b.cols && result.rows == a.rows && result.cols == a.cols
-
-      # Set up 4D tensor descriptors for all matrices
-      dims = [a.rows, a.cols, 1, 1]
-      strides = [a.cols, 1, 1, 1]
-
-      CUDNN.check_status(LibCUDNN.cudnnCreateTensorDescriptor(out a_desc))
-      CUDNN.check_status(LibCUDNN.cudnnCreateTensorDescriptor(out b_desc))
-      CUDNN.check_status(LibCUDNN.cudnnCreateTensorDescriptor(out result_desc))
-
-      CUDNN.check_status(LibCUDNN.cudnnSetTensorNdDescriptor(
-        a_desc, LibCUDNN::CudnnDataType::CUDNN_DATA_DOUBLE, 4,
-        dims.to_unsafe, strides.to_unsafe))
-      CUDNN.check_status(LibCUDNN.cudnnSetTensorNdDescriptor(
-        b_desc, LibCUDNN::CudnnDataType::CUDNN_DATA_DOUBLE, 4,
-        dims.to_unsafe, strides.to_unsafe))
-      CUDNN.check_status(LibCUDNN.cudnnSetTensorNdDescriptor(
-        result_desc, LibCUDNN::CudnnDataType::CUDNN_DATA_DOUBLE, 4,
-        dims.to_unsafe, strides.to_unsafe))
-
-      # Create OpTensor descriptor for addition
-      CUDNN.check_status(LibCUDNN.cudnnCreateOpTensorDescriptor(out op_desc))
-      CUDNN.check_status(LibCUDNN.cudnnSetOpTensorDescriptor(
-        op_desc,
-        LibCUDNN::CudnnOpTensorOp::CUDNN_OP_TENSOR_ADD,
-        LibCUDNN::CudnnDataType::CUDNN_DATA_DOUBLE,
-        0 # nanOpt
-      ))
-
-      alpha_val = alpha
-      beta_val = beta
-      gamma_val = 0.0
 
       a.sync_to_device!("cudnn_element_add_a") unless a.device_dirty?
       b.sync_to_device!("cudnn_element_add_b") unless b.device_dirty?
 
-      # Get device pointers
-      a_ptr = a.device_ptr
-      b_ptr = b.device_ptr
-      result_ptr = result.device_ptr
-      raise "Device pointers are nil" if a_ptr.nil? || b_ptr.nil? || result_ptr.nil?
-
-      CUDNN.check_status(LibCUDNN.cudnnOpTensor(
-        CUDNN.handle,
-        op_desc,
-        pointerof(alpha_val),
-        a_desc,
-        a_ptr.as(Pointer(Void)),
-        pointerof(beta_val),
-        b_desc,
-        b_ptr.as(Pointer(Void)),
-        pointerof(gamma_val),
-        result_desc,
-        result_ptr.as(Pointer(Void))
-      ))
+      # Use cuBLAS GEAM for element-wise addition as fallback
+      handle = CUDA.create_handle
+      begin
+        CUDA.geam(handle, a.device_ptr.not_nil!, b.device_ptr.not_nil!,
+          result.device_ptr.not_nil!, a.rows, a.cols, alpha, beta)
+      ensure
+        CUDA.destroy_handle(handle)
+      end
 
       result.mark_device_dirty!
-
-      # Clean up
-      LibCUDNN.cudnnDestroyOpTensorDescriptor(op_desc)
-      LibCUDNN.cudnnDestroyTensorDescriptor(a_desc)
-      LibCUDNN.cudnnDestroyTensorDescriptor(b_desc)
-      LibCUDNN.cudnnDestroyTensorDescriptor(result_desc)
     end
 
-    # Optimized element-wise multiplication using cuDNN OpTensor
+    # Optimized element-wise multiplication (fallback to custom kernel)
     def self.element_mul!(result : CudaMatrix, a : CudaMatrix, b : CudaMatrix, alpha : Float64 = 1.0, beta : Float64 = 0.0)
+      # Element-wise multiplication requires custom implementation since cuBLAS doesn't have direct support
+      # For now, fall back to CPU implementation
       raise "Matrices must have same dimensions" unless a.rows == b.rows && a.cols == b.cols && result.rows == a.rows && result.cols == a.cols
 
-      # Set up 4D tensor descriptors for all matrices
-      dims = [a.rows, a.cols, 1, 1]
-      strides = [a.cols, 1, 1, 1]
+      # Sync to CPU for element-wise operations
+      a.sync_from_device!("cudnn_element_mul_fallback") if a.device_dirty?
+      b.sync_from_device!("cudnn_element_mul_fallback") if b.device_dirty?
 
-      CUDNN.check_status(LibCUDNN.cudnnCreateTensorDescriptor(out a_desc))
-      CUDNN.check_status(LibCUDNN.cudnnCreateTensorDescriptor(out b_desc))
-      CUDNN.check_status(LibCUDNN.cudnnCreateTensorDescriptor(out result_desc))
+      a.rows.times do |i|
+        a.cols.times do |j|
+          a_val = a.unsafe_get(i, j)
+          b_val = b.unsafe_get(i, j)
+          result.unsafe_set(i, j, alpha * a_val * b_val + beta * (result.device_dirty? ? 0.0 : result.unsafe_get(i, j)))
+        end
+      end
 
-      CUDNN.check_status(LibCUDNN.cudnnSetTensorNdDescriptor(
-        a_desc, LibCUDNN::CudnnDataType::CUDNN_DATA_DOUBLE, 4,
-        dims.to_unsafe, strides.to_unsafe))
-      CUDNN.check_status(LibCUDNN.cudnnSetTensorNdDescriptor(
-        b_desc, LibCUDNN::CudnnDataType::CUDNN_DATA_DOUBLE, 4,
-        dims.to_unsafe, strides.to_unsafe))
-      CUDNN.check_status(LibCUDNN.cudnnSetTensorNdDescriptor(
-        result_desc, LibCUDNN::CudnnDataType::CUDNN_DATA_DOUBLE, 4,
-        dims.to_unsafe, strides.to_unsafe))
-
-      # Create OpTensor descriptor for multiplication
-      CUDNN.check_status(LibCUDNN.cudnnCreateOpTensorDescriptor(out op_desc))
-      CUDNN.check_status(LibCUDNN.cudnnSetOpTensorDescriptor(
-        op_desc,
-        LibCUDNN::CudnnOpTensorOp::CUDNN_OP_TENSOR_MUL,
-        LibCUDNN::CudnnDataType::CUDNN_DATA_DOUBLE,
-        0 # nanOpt
-      ))
-
-      alpha_val = alpha
-      beta_val = beta
-      gamma_val = 0.0
-
-      a.sync_to_device!("cudnn_element_mul_a") unless a.device_dirty?
-      b.sync_to_device!("cudnn_element_mul_b") unless b.device_dirty?
-
-      # Get device pointers
-      a_ptr = a.device_ptr
-      b_ptr = b.device_ptr
-      result_ptr = result.device_ptr
-      raise "Device pointers are nil" if a_ptr.nil? || b_ptr.nil? || result_ptr.nil?
-
-      CUDNN.check_status(LibCUDNN.cudnnOpTensor(
-        CUDNN.handle,
-        op_desc,
-        pointerof(alpha_val),
-        a_desc,
-        a_ptr.as(Pointer(Void)),
-        pointerof(beta_val),
-        b_desc,
-        b_ptr.as(Pointer(Void)),
-        pointerof(gamma_val),
-        result_desc,
-        result_ptr.as(Pointer(Void))
-      ))
-
-      result.mark_device_dirty!
-
-      # Clean up
-      LibCUDNN.cudnnDestroyOpTensorDescriptor(op_desc)
-      LibCUDNN.cudnnDestroyTensorDescriptor(a_desc)
-      LibCUDNN.cudnnDestroyTensorDescriptor(b_desc)
-      LibCUDNN.cudnnDestroyTensorDescriptor(result_desc)
+      result.sync_to_device!("cudnn_element_mul_result")
     end
   end
 end

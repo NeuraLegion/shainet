@@ -223,6 +223,16 @@ module SHAInet
         pointerof(beta), c, ldc)
     end
 
+    def gemm_accumulate(handle : LibCUBLAS::Handle, a : Pointer(Float64), b : Pointer(Float64), c : Pointer(Float64),
+                        m : Int32, n : Int32, k : Int32, lda : Int32, ldb : Int32, ldc : Int32, alpha : Float64, beta : Float64)
+      LibCUBLAS.cublasDgemm_v2(handle,
+        Operation::N.value, Operation::N.value,
+        m, n, k,
+        pointerof(alpha), a, lda,
+        b, ldb,
+        pointerof(beta), c, ldc)
+    end
+
     def geam(handle : LibCUBLAS::Handle, a : Pointer(Float64), b : Pointer(Float64), c : Pointer(Float64),
              m : Int32, n : Int32, alpha : Float64, beta : Float64)
       LibCUBLAS.cublasDgeam(handle,

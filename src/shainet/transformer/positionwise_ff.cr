@@ -176,22 +176,19 @@ module SHAInet
       end
     end
 
-    # GPU path gradient application - all CudaMatrix operations
+    # GPU path gradient application - all CudaMatrix operations with in-place updates
     private def apply_gradients_gpu(lr : Float64)
-      @w1 = @w1.as(CudaMatrix) - @g_w1.as(CudaMatrix) * lr
-      @b1 = @b1.as(CudaMatrix) - @g_b1.as(CudaMatrix) * lr
-      @w2 = @w2.as(CudaMatrix) - @g_w2.as(CudaMatrix) * lr
-      @b2 = @b2.as(CudaMatrix) - @g_b2.as(CudaMatrix) * lr
+      # Use in-place weight updates to eliminate matrix creation
+      @w1.as(CudaMatrix).weight_update!(@g_w1.as(CudaMatrix), lr)
+      @b1.as(CudaMatrix).weight_update!(@g_b1.as(CudaMatrix), lr)
+      @w2.as(CudaMatrix).weight_update!(@g_w2.as(CudaMatrix), lr)
+      @b2.as(CudaMatrix).weight_update!(@g_b2.as(CudaMatrix), lr)
 
-      # Sync updated weights to device
-      [@w1, @b1, @w2, @b2].each do |mat|
-        mat.as(CudaMatrix).sync_to_device!("ff_weight_update") unless mat.as(CudaMatrix).device_dirty?
-      end
-
-      @g_w1 = CudaMatrix.zeros(@w1.rows, @w1.cols)
-      @g_w2 = CudaMatrix.zeros(@w2.rows, @w2.cols)
-      @g_b1 = CudaMatrix.zeros(@b1.rows, @b1.cols)
-      @g_b2 = CudaMatrix.zeros(@b2.rows, @b2.cols)
+      # Clear gradients in-place
+      @g_w1.as(CudaMatrix).zero!
+      @g_w2.as(CudaMatrix).zero!
+      @g_b1.as(CudaMatrix).zero!
+      @g_b2.as(CudaMatrix).zero!
     end
 
     # CPU path gradient application - all SimpleMatrix operations

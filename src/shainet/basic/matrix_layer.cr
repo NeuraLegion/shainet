@@ -258,16 +258,13 @@ module SHAInet
       end
     end
 
-    # GPU path weight update - all CudaMatrix operations
+    # GPU path weight update - all CudaMatrix operations with in-place updates
     private def update_weights_gpu(learning_rate : Float64)
-      # W := W - lr * ∂L/∂W
-      # b := b - lr * ∂L/∂b
-      @weights = @weights.as(CudaMatrix) - @g_w.as(CudaMatrix) * learning_rate
-      @biases = @biases.as(CudaMatrix) - @g_b.as(CudaMatrix) * learning_rate
+      # W := W - lr * ∂L/∂W (in-place using optimized AXPY)
+      # b := b - lr * ∂L/∂b (in-place using optimized AXPY)
 
-      # Mark CudaMatrix weights/biases as dirty after update
-      @weights.as(CudaMatrix).mark_device_dirty!
-      @biases.as(CudaMatrix).mark_device_dirty!
+      @weights.as(CudaMatrix).weight_update!(@g_w.as(CudaMatrix), learning_rate)
+      @biases.as(CudaMatrix).weight_update!(@g_b.as(CudaMatrix), learning_rate)
     end
 
     # CPU path weight update - all SimpleMatrix operations
