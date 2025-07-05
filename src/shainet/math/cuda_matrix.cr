@@ -1,5 +1,6 @@
 require "./simple_matrix"
 require "../cuda"
+require "../cudnn"
 
 module SHAInet
   # Basic GPU matrix wrapper. Allocates device memory when CUDA is
@@ -20,6 +21,23 @@ module SHAInet
     @@allocation_attempts = 0
     @@allocation_failures = 0
 
+    # Sync counters for performance tracking
+    @@sync_to_device_count = 0_u64
+    @@sync_from_device_count = 0_u64
+    @@total_sync_bytes_to_device = 0_u64
+    @@total_sync_bytes_from_device = 0_u64
+
+    # Matrix creation tracking
+    @@matrix_creation_count = 0_u64
+
+    # Detailed sync tracking by source
+    @@sync_sources = Hash(String, UInt64).new(0_u64)
+
+    # Matrix workspace pool to reduce allocations
+    @@matrix_pool = Hash(String, Array(CudaMatrix)).new { |h, k| h[k] = [] of CudaMatrix }
+    @@pool_enabled = true
+    @@max_pool_size = 100
+
     getter rows, cols
 
     def self.gpu_memory_stats
@@ -30,6 +48,25 @@ module SHAInet
         total_attempts:        @@allocation_attempts,
         allocation_failures:   @@allocation_failures,
       }
+    end
+
+    def self.sync_stats
+      {
+        sync_to_device_count:         @@sync_to_device_count,
+        sync_from_device_count:       @@sync_from_device_count,
+        total_sync_bytes_to_device:   @@total_sync_bytes_to_device,
+        total_sync_bytes_from_device: @@total_sync_bytes_from_device,
+        matrix_creation_count:        @@matrix_creation_count,
+      }
+    end
+
+    def self.reset_sync_stats
+      @@sync_to_device_count = 0_u64
+      @@sync_from_device_count = 0_u64
+      @@total_sync_bytes_to_device = 0_u64
+      @@total_sync_bytes_from_device = 0_u64
+      @@matrix_creation_count = 0_u64
+      @@sync_sources.clear
     end
 
     def self.print_detailed_stats
@@ -58,6 +95,9 @@ module SHAInet
     def initialize(@rows : Int32, @cols : Int32, init : Float64 = 0.0)
       @data = Array(Float64).new(@rows * @cols, init)
       @device_ptr = Pointer(Float64).null
+
+      # Count matrix creation
+      @@matrix_creation_count += 1
 
       # CudaMatrix requires CUDA to be available
       raise RuntimeError.new("CudaMatrix requires CUDA to be available") unless CUDA.fully_available?
@@ -99,7 +139,7 @@ module SHAInet
     # Basic matrix access operations
     def [](row : Int32, col : Int32)
       # If GPU data is newer, sync it to CPU first
-      sync_from_device! if device_dirty?
+      sync_from_device!("element_access") if device_dirty?
       @data[row * @cols + col]
     end
 
@@ -126,25 +166,21 @@ module SHAInet
           m.unsafe_set(i, j, val.to_f64)
         end
       end
-      m.sync_to_device!
+      m.sync_to_device!("matrix_from_array")
       m
     end
 
     def self.zeros(rows : Int32, cols : Int32)
-      m = new(rows, cols)
-      # Initial data is already zero, just sync to GPU
-      m.sync_to_device!
+      # Use workspace pool for temporary matrices
+      m = get_workspace(rows, cols, "matrix_zeros_creation")
+      m.zero! # Use optimized GPU zero kernel
       m
     end
 
     def self.ones(rows : Int32, cols : Int32)
-      m = new(rows, cols)
-      rows.times do |i|
-        cols.times do |j|
-          m.unsafe_set(i, j, 1.0)
-        end
-      end
-      m.sync_to_device!
+      # Use workspace pool for temporary matrices
+      m = get_workspace(rows, cols, "matrix_ones_creation")
+      m.fill!(1.0)
       m
     end
 
@@ -154,7 +190,7 @@ module SHAInet
           self[i, j] = Random.rand(min..max)
         end
       end
-      sync_to_device!
+      sync_to_device!("random_fill")
       self
     end
 
@@ -187,7 +223,7 @@ module SHAInet
       raise RuntimeError.new("GPU transpose requires valid device pointers") unless (src_ptr = self.device_ptr) && (dst_ptr = result.device_ptr) && !src_ptr.null? && !dst_ptr.null?
 
       # Make sure source data is on GPU
-      self.sync_to_device! unless device_dirty?
+      self.sync_to_device!("transpose_operation") unless device_dirty?
 
       # Double-check pointers are still valid after sync
       src_ptr_check = self.device_ptr
@@ -202,7 +238,19 @@ module SHAInet
       result
     end
 
-    def sync_to_device!
+    def self.track_sync(source : String)
+      @@sync_sources[source] += 1
+    end
+
+    def self.sync_sources_stats
+      @@sync_sources.to_h
+    end
+
+    def self.reset_sync_sources
+      @@sync_sources.clear
+    end
+
+    def sync_to_device!(source : String = "unknown")
       return unless dptr = @device_ptr
       return if dptr.null?
 
@@ -212,6 +260,11 @@ module SHAInet
         # Use regular memory for host-device transfer (avoiding pinned memory limits)
         size = @rows * @cols
         bytes = (size * 8).to_u64
+
+        # Track sync operations for performance monitoring
+        @@sync_to_device_count += 1
+        @@total_sync_bytes_to_device += bytes
+        self.class.track_sync("to_device:#{source}")
 
         # Create a stable buffer that won't be moved by GC
         buffer = Slice(Float64).new(size) do |i|
@@ -235,7 +288,7 @@ module SHAInet
       end
     end
 
-    def sync_from_device!
+    def sync_from_device!(source : String = "unknown")
       return unless dptr = @device_ptr
       return if dptr.null?
       return unless device_dirty? # Only sync if GPU data is newer
@@ -243,6 +296,11 @@ module SHAInet
       begin
         size = @rows * @cols
         bytes = (size * 8).to_u64
+
+        # Track sync operations for performance monitoring
+        @@sync_from_device_count += 1
+        @@total_sync_bytes_from_device += bytes
+        self.class.track_sync("from_device:#{source}")
 
         # Use regular memory copy (avoiding pinned memory limits)
         buffer = Slice(Float64).new(size, 0.0)
@@ -268,7 +326,7 @@ module SHAInet
       raise RuntimeError.new("GPU slice_cols requires valid device pointers") unless (sptr = self.device_ptr) && (dptr = result.device_ptr) && !sptr.null? && !dptr.null?
 
       # Ensure source has up-to-date GPU data
-      self.sync_to_device! unless device_dirty?
+      self.sync_to_device!("slice_cols") unless device_dirty?
 
       CUDA.slice_cols(dptr, sptr, @rows, @cols, start_col, length)
 
@@ -282,8 +340,8 @@ module SHAInet
       raise RuntimeError.new("GPU set_cols! requires valid device pointers") unless (dptr = self.device_ptr) && (sptr = other.device_ptr) && !dptr.null? && !sptr.null?
 
       # Ensure both matrices have up-to-date GPU data
-      self.sync_to_device! unless device_dirty?
-      other.sync_to_device! unless other.device_dirty?
+      self.sync_to_device!("set_cols") unless device_dirty?
+      other.sync_to_device!("set_cols") unless other.device_dirty?
 
       CUDA.set_cols(dptr, sptr, @rows, @cols, start_col, other.cols)
 
@@ -292,6 +350,7 @@ module SHAInet
       self
     end
 
+    # Optimized cuBLAS matrix multiplication with workspace pool
     def *(other : CudaMatrix)
       raise ArgumentError.new("size mismatch for multiplication") unless @cols == other.rows
       raise RuntimeError.new("GPU multiplication requires valid device pointers") unless (ptr_a = self.device_ptr) && (ptr_b = other.device_ptr) && !ptr_a.null? && !ptr_b.null?
@@ -299,20 +358,24 @@ module SHAInet
       Log.debug { "CudaMatrix.*: Multiplying #{@rows}x#{@cols} * #{other.rows}x#{other.cols}" }
 
       # Ensure both operands have up-to-date GPU data
-      self.sync_to_device! unless device_dirty?
-      other.sync_to_device! unless other.device_dirty?
+      self.sync_to_device!("matrix_multiply") unless device_dirty?
+      other.sync_to_device!("matrix_multiply") unless other.device_dirty?
 
-      handle = CUDA.create_handle
-      result = CudaMatrix.new(@rows, other.cols)
+      # Use workspace pool for result to reduce allocations
+      result = CudaMatrix.get_workspace(@rows, other.cols, "matrix_multiply")
       raise RuntimeError.new("Failed to allocate result matrix on GPU") unless result.device_ptr && !result.device_ptr.not_nil!.null?
 
-      # CUBLAS assumes column-major, but we use row-major
-      # To compute C = A * B in row-major, we compute C^T = B^T * A^T
-      # So we swap the order: gemm(B, A, C) with dimensions swapped
-      CUDA.gemm(handle, ptr_b, ptr_a, result.device_ptr.not_nil!,
-        other.cols, @rows, other.rows,
-        other.cols, @cols, result.cols)
-      CUDA.destroy_handle(handle)
+      handle = CUDA.create_handle
+      begin
+        # Optimized cuBLAS GEMM - account for row-major vs column-major difference
+        # To compute C = A * B in row-major, we compute C^T = B^T * A^T
+        # So we swap the order: gemm(B, A, C) with dimensions swapped
+        CUDA.gemm(handle, ptr_b, ptr_a, result.device_ptr.not_nil!,
+          other.cols, @rows, other.rows,
+          other.cols, @cols, result.cols)
+      ensure
+        CUDA.destroy_handle(handle)
+      end
 
       # Mark result as having newer GPU data
       result.mark_device_dirty!
@@ -320,21 +383,61 @@ module SHAInet
       result
     end
 
-    # Clean CudaMatrix + CudaMatrix addition
+    # Clean CudaMatrix + CudaMatrix addition - optimized with cuDNN and cuBLAS
     def +(other : CudaMatrix) : CudaMatrix
       raise ArgumentError.new("size mismatch") unless @rows == other.rows && @cols == other.cols
       raise RuntimeError.new("GPU addition requires valid device pointers") unless (ptr_a = self.device_ptr) && (ptr_b = other.device_ptr) && !ptr_a.null? && !ptr_b.null?
 
       # Ensure both operands have up-to-date GPU data
-      self.sync_to_device! unless device_dirty?
-      other.sync_to_device! unless other.device_dirty?
+      self.sync_to_device!("matrix_addition") unless device_dirty?
+      other.sync_to_device!("matrix_addition") unless other.device_dirty?
 
-      handle = CUDA.create_handle
-      result = CudaMatrix.new(@rows, @cols)
+      # Use workspace pool for result to reduce allocations
+      result = CudaMatrix.get_workspace(@rows, @cols, "matrix_addition")
       raise RuntimeError.new("Failed to allocate result matrix on GPU") unless result.device_ptr && !result.device_ptr.not_nil!.null?
 
-      CUDA.geam(handle, ptr_a, ptr_b, result.device_ptr.not_nil!, @rows, @cols, 1.0, 1.0)
-      CUDA.destroy_handle(handle)
+      # Try cuDNN first for element-wise operations
+      if CUDNN.available?
+        begin
+          CUDNN.element_add!(result, self, other, 1.0, 1.0)
+          return result
+        rescue e : Exception
+          Log.debug { "cuDNN element_add failed: #{e}, falling back to cuBLAS" }
+        end
+      end
+
+      # Fallback to cuBLAS GEAM
+      handle = CUDA.create_handle
+      begin
+        CUDA.geam(handle, ptr_a, ptr_b, result.device_ptr.not_nil!, @rows, @cols, 1.0, 1.0)
+      ensure
+        CUDA.destroy_handle(handle)
+      end
+
+      result.mark_device_dirty!
+      result
+    end
+
+    # Clean CudaMatrix - CudaMatrix subtraction - optimized with cuBLAS and workspace pool
+    def -(other : CudaMatrix) : CudaMatrix
+      raise ArgumentError.new("size mismatch") unless @rows == other.rows && @cols == other.cols
+      raise RuntimeError.new("GPU subtraction requires valid device pointers") unless (ptr_a = self.device_ptr) && (ptr_b = other.device_ptr) && !ptr_a.null? && !ptr_b.null?
+
+      # Ensure both operands have up-to-date GPU data
+      self.sync_to_device!("matrix_subtraction") unless device_dirty?
+      other.sync_to_device!("matrix_subtraction") unless other.device_dirty?
+
+      # Use workspace pool for result to reduce allocations
+      result = CudaMatrix.get_workspace(@rows, @cols, "matrix_subtraction")
+      raise RuntimeError.new("Failed to allocate result matrix on GPU") unless result.device_ptr && !result.device_ptr.not_nil!.null?
+
+      handle = CUDA.create_handle
+      begin
+        # Use GEAM with alpha=1.0, beta=-1.0 to compute A - B
+        CUDA.geam(handle, ptr_a, ptr_b, result.device_ptr.not_nil!, @rows, @cols, 1.0, -1.0)
+      ensure
+        CUDA.destroy_handle(handle)
+      end
 
       # Mark result as having newer GPU data
       result.mark_device_dirty!
@@ -362,59 +465,112 @@ module SHAInet
           dup.unsafe_set(i, j, unsafe_get(i, j))
         end
       end
-      dup.sync_to_device!
+      dup.sync_to_device!("matrix_clone")
       dup
     end
 
-    # In-place element-wise addition.
+    # In-place element-wise addition - optimized with cuDNN and cuBLAS.
     def add!(other : CudaMatrix)
       raise ArgumentError.new("size mismatch") unless other.rows == @rows && other.cols == @cols
       raise RuntimeError.new("GPU add! requires valid device pointers") unless (ptr_a = self.device_ptr) && (ptr_b = other.device_ptr) && !ptr_a.null? && !ptr_b.null?
 
       # Ensure both matrices have up-to-date GPU data
-      self.sync_to_device! unless device_dirty?
-      other.sync_to_device! unless other.device_dirty?
+      self.sync_to_device!("matrix_add_inplace") unless device_dirty?
+      other.sync_to_device!("matrix_add_inplace") unless other.device_dirty?
+
+      # Try cuDNN first for element-wise operations
+      if CUDNN.available?
+        begin
+          CUDNN.element_add!(self, self, other, 1.0, 1.0)
+          return self
+        rescue e : Exception
+          Log.debug { "cuDNN element_add failed: #{e}, falling back to cuBLAS" }
+        end
+      end
+
+      # Fallback to cuBLAS GEAM
+      handle = CUDA.create_handle
+      begin
+        CUDA.geam(handle, ptr_a, ptr_b, ptr_a, @rows, @cols, 1.0, 1.0)
+      ensure
+        CUDA.destroy_handle(handle)
+      end
+
+      mark_device_dirty!
+      self
+    end
+
+    # In-place element-wise subtraction - optimized with cuBLAS.
+    def sub!(other : CudaMatrix)
+      raise ArgumentError.new("size mismatch") unless other.rows == @rows && other.cols == @cols
+      raise RuntimeError.new("GPU sub! requires valid device pointers") unless (ptr_a = self.device_ptr) && (ptr_b = other.device_ptr) && !ptr_a.null? && !ptr_b.null?
+
+      # Ensure both matrices have up-to-date GPU data
+      self.sync_to_device!("matrix_sub_inplace") unless device_dirty?
+      other.sync_to_device!("matrix_sub_inplace") unless other.device_dirty?
 
       handle = CUDA.create_handle
-      CUDA.geam(handle, ptr_a, ptr_b, ptr_a, @rows, @cols, 1.0, 1.0)
-      CUDA.destroy_handle(handle)
+      begin
+        CUDA.geam(handle, ptr_a, ptr_b, ptr_a, @rows, @cols, 1.0, -1.0)
+      ensure
+        CUDA.destroy_handle(handle)
+      end
 
       # Mark self as having newer GPU data
       mark_device_dirty!
       self
     end
 
-    def -(other : CudaMatrix)
-      raise ArgumentError.new("size mismatch") unless @rows == other.rows && @cols == other.cols
-      raise RuntimeError.new("GPU subtraction requires valid device pointers") unless (ptr_a = self.device_ptr) && (ptr_b = other.device_ptr) && !ptr_a.null? && !ptr_b.null?
+    # Fill matrix with a constant value in-place.
+    def fill!(value : Float64)
+      if CUDA.fully_available? && (dptr = device_ptr) && !dptr.null?
+        # Special case for zero - use GPU kernel directly
+        if value == 0.0
+          size = @rows * @cols
+          CUDA.zero_matrix(dptr, size)
+          mark_device_dirty!
+        else
+          # For non-zero values, fall back to CPU approach
+          # But only sync if actually needed
+          sync_from_device!("matrix_fill") if device_dirty?
 
-      # Ensure both operands have up-to-date GPU data
-      self.sync_to_device! unless device_dirty?
-      other.sync_to_device! unless other.device_dirty?
+          @rows.times do |i|
+            @cols.times do |j|
+              unsafe_set(i, j, value)
+            end
+          end
 
-      handle = CUDA.create_handle
-      result = CudaMatrix.new(@rows, @cols)
-      raise RuntimeError.new("Failed to allocate result matrix on GPU") unless result.device_ptr && !result.device_ptr.not_nil!.null?
-
-      CUDA.geam(handle, ptr_a, ptr_b, result.device_ptr.not_nil!, @rows, @cols, 1.0, -1.0)
-      CUDA.destroy_handle(handle)
-
-      # Mark result as having newer GPU data
-      result.mark_device_dirty!
-      result
+          sync_to_device!("matrix_fill")
+        end
+      else
+        # CPU fallback
+        @rows.times do |i|
+          @cols.times do |j|
+            unsafe_set(i, j, value)
+          end
+        end
+        mark_device_clean!
+      end
+      self
     end
 
+    # Optimized scalar multiplication using cuBLAS SCAL
     def *(scalar : Number)
       raise RuntimeError.new("GPU scalar multiplication requires valid device pointer") unless (dptr = self.device_ptr) && !dptr.null?
 
       # Ensure self has up-to-date GPU data
-      self.sync_to_device! unless device_dirty?
+      self.sync_to_device!("scalar_multiplication") unless device_dirty?
 
-      handle = CUDA.create_handle
+      # Create a copy to avoid modifying the original
       out = self.clone
       ptr = out.device_ptr.not_nil!
-      CUDA.scal(handle, ptr, (@rows*@cols), scalar.to_f64)
-      CUDA.destroy_handle(handle)
+
+      handle = CUDA.create_handle
+      begin
+        CUDA.scal(handle, ptr, (@rows*@cols), scalar.to_f64)
+      ensure
+        CUDA.destroy_handle(handle)
+      end
 
       # Mark result as having newer GPU data
       out.mark_device_dirty!
@@ -424,11 +580,23 @@ module SHAInet
     # Add a bias row vector to each row in-place.
     def add_bias!(bias : CudaMatrix)
       raise ArgumentError.new("bias size mismatch") unless bias.rows == 1 && bias.cols == @cols
+
+      # Use cuDNN for optimized bias addition if available
+      if CUDNN.available?
+        begin
+          CUDNN.add_bias!(self, bias)
+          return self
+        rescue e : Exception
+          Log.debug { "cuDNN add_bias failed: #{e}, falling back to CUDA kernel" }
+        end
+      end
+
+      # Fallback to CUDA kernel
       raise RuntimeError.new("GPU add_bias! requires valid device pointers") unless (dptr = self.device_ptr) && (bptr = bias.device_ptr) && !dptr.null? && !bptr.null?
 
       # Ensure both matrices have up-to-date GPU data
-      self.sync_to_device! unless device_dirty?
-      bias.sync_to_device! unless bias.device_dirty?
+      self.sync_to_device!("bias_addition") unless device_dirty?
+      bias.sync_to_device!("bias_addition") unless bias.device_dirty?
 
       CUDA.add_bias(dptr, bptr, @rows, @cols)
 
@@ -439,10 +607,21 @@ module SHAInet
 
     # Element-wise ReLU activation in-place.
     def relu!
+      # Use cuDNN for optimized ReLU if available
+      if CUDNN.available?
+        begin
+          CUDNN.relu_forward(self, self)
+          return self
+        rescue e : Exception
+          Log.debug { "cuDNN ReLU failed: #{e}, falling back to CUDA kernel" }
+        end
+      end
+
+      # Fallback to CUDA kernel
       raise RuntimeError.new("GPU ReLU requires valid device pointer") unless (dptr = self.device_ptr) && !dptr.null?
 
       # Ensure self has up-to-date GPU data
-      self.sync_to_device! unless device_dirty?
+      self.sync_to_device!("relu_activation") unless device_dirty?
 
       CUDA.relu(dptr, (@rows*@cols))
 
@@ -456,6 +635,10 @@ module SHAInet
       raise ArgumentError.new("vector size mismatch") unless vec.rows == 1 && vec.cols == @cols
       raise RuntimeError.new("GPU mul_row_vector! requires valid device pointers") unless (dptr = self.device_ptr) && (vptr = vec.device_ptr) && !dptr.null? && !vptr.null?
 
+      # Ensure both matrices have up-to-date GPU data
+      self.sync_to_device!("mul_row_vector") unless device_dirty?
+      vec.sync_to_device!("mul_row_vector") unless vec.device_dirty?
+
       # Use GPU kernel for column-wise scaling
       CUDA.mul_row_vector(dptr, vptr, @rows, @cols)
       # Mark result as dirty on device
@@ -465,7 +648,7 @@ module SHAInet
 
     # Convert CudaMatrix to SimpleMatrix for CPU operations
     def to_simple : SimpleMatrix
-      sync_from_device! if device_dirty?
+      sync_from_device!("to_simple_conversion") if device_dirty?
       result = SimpleMatrix.new(@rows, @cols)
       @rows.times do |i|
         @cols.times do |j|
@@ -515,6 +698,203 @@ module SHAInet
     # Provide access to raw data for batch operations
     def raw_data
       @data
+    end
+
+    # Copy data from another CudaMatrix
+    def copy_from!(other : CudaMatrix)
+      raise ArgumentError.new("size mismatch") unless @rows == other.rows && @cols == other.cols
+      raise RuntimeError.new("GPU copy requires valid device pointers") unless (sptr = other.device_ptr) && (dptr = self.device_ptr) && !sptr.null? && !dptr.null?
+
+      # Ensure source has up-to-date GPU data
+      other.sync_to_device!("copy_from") unless other.device_dirty?
+
+      # GPU -> GPU copy
+      bytes = (@rows * @cols * 8).to_u64
+      result = CUDA.memcpy(dptr.as(Pointer(Void)), sptr.as(Pointer(Void)), bytes, CUDA::MemcpyKind::DeviceToDevice)
+      raise RuntimeError.new("GPU-to-GPU memcpy failed") if result != 0
+
+      mark_device_dirty!
+      self
+    end
+
+    # In-place zeroing using GPU kernel
+    def zero!
+      if CUDA.fully_available? && (dptr = device_ptr) && !dptr.null?
+        size = @rows * @cols
+        CUDA.zero_matrix(dptr, size)
+        mark_device_dirty!
+      else
+        # CPU fallback - zero all elements
+        @rows.times do |i|
+          @cols.times do |j|
+            unsafe_set(i, j, 0.0)
+          end
+        end
+        # Mark CPU data as newer for CPU fallback
+        mark_device_clean!
+      end
+      self
+    end
+
+    # Element-wise sigmoid activation in-place.
+    def sigmoid!
+      raise RuntimeError.new("GPU sigmoid requires valid device pointer") unless (dptr = self.device_ptr) && !dptr.null?
+
+      # Ensure self has up-to-date GPU data
+      self.sync_to_device!("sigmoid_activation") unless device_dirty?
+
+      # Apply sigmoid in-place - use same pointer for all three parameters
+      size = @rows * @cols
+      CUDA.sigmoid_forward(dptr, dptr, dptr, size)
+
+      # Mark self as having newer GPU data
+      mark_device_dirty!
+      self
+    end
+
+    # High-performance in-place scalar multiplication using cuBLAS SCAL
+    def scale!(scalar : Float64)
+      raise RuntimeError.new("GPU scale! requires valid device pointer") unless (dptr = self.device_ptr) && !dptr.null?
+
+      # Ensure self has up-to-date GPU data
+      self.sync_to_device!("scalar_scale_inplace") unless device_dirty?
+
+      handle = CUDA.create_handle
+      begin
+        CUDA.scal(handle, dptr, (@rows*@cols), scalar)
+      ensure
+        CUDA.destroy_handle(handle)
+      end
+
+      # Mark self as having newer GPU data
+      mark_device_dirty!
+      self
+    end
+
+    # High-performance element-wise division - simplified version
+    def /(other : CudaMatrix) : CudaMatrix
+      raise ArgumentError.new("size mismatch") unless @rows == other.rows && @cols == other.cols
+
+      # For now, use CPU fallback for element-wise division since cuBLAS doesn't have direct support
+      # This can be optimized with custom CUDA kernels later
+      result = CudaMatrix.new(@rows, @cols)
+
+      # Sync both matrices to CPU for element-wise division
+      self.sync_from_device!("element_division") if device_dirty?
+      other.sync_from_device!("element_division") if other.device_dirty?
+
+      @rows.times do |i|
+        @cols.times do |j|
+          self_val = self.unsafe_get(i, j)
+          other_val = other.unsafe_get(i, j)
+          result.unsafe_set(i, j, other_val == 0.0 ? 0.0 : self_val / other_val)
+        end
+      end
+
+      result.sync_to_device!("element_division_result")
+      result
+    end
+
+    # Element-wise softmax using cuDNN when available
+    def softmax_rows!
+      # Use cuDNN for optimized softmax if available
+      if CUDNN.available?
+        begin
+          CUDNN.softmax_rows(self, self)
+          return self
+        rescue e : Exception
+          Log.debug { "cuDNN softmax failed: #{e}, falling back to CUDA kernel" }
+        end
+      end
+
+      # Fallback to existing implementation
+      raise RuntimeError.new("GPU softmax requires valid device pointer") unless (dptr = self.device_ptr) && !dptr.null?
+
+      # Ensure self has up-to-date GPU data
+      self.sync_to_device!("softmax_activation") unless device_dirty?
+
+      # Use existing CUDA kernel or CPU fallback
+      # This would benefit from a custom CUDA softmax kernel
+      self.sync_from_device!("softmax_fallback")
+      @rows.times do |i|
+        # Compute softmax for each row
+        row_max = -Float64::INFINITY
+        @cols.times { |j| row_max = Math.max(row_max, unsafe_get(i, j)) }
+
+        row_sum = 0.0
+        @cols.times do |j|
+          val = Math.exp(unsafe_get(i, j) - row_max)
+          unsafe_set(i, j, val)
+          row_sum += val
+        end
+
+        @cols.times { |j| unsafe_set(i, j, unsafe_get(i, j) / row_sum) }
+      end
+      self.sync_to_device!("softmax_result")
+
+      # Mark self as having newer GPU data
+      mark_device_dirty!
+      self
+    end
+
+    # Matrix workspace pool to reduce allocations
+    @@matrix_pool = Hash(String, Array(CudaMatrix)).new { |h, k| h[k] = [] of CudaMatrix }
+    @@pool_enabled = true
+    @@max_pool_size = 100
+
+    # Get a matrix from the pool or create a new one
+    def self.get_workspace(rows : Int32, cols : Int32, source : String = "workspace") : CudaMatrix
+      return new(rows, cols) unless @@pool_enabled
+
+      key = "#{rows}x#{cols}"
+      pool = @@matrix_pool[key]
+
+      if matrix = pool.pop?
+        # Reuse existing matrix - zero it out for cleanliness
+        matrix.zero!
+        Log.debug { "CudaMatrix.get_workspace: Reused #{key} matrix from pool (pool size: #{pool.size})" }
+        matrix
+      else
+        # Create new matrix
+        Log.debug { "CudaMatrix.get_workspace: Created new #{key} matrix (pool empty)" }
+        new(rows, cols)
+      end
+    end
+
+    # Return a matrix to the pool for reuse
+    def self.return_workspace(matrix : CudaMatrix)
+      return unless @@pool_enabled
+
+      key = "#{matrix.rows}x#{matrix.cols}"
+      pool = @@matrix_pool[key]
+
+      # Only pool if we haven't exceeded the limit
+      if pool.size < @@max_pool_size
+        pool << matrix
+        Log.debug { "CudaMatrix.return_workspace: Returned #{key} matrix to pool (pool size: #{pool.size})" }
+      else
+        Log.debug { "CudaMatrix.return_workspace: Pool full for #{key}, not caching" }
+      end
+    end
+
+    # Clear all pooled matrices
+    def self.clear_workspace_pool
+      total_freed = 0
+      @@matrix_pool.each_value do |pool|
+        total_freed += pool.size
+        pool.clear
+      end
+      Log.debug { "CudaMatrix.clear_workspace_pool: Cleared #{total_freed} pooled matrices" }
+    end
+
+    # Get pool statistics
+    def self.pool_stats
+      total_pooled = @@matrix_pool.values.sum(&.size)
+      {
+        enabled:      @@pool_enabled,
+        total_pooled: total_pooled,
+        pools:        @@matrix_pool.transform_values(&.size),
+      }
     end
   end
 end

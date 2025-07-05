@@ -194,11 +194,13 @@ module SHAInet
     # Convert SimpleMatrix to CudaMatrix for GPU operations
     def to_cuda : CudaMatrix
       result = CudaMatrix.new(@rows, @cols)
+      # Use batch copy through raw data for better performance
       @rows.times do |i|
         @cols.times do |j|
-          result[i, j] = self[i, j]
+          result.unsafe_set(i, j, self[i, j])
         end
       end
+      result.sync_to_device!("simple_to_cuda_conversion")
       result
     end
   end

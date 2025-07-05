@@ -19,6 +19,18 @@ module SHAInet
     @g_w_v : SimpleMatrix | CudaMatrix
     @g_w_o : SimpleMatrix | CudaMatrix
 
+    # Pre-allocated workspace matrices to avoid allocations in forward/backward passes
+    @workspace_concat : CudaMatrix | Nil
+    @workspace_d_q_concat : CudaMatrix | Nil
+    @workspace_d_k_concat : CudaMatrix | Nil
+    @workspace_d_v_concat : CudaMatrix | Nil
+
+    # Workspace matrices for attention computation (per head)
+    @workspace_scores : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
+    @workspace_attn_output : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
+
+    @last_batch_size : Int32
+
     getter w_q, w_k, w_v, w_o
     property g_w_q, g_w_k, g_w_v, g_w_o
 
@@ -44,6 +56,13 @@ module SHAInet
       @v_heads = [] of (SimpleMatrix | CudaMatrix)
       @attn = [] of (SimpleMatrix | CudaMatrix)
       @out = mat_klass.zeros(1, 1)
+
+      # Initialize workspace matrices as nil - will be allocated on first use
+      @workspace_concat = nil
+      @workspace_d_q_concat = nil
+      @workspace_d_k_concat = nil
+      @workspace_d_v_concat = nil
+      @last_batch_size = 0
     end
 
     # Convert all internal matrices to GPU
@@ -62,6 +81,13 @@ module SHAInet
         @out = @out.as(SimpleMatrix).to_cuda if @out && !@out.is_a?(CudaMatrix)
         @x = @x.as(SimpleMatrix).to_cuda if @x && !@x.is_a?(CudaMatrix)
 
+        # Reset workspace matrices so they get allocated as CudaMatrix on next use
+        @workspace_concat = nil
+        @workspace_d_q_concat = nil
+        @workspace_d_k_concat = nil
+        @workspace_d_v_concat = nil
+        @last_batch_size = 0
+
         # Convert stored head matrices to GPU
         @q_heads = @q_heads.map { |h| h.is_a?(CudaMatrix) ? h.as(SimpleMatrix | CudaMatrix) : h.as(SimpleMatrix).to_cuda.as(SimpleMatrix | CudaMatrix) }
         @k_heads = @k_heads.map { |h| h.is_a?(CudaMatrix) ? h.as(SimpleMatrix | CudaMatrix) : h.as(SimpleMatrix).to_cuda.as(SimpleMatrix | CudaMatrix) }
@@ -70,59 +96,105 @@ module SHAInet
       end
     end
 
-    # GPU path - all operations with CudaMatrix
+    # GPU path - all operations with CudaMatrix - optimized with workspace pool
     def forward(x : CudaMatrix, mask : CudaMatrix | Nil = nil) : CudaMatrix
       @x = x
 
-      # Compute Q, K, V projections - GPU path
-      q = x * @w_q.as(CudaMatrix)
-      k = x * @w_k.as(CudaMatrix)
-      v = x * @w_v.as(CudaMatrix)
+      # Ensure workspace matrices are allocated for this batch size
+      ensure_workspace_matrices(x.rows)
 
-      @q_heads = Array(SimpleMatrix | CudaMatrix).new
-      @k_heads = Array(SimpleMatrix | CudaMatrix).new
-      @v_heads = Array(SimpleMatrix | CudaMatrix).new
-      @attn = Array(SimpleMatrix | CudaMatrix).new
-      outputs = [] of CudaMatrix
+      # Use workspace pool for Q, K, V projections to reduce allocations
+      q = CudaMatrix.get_workspace(x.rows, @d_model, "mha_q_projection")
+      k = CudaMatrix.get_workspace(x.rows, @d_model, "mha_k_projection")
+      v = CudaMatrix.get_workspace(x.rows, @d_model, "mha_v_projection")
 
-      # Split into heads and compute attention - all GPU operations
-      @num_heads.times do |h|
-        qs = q.slice_cols(h * @head_dim, @head_dim)
-        ks = k.slice_cols(h * @head_dim, @head_dim)
-        vs = v.slice_cols(h * @head_dim, @head_dim)
+      begin
+        # Compute Q, K, V projections - reuse workspace matrices
+        q.copy_from!(x * @w_q.as(CudaMatrix))
+        k.copy_from!(x * @w_k.as(CudaMatrix))
+        v.copy_from!(x * @w_v.as(CudaMatrix))
 
-        @q_heads << qs
-        @k_heads << ks
-        @v_heads << vs
+        @q_heads = Array(SimpleMatrix | CudaMatrix).new
+        @k_heads = Array(SimpleMatrix | CudaMatrix).new
+        @v_heads = Array(SimpleMatrix | CudaMatrix).new
+        @attn = Array(SimpleMatrix | CudaMatrix).new
+        outputs = [] of CudaMatrix
 
-        # Attention computation - all GPU
-        ks_transposed = ks.transpose
-        scores = qs * ks_transposed * (1.0 / Math.sqrt(@head_dim.to_f))
+        # Split into heads and compute attention - all GPU operations
+        @num_heads.times do |h|
+          qs = q.slice_cols(h * @head_dim, @head_dim)
+          ks = k.slice_cols(h * @head_dim, @head_dim)
+          vs = v.slice_cols(h * @head_dim, @head_dim)
 
-        # Apply mask if provided
-        if m = mask
-          raise "mask size mismatch" unless m.rows == scores.rows && m.cols == scores.cols
-          scores = scores + m
+          @q_heads << qs
+          @k_heads << ks
+          @v_heads << vs
+
+          # Attention computation - reuse workspace matrices
+          ks_transposed = ks.transpose
+
+          # Use workspace matrix for scores computation
+          scores_workspace = @workspace_scores[h].not_nil!
+          scores_workspace.zero!
+
+          # Compute attention scores directly into workspace
+          temp_scores = qs * ks_transposed
+          temp_scores.scale!(1.0 / Math.sqrt(@head_dim.to_f))
+          scores_workspace.copy_from!(temp_scores)
+
+          # Apply mask if provided
+          if m = mask
+            raise "mask size mismatch" unless m.rows == scores_workspace.rows && m.cols == scores_workspace.cols
+            scores_workspace.add!(m) # in-place addition
+          end
+
+          # GPU-accelerated softmax
+          attn = SHAInet.softmax_rows(scores_workspace)
+          @attn << attn
+
+          # Compute output for this head using workspace
+          attn_output_workspace = @workspace_attn_output[h].not_nil!
+          attn_output_workspace.zero!
+
+          # Compute attention output directly into workspace
+          temp_output = attn * vs
+          attn_output_workspace.copy_from!(temp_output)
+          outputs << attn_output_workspace
         end
 
-        # GPU-accelerated softmax - ensure scores is CudaMatrix
-        scores_cuda = scores.is_a?(CudaMatrix) ? scores : scores.to_cuda
-        attn = SHAInet.softmax_rows(scores_cuda)
-        @attn << attn
+        # Concatenate heads - use optimized batch copy instead of set_cols
+        concat = @workspace_concat.not_nil!
+        concat.zero!
 
-        # Compute output for this head
-        outputs << (attn * vs)
+        # Use more efficient concatenation to reduce set_cols syncs
+        @num_heads.times do |h|
+          start_col = h * @head_dim
+          output_h = outputs[h]
+
+          # Use GPU-to-GPU copy when possible instead of set_cols
+          if (concat_ptr = concat.device_ptr) && (output_ptr = output_h.device_ptr) &&
+             !concat_ptr.null? && !output_ptr.null?
+            concat.sync_to_device!("mha_concat_prep") unless concat.device_dirty?
+            output_h.sync_to_device!("mha_concat_prep") unless output_h.device_dirty?
+
+            # Direct GPU memory copy for each column block
+            CUDA.set_cols(concat_ptr, output_ptr, concat.rows, concat.cols, start_col, @head_dim)
+            concat.mark_device_dirty!
+          else
+            # Fallback to standard set_cols
+            concat.set_cols!(start_col, output_h)
+          end
+        end
+
+        # Final projection - GPU
+        @out = concat * @w_o.as(CudaMatrix)
+        @out.as(CudaMatrix)
+      ensure
+        # Return workspace matrices to pool
+        CudaMatrix.return_workspace(q)
+        CudaMatrix.return_workspace(k)
+        CudaMatrix.return_workspace(v)
       end
-
-      # Concatenate heads - GPU
-      concat = CudaMatrix.new(x.rows, @d_model)
-      @num_heads.times do |h|
-        concat.set_cols!(h * @head_dim, outputs[h])
-      end
-
-      # Final projection - GPU
-      @out = concat * @w_o.as(CudaMatrix)
-      @out.as(CudaMatrix)
     end
 
     # CPU path - all operations with SimpleMatrix
@@ -249,72 +321,128 @@ module SHAInet
       d_x
     end
 
-    # GPU path backward - all CudaMatrix operations
+    # GPU path backward - all CudaMatrix operations - optimized with workspace pool
     def backward(d_out : CudaMatrix) : CudaMatrix
       x = @x.not_nil!.as(CudaMatrix)
 
-      # Gradient w.r.t. W_o
-      concat = CudaMatrix.new(x.rows, @d_model)
-      @num_heads.times do |h|
-        output = @attn[h].as(CudaMatrix) * @v_heads[h].as(CudaMatrix)
-        concat.set_cols!(h * @head_dim, output)
+      # Use workspace pools for temporary matrices to reduce allocations
+      temp_grad_o = CudaMatrix.get_workspace(@d_model, @d_model, "mha_grad_o")
+      d_concat = CudaMatrix.get_workspace(x.rows, @d_model, "mha_d_concat")
+
+      begin
+        # Gradient w.r.t. W_o (use pre-allocated workspace)
+        concat = @workspace_concat.not_nil!
+        @num_heads.times do |h|
+          output = @attn[h].as(CudaMatrix) * @v_heads[h].as(CudaMatrix)
+          concat.set_cols!(h * @head_dim, output)
+        end
+
+        # Compute gradient and accumulate in-place
+        temp_grad_o.copy_from!(concat.transpose * d_out)
+        @g_w_o.as(CudaMatrix).add!(temp_grad_o)
+
+        # Gradient w.r.t. concat
+        d_concat.copy_from!(d_out * @w_o.as(CudaMatrix).transpose)
+
+        # Use workspace pools for head gradients
+        d_q_heads = [] of CudaMatrix
+        d_k_heads = [] of CudaMatrix
+        d_v_heads = [] of CudaMatrix
+
+        @num_heads.times do |h|
+          d_out_h = d_concat.slice_cols(h * @head_dim, @head_dim)
+
+          # Use workspace matrices for gradients
+          d_v_workspace = CudaMatrix.get_workspace(@head_dim, x.rows, "mha_d_v")
+          d_attn_workspace = CudaMatrix.get_workspace(x.rows, x.rows, "mha_d_attn")
+          d_scores_workspace = CudaMatrix.get_workspace(x.rows, x.rows, "mha_d_scores")
+          d_q_workspace = CudaMatrix.get_workspace(x.rows, @head_dim, "mha_d_q")
+          d_k_workspace = CudaMatrix.get_workspace(x.rows, @head_dim, "mha_d_k")
+
+          begin
+            # Gradient w.r.t. V
+            d_v_workspace.copy_from!(@attn[h].as(CudaMatrix).transpose * d_out_h)
+            d_v_heads << d_v_workspace
+
+            # Gradient w.r.t. attention weights
+            d_attn_workspace.copy_from!(d_out_h * @v_heads[h].as(CudaMatrix).transpose)
+
+            # Gradient w.r.t. scores (softmax backward)
+            d_scores_workspace.copy_from!(softmax_backward(d_attn_workspace, @attn[h].as(CudaMatrix)))
+
+            # Scale by 1/sqrt(d_k) in-place
+            d_scores_workspace.scale!(1.0 / Math.sqrt(@head_dim.to_f))
+
+            # Gradients w.r.t. Q and K
+            d_q_workspace.copy_from!(d_scores_workspace * @k_heads[h].as(CudaMatrix))
+            d_k_workspace.copy_from!(d_scores_workspace.transpose * @q_heads[h].as(CudaMatrix))
+
+            d_q_heads << d_q_workspace
+            d_k_heads << d_k_workspace
+          ensure
+            # Note: Don't return these to pool yet as they're still referenced in the arrays
+          end
+        end
+
+        # Concatenate head gradients (use pre-allocated workspace matrices)
+        d_q_concat = @workspace_d_q_concat.not_nil!
+        d_k_concat = @workspace_d_k_concat.not_nil!
+        d_v_concat = @workspace_d_v_concat.not_nil!
+
+        d_q_concat.zero!
+        d_k_concat.zero!
+        d_v_concat.zero!
+
+        @num_heads.times do |h|
+          d_q_concat.set_cols!(h * @head_dim, d_q_heads[h])
+          d_k_concat.set_cols!(h * @head_dim, d_k_heads[h])
+          d_v_concat.set_cols!(h * @head_dim, d_v_heads[h])
+        end
+
+        # Use workspace pools for weight gradients
+        temp_grad_q = CudaMatrix.get_workspace(@d_model, @d_model, "mha_temp_grad_q")
+        temp_grad_k = CudaMatrix.get_workspace(@d_model, @d_model, "mha_temp_grad_k")
+        temp_grad_v = CudaMatrix.get_workspace(@d_model, @d_model, "mha_temp_grad_v")
+
+        begin
+          # Gradients w.r.t. projection weights - use in-place accumulation
+          temp_grad_q.copy_from!(x.transpose * d_q_concat)
+          temp_grad_k.copy_from!(x.transpose * d_k_concat)
+          temp_grad_v.copy_from!(x.transpose * d_v_concat)
+
+          @g_w_q.as(CudaMatrix).add!(temp_grad_q)
+          @g_w_k.as(CudaMatrix).add!(temp_grad_k)
+          @g_w_v.as(CudaMatrix).add!(temp_grad_v)
+
+          # Gradient w.r.t. input - use workspace pool
+          d_x = CudaMatrix.get_workspace(x.rows, x.cols, "mha_d_x")
+
+          # Compute parts separately and accumulate
+          d_x_q = d_q_concat * @w_q.as(CudaMatrix).transpose
+          d_x_k = d_k_concat * @w_k.as(CudaMatrix).transpose
+          d_x_v = d_v_concat * @w_v.as(CudaMatrix).transpose
+
+          d_x.copy_from!(d_x_q)
+          d_x.add!(d_x_k)
+          d_x.add!(d_x_v)
+
+          d_x
+        ensure
+          # Return workspace matrices to pool
+          CudaMatrix.return_workspace(temp_grad_q)
+          CudaMatrix.return_workspace(temp_grad_k)
+          CudaMatrix.return_workspace(temp_grad_v)
+        end
+      ensure
+        # Return main workspace matrices to pool
+        CudaMatrix.return_workspace(temp_grad_o)
+        CudaMatrix.return_workspace(d_concat)
+
+        # Return head gradient matrices to pool
+        d_q_heads.each { |m| CudaMatrix.return_workspace(m) }
+        d_k_heads.each { |m| CudaMatrix.return_workspace(m) }
+        d_v_heads.each { |m| CudaMatrix.return_workspace(m) }
       end
-      @g_w_o = @g_w_o.as(CudaMatrix) + (concat.transpose * d_out)
-
-      # Gradient w.r.t. concat
-      d_concat = d_out * @w_o.as(CudaMatrix).transpose
-
-      # Gradients w.r.t. each head
-      d_q_heads = [] of CudaMatrix
-      d_k_heads = [] of CudaMatrix
-      d_v_heads = [] of CudaMatrix
-
-      @num_heads.times do |h|
-        d_out_h = d_concat.slice_cols(h * @head_dim, @head_dim)
-
-        # Gradient w.r.t. V
-        d_v = @attn[h].as(CudaMatrix).transpose * d_out_h
-        d_v_heads << d_v
-
-        # Gradient w.r.t. attention weights
-        d_attn = d_out_h * @v_heads[h].as(CudaMatrix).transpose
-
-        # Gradient w.r.t. scores (softmax backward)
-        d_scores = softmax_backward(d_attn, @attn[h].as(CudaMatrix))
-
-        # Scale by 1/sqrt(d_k)
-        d_scores = d_scores * (1.0 / Math.sqrt(@head_dim.to_f))
-
-        # Gradients w.r.t. Q and K
-        d_q = d_scores * @k_heads[h].as(CudaMatrix)
-        d_k = d_scores.transpose * @q_heads[h].as(CudaMatrix)
-
-        d_q_heads << d_q
-        d_k_heads << d_k
-      end
-
-      # Concatenate head gradients
-      d_q_concat = CudaMatrix.new(x.rows, @d_model)
-      d_k_concat = CudaMatrix.new(x.rows, @d_model)
-      d_v_concat = CudaMatrix.new(x.rows, @d_model)
-
-      @num_heads.times do |h|
-        d_q_concat.set_cols!(h * @head_dim, d_q_heads[h])
-        d_k_concat.set_cols!(h * @head_dim, d_k_heads[h])
-        d_v_concat.set_cols!(h * @head_dim, d_v_heads[h])
-      end
-
-      # Gradients w.r.t. projection weights
-      @g_w_q = @g_w_q.as(CudaMatrix) + (x.transpose * d_q_concat)
-      @g_w_k = @g_w_k.as(CudaMatrix) + (x.transpose * d_k_concat)
-      @g_w_v = @g_w_v.as(CudaMatrix) + (x.transpose * d_v_concat)
-
-      # Gradient w.r.t. input
-      d_x = (d_q_concat * @w_q.as(CudaMatrix).transpose) +
-            (d_k_concat * @w_k.as(CudaMatrix).transpose) +
-            (d_v_concat * @w_v.as(CudaMatrix).transpose)
-
-      d_x
     end
 
     # GPU path for applying gradients
@@ -347,10 +475,11 @@ module SHAInet
 
     # GPU path for zeroing gradients
     def zero_gradients(device : CudaMatrix.class)
-      @g_w_q = CudaMatrix.zeros(@d_model, @d_model)
-      @g_w_k = CudaMatrix.zeros(@d_model, @d_model)
-      @g_w_v = CudaMatrix.zeros(@d_model, @d_model)
-      @g_w_o = CudaMatrix.zeros(@d_model, @d_model)
+      # Use in-place zeroing instead of creating new matrices
+      @g_w_q.as(CudaMatrix).zero!
+      @g_w_k.as(CudaMatrix).zero!
+      @g_w_v.as(CudaMatrix).zero!
+      @g_w_o.as(CudaMatrix).zero!
     end
 
     # CPU path for zeroing gradients
@@ -395,24 +524,48 @@ module SHAInet
       end
 
       # CPU fallback - sync matrices to host first
-      d_out.sync_from_device!
-      softmax_out.sync_from_device!
+      d_out.sync_from_device!("attention_backward")
+      softmax_out.sync_from_device!("attention_backward")
 
-      # Efficient softmax gradient computation on CPU
+      # Efficient softmax gradient computation on CPU using unsafe operations
       result = CudaMatrix.new(d_out.rows, d_out.cols)
 
       d_out.rows.times do |i|
         # For each row, compute: softmax * (d_out - sum(softmax * d_out))
         sum = 0.0
-        d_out.cols.times { |j| sum += softmax_out[i, j] * d_out[i, j] }
+        d_out.cols.times { |j| sum += softmax_out.unsafe_get(i, j) * d_out.unsafe_get(i, j) }
 
         d_out.cols.times do |j|
-          result[i, j] = softmax_out[i, j] * (d_out[i, j] - sum)
+          result.unsafe_set(i, j, softmax_out.unsafe_get(i, j) * (d_out.unsafe_get(i, j) - sum))
         end
       end
 
       result.sync_to_device!
       result
+    end
+
+    # Pre-allocate or reuse workspace matrices based on input dimensions
+    private def ensure_workspace_matrices(batch_size : Int32)
+      if CUDA.fully_available?
+        # Only reallocate if batch size changed
+        if @last_batch_size != batch_size
+          @workspace_concat = CudaMatrix.new(batch_size, @d_model)
+          @workspace_d_q_concat = CudaMatrix.new(batch_size, @d_model)
+          @workspace_d_k_concat = CudaMatrix.new(batch_size, @d_model)
+          @workspace_d_v_concat = CudaMatrix.new(batch_size, @d_model)
+
+          # Allocate workspace matrices for each attention head
+          @workspace_scores = Array(CudaMatrix | Nil).new(@num_heads, nil)
+          @workspace_attn_output = Array(CudaMatrix | Nil).new(@num_heads, nil)
+
+          @num_heads.times do |h|
+            @workspace_scores[h] = CudaMatrix.new(batch_size, batch_size)     # scores matrix
+            @workspace_attn_output[h] = CudaMatrix.new(batch_size, @head_dim) # attn * vs result
+          end
+
+          @last_batch_size = batch_size
+        end
+      end
     end
   end
 end

@@ -7,8 +7,12 @@ module SHAInet
     property gradients : SimpleMatrix | CudaMatrix
     getter current_ids : Array(Int32)
 
+    # Pre-allocated workspace matrices to avoid allocations during forward pass
+    @workspace_result : CudaMatrix | Nil
+    @last_ids_size : Int32
+
     def initialize(vocab_size : Int32, l_size : Int32, activation_function : ActivationFunction = SHAInet.none)
-      super("memory", l_size, activation_function)
+      super(l_size, activation_function)
       mat_klass = CUDA.fully_available? ? CudaMatrix : SimpleMatrix
       # Initialize with random values between -0.1 and 0.1
       @embeddings = mat_klass.new(vocab_size, l_size)
@@ -19,6 +23,10 @@ module SHAInet
       end
       @gradients = mat_klass.zeros(vocab_size, l_size)
       @current_ids = [] of Int32
+
+      # Initialize workspace matrices
+      @workspace_result = nil
+      @last_ids_size = 0
     end
 
     # Convert embeddings and gradients to GPU
@@ -26,6 +34,10 @@ module SHAInet
       if CUDA.fully_available? && !@embeddings.is_a?(CudaMatrix)
         @embeddings = @embeddings.as(SimpleMatrix).to_cuda
         @gradients = @gradients.as(SimpleMatrix).to_cuda
+
+        # Reset workspace so it gets allocated as CudaMatrix on next use
+        @workspace_result = nil
+        @last_ids_size = 0
       end
     end
 
@@ -63,7 +75,10 @@ module SHAInet
         return embed_cpu(ids).to_cuda unless @embeddings.is_a?(CudaMatrix)
       end
 
-      result = CudaMatrix.zeros(ids.size, @l_size)
+      # Ensure workspace result matrix is allocated for this batch size
+      ensure_workspace_result(ids.size)
+      result = @workspace_result.not_nil!
+
       e_ptr = @embeddings.as(CudaMatrix).device_ptr
       r_ptr = result.device_ptr
 
@@ -130,7 +145,7 @@ module SHAInet
       # For better performance, try to keep the caller working with matrices
       if mat.is_a?(CudaMatrix) && CUDA.fully_available?
         # Only sync when the caller actually needs the array
-        mat.as(CudaMatrix).sync_from_device!
+        mat.as(CudaMatrix).sync_from_device!("embedding_backprop")
       end
 
       # Set the activations for this layer
@@ -222,6 +237,17 @@ module SHAInet
       if CUDA.fully_available? && @embeddings.is_a?(CudaMatrix)
         @embeddings.as(CudaMatrix).sync_to_device! unless @embeddings.as(CudaMatrix).device_dirty?
         @gradients.as(CudaMatrix).sync_to_device! unless @gradients.as(CudaMatrix).device_dirty?
+      end
+    end
+
+    # Pre-allocate or reuse workspace result matrix based on batch size
+    private def ensure_workspace_result(ids_size : Int32)
+      if CUDA.fully_available?
+        # Only reallocate if batch size changed
+        if @last_ids_size != ids_size
+          @workspace_result = CudaMatrix.zeros(ids_size, @l_size)
+          @last_ids_size = ids_size
+        end
       end
     end
   end

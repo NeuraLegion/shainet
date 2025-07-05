@@ -57,7 +57,7 @@ module SHAInet
       end
 
       # CPU fallback - ensure we have current data from GPU
-      self.sync_from_device! if device_dirty?
+      self.sync_from_device!("softmax_fallback") if device_dirty?
 
       @rows.times do |i|
         sum = 0.0
@@ -90,7 +90,7 @@ module SHAInet
       end
 
       # CPU fallback - ensure we have current data from GPU
-      self.sync_from_device! if device_dirty?
+      self.sync_from_device!("dropout_fallback") if device_dirty?
 
       @rows.times do |i|
         @cols.times do |j|

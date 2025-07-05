@@ -1,5 +1,6 @@
 require "log"
 require "./shainet/**"
+require "./shainet/cudnn"
 
 module SHAInet
   Log = ::Log.for(self)

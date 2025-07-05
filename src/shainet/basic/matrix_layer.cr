@@ -1,11 +1,9 @@
 require "../math/simple_matrix"
 require "../math/cuda_matrix"
-require "../math/unified_matrix"
 
 module SHAInet
   class MatrixLayer
     # Base layer properties
-    property :n_type
     getter :activation_function, :l_size
     property weights : SimpleMatrix | CudaMatrix
     property biases : SimpleMatrix | CudaMatrix
@@ -19,7 +17,6 @@ module SHAInet
     @sigma_primes : SimpleMatrix | CudaMatrix | Nil
 
     def initialize(in_size : Int32, @size : Int32)
-      @n_type = "memory"
       @l_size = @size
       @activation_function = SHAInet.sigmoid
       # Use CudaMatrix when CUDA is fully available, otherwise SimpleMatrix
@@ -34,7 +31,7 @@ module SHAInet
     end
 
     # Constructor for compatibility with Layer API
-    def initialize(@n_type : String, @size : Int32, @activation_function : ActivationFunction = SHAInet.sigmoid)
+    def initialize(@size : Int32, @activation_function : ActivationFunction = SHAInet.sigmoid)
       @l_size = @size
       # Use CudaMatrix when CUDA is fully available, otherwise SimpleMatrix
       mat_klass = CUDA.fully_available? ? CudaMatrix : SimpleMatrix
@@ -49,7 +46,6 @@ module SHAInet
 
     # Constructor with custom activation function
     def initialize(in_size : Int32, @size : Int32, @activation_function : ActivationFunction)
-      @n_type = "memory"
       @l_size = @size
       # Use CudaMatrix when CUDA is fully available, otherwise SimpleMatrix
       mat_klass = CUDA.fully_available? ? CudaMatrix : SimpleMatrix
@@ -112,7 +108,7 @@ module SHAInet
       sigma_primes_cuda = @sigma_primes.as(CudaMatrix)
 
       # Ensure all matrices are synced to GPU
-      linear_result.sync_to_device! unless linear_result.device_dirty?
+      linear_result.sync_to_device!("matrix_layer_forward") unless linear_result.device_dirty?
 
       size = linear_result.rows * linear_result.cols
 
@@ -187,8 +183,8 @@ module SHAInet
       local_grad = grad.clone
 
       # Use GPU kernel for gradient computation
-      grad.sync_to_device! unless grad.device_dirty?
-      sigma_primes.sync_to_device! unless sigma_primes.device_dirty?
+      grad.sync_to_device!("matrix_layer_backward") unless grad.device_dirty?
+      sigma_primes.sync_to_device!("matrix_layer_backward") unless sigma_primes.device_dirty?
 
       size = local_grad.rows * local_grad.cols
       CUDA.apply_gradient(
@@ -205,8 +201,8 @@ module SHAInet
 
       # Accumulate bias gradients: ∂L/∂b += sum(local_grad, axis=0)
       g_b_cuda = @g_b.as(CudaMatrix)
-      local_grad.sync_to_device! unless local_grad.device_dirty?
-      g_b_cuda.sync_to_device! unless g_b_cuda.device_dirty?
+      local_grad.sync_to_device!("matrix_layer_bias_grad") unless local_grad.device_dirty?
+      g_b_cuda.sync_to_device!("matrix_layer_bias_grad") unless g_b_cuda.device_dirty?
 
       CUDA.accumulate_bias_grad(
         g_b_cuda.device_ptr.not_nil!,

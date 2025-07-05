@@ -27,24 +27,24 @@ puts "Using the GPU? #{SHAInet::CUDA.available? ? "Yes" : "No"}"
 puts "Kernels available? #{SHAInet::CUDA.kernels_available? ? "Yes" : "No"}"
 puts "Training the tokenizer on the dataset..."
 # Train tokenizer and encode text
-vocab_size = 5000 # Increased for better language modeling
+vocab_size = 1000 # Much smaller vocab for faster training
 tokenizer = SHAInet::BPETokenizer.new
-tokenizer.train(text[0..50000], vocab_size) # Use more text for training
-ids = tokenizer.encode(text[0..50000])
+tokenizer.train(text[0..10000], vocab_size) # Much smaller dataset
+ids = tokenizer.encode(text[0..10000])
 
 puts "Tokenizer trained with #{tokenizer.vocab.size} tokens."
 puts "Dataset size: #{ids.size} tokens"
 puts "Sample of first 10 tokens: #{ids[0, [ids.size, 10].min]}"
 
 puts "Building the network..."
-# Build the network with incremental scaling
-d_model = 64 # Moderate increase from 8
-seq_len = 16 # Keep original sequence length
+# Build the network with much smaller dimensions for fast debugging
+d_model = 32 # Much smaller model dimension
+seq_len = 8  # Shorter sequences
 token_count = tokenizer.vocab.size
 net = SHAInet::Network.new
 net.add_layer(:input, 1, SHAInet.none)
 net.add_layer(:embedding, d_model, SHAInet.none, vocab_size: token_count)
-2.times { net.add_layer(:transformer, d_model) } # Reduce to 2 layers
+1.times { net.add_layer(:transformer, d_model) } # Only 1 layer for fast training
 net.add_layer(:output, token_count, SHAInet.identity)
 net.fully_connect
 
@@ -100,8 +100,8 @@ puts "Expected validation sequences: #{val_ids.size - seq_len}"
 train_data = SHAInet::StreamingData.new(train_file, shuffle: true, gpu_batches: true)
 val_data = SHAInet::StreamingData.new(val_file, gpu_batches: true)
 
-epochs = 10
-batch = 32
+epochs = 5
+batch = 8
 net.learning_rate = 0.001
 
 puts "Training the network for #{epochs} epochs with batch size #{batch}..."
@@ -111,7 +111,7 @@ net.train(data: train_data,
   cost_function: :c_ent_sm,
   epochs: epochs,
   mini_batch_size: batch,
-  log_each: 5) # Log every 5 epochs instead of every 100 samples
+  log_each: 1) # Log every 5 epochs instead of every 100 samples
 
 # Validation after training is complete
 puts "Training complete. Running validation..."
@@ -124,7 +124,16 @@ while (val_batch = val_data.next_batch(val_batch_size)).size > 0
   total_batch_loss = 0.0
 
   val_batch.each do |sample|
-    seq = sample[0].as(Array(Array(Float64))).map { |token_arr| token_arr.map(&.to_i) }
+    # Handle the case where sample[0] might be a matrix due to GPU batching
+    seq_data = sample[0]
+    if seq_data.is_a?(Array)
+      seq = seq_data.as(Array(Array(Float64))).map { |token_arr| token_arr.map(&.to_i) }
+    else
+      # If it's a matrix, convert to array format
+      matrix = seq_data.as(SHAInet::CudaMatrix | SHAInet::SimpleMatrix)
+      seq = matrix.to_a.map { |row| row.map(&.to_i) }
+    end
+
     tgt = sample[1].as(Array(Float64))
     pred_id = tgt.index(tgt.max) || 0
     output_vec = net.run(seq).last

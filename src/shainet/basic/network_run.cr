@@ -30,7 +30,7 @@ module SHAInet
 
       # Efficient array extraction - only sync once if needed
       output = if result_matrix.is_a?(CudaMatrix)
-                 result_matrix.sync_from_device! if result_matrix.device_dirty?
+                 result_matrix.sync_from_device!("array_output") if result_matrix.device_dirty?
                  result_matrix.to_a.first
                else
                  result_matrix.to_a.first
@@ -57,12 +57,16 @@ module SHAInet
             # Ensure embedding layer is on GPU for GPU path
             l.as(EmbeddingLayer).to_gpu!
             raise NeuralNetRunError.new("Embedding input mismatch") unless matrix.cols == 1
-            tokens = (0...matrix.rows).map { |r| matrix[r, 0].to_i }
+            tokens = extract_tokens_gpu(matrix)
             matrix = l.as(EmbeddingLayer).embed(tokens)
           when TransformerLayer
             # Ensure transformer layer is on GPU for GPU path
             l.as(TransformerLayer).to_gpu!
             matrix = l.as(TransformerLayer).forward(matrix)
+          else
+            # Handle MatrixLayer and other layer types
+            l.to_gpu! if l.responds_to?(:to_gpu!)
+            matrix = l.forward(matrix)
           end
         end
         out_layer = @output_layers.last
@@ -73,26 +77,37 @@ module SHAInet
         matrix = safe_output_transform(matrix.as(CudaMatrix), w)
         matrix.add_bias!(b)
 
-        # Apply activation function - for identity, no operation needed
+        # Apply activation function - use GPU kernels when available
         unless out_layer.activation_function == SHAInet.identity
-          # For non-identity activation functions, we need CPU access to apply element-wise functions
-          # This is a limitation - complex activation functions require CPU processing
-          matrix.sync_from_device!
-          matrix.rows.times do |i|
-            matrix.cols.times do |j|
-              val = matrix[i, j]
-              act, sig = out_layer.activation_function.call(val)
-              matrix[i, j] = act
-              if i == matrix.rows - 1
-                # Update internal state matrices for output layer
-                if out_layer.responds_to?(:activations) && out_layer.responds_to?(:sigma_primes)
-                  out_layer.activations[0, j] = act
-                  out_layer.sigma_primes[0, j] = sig
+          # Try to use GPU kernels for common activation functions
+          if try_gpu_activation(matrix, out_layer.activation_function)
+            # GPU activation succeeded, update internal state matrices if needed
+            if out_layer.responds_to?(:activations) && out_layer.responds_to?(:sigma_primes)
+              # For now, keep last row handling simple - this is a rare case
+              last_row_vals = matrix.rows == 1 ? matrix : slice_rows_helper(matrix, matrix.rows - 1, 1)
+              out_layer.activations = last_row_vals.clone
+              out_layer.sigma_primes = CudaMatrix.ones(1, matrix.cols)
+            end
+          else
+            # Fallback to CPU for unsupported activation functions - minimize sync operations
+            matrix.sync_from_device!("activation_fallback")
+            # Use unsafe_get/unsafe_set for better performance
+            matrix.rows.times do |i|
+              matrix.cols.times do |j|
+                val = matrix.unsafe_get(i, j)
+                act, sig = out_layer.activation_function.call(val)
+                matrix.unsafe_set(i, j, act)
+                if i == matrix.rows - 1
+                  # Update internal state matrices for output layer
+                  if out_layer.responds_to?(:activations) && out_layer.responds_to?(:sigma_primes)
+                    out_layer.activations.unsafe_set(0, j, act) if out_layer.activations.is_a?(CudaMatrix)
+                    out_layer.sigma_primes.unsafe_set(0, j, sig) if out_layer.sigma_primes.is_a?(CudaMatrix)
+                  end
                 end
               end
             end
+            matrix.sync_to_device!("activation_fallback")
           end
-          matrix.sync_to_device!
         end
         matrix.as(CudaMatrix)
       else
@@ -103,9 +118,11 @@ module SHAInet
             # Ensure embedding layer is on GPU for GPU path
             l.as(EmbeddingLayer).to_gpu!
             raise NeuralNetRunError.new("Embedding input mismatch") unless matrix.cols == 1
-            tokens = (0...matrix.rows).map { |r| matrix[r, 0].to_i }
+            tokens = extract_tokens_gpu(matrix)
             matrix = l.as(EmbeddingLayer).embed(tokens)
           else
+            # Handle MatrixLayer and other layer types
+            l.to_gpu! if l.responds_to?(:to_gpu!)
             matrix = l.forward(matrix)
           end
         end
@@ -223,7 +240,7 @@ module SHAInet
 
       # Efficient array extraction - sync only once if needed
       if result_matrix.is_a?(CudaMatrix)
-        result_matrix.sync_from_device! if result_matrix.device_dirty?
+        result_matrix.sync_from_device!("run_output") if result_matrix.device_dirty?
         result_matrix.to_a
       else
         result_matrix.to_a
@@ -267,7 +284,7 @@ module SHAInet
         exp = if CUDA.fully_available?
                 mat = CudaMatrix.new(1, exp_data.size)
                 exp_data.each_with_index { |val, i| mat[0, i] = val }
-                mat.sync_to_device!
+                mat.sync_to_device!("evaluate_expected_matrix")
                 mat
               else
                 SimpleMatrix.from_a([exp_data])
@@ -276,7 +293,7 @@ module SHAInet
         act = if CUDA.fully_available?
                 mat = CudaMatrix.new(1, actual_output.size)
                 actual_output.each_with_index { |val, i| mat[0, i] = val }
-                mat.sync_to_device!
+                mat.sync_to_device!("evaluate_actual_matrix")
                 mat
               else
                 SimpleMatrix.from_a([actual_output])
@@ -571,6 +588,11 @@ module SHAInet
       batch_size = stream ? mini_batch_size : mini_batch_size.clamp(1, raw_data.size)
 
       epochs.times do |epoch|
+        # Reset sync counters at start of each epoch
+        if CUDA.fully_available?
+          SHAInet::CudaMatrix.reset_sync_stats
+        end
+
         # Autosave if configured
         if autosave && epoch % autosave[:freq] == 0 && epoch > 0
           save_to_file("#{autosave[:path]}/autosave_epoch_#{epoch}.nn")
@@ -610,7 +632,29 @@ module SHAInet
         if epoch % log_each == 0
           elapsed = Time.monotonic - start_time
           gpu_stats = SHAInet::CudaMatrix.gpu_memory_stats
-          Log.info { "Epoch: #{epoch}, Error: #{avg_error.round(6)}, MSE: #{@mse.round(6)}, Time: #{elapsed.total_seconds.round(2)}s, GPU: #{gpu_stats[:active_matrices]} matrices, #{gpu_stats[:total_allocated_bytes]} bytes" }
+          sync_stats = CUDA.fully_available? ? SHAInet::CudaMatrix.sync_stats : nil
+
+          if sync_stats
+            sync_to_mb = (sync_stats[:total_sync_bytes_to_device] / 1024.0 / 1024.0).round(2)
+            sync_from_mb = (sync_stats[:total_sync_bytes_from_device] / 1024.0 / 1024.0).round(2)
+            total_syncs = sync_stats[:sync_to_device_count] + sync_stats[:sync_from_device_count]
+            Log.info { "Epoch: #{epoch}, Error: #{avg_error.round(6)}, MSE: #{@mse.round(6)}, Time: #{elapsed.total_seconds.round(2)}s" }
+            Log.info { "  GPU: #{gpu_stats[:active_matrices]} matrices, #{(gpu_stats[:total_allocated_bytes] / 1024.0 / 1024.0).round(2)} MB" }
+            Log.info { "  Syncs: #{total_syncs} total (#{sync_stats[:sync_to_device_count]} to GPU, #{sync_stats[:sync_from_device_count]} from GPU)" }
+            Log.info { "  Data: #{sync_to_mb} MB to GPU, #{sync_from_mb} MB from GPU (#{(sync_to_mb + sync_from_mb).round(2)} MB total)" }
+            Log.info { "  Matrix creations: #{sync_stats[:matrix_creation_count]} this epoch" }
+
+            # Log top sync sources
+            sources = SHAInet::CudaMatrix.sync_sources_stats
+            if sources.size > 0
+              Log.info { "  Top sync sources:" }
+              sources.to_a.sort_by { |k, v| v }.reverse[0, 5].each do |source, count|
+                Log.info { "    #{source}: #{count} times" }
+              end
+            end
+          else
+            Log.info { "Epoch: #{epoch}, Error: #{avg_error.round(6)}, MSE: #{@mse.round(6)}, Time: #{elapsed.total_seconds.round(2)}s, GPU: #{gpu_stats[:active_matrices]} matrices, #{gpu_stats[:total_allocated_bytes]} bytes" }
+          end
         end
 
         if avg_error < error_threshold
@@ -653,60 +697,17 @@ module SHAInet
 
         actual_matrix = run(input_matrix, stealth: true)
 
-        # Ensure we can access the actual matrix elements - sync if needed
-        if actual_matrix.is_a?(CudaMatrix)
-          actual_matrix.sync_from_device!
-        end
-
+        # Optimize: combine cost calculation and gradient computation in single pass
+        # This avoids double matrix access and reduces syncs
         sample_error = 0.0
-
-        if expected_output.is_a?(SimpleMatrix)
-          rows = expected_output.as(SimpleMatrix).rows
-          cols = expected_output.as(SimpleMatrix).cols
-          rows.times do |i|
-            cols.times do |j|
-              expected = expected_output.as(SimpleMatrix)[i, j]
-              actual = actual_matrix[i, j]
-              cost_result = cost_proc.call(expected, actual)
-              sample_error += cost_result[:value]
-            end
-          end
-        elsif expected_output.is_a?(CudaMatrix)
-          rows = expected_output.as(CudaMatrix).rows
-          cols = expected_output.as(CudaMatrix).cols
-          rows.times do |i|
-            cols.times do |j|
-              expected = expected_output.as(CudaMatrix)[i, j]
-              actual = actual_matrix[i, j]
-              cost_result = cost_proc.call(expected, actual)
-              sample_error += cost_result[:value]
-            end
-          end
-        elsif expected_output.is_a?(Array) && expected_output.as(Array).size > 0 && expected_output.as(Array)[0].is_a?(Array)
-          rows = expected_output.as(Array).size
-          cols = expected_output.as(Array)[0].as(Array).size
-          rows.times do |i|
-            cols.times do |j|
-              expected = expected_output.as(Array)[i].as(Array)[j].as(GenNum).to_f64
-              actual = actual_matrix[i, j]
-              cost_result = cost_proc.call(expected, actual)
-              sample_error += cost_result[:value]
-            end
-          end
-        else
-          arr = expected_output.as(Array)
-          arr.size.times do |i|
-            expected = arr[i].as(GenNum).to_f64
-            actual = actual_matrix[0, i]
-            cost_result = cost_proc.call(expected, actual)
-            sample_error += cost_result[:value]
-          end
-        end
-
-        batch_error += sample_error
-
         output_layer = @output_layers.last
+
         if output_layer.is_a?(MatrixLayer)
+          # Ensure we sync only once for both cost and gradient computation
+          if actual_matrix.is_a?(CudaMatrix)
+            actual_matrix.sync_from_device!("cost_and_grad_calculation")
+          end
+
           if expected_output.is_a?(SimpleMatrix)
             exp_mat = expected_output.as(SimpleMatrix)
             output_grad = GPUMemory.like(actual_matrix, exp_mat.rows, exp_mat.cols)
@@ -715,6 +716,19 @@ module SHAInet
                 expected = exp_mat[i, j]
                 actual = actual_matrix[i, j]
                 cost_result = cost_proc.call(expected, actual)
+                sample_error += cost_result[:value]
+                output_grad[i, j] = cost_result[:derivative]
+              end
+            end
+          elsif expected_output.is_a?(CudaMatrix)
+            exp_mat = expected_output.as(CudaMatrix)
+            output_grad = GPUMemory.like(actual_matrix, exp_mat.rows, exp_mat.cols)
+            exp_mat.rows.times do |i|
+              exp_mat.cols.times do |j|
+                expected = exp_mat[i, j]
+                actual = actual_matrix[i, j]
+                cost_result = cost_proc.call(expected, actual)
+                sample_error += cost_result[:value]
                 output_grad[i, j] = cost_result[:derivative]
               end
             end
@@ -727,17 +741,7 @@ module SHAInet
                 expected = expected_output.as(Array)[i].as(Array)[j].as(GenNum).to_f64
                 actual = actual_matrix[i, j]
                 cost_result = cost_proc.call(expected, actual)
-                output_grad[i, j] = cost_result[:derivative]
-              end
-            end
-          elsif expected_output.is_a?(CudaMatrix)
-            exp_mat = expected_output.as(CudaMatrix)
-            output_grad = GPUMemory.like(actual_matrix, exp_mat.rows, exp_mat.cols)
-            exp_mat.rows.times do |i|
-              exp_mat.cols.times do |j|
-                expected = exp_mat[i, j]
-                actual = actual_matrix[i, j]
-                cost_result = cost_proc.call(expected, actual)
+                sample_error += cost_result[:value]
                 output_grad[i, j] = cost_result[:derivative]
               end
             end
@@ -748,9 +752,12 @@ module SHAInet
               expected = arr[i].as(GenNum).to_f64
               actual = actual_matrix[0, i]
               cost_result = cost_proc.call(expected, actual)
+              sample_error += cost_result[:value]
               output_grad[0, i] = cost_result[:derivative]
             end
           end
+
+          batch_error += sample_error
 
           # output_grad is already GPU-compatible from GPUMemory.like()
           grad = output_layer.backward(output_grad)
@@ -938,12 +945,38 @@ module SHAInet
       begin
         # For transformer architectures, use only the last token's representation
         if @hidden_layers.any? &.is_a?(TransformerLayer)
-          # Extract last token (row) from transformer output for language modeling
-          last_token = CudaMatrix.new(1, matrix.cols)
-          matrix.cols.times do |j|
-            last_token[0, j] = matrix[matrix.rows - 1, j]
-          end
-          last_token.sync_to_device!
+          # Extract last token (row) from transformer output for language modeling using GPU kernel
+          last_token = if CUDA.fully_available? && (mptr = matrix.device_ptr) && (wptr = weights.device_ptr) && !mptr.null? && !wptr.null?
+                         begin
+                           # Use more efficient GPU slice operation for last row
+                           result = CudaMatrix.new(1, matrix.cols)
+                           # Copy last row using GPU memory copy
+                           last_row_offset = (matrix.rows - 1) * matrix.cols
+                           CUDA.copy_device_to_device(
+                             result.device_ptr.not_nil!,
+                             mptr + last_row_offset,
+                             (matrix.cols * 8).to_u64
+                           )
+                           result.mark_device_dirty!
+                           result
+                         rescue e
+                           # Fallback to elementwise copy if GPU operation fails
+                           last_token_fallback = CudaMatrix.new(1, matrix.cols)
+                           matrix.cols.times do |j|
+                             last_token_fallback[0, j] = matrix[matrix.rows - 1, j]
+                           end
+                           last_token_fallback.sync_to_device!
+                           last_token_fallback
+                         end
+                       else
+                         # CPU fallback
+                         last_token_cpu = CudaMatrix.new(1, matrix.cols)
+                         matrix.cols.times do |j|
+                           last_token_cpu[0, j] = matrix[matrix.rows - 1, j]
+                         end
+                         last_token_cpu.sync_to_device!
+                         last_token_cpu
+                       end
 
           # Now multiply: last_token (1 x d_model) * weights (d_model x vocab_size)
           if last_token.cols != weights.rows
@@ -1027,13 +1060,11 @@ module SHAInet
 
         raise ex
       end
-    end
-
-    # Optimized helper to extract tokens from GPU matrix without elementwise access
+    end # Optimized helper to extract tokens from GPU matrix without elementwise access
     # Uses GPU-to-CPU batch transfer instead of per-element sync
     private def extract_tokens_gpu(matrix : CudaMatrix) : Array(Int32)
       # Sync entire matrix from GPU in one operation instead of elementwise access
-      matrix.sync_from_device! if matrix.device_dirty?
+      matrix.sync_from_device!("extract_tokens") if matrix.device_dirty?
       # Extract tokens as a batch operation from column 0
       Array.new(matrix.rows) { |r| matrix.unsafe_get(r, 0).to_i }
     end
@@ -1065,6 +1096,44 @@ module SHAInet
         # For SimpleMatrix, still do elementwise but at least batch the operation
         data.each_with_index { |val, col| matrix[row, col] = val }
       end
+    end
+
+    # Try to apply activation function using GPU kernels
+    private def try_gpu_activation(matrix : CudaMatrix, activation_function : ActivationFunction) : Bool
+      return false unless CUDA.fully_available?
+
+      case activation_function
+      when SHAInet.sigmoid
+        # Use in-place GPU sigmoid operation
+        begin
+          matrix.sigmoid!
+          return true
+        rescue e
+          Log.debug { "GPU sigmoid failed: #{e}, falling back to CPU" }
+        end
+      when SHAInet.relu
+        # Use in-place ReLU operation
+        begin
+          matrix.relu!
+          return true
+        rescue e
+          Log.debug { "GPU ReLU failed: #{e}, falling back to CPU" }
+        end
+      end
+
+      false
+    end
+
+    # Helper method for matrix slicing (missing method)
+    private def slice_rows_helper(matrix : CudaMatrix, start_row : Int32, num_rows : Int32) : CudaMatrix
+      result = CudaMatrix.new(num_rows, matrix.cols)
+      num_rows.times do |i|
+        matrix.cols.times do |j|
+          result[i, j] = matrix[start_row + i, j]
+        end
+      end
+      result.sync_to_device! if CUDA.fully_available?
+      result
     end
   end
 end

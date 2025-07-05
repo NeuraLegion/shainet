@@ -35,55 +35,6 @@ module SHAInet
       end
     end
 
-    # Allocate device memory, no longer using pools
-    def alloc_buffer(rows : Int32, cols : Int32)
-      return Pointer(Float64).null unless CUDA.fully_available?
-
-      size = rows * cols
-
-      # Sanity check - prevent excessive memory allocation
-      if size <= 0 || size > 100_000_000 # 100M elements = ~800MB
-        Log.warn { "GPUMemory.alloc_buffer: Invalid size #{size} for #{rows}x#{cols}" }
-        return Pointer(Float64).null
-      end
-
-      # NO MORE POOLING - always allocate fresh
-      begin
-        ptr = Pointer(Float64).null
-        bytes = ((size) * 8).to_u64
-        Log.debug { "GPUMemory.alloc_buffer: Attempting fresh allocation of #{bytes} bytes for #{rows}x#{cols}" }
-        res = CUDA.malloc(pointerof(ptr).as(Pointer(Pointer(Void))), bytes)
-        Log.debug { "GPUMemory.alloc_buffer: CUDA.malloc returned #{res}, ptr=#{ptr.null? ? "null" : "valid"}" }
-        if res == 0 && !ptr.null?
-          @@active_allocations += 1
-          @@total_allocated_bytes += bytes
-          Log.debug { "GPUMemory.alloc_buffer: Successful allocation for #{rows}x#{cols} (#{@@active_allocations} active, #{@@total_allocated_bytes} total bytes)" }
-          ptr
-        else
-          Log.warn { "GPUMemory.alloc_buffer: Failed allocation for #{rows}x#{cols} - res=#{res}, ptr=#{ptr.null? ? "null" : "valid"} (#{@@active_allocations} active, #{@@total_allocated_bytes} total bytes)" }
-          Pointer(Float64).null
-        end
-      rescue e
-        Log.error { "GPUMemory.alloc_buffer: Exception during allocation for #{rows}x#{cols}: #{e}" }
-        Pointer(Float64).null
-      end
-    end
-
-    # Return a buffer to the pool for reuse
-    def release_buffer(ptr : Pointer(Float64), rows : Int32, cols : Int32)
-      return if ptr.null?
-      size = rows * cols
-      bytes = size * 8
-
-      # Always decrement counters when buffer is released
-      @@active_allocations -= 1
-      @@total_allocated_bytes -= bytes
-
-      # DISABLE POOLING - always free immediately to prevent memory accumulation
-      CUDA.free(ptr.as(Pointer(Void)))
-      Log.debug { "GPUMemory.release_buffer: Immediately freed buffer for #{rows}x#{cols} (#{@@active_allocations} active, #{@@total_allocated_bytes} total bytes)" }
-    end
-
     # Free all cached buffers and reset counters
     def cleanup
       total_freed = 0
@@ -99,14 +50,6 @@ module SHAInet
       @@total_allocated_bytes = 0_u64
     end
 
-    # Force cleanup of pooled buffers if memory usage is high
-    def force_cleanup_if_needed
-      if @@active_allocations > 100 || @@total_allocated_bytes > 10_000_000 # 10MB
-        Log.warn { "GPUMemory: High memory usage detected (#{@@active_allocations} active, #{@@total_allocated_bytes} bytes), forcing cleanup" }
-        cleanup
-      end
-    end
-
     # Convert SimpleMatrix to CudaMatrix if CUDA is available and input is not already CudaMatrix
     def to_gpu(matrix : SimpleMatrix)
       return matrix if matrix.is_a?(CudaMatrix) || !CUDA.fully_available?
@@ -117,7 +60,7 @@ module SHAInet
           result[i, j] = matrix[i, j]
         end
       end
-      result.sync_to_device!
+      result.sync_to_device!("gpu_conversion")
       result
     end
 
@@ -136,7 +79,7 @@ module SHAInet
     def like(matrix : SimpleMatrix | CudaMatrix, rows : Int32, cols : Int32, init : Float64 = 0.0)
       if matrix.is_a?(CudaMatrix) && CUDA.fully_available?
         result = CudaMatrix.new(rows, cols, init)
-        result.sync_to_device!
+        result.sync_to_device!("gpu_memory_zeros_like")
         result
       else
         SimpleMatrix.new(rows, cols, init)
@@ -153,69 +96,11 @@ module SHAInet
       like(matrix, rows, cols, 1.0)
     end
 
-    # Apply operation and ensure result stays on same device
-    def preserve_device(input : SimpleMatrix, &block : SimpleMatrix -> SimpleMatrix)
-      result = yield input
-
-      # Ensure result is same type as input
-      if input.is_a?(CudaMatrix) && !result.is_a?(CudaMatrix) && CUDA.fully_available?
-        gpu_result = to_gpu(result)
-        gpu_result
-      else
-        result
-      end
-    end
-
     # Batch sync multiple CudaMatrix objects from device efficiently
     def batch_sync_from_device(matrices : Array(SimpleMatrix))
       matrices.each do |matrix|
         if matrix.is_a?(CudaMatrix)
-          matrix.sync_from_device!
-        end
-      end
-    end
-
-    # Batch sync multiple CudaMatrix objects to device efficiently
-    def batch_sync_to_device(matrices : Array(SimpleMatrix))
-      matrices.each do |matrix|
-        if matrix.is_a?(CudaMatrix) && !matrix.device_dirty?
-          matrix.sync_to_device!
-        end
-      end
-    end
-
-    # Check if all matrices in array are of the same type (all GPU or all CPU)
-    def same_device_type?(matrices : Array(SimpleMatrix))
-      return true if matrices.empty?
-
-      first_type = matrices.first.class
-      matrices.all? { |m| m.class == first_type }
-    end
-
-    # Convert all matrices to the same device type (prefer GPU if available)
-    def unify_device_type(matrices : Array(SimpleMatrix))
-      return matrices if same_device_type?(matrices)
-
-      # If CUDA is available and any matrix is on GPU, move all to GPU
-      has_gpu = matrices.any? { |m| m.is_a?(CudaMatrix) }
-
-      if has_gpu && CUDA.fully_available?
-        matrices.map { |m| to_gpu(m) }
-      else
-        # Otherwise ensure all are CPU matrices (SimpleMatrix)
-        matrices.map do |m|
-          if m.is_a?(CudaMatrix)
-            m.sync_from_device!
-            cpu_matrix = SimpleMatrix.new(m.rows, m.cols)
-            m.rows.times do |i|
-              m.cols.times do |j|
-                cpu_matrix[i, j] = m[i, j]
-              end
-            end
-            cpu_matrix
-          else
-            m
-          end
+          matrix.sync_from_device!("cleanup_matrices")
         end
       end
     end

@@ -20,6 +20,16 @@ module SHAInet
     @var : SimpleMatrix | CudaMatrix
     @norm : SimpleMatrix | CudaMatrix
 
+    # Pre-allocated workspace matrices to avoid allocations in forward/backward passes
+    @workspace_mean : CudaMatrix | Nil
+    @workspace_var : CudaMatrix | Nil
+    @workspace_norm : CudaMatrix | Nil
+    @workspace_d_x : CudaMatrix | Nil
+    @workspace_d_gamma : CudaMatrix | Nil
+    @workspace_d_beta : CudaMatrix | Nil
+    @last_batch_size : Int32
+    @d_model : Int32
+
     def initialize(d_model : Int32, epsilon : Float64 = 1e-5)
       # Use CudaMatrix when CUDA is available for better performance
       mat_klass = CUDA.fully_available? ? CudaMatrix : SimpleMatrix
@@ -32,6 +42,16 @@ module SHAInet
       @mean = mat_klass.zeros(1, 1)
       @var = mat_klass.zeros(1, 1)
       @norm = mat_klass.zeros(1, 1)
+      @d_model = d_model
+      @last_batch_size = 0
+
+      # Initialize workspace matrices as nil - will be allocated on first use
+      @workspace_mean = nil
+      @workspace_var = nil
+      @workspace_norm = nil
+      @workspace_d_x = nil
+      @workspace_d_gamma = nil
+      @workspace_d_beta = nil
     end
 
     # Convert all internal matrices to GPU
@@ -45,6 +65,31 @@ module SHAInet
         @var = @var.as(SimpleMatrix).to_cuda if @var && !@var.is_a?(CudaMatrix)
         @norm = @norm.as(SimpleMatrix).to_cuda if @norm && !@norm.is_a?(CudaMatrix)
         @x = @x.as(SimpleMatrix).to_cuda if @x && !@x.is_a?(CudaMatrix)
+
+        # Reset workspace matrices so they get allocated as CudaMatrix on next use
+        @workspace_mean = nil
+        @workspace_var = nil
+        @workspace_norm = nil
+        @workspace_d_x = nil
+        @workspace_d_gamma = nil
+        @workspace_d_beta = nil
+        @last_batch_size = 0
+      end
+    end
+
+    # Pre-allocate or reuse workspace matrices based on input dimensions
+    private def ensure_workspace_matrices(batch_size : Int32, d_model : Int32)
+      if CUDA.fully_available?
+        # Only reallocate if batch size changed
+        if @last_batch_size != batch_size
+          @workspace_mean = CudaMatrix.new(batch_size, 1)
+          @workspace_var = CudaMatrix.new(batch_size, 1)
+          @workspace_norm = CudaMatrix.new(batch_size, d_model)
+          @workspace_d_x = CudaMatrix.new(batch_size, d_model)
+          @workspace_d_gamma = CudaMatrix.zeros(1, d_model)
+          @workspace_d_beta = CudaMatrix.zeros(1, d_model)
+          @last_batch_size = batch_size
+        end
       end
     end
 
@@ -54,10 +99,13 @@ module SHAInet
       rows = x.rows
       cols = x.cols
 
-      # Convert internal matrices to CUDA to match input
-      cuda_mean = CudaMatrix.new(rows, 1)
-      cuda_var = CudaMatrix.new(rows, 1)
-      cuda_norm = CudaMatrix.new(rows, cols)
+      # Ensure workspace matrices are allocated for this batch size
+      ensure_workspace_matrices(rows, cols)
+
+      # Use pre-allocated workspace matrices instead of creating new ones
+      cuda_mean = @workspace_mean.not_nil!
+      cuda_var = @workspace_var.not_nil!
+      cuda_norm = @workspace_norm.not_nil!
 
       begin
         # Try to use CUDA kernels - if they fail, fallback to CPU
@@ -81,8 +129,8 @@ module SHAInet
         @var = cuda_var   # Keep as CudaMatrix
         @norm = cuda_norm # Keep as CudaMatrix
 
+        # Use in-place operations for better performance
         result = cuda_norm.clone
-        # Apply gamma and beta - they should already be CudaMatrix in GPU path
         result.mul_row_vector!(@gamma.as(CudaMatrix))
         result.add_bias!(@beta.as(CudaMatrix))
         return result
@@ -167,10 +215,14 @@ module SHAInet
       # If all tensors are CUDA and kernels are available, use GPU computation
       if CUDA.fully_available? && @mean.is_a?(CudaMatrix) && @var.is_a?(CudaMatrix) && @norm.is_a?(CudaMatrix)
         begin
-          # Create GPU matrices for gradients
-          d_x = CudaMatrix.new(rows, cols)
-          d_gamma = CudaMatrix.zeros(1, cols)
-          d_beta = CudaMatrix.zeros(1, cols)
+          # Use pre-allocated workspace matrices instead of creating new ones
+          d_x = @workspace_d_x.not_nil!
+          d_gamma = @workspace_d_gamma.not_nil!
+          d_beta = @workspace_d_beta.not_nil!
+
+          # Clear gradient workspace matrices for this backward pass
+          d_gamma.zero!
+          d_beta.zero!
 
           # Run CUDA kernel for backward pass
           CUDA.layer_norm_backward(
@@ -191,15 +243,21 @@ module SHAInet
           d_gamma.mark_device_dirty!
           d_beta.mark_device_dirty!
 
-          # Only sync gradients when needed - accumulate gradients to CPU parameters
-          # without calling sync_from_device! unnecessarily
-          d_gamma.sync_from_device!
-          d_beta.sync_from_device!
-
-          # Accumulate gradients to parameters (always SimpleMatrix)
-          cols.times do |j|
-            @g_gamma[0, j] += d_gamma[0, j]
-            @g_beta[0, j] += d_beta[0, j]
+          # Keep gradient accumulation on GPU - avoid expensive CPU syncs
+          # Only accumulate to GPU gradient matrices, sync only when applying gradients
+          if @g_gamma.is_a?(CudaMatrix) && @g_beta.is_a?(CudaMatrix)
+            # GPU gradient accumulation - use in-place addition
+            @g_gamma.as(CudaMatrix).add!(d_gamma)
+            @g_beta.as(CudaMatrix).add!(d_beta)
+          else
+            # Fallback to CPU accumulation only if gradients are on CPU
+            d_gamma.sync_from_device!("layer_norm_grad")
+            d_beta.sync_from_device!("layer_norm_grad")
+            # Accumulate gradients to parameters (SimpleMatrix fallback)
+            cols.times do |j|
+              @g_gamma[0, j] += d_gamma[0, j]
+              @g_beta[0, j] += d_beta[0, j]
+            end
           end
 
           return d_x
@@ -209,12 +267,12 @@ module SHAInet
       end
 
       # CPU fallback - sync ALL matrices from device first
-      x.sync_from_device!
-      d_out.sync_from_device! # This was missing!
+      x.sync_from_device!("layer_norm_backward")
+      d_out.sync_from_device!("layer_norm_backward") # This was missing!
 
       # Sync gamma if it's on GPU
       if @gamma.is_a?(CudaMatrix)
-        @gamma.as(CudaMatrix).sync_from_device!
+        @gamma.as(CudaMatrix).sync_from_device!("layer_norm_debug")
       end
 
       # Use CPU matrices for computation
@@ -224,13 +282,13 @@ module SHAInet
 
       # Also sync other matrices if they're CUDA
       if @mean.is_a?(CudaMatrix)
-        @mean.as(CudaMatrix).sync_from_device!
+        @mean.as(CudaMatrix).sync_from_device!("layer_norm_debug")
       end
       if @var.is_a?(CudaMatrix)
-        @var.as(CudaMatrix).sync_from_device!
+        @var.as(CudaMatrix).sync_from_device!("layer_norm_debug")
       end
       if @norm.is_a?(CudaMatrix)
-        @norm.as(CudaMatrix).sync_from_device!
+        @norm.as(CudaMatrix).sync_from_device!("layer_norm_debug")
       end
 
       rows.times do |i|
@@ -266,7 +324,7 @@ module SHAInet
           result[i, j] = d_x[i, j]
         end
       end
-      result.sync_to_device!
+      result.sync_to_device!("layer_norm_gradient_result")
       result
     end
 
@@ -316,12 +374,17 @@ module SHAInet
       end
     end
 
-    # GPU path gradient application - all CudaMatrix operations
+    # GPU path gradient application - all CudaMatrix operations with in-place operations
     private def apply_gradients_gpu(lr : Float64)
-      @gamma = @gamma.as(CudaMatrix) - @g_gamma.as(CudaMatrix) * lr
-      @beta = @beta.as(CudaMatrix) - @g_beta.as(CudaMatrix) * lr
-      @g_gamma = CudaMatrix.zeros(@gamma.rows, @gamma.cols)
-      @g_beta = CudaMatrix.zeros(@beta.rows, @beta.cols)
+      # Use in-place operations to reduce allocations
+      gamma_scaled = @g_gamma.as(CudaMatrix) * lr
+      beta_scaled = @g_beta.as(CudaMatrix) * lr
+
+      @gamma.as(CudaMatrix).sub!(gamma_scaled)
+      @beta.as(CudaMatrix).sub!(beta_scaled)
+
+      # Clear gradients in-place        @g_gamma.as(CudaMatrix).zero!
+      @g_beta.as(CudaMatrix).zero!
     end
 
     # CPU path gradient application - all SimpleMatrix operations
@@ -334,9 +397,9 @@ module SHAInet
 
     def zero_gradients
       # Check device type and call appropriate method
-      if @gamma.is_a?(CudaMatrix)
-        @g_gamma = CudaMatrix.zeros(@gamma.rows, @gamma.cols)
-        @g_beta = CudaMatrix.zeros(@beta.rows, @beta.cols)
+      if @gamma.is_a?(CudaMatrix) # Use in-place fill for better performance
+        @g_gamma.as(CudaMatrix).zero!
+        @g_beta.as(CudaMatrix).zero!
       else
         @g_gamma = SimpleMatrix.zeros(@gamma.rows, @gamma.cols)
         @g_beta = SimpleMatrix.zeros(@beta.rows, @beta.cols)

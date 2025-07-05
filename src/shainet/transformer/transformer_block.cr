@@ -14,7 +14,7 @@ module SHAInet
 
     def initialize(d_model : Int32, num_heads : Int32, ff_hidden : Int32,
                    drop_percent : Int32 = 0)
-      super("memory", d_model, SHAInet.none)
+      super(d_model, SHAInet.none)
       @mha = MultiHeadAttention.new(d_model, num_heads)
       @ffn = PositionWiseFF.new(d_model, ff_hidden)
       @norm1 = LayerNorm.new(d_model)

@@ -13,6 +13,9 @@ module SHAInet
     @h : SimpleMatrix | CudaMatrix
     @out : SimpleMatrix | CudaMatrix
 
+    # Workspace matrices to avoid repeated allocations
+    @workspace_temp_bias : CudaMatrix | Nil = nil
+
     property g_w1 : SimpleMatrix | CudaMatrix
     property g_w2 : SimpleMatrix | CudaMatrix
     property g_b1 : SimpleMatrix | CudaMatrix
@@ -50,7 +53,7 @@ module SHAInet
       end
     end
 
-    # GPU path - all CudaMatrix operations
+    # GPU path - all CudaMatrix operations with cuDNN optimization
     def forward(x : CudaMatrix) : CudaMatrix
       @x = x
       # Weights are already CudaMatrix in GPU path
@@ -60,10 +63,25 @@ module SHAInet
       b2_gpu = @b2.as(CudaMatrix)
 
       @h = x * w1_gpu
-      @h.as(CudaMatrix).add_bias!(b1_gpu)
-      @h.as(CudaMatrix).relu!
+
+      # Use cuDNN for optimized bias addition and ReLU if available
+      if CUDNN.available?
+        CUDNN.add_bias!(@h.as(CudaMatrix), b1_gpu)
+        CUDNN.relu_forward(@h.as(CudaMatrix), @h.as(CudaMatrix))
+      else
+        @h.as(CudaMatrix).add_bias!(b1_gpu)
+        @h.as(CudaMatrix).relu!
+      end
+
       @out = @h.as(CudaMatrix) * w2_gpu
-      @out.as(CudaMatrix).add_bias!(b2_gpu)
+
+      # Use cuDNN for bias addition if available
+      if CUDNN.available?
+        CUDNN.add_bias!(@out.as(CudaMatrix), b2_gpu)
+      else
+        @out.as(CudaMatrix).add_bias!(b2_gpu)
+      end
+
       @out.as(CudaMatrix)
     end
 
@@ -88,61 +106,23 @@ module SHAInet
     def backward(d_out : CudaMatrix) : CudaMatrix
       w2_gpu = @w2.as(CudaMatrix)
       dh = d_out * w2_gpu.transpose
-      @g_w2 = @g_w2.as(CudaMatrix) + (@h.as(CudaMatrix).transpose * d_out)
+
+      # Use in-place gradient accumulation to avoid creating new matrices
+      temp_grad_w2 = @h.as(CudaMatrix).transpose * d_out
+      @g_w2.as(CudaMatrix).add!(temp_grad_w2)
 
       # Efficient bias gradient using GPU
-      if CUDA.fully_available? && @g_b2.is_a?(CudaMatrix)
-        begin
-          CUDA.row_sum(@g_b2.as(CudaMatrix).device_ptr.not_nil!, d_out.device_ptr.not_nil!, d_out.rows, d_out.cols)
-          @g_b2.as(CudaMatrix).mark_device_dirty!
-        rescue e : Exception
-          # Fallback to CPU computation - sync matrices first
-          d_out.sync_from_device!
-          d_out.rows.times do |i|
-            d_out.cols.times do |j|
-              @g_b2[0, j] += d_out[i, j]
-            end
-          end
-        end
-      else
-        # Sync matrix before CPU access
-        d_out.sync_from_device!
-        db2 = CudaMatrix.zeros(1, d_out.cols)
-        d_out.rows.times do |i|
-          d_out.cols.times do |j|
-            db2[0, j] += d_out[i, j]
-          end
-        end
-        @g_b2 = @g_b2.as(CudaMatrix) + db2
-      end
+      # Use optimized bias gradient accumulation
+      accumulate_bias_gradient(@g_b2, d_out)
 
       drelu = relu_grad(@h.as(CudaMatrix), dh)
-      @g_w1 = @g_w1.as(CudaMatrix) + (@x.not_nil!.as(CudaMatrix).transpose * drelu)
 
-      if CUDA.fully_available? && @g_b1.is_a?(CudaMatrix)
-        begin
-          CUDA.row_sum(@g_b1.as(CudaMatrix).device_ptr.not_nil!, drelu.device_ptr.not_nil!, drelu.rows, drelu.cols)
-          @g_b1.as(CudaMatrix).mark_device_dirty!
-        rescue e : Exception
-          # Fallback to CPU computation - sync matrices first
-          drelu.sync_from_device!
-          drelu.rows.times do |i|
-            drelu.cols.times do |j|
-              @g_b1[0, j] += drelu[i, j]
-            end
-          end
-        end
-      else
-        # Sync matrix before CPU access
-        drelu.sync_from_device!
-        db1 = CudaMatrix.zeros(1, drelu.cols)
-        drelu.rows.times do |i|
-          drelu.cols.times do |j|
-            db1[0, j] += drelu[i, j]
-          end
-        end
-        @g_b1 = @g_b1.as(CudaMatrix) + db1
-      end
+      # Use in-place gradient accumulation to avoid creating new matrices
+      temp_grad_w1 = @x.not_nil!.as(CudaMatrix).transpose * drelu
+      @g_w1.as(CudaMatrix).add!(temp_grad_w1)
+
+      # Use optimized bias gradient accumulation
+      accumulate_bias_gradient(@g_b1, drelu)
 
       w1_gpu = @w1.as(CudaMatrix)
       d_input = drelu * w1_gpu.transpose
@@ -153,24 +133,32 @@ module SHAInet
     def backward(d_out : SimpleMatrix) : SimpleMatrix
       w2_cpu = @w2.as(SimpleMatrix)
       dh = d_out * w2_cpu.transpose
-      @g_w2 = @g_w2.as(SimpleMatrix) + (@h.as(SimpleMatrix).transpose * d_out)
 
+      # For SimpleMatrix, still need to create temporary (no in-place add for SimpleMatrix yet)
+      temp_grad_w2 = @h.as(SimpleMatrix).transpose * d_out
+      @g_w2 = @g_w2.as(SimpleMatrix) + temp_grad_w2
+
+      # Efficient bias gradient accumulation for CPU path
       db2 = SimpleMatrix.zeros(1, d_out.cols)
-      d_out.rows.times do |i|
-        d_out.cols.times do |j|
-          db2[0, j] += d_out[i, j]
-        end
+      d_out.cols.times do |j|
+        sum = 0.0
+        d_out.rows.times { |i| sum += d_out[i, j] }
+        db2[0, j] = sum
       end
       @g_b2 = @g_b2.as(SimpleMatrix) + db2
 
       drelu = relu_grad(@h.as(SimpleMatrix), dh)
-      @g_w1 = @g_w1.as(SimpleMatrix) + (@x.not_nil!.as(SimpleMatrix).transpose * drelu)
 
+      # For SimpleMatrix, still need to create temporary (no in-place add for SimpleMatrix yet)
+      temp_grad_w1 = @x.not_nil!.as(SimpleMatrix).transpose * drelu
+      @g_w1 = @g_w1.as(SimpleMatrix) + temp_grad_w1
+
+      # Efficient bias gradient accumulation for CPU path
       db1 = SimpleMatrix.zeros(1, drelu.cols)
-      drelu.rows.times do |i|
-        drelu.cols.times do |j|
-          db1[0, j] += drelu[i, j]
-        end
+      drelu.cols.times do |j|
+        sum = 0.0
+        drelu.rows.times { |i| sum += drelu[i, j] }
+        db1[0, j] = sum
       end
       @g_b1 = @g_b1.as(SimpleMatrix) + db1
 
@@ -197,7 +185,7 @@ module SHAInet
 
       # Sync updated weights to device
       [@w1, @b1, @w2, @b2].each do |mat|
-        mat.as(CudaMatrix).sync_to_device! unless mat.as(CudaMatrix).device_dirty?
+        mat.as(CudaMatrix).sync_to_device!("ff_weight_update") unless mat.as(CudaMatrix).device_dirty?
       end
 
       @g_w1 = CudaMatrix.zeros(@w1.rows, @w1.cols)
@@ -220,13 +208,14 @@ module SHAInet
     end
 
     def zero_gradients
-      # Check device type and use appropriate matrix type
+      # Use in-place zeroing instead of creating new matrices
       if @w1.is_a?(CudaMatrix)
-        @g_w1 = CudaMatrix.zeros(@w1.rows, @w1.cols)
-        @g_w2 = CudaMatrix.zeros(@w2.rows, @w2.cols)
-        @g_b1 = CudaMatrix.zeros(@b1.rows, @b1.cols)
-        @g_b2 = CudaMatrix.zeros(@b2.rows, @b2.cols)
+        @g_w1.as(CudaMatrix).zero!
+        @g_w2.as(CudaMatrix).zero!
+        @g_b1.as(CudaMatrix).zero!
+        @g_b2.as(CudaMatrix).zero!
       else
+        # CPU fallback - create new zero matrices for SimpleMatrix (no in-place zero yet)
         @g_w1 = SimpleMatrix.zeros(@w1.rows, @w1.cols)
         @g_w2 = SimpleMatrix.zeros(@w2.rows, @w2.cols)
         @g_b1 = SimpleMatrix.zeros(@b1.rows, @b1.cols)
@@ -235,6 +224,17 @@ module SHAInet
     end
 
     private def relu_grad(m : CudaMatrix, grad : CudaMatrix) : CudaMatrix
+      # Use cuDNN for optimized ReLU gradient if available
+      if CUDNN.available?
+        begin
+          result = CudaMatrix.new(grad.rows, grad.cols)
+          CUDNN.relu_backward(m, grad, result)
+          return result
+        rescue e : Exception
+          Log.debug { "cuDNN ReLU backward failed: #{e}, falling back to CUDA kernel" }
+        end
+      end
+
       # Use GPU kernel for ReLU gradient if available
       if CUDA.fully_available?
         begin
@@ -249,15 +249,16 @@ module SHAInet
       end
 
       # CPU fallback - sync matrices to host first
-      m.sync_from_device!
-      grad.sync_from_device!
+      m.sync_from_device!("ff_gradient_debug")
+      grad.sync_from_device!("ff_gradient_debug")
       result = grad.clone
+      # Use unsafe_get for better performance
       m.rows.times do |i|
         m.cols.times do |j|
-          result[i, j] = m[i, j] > 0 ? grad[i, j] : 0.0
+          result.unsafe_set(i, j, m.unsafe_get(i, j) > 0 ? grad.unsafe_get(i, j) : 0.0)
         end
       end
-      result.sync_to_device!
+      result.sync_to_device!("ff_backward_result")
       result
     end
 
@@ -269,6 +270,46 @@ module SHAInet
         end
       end
       out
+    end
+
+    # Optimized bias gradient accumulation with minimal CPU-GPU sync
+    private def accumulate_bias_gradient(bias_grad : SimpleMatrix | CudaMatrix, d_out : CudaMatrix)
+      if CUDA.fully_available? && bias_grad.is_a?(CudaMatrix)
+        begin
+          CUDA.row_sum(bias_grad.as(CudaMatrix).device_ptr.not_nil!, d_out.device_ptr.not_nil!, d_out.rows, d_out.cols)
+          bias_grad.as(CudaMatrix).mark_device_dirty!
+          return
+        rescue e : Exception
+          # Log GPU failure but continue with CPU fallback
+          Log.debug { "GPU bias gradient accumulation failed: #{e.message}" }
+        end
+      end
+
+      # CPU fallback - sync once and use batch operations
+      d_out.sync_from_device!("ff_backward") if d_out.device_dirty?
+
+      if bias_grad.is_a?(CudaMatrix)
+        # Reuse existing workspace or create temporary accumulator to avoid repeated GPU syncs
+        if @workspace_temp_bias.nil? || @workspace_temp_bias.not_nil!.cols != d_out.cols
+          @workspace_temp_bias = CudaMatrix.zeros(1, d_out.cols)
+        else
+          @workspace_temp_bias.not_nil!.zero!
+        end
+
+        temp_bias = @workspace_temp_bias.not_nil!
+        d_out.cols.times do |j|
+          sum = 0.0
+          d_out.rows.times { |i| sum += d_out.unsafe_get(i, j) }
+          temp_bias.unsafe_set(0, j, sum)
+        end
+        temp_bias.sync_to_device!("ff_bias_update")
+        bias_grad.as(CudaMatrix).add!(temp_bias)
+      else
+        # Direct accumulation for SimpleMatrix
+        d_out.cols.times do |j|
+          d_out.rows.times { |i| bias_grad[0, j] += d_out.unsafe_get(i, j) }
+        end
+      end
     end
   end
 end
