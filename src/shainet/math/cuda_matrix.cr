@@ -860,14 +860,22 @@ module SHAInet
         end
       end
 
-      # Fallback to existing implementation
+      # Try custom CUDA kernel before falling back to CPU
+      if CUDA.fully_available? && (dptr = self.device_ptr) && !dptr.null?
+        begin
+          self.sync_to_device!("softmax_kernel") unless device_dirty?
+          CUDA.softmax_rows(dptr, dptr, @rows, @cols)
+          mark_device_dirty!
+          return self
+        rescue e : Exception
+          Log.debug { "CUDA softmax kernel failed: #{e}, falling back to CPU" }
+        end
+      end
+
+      # CPU fallback implementation
       raise RuntimeError.new("GPU softmax requires valid device pointer") unless (dptr = self.device_ptr) && !dptr.null?
 
-      # Ensure self has up-to-date GPU data
-      self.sync_to_device!("softmax_activation") unless device_dirty?
-
-      # Use existing CUDA kernel or CPU fallback
-      # This would benefit from a custom CUDA softmax kernel
+      # Ensure self has up-to-date CPU data
       self.sync_from_device!("softmax_fallback")
       @rows.times do |i|
         # Compute softmax for each row

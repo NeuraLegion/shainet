@@ -2,18 +2,33 @@
 #include <cstdio>
 
 // Device kernels
+// Simple row-wise softmax kernel. This version runs one thread per row and
+// performs the computation sequentially. It uses the row maximum for numerical
+// stability.
 __global__ void softmax_rows_kernel(double* out, const double* in, int rows, int cols) {
     int row = blockIdx.x;
-    if(row >= rows) return;
-    const double *row_in = in + row * cols;
-    double *row_out = out + row * cols;
+    if (row >= rows) return;
+
+    const double* row_in = in + row * cols;
+    double* row_out = out + row * cols;
+
+    // Find the maximum value for numerical stability
+    double max_val = row_in[0];
+    for (int j = 1; j < cols; ++j) {
+        double v = row_in[j];
+        if (v > max_val) max_val = v;
+    }
+
+    // Compute exponentials and their sum
     double sum = 0.0;
-    for(int j=0;j<cols;++j){
-        double e = exp(row_in[j]);
+    for (int j = 0; j < cols; ++j) {
+        double e = exp(row_in[j] - max_val);
         row_out[j] = e;
         sum += e;
     }
-    for(int j=0;j<cols;++j){
+
+    // Normalize
+    for (int j = 0; j < cols; ++j) {
         row_out[j] /= sum;
     }
 }
