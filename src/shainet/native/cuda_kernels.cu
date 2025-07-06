@@ -357,6 +357,25 @@ void zero_matrix(double* matrix, int size) {
     }
 }
 
+__global__ void element_div_kernel(double* out, const double* a, const double* b, int size){
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx >= size) return;
+
+    double denom = b[idx];
+    out[idx] = denom == 0.0 ? 0.0 : a[idx] / denom;
+}
+
+void element_div(double* out, const double* a, const double* b, int size){
+    int threads_per_block = 256;
+    int blocks = (size + threads_per_block - 1) / threads_per_block;
+
+    element_div_kernel<<<blocks, threads_per_block>>>(out, a, b, size);
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in element_div: %s\n", cudaGetErrorString(err));
+    }
+}
+
 __global__ void softmax_backward_kernel(double* output, const double* grad, const double* softmax_out, int rows, int cols) {
     int row = blockIdx.x;
     if (row >= rows) return;
