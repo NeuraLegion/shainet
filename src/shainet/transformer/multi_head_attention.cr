@@ -333,16 +333,22 @@ module SHAInet
         # Gradient w.r.t. W_o (use pre-allocated workspace)
         concat = @workspace_concat.not_nil!
         @num_heads.times do |h|
-          output = @attn[h].as(CudaMatrix) * @v_heads[h].as(CudaMatrix)
+          output = CudaMatrix.get_workspace(@attn[h].rows, @v_heads[h].cols, "mha_head_out")
+          output.gemm!(@attn[h].as(CudaMatrix), @v_heads[h].as(CudaMatrix))
           concat.set_cols!(h * @head_dim, output)
+          CudaMatrix.return_workspace(output)
         end
 
         # Compute gradient and accumulate in-place
-        temp_grad_o.copy_from!(concat.transpose * d_out)
+        concat_t = concat.transpose
+        temp_grad_o.gemm!(concat_t, d_out)
+        CudaMatrix.return_workspace(concat_t)
         @g_w_o.as(CudaMatrix).add!(temp_grad_o)
 
         # Gradient w.r.t. concat
-        d_concat.copy_from!(d_out * @w_o.as(CudaMatrix).transpose)
+        w_o_t = @w_o.as(CudaMatrix).transpose
+        d_concat.gemm!(d_out, w_o_t)
+        CudaMatrix.return_workspace(w_o_t)
 
         # Use workspace pools for head gradients
         d_q_heads = [] of CudaMatrix
@@ -366,11 +372,15 @@ module SHAInet
             d_k_temp = CudaMatrix.get_workspace(x.rows, @head_dim, "mha_d_k_temp")
 
             # Gradient w.r.t. V
-            d_v_temp.copy_from!(@attn[h].as(CudaMatrix).transpose * d_out_h)
+            attn_t = @attn[h].as(CudaMatrix).transpose
+            d_v_temp.gemm!(attn_t, d_out_h)
+            CudaMatrix.return_workspace(attn_t)
             d_v_heads << d_v_temp
 
             # Gradient w.r.t. attention weights
-            d_attn_temp.copy_from!(d_out_h * @v_heads[h].as(CudaMatrix).transpose)
+            v_t = @v_heads[h].as(CudaMatrix).transpose
+            d_attn_temp.gemm!(d_out_h, v_t)
+            CudaMatrix.return_workspace(v_t)
 
             # Gradient w.r.t. scores (softmax backward)
             d_scores_temp.copy_from!(softmax_backward(d_attn_temp, @attn[h].as(CudaMatrix)))
@@ -379,8 +389,10 @@ module SHAInet
             d_scores_temp.scale!(1.0 / Math.sqrt(@head_dim.to_f))
 
             # Gradients w.r.t. Q and K
-            d_q_temp.copy_from!(d_scores_temp * @k_heads[h].as(CudaMatrix))
-            d_k_temp.copy_from!(d_scores_temp.transpose * @q_heads[h].as(CudaMatrix))
+            d_q_temp.gemm!(d_scores_temp, @k_heads[h].as(CudaMatrix))
+            scores_t = d_scores_temp.transpose
+            d_k_temp.gemm!(scores_t, @q_heads[h].as(CudaMatrix))
+            CudaMatrix.return_workspace(scores_t)
 
             d_q_heads << d_q_temp
             d_k_heads << d_k_temp
@@ -409,9 +421,11 @@ module SHAInet
 
         begin
           # Gradients w.r.t. projection weights - use in-place accumulation
-          temp_grad_q.copy_from!(x.transpose * d_q_concat)
-          temp_grad_k.copy_from!(x.transpose * d_k_concat)
-          temp_grad_v.copy_from!(x.transpose * d_v_concat)
+          x_t = x.transpose
+          temp_grad_q.gemm!(x_t, d_q_concat)
+          temp_grad_k.gemm!(x_t, d_k_concat)
+          temp_grad_v.gemm!(x_t, d_v_concat)
+          CudaMatrix.return_workspace(x_t)
 
           @g_w_q.as(CudaMatrix).add!(temp_grad_q)
           @g_w_k.as(CudaMatrix).add!(temp_grad_k)
@@ -420,14 +434,28 @@ module SHAInet
           # Gradient w.r.t. input - use workspace pool
           d_x = CudaMatrix.get_workspace(x.rows, x.cols, "mha_d_x")
 
-          # Compute parts separately and accumulate
-          d_x_q = d_q_concat * @w_q.as(CudaMatrix).transpose
-          d_x_k = d_k_concat * @w_k.as(CudaMatrix).transpose
-          d_x_v = d_v_concat * @w_v.as(CudaMatrix).transpose
+          w_q_t = @w_q.as(CudaMatrix).transpose
+          w_k_t = @w_k.as(CudaMatrix).transpose
+          w_v_t = @w_v.as(CudaMatrix).transpose
+
+          d_x_q = CudaMatrix.get_workspace(d_q_concat.rows, w_q_t.cols, "mha_d_x_q")
+          d_x_k = CudaMatrix.get_workspace(d_k_concat.rows, w_k_t.cols, "mha_d_x_k")
+          d_x_v = CudaMatrix.get_workspace(d_v_concat.rows, w_v_t.cols, "mha_d_x_v")
+
+          d_x_q.gemm!(d_q_concat, w_q_t)
+          d_x_k.gemm!(d_k_concat, w_k_t)
+          d_x_v.gemm!(d_v_concat, w_v_t)
 
           d_x.copy_from!(d_x_q)
           d_x.add!(d_x_k)
           d_x.add!(d_x_v)
+
+          CudaMatrix.return_workspace(d_x_q)
+          CudaMatrix.return_workspace(d_x_k)
+          CudaMatrix.return_workspace(d_x_v)
+          CudaMatrix.return_workspace(w_q_t)
+          CudaMatrix.return_workspace(w_k_t)
+          CudaMatrix.return_workspace(w_v_t)
 
           d_x
         ensure
