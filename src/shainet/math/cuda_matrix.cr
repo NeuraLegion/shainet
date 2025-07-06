@@ -977,7 +977,12 @@ module SHAInet
     # In-place matrix multiplication with accumulation: self = alpha * A * B + beta * self
     def gemm!(a : CudaMatrix, b : CudaMatrix, alpha : Float64 = 1.0, beta : Float64 = 0.0)
       raise ArgumentError.new("size mismatch for in-place GEMM") unless a.cols == b.rows && @rows == a.rows && @cols == b.cols
-      raise RuntimeError.new("GPU in-place GEMM requires valid device pointers") unless (ptr_a = a.device_ptr) && (ptr_b = b.device_ptr) && (ptr_c = self.device_ptr) && !ptr_a.null? && !ptr_b.null? && !ptr_c.null?
+      ptr_a = a.device_ptr
+      ptr_b = b.device_ptr
+      ptr_c = self.device_ptr
+      if !ptr_a || !ptr_b || !ptr_c || ptr_a.null? || ptr_b.null? || ptr_c.null?
+        raise RuntimeError.new("GPU in-place GEMM requires valid device pointers")
+      end
 
       # Ensure all operands have up-to-date GPU data
       a.sync_to_device!("gemm_inplace") unless a.device_dirty?
@@ -987,9 +992,13 @@ module SHAInet
       handle = CUDA.create_handle
       begin
         # In-place GEMM: C = alpha * A * B + beta * C
-        CUDA.gemm_accumulate(handle, ptr_a, ptr_b, ptr_c,
-          a.rows, b.cols, a.cols,
-          a.cols, b.cols, @cols, alpha, beta)
+        # cuBLAS expects column-major ordering, so we perform the same
+        # transpose trick used in `*` by swapping operands and dimensions.
+        # Treating row-major A,B as column-major A^T,B^T results in:
+        # C^T = B^T * A^T
+        CUDA.gemm_accumulate(handle, ptr_b, ptr_a, ptr_c,
+          b.cols, a.rows, b.rows,
+          b.cols, a.cols, @cols, alpha, beta)
       ensure
         CUDA.destroy_handle(handle)
       end
