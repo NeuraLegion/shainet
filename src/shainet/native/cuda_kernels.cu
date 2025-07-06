@@ -385,4 +385,32 @@ void softmax_backward(double* output, const double* grad, const double* softmax_
     }
 }
 
+__global__ void cross_entropy_loss_gradient_kernel(const double* pred, const double* target,
+                                                   double* grad, double* loss, int total) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+
+    double p = pred[idx];
+    double t = target[idx];
+    grad[idx] = p - t;
+
+    double contrib = -t * log(max(p, 1e-15));
+    atomicAdd(loss, contrib);
+}
+
+void cross_entropy_loss_gradient(double* pred, double* target,
+                                 double* grad, double* loss,
+                                 int rows, int cols) {
+    int total = rows * cols;
+    cudaMemset(loss, 0, sizeof(double));
+    int threads = 256;
+    int blocks = (total + threads - 1) / threads;
+
+    cross_entropy_loss_gradient_kernel<<<blocks, threads>>>(pred, target, grad, loss, total);
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in cross_entropy_loss_gradient: %s\n", cudaGetErrorString(err));
+    }
+}
+
 } // extern "C"
