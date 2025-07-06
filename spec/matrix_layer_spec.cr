@@ -47,9 +47,29 @@ describe SHAInet::MatrixLayer do
     old_gw = layer.g_w.clone
     old_gb = layer.g_b.clone
     old_b = layer.biases.clone
+
+    if SHAInet::CUDA.fully_available?
+      old_w = old_w.as(SHAInet::CudaMatrix)
+      old_gw = old_gw.as(SHAInet::CudaMatrix)
+      old_gb = old_gb.as(SHAInet::CudaMatrix)
+      old_b = old_b.as(SHAInet::CudaMatrix)
+    else
+      old_w = old_w.as(SHAInet::SimpleMatrix)
+      old_gw = old_gw.as(SHAInet::SimpleMatrix)
+      old_gb = old_gb.as(SHAInet::SimpleMatrix)
+      old_b = old_b.as(SHAInet::SimpleMatrix)
+    end
     layer.update_weights(0.1)
-    expected_w = old_w - old_gw * 0.1
-    expected_b = old_b - old_gb * 0.1
+    expected_w = old_w.clone
+    expected_b = old_b.clone
+    expected_w.rows.times do |i|
+      expected_w.cols.times do |j|
+        expected_w[i, j] = old_w[i, j] - old_gw[i, j] * 0.1
+      end
+    end
+    expected_b.cols.times do |j|
+      expected_b[0, j] = old_b[0, j] - old_gb[0, j] * 0.1
+    end
     expected_w.rows.times do |i|
       expected_w.cols.times do |j|
         layer.weights[i, j].should be_close(expected_w[i, j], 1e-6)
