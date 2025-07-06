@@ -721,11 +721,96 @@ module SHAInet
       end
     end
 
-    # Dropout kernel using cuRAND for proper random number generation
+    # Dropout kernel using cuRAND/cuDNN. Applies dropout in-place on a contiguous
+    # buffer of `size` Float64 values. Returns 0 on success and 1 on failure.
     def dropout(data : Pointer(Float64), size : Int32, dropout_prob : Float32, seed : UInt64) : Int32
-      # This would ideally be implemented as a custom CUDA kernel
-      # For now, fall back to the caller's CPU implementation
-      return 1 # Not implemented - let caller fall back
+      return 1 if data.null? || size <= 0
+
+      # Prefer cuDNN implementation when available
+      if CUDNN.available?
+        begin
+          states_size = uninitialized LibC::SizeT
+          CUDNN.check_status(LibCUDNN.cudnnDropoutGetStatesSize(CUDNN.handle, pointerof(states_size)))
+
+          states_ptr = Pointer(Void).null
+          CUDA.malloc(pointerof(states_ptr), states_size.to_u64)
+
+          begin
+            dropout_desc = uninitialized LibCUDNN::CudnnDropoutDescriptor
+            CUDNN.check_status(LibCUDNN.cudnnCreateDropoutDescriptor(pointerof(dropout_desc)))
+
+            begin
+              CUDNN.check_status(LibCUDNN.cudnnSetDropoutDescriptor(
+                dropout_desc,
+                CUDNN.handle,
+                dropout_prob,
+                states_ptr,
+                states_size,
+                seed
+              ))
+
+              tensor_desc = uninitialized LibCUDNN::CudnnTensorDescriptor
+              CUDNN.check_status(LibCUDNN.cudnnCreateTensorDescriptor(pointerof(tensor_desc)))
+
+              begin
+                dims = [size, 1, 1, 1]
+                strides = [1, 1, 1, 1]
+                CUDNN.check_status(LibCUDNN.cudnnSetTensorNdDescriptor(
+                  tensor_desc,
+                  LibCUDNN::CudnnDataType::CUDNN_DATA_DOUBLE,
+                  4,
+                  dims.to_unsafe,
+                  strides.to_unsafe
+                ))
+
+                CUDNN.check_status(LibCUDNN.cudnnDropoutForward(
+                  CUDNN.handle,
+                  dropout_desc,
+                  tensor_desc, data.as(Pointer(Void)),
+                  tensor_desc, data.as(Pointer(Void)),
+                  Pointer(Void).null,
+                  0_u64
+                ))
+              ensure
+                LibCUDNN.cudnnDestroyTensorDescriptor(tensor_desc)
+              end
+            ensure
+              LibCUDNN.cudnnDestroyDropoutDescriptor(dropout_desc)
+            end
+          ensure
+            CUDA.free(states_ptr) unless states_ptr.null?
+          end
+          return 0
+        rescue e
+          Log.error { "CUDA dropout (cuDNN) failed: #{e}" }
+          return 1
+        end
+      end
+
+      # Fallback to custom kernel compiled with cuRAND if available
+      begin
+        unless fn = @@dropout_proc
+          if @@kernels_handle.null?
+            @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+          end
+          unless @@kernels_handle.null?
+            sym = LibC.dlsym(@@kernels_handle, "dropout")
+            unless sym.null?
+              @@dropout_proc = Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Float64, UInt64, Void).new(sym, Pointer(Void).null)
+              fn = @@dropout_proc
+            end
+          end
+        end
+
+        if fn
+          fn.call(data, data, size, 1, dropout_prob.to_f64, seed)
+          return 0
+        end
+      rescue e
+        Log.error { "CUDA dropout kernel failed: #{e}" }
+      end
+
+      1
     end
 
     # ReLU backward kernel

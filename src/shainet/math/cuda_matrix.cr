@@ -1025,13 +1025,15 @@ module SHAInet
         end
       end
 
-      # Fallback to custom CUDA kernel if available
+      # Fallback to custom CUDA kernel when cuDNN is unavailable
       if CUDA.fully_available? && (dptr = self.device_ptr) && !dptr.null?
         begin
           self.sync_to_device!("dropout_kernel") unless device_dirty?
-          CUDA.dropout(dptr, (@rows * @cols), prob.to_f32, seed)
-          mark_device_dirty!
-          return self
+          result = CUDA.dropout(dptr, (@rows * @cols), prob.to_f32, seed)
+          if result == 0
+            mark_device_dirty!
+            return self
+          end
         rescue e : Exception
           Log.debug { "CUDA dropout kernel failed: #{e}, falling back to CPU" }
         end
