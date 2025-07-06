@@ -70,6 +70,7 @@ describe SHAInet::MatrixLayer do
     expected_b.cols.times do |j|
       expected_b[0, j] = old_b[0, j] - old_gb[0, j] * 0.1
     end
+
     expected_w.rows.times do |i|
       expected_w.cols.times do |j|
         layer.weights[i, j].should be_close(expected_w[i, j], 1e-6)

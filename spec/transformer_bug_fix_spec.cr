@@ -11,10 +11,10 @@ describe "Transformer Bug Fix" do
     vocab_size = 5
 
     net = SHAInet::Network.new
-    net.add_layer(:input, 1, :memory, SHAInet.none)
-    net.add_layer(:embedding, d_model, :memory, SHAInet.none, vocab_size: vocab_size)
+    net.add_layer(:input, 1, SHAInet.none)
+    net.add_layer(:embedding, d_model, SHAInet.none, vocab_size: vocab_size)
     net.add_layer(:transformer, d_model)
-    net.add_layer(:output, vocab_size, :memory, SHAInet.identity)
+    net.add_layer(:output, vocab_size, SHAInet.identity)
     net.fully_connect
 
     # Create positional encoding for sequence length
@@ -51,10 +51,10 @@ describe "Transformer Bug Fix" do
     vocab_size = tokenizer.vocab.size
 
     net = SHAInet::Network.new
-    net.add_layer(:input, 1, :memory, SHAInet.none)
-    net.add_layer(:embedding, d_model, :memory, SHAInet.none, vocab_size: vocab_size)
+    net.add_layer(:input, 1, SHAInet.none)
+    net.add_layer(:embedding, d_model, SHAInet.none, vocab_size: vocab_size)
     net.add_layer(:transformer, d_model)
-    net.add_layer(:output, vocab_size, :memory, SHAInet.identity)
+    net.add_layer(:output, vocab_size, SHAInet.identity)
     net.fully_connect
 
     # Set positional encoding only on first transformer layer

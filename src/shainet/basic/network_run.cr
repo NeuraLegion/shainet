@@ -299,9 +299,23 @@ module SHAInet
                 SimpleMatrix.from_a([actual_output])
               end
 
-        diff = act - exp
-        w = GPUMemory.keep_on_gpu(@output_layers.last.weights)
-        @transformer_error = diff * w
+        diff = if act.is_a?(CudaMatrix) && exp.is_a?(CudaMatrix)
+                 act - exp
+               else
+                 act_s = act.is_a?(CudaMatrix) ? act.to_simple : act
+                 exp_s = exp.is_a?(CudaMatrix) ? exp.to_simple : exp
+                 act_s - exp_s
+               end
+        out_w = @output_layers.last.weights
+        w = out_w.is_a?(CudaMatrix) ? out_w : GPUMemory.keep_on_gpu(out_w.as(SimpleMatrix))
+        trans = if diff.is_a?(CudaMatrix) && w.is_a?(CudaMatrix)
+                  diff * w
+                else
+                  d = diff.is_a?(CudaMatrix) ? diff.to_simple : diff
+                  ww = w.is_a?(CudaMatrix) ? w.to_simple : w
+                  d * ww
+                end
+        @transformer_error = trans.is_a?(CudaMatrix) ? trans.to_simple : trans
       end
 
       # puts "@error_signal: #{@error_signal}"
@@ -355,8 +369,16 @@ module SHAInet
                 end
 
         diff = act_m - exp_m
-        w = GPUMemory.keep_on_gpu(@output_layers.last.weights)
-        @transformer_error = diff * w
+        out_w = @output_layers.last.weights
+        w = out_w.is_a?(CudaMatrix) ? out_w : GPUMemory.keep_on_gpu(out_w.as(SimpleMatrix))
+        trans = if diff.is_a?(CudaMatrix) && w.is_a?(CudaMatrix)
+                  diff * w
+                else
+                  d = diff.is_a?(CudaMatrix) ? diff.to_simple : diff
+                  ww = w.is_a?(CudaMatrix) ? w.to_simple : w
+                  d * ww
+                end
+        @transformer_error = trans.is_a?(CudaMatrix) ? trans.to_simple : trans
       end
     rescue e : Exception
       raise NeuralNetRunError.new("Error in evaluate: #{e}")
@@ -403,10 +425,12 @@ module SHAInet
         exp_row = GPUMemory.to_gpu(SimpleMatrix.from_a([expected_output.map(&.to_f64)]))
         act_row = GPUMemory.to_gpu(SimpleMatrix.from_a([actual_output]))
         diff = act_row - exp_row
-        @transformer_error = GPUMemory.zeros_like(diff, outputs.size, diff.cols)
+        tmp = GPUMemory.zeros_like(diff, outputs.size, diff.cols)
+        tmp = tmp.to_simple if tmp.is_a?(CudaMatrix)
 
         # Use efficient row copying instead of element-by-element access
-        @transformer_error.set_row!(outputs.size - 1, diff, 0)
+        tmp.set_row!(outputs.size - 1, diff.is_a?(CudaMatrix) ? diff.to_simple : diff, 0)
+        @transformer_error = tmp
       end
 
       # puts "@error_signal: #{@error_signal}"
@@ -463,9 +487,23 @@ module SHAInet
                 SimpleMatrix.from_a([probs])
               end
 
-        diff = act - exp
-        w = GPUMemory.keep_on_gpu(@output_layers.last.weights)
-        @transformer_error = diff * w
+        diff = if act.is_a?(CudaMatrix) && exp.is_a?(CudaMatrix)
+                 act - exp
+               else
+                 act_s = act.is_a?(CudaMatrix) ? act.to_simple : act
+                 exp_s = exp.is_a?(CudaMatrix) ? exp.to_simple : exp
+                 act_s - exp_s
+               end
+        out_w = @output_layers.last.weights
+        w = out_w.is_a?(CudaMatrix) ? out_w : GPUMemory.keep_on_gpu(out_w.as(SimpleMatrix))
+        trans = if diff.is_a?(CudaMatrix) && w.is_a?(CudaMatrix)
+                  diff * w
+                else
+                  d = diff.is_a?(CudaMatrix) ? diff.to_simple : diff
+                  ww = w.is_a?(CudaMatrix) ? w.to_simple : w
+                  d * ww
+                end
+        @transformer_error = trans.is_a?(CudaMatrix) ? trans.to_simple : trans
       end
     end
 
@@ -519,13 +557,28 @@ module SHAInet
                     SimpleMatrix.from_a([probs])
                   end
 
-        diff = act_row - exp_row
-        w = GPUMemory.keep_on_gpu(@output_layers.last.weights)
-        trans = diff * w
-        @transformer_error = GPUMemory.zeros_like(trans, outputs.size, trans.cols)
+        diff = if act_row.is_a?(CudaMatrix) && exp_row.is_a?(CudaMatrix)
+                 act_row - exp_row
+               else
+                 a = act_row.is_a?(CudaMatrix) ? act_row.to_simple : act_row
+                 e = exp_row.is_a?(CudaMatrix) ? exp_row.to_simple : exp_row
+                 a - e
+               end
+        out_w = @output_layers.last.weights
+        w = out_w.is_a?(CudaMatrix) ? out_w : GPUMemory.keep_on_gpu(out_w.as(SimpleMatrix))
+        trans = if diff.is_a?(CudaMatrix) && w.is_a?(CudaMatrix)
+                  diff * w
+                else
+                  d = diff.is_a?(CudaMatrix) ? diff.to_simple : diff
+                  ww = w.is_a?(CudaMatrix) ? w.to_simple : w
+                  d * ww
+                end
+        tmp = GPUMemory.zeros_like(trans, outputs.size, trans.cols)
+        tmp = tmp.to_simple if tmp.is_a?(CudaMatrix)
         trans.cols.times do |j|
-          @transformer_error[outputs.size - 1, j] = trans[0, j]
+          tmp[outputs.size - 1, j] = trans[0, j]
         end
+        @transformer_error = tmp
       end
     end
 
@@ -690,22 +743,89 @@ module SHAInet
         layer.zero_gradients if layer.is_a?(MatrixLayer)
       end
 
-      # Pre-allocate output_grad matrix once per batch to reuse across samples
+      # Determine matrix dimensions from first sample for workspace allocation
+      first_input = batch.first[0]
+      first_output = batch.first[1]
+
+      get_dims = ->(obj : _) do
+        case obj
+        when SimpleMatrix
+          {obj.rows, obj.cols}
+        when CudaMatrix
+          {obj.rows, obj.cols}
+        else
+          arr = obj.as(Array)
+          if arr.size > 0 && arr[0].is_a?(Array)
+            {arr.size, arr[0].as(Array).size}
+          else
+            {1, arr.size}
+          end
+        end
+      end
+
+      in_rows, in_cols = get_dims.call(first_input)
+      out_rows, out_cols = get_dims.call(first_output)
+
+      input_workspace : CudaMatrix | Nil = nil
+      expected_workspace : CudaMatrix | Nil = nil
       output_grad : SimpleMatrix | CudaMatrix | Nil = nil
+
+      if CUDA.fully_available?
+        input_workspace = CudaMatrix.get_workspace(in_rows, in_cols, "batch_input")
+        expected_workspace = CudaMatrix.get_workspace(out_rows, out_cols, "batch_expected")
+        output_grad = CudaMatrix.get_workspace(out_rows, out_cols, "batch_grad")
+      end
 
       batch.each do |sample|
         input_data = sample[0]
         expected_output = sample[1]
 
-        # Handle different input types explicitly
+        # Prepare expected output matrix using workspace when on GPU
+        expected_matrix = case expected_output
+                          when SimpleMatrix
+                            if expected_workspace
+                              GPUMemory.to_gpu!(expected_output, expected_workspace)
+                            else
+                              expected_output
+                            end
+                          when CudaMatrix
+                            expected_output
+                          else
+                            arr = expected_output.as(Array)
+                            if expected_workspace
+                              if arr.size > 0 && arr[0].is_a?(Array)
+                                GPUMemory.to_gpu!(arr.as(Array(Array(GenNum))), expected_workspace)
+                              else
+                                GPUMemory.to_gpu!(arr.as(Array(GenNum)), expected_workspace)
+                              end
+                              expected_workspace
+                            else
+                              to_matrix(expected_output)
+                            end
+                          end
+
+        # Prepare input matrix using preallocated workspace when on GPU
         input_matrix = case input_data
                        when SimpleMatrix
-                         input_data
+                         if input_workspace
+                           GPUMemory.to_gpu!(input_data, input_workspace)
+                         else
+                           input_data
+                         end
                        when CudaMatrix
                          input_data
                        else
-                         # Convert raw data to matrix, using GPU if available
-                         to_matrix(input_data)
+                         arr = input_data.as(Array)
+                         if input_workspace
+                           if arr.size > 0 && arr[0].is_a?(Array)
+                             GPUMemory.to_gpu!(arr.as(Array(Array(GenNum))), input_workspace)
+                           else
+                             GPUMemory.to_gpu!(arr.as(Array(GenNum)), input_workspace)
+                           end
+                           input_workspace
+                         else
+                           to_matrix(input_data)
+                         end
                        end
 
         actual_matrix = run(input_matrix, stealth: true)
@@ -729,20 +849,18 @@ module SHAInet
                                    {1, arr.size}
                                  end
 
-          # Allocate output_grad matrix only once, reuse across batch samples
+          # Reuse preallocated output_grad matrix when available
           if output_grad.nil? || output_grad.not_nil!.rows != grad_rows || output_grad.not_nil!.cols != grad_cols
             output_grad = GPUMemory.like(actual_matrix, grad_rows, grad_cols)
+          end
+
+          existing_grad = output_grad.not_nil!
+          if existing_grad.is_a?(CudaMatrix)
+            existing_grad.zero!
           else
-            # Zero the existing matrix for reuse
-            existing_grad = output_grad.not_nil!
-            if existing_grad.is_a?(CudaMatrix)
-              existing_grad.zero!
-            else
-              # For SimpleMatrix, manually zero all elements
-              existing_grad.rows.times do |i|
-                existing_grad.cols.times do |j|
-                  existing_grad[i, j] = 0.0
-                end
+            existing_grad.rows.times do |i|
+              existing_grad.cols.times do |j|
+                existing_grad[i, j] = 0.0
               end
             end
           end
@@ -750,12 +868,12 @@ module SHAInet
           grad_matrix = output_grad.not_nil!
 
           # Try GPU-accelerated cross-entropy for CudaMatrix (most common case)
-          if actual_matrix.is_a?(CudaMatrix) && expected_output.is_a?(CudaMatrix) && CUDNN.available?
+          if actual_matrix.is_a?(CudaMatrix) && expected_matrix.is_a?(CudaMatrix) && CUDNN.available?
             begin
               loss_value = 0.0
               CUDNN.softmax_cross_entropy_loss_and_gradient(
                 actual_matrix.as(CudaMatrix),
-                expected_output.as(CudaMatrix),
+                expected_matrix.as(CudaMatrix),
                 pointerof(loss_value),
                 grad_matrix.as(CudaMatrix)
               )
@@ -763,11 +881,11 @@ module SHAInet
             rescue e : Exception
               Log.debug { "GPU cross-entropy failed: #{e}, falling back to CPU computation" }
               # Fall back to CPU computation below
-              sample_error = compute_cost_and_gradient_cpu(actual_matrix, expected_output, grad_matrix, cost_proc)
+              sample_error = compute_cost_and_gradient_cpu(actual_matrix, expected_matrix, grad_matrix, cost_proc)
             end
           else
             # CPU fallback for non-CudaMatrix types or when GPU computation fails
-            sample_error = compute_cost_and_gradient_cpu(actual_matrix, expected_output, grad_matrix, cost_proc)
+            sample_error = compute_cost_and_gradient_cpu(actual_matrix, expected_matrix, grad_matrix, cost_proc)
           end
 
           batch_error += sample_error
@@ -848,7 +966,7 @@ module SHAInet
         # Explicit GPU memory cleanup after processing each sample
         # Force cleanup of temporary matrices created during forward/backward pass
         if actual_matrix.is_a?(CudaMatrix)
-          actual_matrix.cleanup!
+          CudaMatrix.return_workspace(actual_matrix.as(CudaMatrix))
         end
 
         # Also clean up any temporary matrices created during gradient computation
@@ -878,6 +996,16 @@ module SHAInet
       end
 
       update_transformer_layers if @transformer_layers.any?
+
+      if input_workspace
+        CudaMatrix.return_workspace(input_workspace)
+      end
+      if expected_workspace
+        CudaMatrix.return_workspace(expected_workspace)
+      end
+      if output_grad && output_grad.is_a?(CudaMatrix)
+        CudaMatrix.return_workspace(output_grad.as(CudaMatrix))
+      end
 
       batch_error
     end
