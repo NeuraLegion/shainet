@@ -404,6 +404,24 @@ void softmax_backward(double* output, const double* grad, const double* softmax_
     }
 }
 
+
+__global__ void element_log_kernel(double* out, const double* in, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= size) return;
+
+    double val = in[idx];
+    out[idx] = log(val);
+}
+
+void element_log(double* out, const double* in, int size) {
+    int threads_per_block = 256;
+    int blocks = (size + threads_per_block - 1) / threads_per_block;
+
+    element_log_kernel<<<blocks, threads_per_block>>>(out, in, size);
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in element_log: %s\n", cudaGetErrorString(err));
+
 __global__ void cross_entropy_loss_gradient_kernel(const double* pred, const double* target,
                                                    double* grad, double* loss, int total) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -429,6 +447,7 @@ void cross_entropy_loss_gradient(double* pred, double* target,
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
         printf("CUDA Error in cross_entropy_loss_gradient: %s\n", cudaGetErrorString(err));
+
     }
 }
 

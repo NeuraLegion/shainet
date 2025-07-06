@@ -288,6 +288,7 @@ module SHAInet
     @@count_pairs_proc : Proc(Pointer(Int32), Pointer(Int32), Pointer(Int32), Pointer(Int32), Int32, Int32, Void)? = nil
     @@relu_backward_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Void)? = nil
     @@softmax_backward_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Int32, Void)? = nil
+    @@element_log_proc : Proc(Pointer(Float64), Pointer(Float64), Int32, Void)? = nil
     @@cross_entropy_loss_grad_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Int32, Void)? = nil
 
     def softmax_rows(dst : Pointer(Float64), src : Pointer(Float64), rows : Int32, cols : Int32)
@@ -898,6 +899,34 @@ module SHAInet
         fn.call(dst, grad, softmax_out, rows, cols)
       rescue e
         Log.error { "CUDA Error in softmax_backward: #{e}" }
+        raise e
+      end
+    end
+
+    def element_log(dst : Pointer(Float64), src : Pointer(Float64), size : Int32)
+      if dst.null? || src.null? || size <= 0
+        Log.error { "CUDA element_log: invalid parameters - dst: #{dst.null? ? "null" : "valid"}, src: #{src.null? ? "null" : "valid"}, size: #{size}" }
+        return
+      end
+
+      unless fn = @@element_log_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "element_log")
+          unless sym.null?
+            @@element_log_proc = Proc(Pointer(Float64), Pointer(Float64), Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@element_log_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+
+      begin
+        fn.call(dst, src, size)
+      rescue e
+        Log.error { "CUDA Error in element_log: #{e}" }
         raise e
       end
     end
