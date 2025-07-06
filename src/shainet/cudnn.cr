@@ -509,22 +509,26 @@ module SHAInet
     end
 
     # Cross-entropy loss and gradient computation on GPU
-    def self.cross_entropy_loss_gradient(predicted : CudaMatrix, target : CudaMatrix, loss_output : CudaMatrix, grad_output : CudaMatrix)
+    def self.cross_entropy_loss_gradient(predicted : CudaMatrix, target : CudaMatrix, loss_output : Float64*, grad_output : CudaMatrix)
       raise "Matrices must have same dimensions" unless predicted.rows == target.rows && predicted.cols == target.cols
 
-      # Use softmax forward to normalize predictions
-      softmax_temp = CudaMatrix.new(predicted.rows, predicted.cols)
-      softmax_rows(predicted, softmax_temp)
+      # Ensure matrices are on device
+      predicted.sync_to_device!("xent_pred") unless predicted.device_dirty?
+      target.sync_to_device!("xent_target") unless target.device_dirty?
+      grad_output.sync_to_device!("xent_grad") unless grad_output.device_dirty?
 
-      # Compute loss and gradient using element-wise operations
-      # Loss: -target * log(softmax_pred)
-      # Gradient: softmax_pred - target
-      element_subtract!(grad_output, softmax_temp, target, 1.0, -1.0)
+      result = CUDA.cross_entropy_loss_gradient(
+        predicted.device_ptr.not_nil!,
+        target.device_ptr.not_nil!,
+        grad_output.device_ptr.not_nil!,
+        loss_output,
+        predicted.rows,
+        predicted.cols
+      )
 
-      # Compute cross-entropy loss (sum over elements)
-      log_probs = CudaMatrix.new(predicted.rows, predicted.cols)
-      element_log!(log_probs, softmax_temp)
-      element_multiply!(loss_output, target, log_probs, -1.0, 0.0)
+      raise "CUDA cross-entropy computation failed" if result != 0
+
+      grad_output.mark_device_dirty!
     end
 
     # GPU-accelerated cross-entropy loss and gradient computation
@@ -562,9 +566,22 @@ module SHAInet
       raise "Predicted and target must have same dimensions" unless predicted.rows == target.rows && predicted.cols == target.cols
       raise "Gradient output must have same dimensions as predicted" unless grad_output.rows == predicted.rows && grad_output.cols == predicted.cols
 
-      # For now, this is a placeholder - we would implement a custom CUDA kernel
-      # or use cuDNN's cross-entropy functions when available
-      raise "GPU cross-entropy not yet implemented - falling back to CPU"
+      # Compute softmax of logits into grad_output
+      softmax_rows(predicted, grad_output)
+
+      # Now compute cross-entropy on the probabilities in grad_output
+      result = CUDA.cross_entropy_loss_gradient(
+        grad_output.device_ptr.not_nil!,
+        target.device_ptr.not_nil!,
+        grad_output.device_ptr.not_nil!,
+        loss,
+        predicted.rows,
+        predicted.cols
+      )
+
+      raise "CUDA softmax cross-entropy failed" if result != 0
+
+      grad_output.mark_device_dirty!
     end
 
     # Element-wise operations using cuDNN OpTensor
@@ -603,13 +620,13 @@ module SHAInet
             op_desc,
             pointerof(alpha_val).as(Pointer(Void)),
             a_desc,
-            a.device_ptr.as(Pointer(Void)),
+            a.device_ptr.not_nil!.as(Pointer(Void)),
             pointerof(alpha_val).as(Pointer(Void)),
             b_desc,
-            b.device_ptr.as(Pointer(Void)),
+            b.device_ptr.not_nil!.as(Pointer(Void)),
             pointerof(beta_val).as(Pointer(Void)),
             c_desc,
-            output.device_ptr.as(Pointer(Void))
+            output.device_ptr.not_nil!.as(Pointer(Void))
           ))
 
           output.mark_device_dirty!
@@ -693,13 +710,13 @@ module SHAInet
             op_desc,
             pointerof(alpha_val).as(Pointer(Void)),
             a_desc,
-            a.device_ptr.as(Pointer(Void)),
+            a.device_ptr.not_nil!.as(Pointer(Void)),
             pointerof(beta_val).as(Pointer(Void)),
             b_desc,
-            b.device_ptr.as(Pointer(Void)),
+            b.device_ptr.not_nil!.as(Pointer(Void)),
             pointerof(alpha_val).as(Pointer(Void)), # Use alpha again for output scaling
             c_desc,
-            output.device_ptr.as(Pointer(Void))
+            output.device_ptr.not_nil!.as(Pointer(Void))
           ))
 
           output.mark_device_dirty!
@@ -782,7 +799,7 @@ module SHAInet
 
       # Get dropout states size
       states_size = uninitialized LibC::SizeT
-      CUDNN.check_status(LibCUDNN.cudnnDropoutGetStatesSize(CUDNN.handle, out states_size))
+      CUDNN.check_status(LibCUDNN.cudnnDropoutGetStatesSize(CUDNN.handle, pointerof(states_size)))
 
       # Allocate dropout states on GPU
       states_ptr = Pointer(Void).null
@@ -791,7 +808,7 @@ module SHAInet
       begin
         # Create dropout descriptor
         dropout_desc = uninitialized LibCUDNN::CudnnDropoutDescriptor
-        CUDNN.check_status(LibCUDNN.cudnnCreateDropoutDescriptor(out dropout_desc))
+        CUDNN.check_status(LibCUDNN.cudnnCreateDropoutDescriptor(pointerof(dropout_desc)))
 
         begin
           # Set dropout parameters
@@ -821,9 +838,9 @@ module SHAInet
               CUDNN.handle,
               dropout_desc,
               input_desc,
-              input.device_ptr.as(Pointer(Void)),
+              input.device_ptr.not_nil!.as(Pointer(Void)),
               output_desc,
-              output.device_ptr.as(Pointer(Void)),
+              output.device_ptr.not_nil!.as(Pointer(Void)),
               reserve_space_ptr,
               reserve_space_size
             ))

@@ -357,6 +357,25 @@ void zero_matrix(double* matrix, int size) {
     }
 }
 
+__global__ void element_div_kernel(double* out, const double* a, const double* b, int size){
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx >= size) return;
+
+    double denom = b[idx];
+    out[idx] = denom == 0.0 ? 0.0 : a[idx] / denom;
+}
+
+void element_div(double* out, const double* a, const double* b, int size){
+    int threads_per_block = 256;
+    int blocks = (size + threads_per_block - 1) / threads_per_block;
+
+    element_div_kernel<<<blocks, threads_per_block>>>(out, a, b, size);
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in element_div: %s\n", cudaGetErrorString(err));
+    }
+}
+
 __global__ void softmax_backward_kernel(double* output, const double* grad, const double* softmax_out, int rows, int cols) {
     int row = blockIdx.x;
     if (row >= rows) return;
@@ -385,6 +404,7 @@ void softmax_backward(double* output, const double* grad, const double* softmax_
     }
 }
 
+
 __global__ void element_log_kernel(double* out, const double* in, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= size) return;
@@ -401,6 +421,33 @@ void element_log(double* out, const double* in, int size) {
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
         printf("CUDA Error in element_log: %s\n", cudaGetErrorString(err));
+
+__global__ void cross_entropy_loss_gradient_kernel(const double* pred, const double* target,
+                                                   double* grad, double* loss, int total) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+
+    double p = pred[idx];
+    double t = target[idx];
+    grad[idx] = p - t;
+
+    double contrib = -t * log(max(p, 1e-15));
+    atomicAdd(loss, contrib);
+}
+
+void cross_entropy_loss_gradient(double* pred, double* target,
+                                 double* grad, double* loss,
+                                 int rows, int cols) {
+    int total = rows * cols;
+    cudaMemset(loss, 0, sizeof(double));
+    int threads = 256;
+    int blocks = (total + threads - 1) / threads;
+
+    cross_entropy_loss_gradient_kernel<<<blocks, threads>>>(pred, target, grad, loss, total);
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in cross_entropy_loss_gradient: %s\n", cudaGetErrorString(err));
+
     }
 }
 

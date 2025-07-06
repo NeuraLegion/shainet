@@ -814,27 +814,37 @@ module SHAInet
       self
     end
 
-    # High-performance element-wise division - simplified version
+    # High-performance element-wise division
     def /(other : CudaMatrix) : CudaMatrix
       raise ArgumentError.new("size mismatch") unless @rows == other.rows && @cols == other.cols
 
-      # For now, use CPU fallback for element-wise division since cuBLAS doesn't have direct support
-      # This can be optimized with custom CUDA kernels later
       result = CudaMatrix.new(@rows, @cols)
 
-      # Sync both matrices to CPU for element-wise division
-      self.sync_from_device!("element_division") if device_dirty?
-      other.sync_from_device!("element_division") if other.device_dirty?
+      if CUDA.fully_available? && (sptr = self.device_ptr) && (optr = other.device_ptr) && (dptr = result.device_ptr) && !sptr.null? && !optr.null? && !dptr.null?
+        # Ensure both operands have up-to-date GPU data
+        self.sync_to_device!("element_division") unless device_dirty?
+        other.sync_to_device!("element_division") unless other.device_dirty?
 
-      @rows.times do |i|
-        @cols.times do |j|
-          self_val = self.unsafe_get(i, j)
-          other_val = other.unsafe_get(i, j)
-          result.unsafe_set(i, j, other_val == 0.0 ? 0.0 : self_val / other_val)
+        size = @rows * @cols
+        CUDA.element_div(dptr, sptr, optr, size)
+
+        result.mark_device_dirty!
+      else
+        # Fallback to CPU implementation
+        self.sync_from_device!("element_division") if device_dirty?
+        other.sync_from_device!("element_division") if other.device_dirty?
+
+        @rows.times do |i|
+          @cols.times do |j|
+            self_val = self.unsafe_get(i, j)
+            other_val = other.unsafe_get(i, j)
+            result.unsafe_set(i, j, other_val == 0.0 ? 0.0 : self_val / other_val)
+          end
         end
+
+        result.sync_to_device!("element_division_result")
       end
 
-      result.sync_to_device!("element_division_result")
       result
     end
 
@@ -1025,13 +1035,15 @@ module SHAInet
         end
       end
 
-      # Fallback to custom CUDA kernel if available
+      # Fallback to custom CUDA kernel when cuDNN is unavailable
       if CUDA.fully_available? && (dptr = self.device_ptr) && !dptr.null?
         begin
           self.sync_to_device!("dropout_kernel") unless device_dirty?
-          CUDA.dropout(dptr, (@rows * @cols), prob.to_f32, seed)
-          mark_device_dirty!
-          return self
+          result = CUDA.dropout(dptr, (@rows * @cols), prob.to_f32, seed)
+          if result == 0
+            mark_device_dirty!
+            return self
+          end
         rescue e : Exception
           Log.debug { "CUDA dropout kernel failed: #{e}, falling back to CPU" }
         end

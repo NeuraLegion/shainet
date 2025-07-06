@@ -284,10 +284,12 @@ module SHAInet
     @@apply_gradient_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Void)? = nil
     @@accumulate_bias_grad_proc : Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Void)? = nil
     @@zero_matrix_proc : Proc(Pointer(Float64), Int32, Void)? = nil
+    @@element_div_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Void)? = nil
     @@count_pairs_proc : Proc(Pointer(Int32), Pointer(Int32), Pointer(Int32), Pointer(Int32), Int32, Int32, Void)? = nil
     @@relu_backward_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Void)? = nil
     @@softmax_backward_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Int32, Void)? = nil
     @@element_log_proc : Proc(Pointer(Float64), Pointer(Float64), Int32, Void)? = nil
+    @@cross_entropy_loss_grad_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Int32, Void)? = nil
 
     def softmax_rows(dst : Pointer(Float64), src : Pointer(Float64), rows : Int32, cols : Int32)
       # Validate inputs
@@ -617,6 +619,34 @@ module SHAInet
       end
     end
 
+    def element_div(dst : Pointer(Float64), a : Pointer(Float64), b : Pointer(Float64), size : Int32)
+      if dst.null? || a.null? || b.null? || size <= 0
+        Log.error { "CUDA element_div: invalid parameters - dst: #{dst.null? ? "null" : "valid"}, a: #{a.null? ? "null" : "valid"}, b: #{b.null? ? "null" : "valid"}, size: #{size}" }
+        return
+      end
+
+      unless fn = @@element_div_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "element_div")
+          unless sym.null?
+            @@element_div_proc = Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@element_div_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+
+      begin
+        fn.call(dst, a, b, size)
+      rescue e
+        Log.error { "CUDA Error in element_div: #{e}" }
+        raise e
+      end
+    end
+
     # In-place element-wise ReLU on GPU memory. This fallback implementation
     # copies the data to the host, applies ReLU and writes the result back. It
     # avoids additional synchronization logic in the caller while still keeping
@@ -694,39 +724,125 @@ module SHAInet
     def cross_entropy_loss_gradient(predicted : Pointer(Float64), target : Pointer(Float64),
                                     grad_output : Pointer(Float64), loss_output : Pointer(Float64),
                                     rows : Int32, cols : Int32) : Int32
-      # Use a simple kernel that computes both loss and gradient in one pass
-      # Loss: -sum(target * log(predicted))
-      # Gradient: predicted - target (for softmax output)
+      unless fn = @@cross_entropy_loss_grad_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "cross_entropy_loss_gradient")
+          unless sym.null?
+            @@cross_entropy_loss_grad_proc = Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@cross_entropy_loss_grad_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
 
-      handle = create_handle
       begin
-        # For now, use a simplified approach with existing operations
-        # This can be optimized with a custom CUDA kernel later
-        total_elements = rows * cols
-
-        # Initialize loss accumulator
-        loss_val = 0.0
-        loss_output.value = loss_val
-
-        # Compute gradient: pred - target (in-place)
-        # Use AXPY: grad = 1.0 * pred + (-1.0) * target
-        LibCUBLAS.cublasDcopy_v2(handle, total_elements, predicted, 1, grad_output, 1)
-        minus_one = -1.0
-        LibCUBLAS.cublasDaxpy_v2(handle, total_elements, pointerof(minus_one), target, 1, grad_output, 1)
-
-        return 0 # Success
-      rescue
-        return 1 # Error
-      ensure
-        destroy_handle(handle)
+        loss_device = Pointer(Float64).null
+        # Allocate device memory for the scalar loss
+        CUDA.malloc(pointerof(loss_device).as(Pointer(Pointer(Void))), 8)
+        fn.call(predicted, target, grad_output, loss_device, rows, cols)
+        # Copy loss back to host
+        CUDA.memcpy(loss_output.as(Pointer(Void)), loss_device.as(Pointer(Void)), 8_u64, MemcpyKind::DeviceToHost)
+        CUDA.free(loss_device.as(Pointer(Void)))
+        0
+      rescue e
+        Log.error { "CUDA Error in cross_entropy_loss_gradient: #{e}" }
+        1
       end
     end
 
-    # Dropout kernel using cuRAND for proper random number generation
+    # Dropout kernel using cuRAND/cuDNN. Applies dropout in-place on a contiguous
+    # buffer of `size` Float64 values. Returns 0 on success and 1 on failure.
     def dropout(data : Pointer(Float64), size : Int32, dropout_prob : Float32, seed : UInt64) : Int32
-      # This would ideally be implemented as a custom CUDA kernel
-      # For now, fall back to the caller's CPU implementation
-      return 1 # Not implemented - let caller fall back
+      return 1 if data.null? || size <= 0
+
+      # Prefer cuDNN implementation when available
+      if CUDNN.available?
+        begin
+          states_size = uninitialized LibC::SizeT
+          CUDNN.check_status(LibCUDNN.cudnnDropoutGetStatesSize(CUDNN.handle, pointerof(states_size)))
+
+          states_ptr = Pointer(Void).null
+          CUDA.malloc(pointerof(states_ptr), states_size.to_u64)
+
+          begin
+            dropout_desc = uninitialized LibCUDNN::CudnnDropoutDescriptor
+            CUDNN.check_status(LibCUDNN.cudnnCreateDropoutDescriptor(pointerof(dropout_desc)))
+
+            begin
+              CUDNN.check_status(LibCUDNN.cudnnSetDropoutDescriptor(
+                dropout_desc,
+                CUDNN.handle,
+                dropout_prob,
+                states_ptr,
+                states_size,
+                seed
+              ))
+
+              tensor_desc = uninitialized LibCUDNN::CudnnTensorDescriptor
+              CUDNN.check_status(LibCUDNN.cudnnCreateTensorDescriptor(pointerof(tensor_desc)))
+
+              begin
+                dims = [size, 1, 1, 1]
+                strides = [1, 1, 1, 1]
+                CUDNN.check_status(LibCUDNN.cudnnSetTensorNdDescriptor(
+                  tensor_desc,
+                  LibCUDNN::CudnnDataType::CUDNN_DATA_DOUBLE,
+                  4,
+                  dims.to_unsafe,
+                  strides.to_unsafe
+                ))
+
+                CUDNN.check_status(LibCUDNN.cudnnDropoutForward(
+                  CUDNN.handle,
+                  dropout_desc,
+                  tensor_desc, data.as(Pointer(Void)),
+                  tensor_desc, data.as(Pointer(Void)),
+                  Pointer(Void).null,
+                  0_u64
+                ))
+              ensure
+                LibCUDNN.cudnnDestroyTensorDescriptor(tensor_desc)
+              end
+            ensure
+              LibCUDNN.cudnnDestroyDropoutDescriptor(dropout_desc)
+            end
+          ensure
+            CUDA.free(states_ptr) unless states_ptr.null?
+          end
+          return 0
+        rescue e
+          Log.error { "CUDA dropout (cuDNN) failed: #{e}" }
+          return 1
+        end
+      end
+
+      # Fallback to custom kernel compiled with cuRAND if available
+      begin
+        unless fn = @@dropout_proc
+          if @@kernels_handle.null?
+            @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+          end
+          unless @@kernels_handle.null?
+            sym = LibC.dlsym(@@kernels_handle, "dropout")
+            unless sym.null?
+              @@dropout_proc = Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Float64, UInt64, Void).new(sym, Pointer(Void).null)
+              fn = @@dropout_proc
+            end
+          end
+        end
+
+        if fn
+          fn.call(data, data, size, 1, dropout_prob.to_f64, seed)
+          return 0
+        end
+      rescue e
+        Log.error { "CUDA dropout kernel failed: #{e}" }
+      end
+
+      1
     end
 
     # ReLU backward kernel
