@@ -68,6 +68,53 @@ module SHAInet
       result
     end
 
+    # Copy data from +matrix+ into an existing CudaMatrix +dest+
+    # and sync it to the device. The destination must have the
+    # same dimensions as the source.
+    def to_gpu!(matrix : SimpleMatrix, dest : CudaMatrix)
+      return dest unless CUDA.fully_available?
+      raise ArgumentError.new("size mismatch") unless matrix.rows == dest.rows && matrix.cols == dest.cols
+
+      matrix.data.each_with_index do |val, idx|
+        row = idx // matrix.cols
+        col = idx % matrix.cols
+        dest.unsafe_set(row, col, val)
+      end
+
+      dest.sync_to_device!("gpu_conversion_inplace")
+      dest
+    end
+
+    # Fill a CudaMatrix from a 1D array (treated as a row vector)
+    def to_gpu!(array : Array(GenNum), dest : CudaMatrix)
+      return dest unless CUDA.fully_available?
+      raise ArgumentError.new("size mismatch") unless dest.rows == 1 && dest.cols == array.size
+
+      array.each_with_index do |val, j|
+        dest.unsafe_set(0, j, val.to_f64)
+      end
+
+      dest.sync_to_device!("gpu_array_inplace")
+      dest
+    end
+
+    # Fill a CudaMatrix from a 2D array
+    def to_gpu!(array : Array(Array(GenNum)), dest : CudaMatrix)
+      return dest unless CUDA.fully_available?
+      rows = array.size
+      cols = array[0].as(Array).size
+      raise ArgumentError.new("size mismatch") unless dest.rows == rows && dest.cols == cols
+
+      rows.times do |i|
+        cols.times do |j|
+          dest.unsafe_set(i, j, array[i].as(Array)[j].as(GenNum).to_f64)
+        end
+      end
+
+      dest.sync_to_device!("gpu_array2d_inplace")
+      dest
+    end
+
     # Ensure matrix stays on GPU if it's already there
     def keep_on_gpu(matrix : SimpleMatrix)
       if matrix.is_a?(CudaMatrix)

@@ -690,22 +690,89 @@ module SHAInet
         layer.zero_gradients if layer.is_a?(MatrixLayer)
       end
 
-      # Pre-allocate output_grad matrix once per batch to reuse across samples
+      # Determine matrix dimensions from first sample for workspace allocation
+      first_input = batch.first[0]
+      first_output = batch.first[1]
+
+      get_dims = ->(obj : _) do
+        case obj
+        when SimpleMatrix
+          {obj.rows, obj.cols}
+        when CudaMatrix
+          {obj.rows, obj.cols}
+        else
+          arr = obj.as(Array)
+          if arr.size > 0 && arr[0].is_a?(Array)
+            {arr.size, arr[0].as(Array).size}
+          else
+            {1, arr.size}
+          end
+        end
+      end
+
+      in_rows, in_cols = get_dims.call(first_input)
+      out_rows, out_cols = get_dims.call(first_output)
+
+      input_workspace : CudaMatrix | Nil = nil
+      expected_workspace : CudaMatrix | Nil = nil
       output_grad : SimpleMatrix | CudaMatrix | Nil = nil
+
+      if CUDA.fully_available?
+        input_workspace = CudaMatrix.get_workspace(in_rows, in_cols, "batch_input")
+        expected_workspace = CudaMatrix.get_workspace(out_rows, out_cols, "batch_expected")
+        output_grad = CudaMatrix.get_workspace(out_rows, out_cols, "batch_grad")
+      end
 
       batch.each do |sample|
         input_data = sample[0]
         expected_output = sample[1]
 
-        # Handle different input types explicitly
+        # Prepare expected output matrix using workspace when on GPU
+        expected_matrix = case expected_output
+                          when SimpleMatrix
+                            if expected_workspace
+                              GPUMemory.to_gpu!(expected_output, expected_workspace)
+                            else
+                              expected_output
+                            end
+                          when CudaMatrix
+                            expected_output
+                          else
+                            arr = expected_output.as(Array)
+                            if expected_workspace
+                              if arr.size > 0 && arr[0].is_a?(Array)
+                                GPUMemory.to_gpu!(arr.as(Array(Array(GenNum))), expected_workspace)
+                              else
+                                GPUMemory.to_gpu!(arr.as(Array(GenNum)), expected_workspace)
+                              end
+                              expected_workspace
+                            else
+                              to_matrix(expected_output)
+                            end
+                          end
+
+        # Prepare input matrix using preallocated workspace when on GPU
         input_matrix = case input_data
                        when SimpleMatrix
-                         input_data
+                         if input_workspace
+                           GPUMemory.to_gpu!(input_data, input_workspace)
+                         else
+                           input_data
+                         end
                        when CudaMatrix
                          input_data
                        else
-                         # Convert raw data to matrix, using GPU if available
-                         to_matrix(input_data)
+                         arr = input_data.as(Array)
+                         if input_workspace
+                           if arr.size > 0 && arr[0].is_a?(Array)
+                             GPUMemory.to_gpu!(arr.as(Array(Array(GenNum))), input_workspace)
+                           else
+                             GPUMemory.to_gpu!(arr.as(Array(GenNum)), input_workspace)
+                           end
+                           input_workspace
+                         else
+                           to_matrix(input_data)
+                         end
                        end
 
         actual_matrix = run(input_matrix, stealth: true)
@@ -729,20 +796,18 @@ module SHAInet
                                    {1, arr.size}
                                  end
 
-          # Allocate output_grad matrix only once, reuse across batch samples
+          # Reuse preallocated output_grad matrix when available
           if output_grad.nil? || output_grad.not_nil!.rows != grad_rows || output_grad.not_nil!.cols != grad_cols
             output_grad = GPUMemory.like(actual_matrix, grad_rows, grad_cols)
+          end
+
+          existing_grad = output_grad.not_nil!
+          if existing_grad.is_a?(CudaMatrix)
+            existing_grad.zero!
           else
-            # Zero the existing matrix for reuse
-            existing_grad = output_grad.not_nil!
-            if existing_grad.is_a?(CudaMatrix)
-              existing_grad.zero!
-            else
-              # For SimpleMatrix, manually zero all elements
-              existing_grad.rows.times do |i|
-                existing_grad.cols.times do |j|
-                  existing_grad[i, j] = 0.0
-                end
+            existing_grad.rows.times do |i|
+              existing_grad.cols.times do |j|
+                existing_grad[i, j] = 0.0
               end
             end
           end
@@ -750,12 +815,12 @@ module SHAInet
           grad_matrix = output_grad.not_nil!
 
           # Try GPU-accelerated cross-entropy for CudaMatrix (most common case)
-          if actual_matrix.is_a?(CudaMatrix) && expected_output.is_a?(CudaMatrix) && CUDNN.available?
+          if actual_matrix.is_a?(CudaMatrix) && expected_matrix.is_a?(CudaMatrix) && CUDNN.available?
             begin
               loss_value = 0.0
               CUDNN.softmax_cross_entropy_loss_and_gradient(
                 actual_matrix.as(CudaMatrix),
-                expected_output.as(CudaMatrix),
+                expected_matrix.as(CudaMatrix),
                 pointerof(loss_value),
                 grad_matrix.as(CudaMatrix)
               )
@@ -763,11 +828,11 @@ module SHAInet
             rescue e : Exception
               Log.debug { "GPU cross-entropy failed: #{e}, falling back to CPU computation" }
               # Fall back to CPU computation below
-              sample_error = compute_cost_and_gradient_cpu(actual_matrix, expected_output, grad_matrix, cost_proc)
+              sample_error = compute_cost_and_gradient_cpu(actual_matrix, expected_matrix, grad_matrix, cost_proc)
             end
           else
             # CPU fallback for non-CudaMatrix types or when GPU computation fails
-            sample_error = compute_cost_and_gradient_cpu(actual_matrix, expected_output, grad_matrix, cost_proc)
+            sample_error = compute_cost_and_gradient_cpu(actual_matrix, expected_matrix, grad_matrix, cost_proc)
           end
 
           batch_error += sample_error
@@ -848,7 +913,7 @@ module SHAInet
         # Explicit GPU memory cleanup after processing each sample
         # Force cleanup of temporary matrices created during forward/backward pass
         if actual_matrix.is_a?(CudaMatrix)
-          actual_matrix.cleanup!
+          CudaMatrix.return_workspace(actual_matrix.as(CudaMatrix))
         end
 
         # Also clean up any temporary matrices created during gradient computation
@@ -870,6 +935,16 @@ module SHAInet
       end
 
       update_transformer_layers if @transformer_layers.any?
+
+      if input_workspace
+        CudaMatrix.return_workspace(input_workspace)
+      end
+      if expected_workspace
+        CudaMatrix.return_workspace(expected_workspace)
+      end
+      if output_grad && output_grad.is_a?(CudaMatrix)
+        CudaMatrix.return_workspace(output_grad.as(CudaMatrix))
+      end
 
       batch_error
     end
