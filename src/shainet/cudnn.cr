@@ -623,6 +623,32 @@ module SHAInet
       end
     end
 
+    def self.element_log!(output : CudaMatrix, input : CudaMatrix)
+      raise "Input and output must have same dimensions" unless input.rows == output.rows && input.cols == output.cols
+
+      if CUDA.kernels_available? && (out_ptr = output.device_ptr) && (in_ptr = input.device_ptr)
+        begin
+          input.sync_to_device!("cudnn_element_log_in") unless input.device_dirty?
+          output.sync_to_device!("cudnn_element_log_out") unless output.device_dirty?
+          size = input.rows * input.cols
+          CUDA.element_log(out_ptr, in_ptr, size)
+          output.mark_device_dirty!
+          return
+        rescue e
+          Log.error { "CUDA element_log kernel failed: #{e}" }
+        end
+      end
+
+      # CPU fallback
+      input.sync_from_device!("element_log_fallback") if input.device_dirty?
+      input.rows.times do |i|
+        input.cols.times do |j|
+          output.unsafe_set(i, j, Math.log(input.unsafe_get(i, j)))
+        end
+      end
+      output.sync_to_device!("element_log_result") if CUDA.available?
+    end
+
     # Element-wise subtraction using OpTensor
     def self.element_subtract!(output : CudaMatrix, a : CudaMatrix, b : CudaMatrix, alpha : Float64 = 1.0, beta : Float64 = -1.0)
       raise "Matrices must have same dimensions" unless a.rows == b.rows && a.cols == b.cols && output.rows == a.rows && output.cols == a.cols
