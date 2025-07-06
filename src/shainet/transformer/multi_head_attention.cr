@@ -284,10 +284,16 @@ module SHAInet
         d_attn = d_out_h * @v_heads[h].as(SimpleMatrix).transpose
 
         # Gradient w.r.t. scores (softmax backward)
-        d_scores = softmax_backward(d_attn, @attn[h].as(SimpleMatrix))
+        d_scores = mat_klass.new(d_attn.rows, d_attn.cols)
+        softmax_backward(d_attn, @attn[h].as(SimpleMatrix), d_scores)
 
-        # Scale by 1/sqrt(d_k)
-        d_scores = d_scores * (1.0 / Math.sqrt(@head_dim.to_f))
+        # Scale by 1/sqrt(d_k) in-place
+        scale = 1.0 / Math.sqrt(@head_dim.to_f)
+        d_scores.rows.times do |i|
+          d_scores.cols.times do |j|
+            d_scores[i, j] *= scale
+          end
+        end
 
         # Gradients w.r.t. Q and K
         d_q = d_scores * @k_heads[h].as(SimpleMatrix)
@@ -373,7 +379,8 @@ module SHAInet
             d_attn_temp.copy_from!(d_out_h * @v_heads[h].as(CudaMatrix).transpose)
 
             # Gradient w.r.t. scores (softmax backward)
-            d_scores_temp.copy_from!(softmax_backward(d_attn_temp, @attn[h].as(CudaMatrix)))
+            softmax_backward(d_attn_temp, @attn[h].as(CudaMatrix), d_scores_temp)
+            CudaMatrix.return_workspace(d_attn_temp)
 
             # Scale by 1/sqrt(d_k) in-place
             d_scores_temp.scale!(1.0 / Math.sqrt(@head_dim.to_f))
@@ -384,6 +391,7 @@ module SHAInet
 
             d_q_heads << d_q_temp
             d_k_heads << d_k_temp
+            CudaMatrix.return_workspace(d_scores_temp)
           end
 
           # Concatenate head gradients (use pre-allocated workspace matrices)
@@ -491,34 +499,30 @@ module SHAInet
       @g_w_o = SimpleMatrix.zeros(@d_model, @d_model)
     end
 
-    private def softmax_backward(d_out : SimpleMatrix, softmax_out : SimpleMatrix)
-      # Efficient softmax gradient computation
-      mat_klass = d_out.class
-      result = mat_klass.new(d_out.rows, d_out.cols)
-
+    private def softmax_backward(d_out : SimpleMatrix, softmax_out : SimpleMatrix, dest : SimpleMatrix)
+      # Efficient softmax gradient computation into the provided destination matrix
       d_out.rows.times do |i|
         # For each row, compute: softmax * (d_out - sum(softmax * d_out))
         sum = 0.0
         d_out.cols.times { |j| sum += softmax_out[i, j] * d_out[i, j] }
 
         d_out.cols.times do |j|
-          result[i, j] = softmax_out[i, j] * (d_out[i, j] - sum)
+          dest[i, j] = softmax_out[i, j] * (d_out[i, j] - sum)
         end
       end
 
-      result
+      dest
     end
 
     # GPU version of softmax backward
-    private def softmax_backward(d_out : CudaMatrix, softmax_out : CudaMatrix) : CudaMatrix
+    private def softmax_backward(d_out : CudaMatrix, softmax_out : CudaMatrix, dest : CudaMatrix) : CudaMatrix
       # Use GPU kernel for softmax backward if available
       if CUDA.fully_available?
         begin
-          result = CudaMatrix.new(d_out.rows, d_out.cols)
-          # Use CUDA kernel for softmax backward pass
-          CUDA.softmax_backward(result.device_ptr.not_nil!, d_out.device_ptr.not_nil!, softmax_out.device_ptr.not_nil!, d_out.rows, d_out.cols)
-          result.mark_device_dirty!
-          return result
+          # Use CUDA kernel for softmax backward pass directly into dest
+          CUDA.softmax_backward(dest.device_ptr.not_nil!, d_out.device_ptr.not_nil!, softmax_out.device_ptr.not_nil!, d_out.rows, d_out.cols)
+          dest.mark_device_dirty!
+          return dest
         rescue e : Exception
           # Fall back to CPU computation if CUDA fails
         end
@@ -529,20 +533,18 @@ module SHAInet
       softmax_out.sync_from_device!("attention_backward")
 
       # Efficient softmax gradient computation on CPU using unsafe operations
-      result = CudaMatrix.new(d_out.rows, d_out.cols)
-
       d_out.rows.times do |i|
         # For each row, compute: softmax * (d_out - sum(softmax * d_out))
         sum = 0.0
         d_out.cols.times { |j| sum += softmax_out.unsafe_get(i, j) * d_out.unsafe_get(i, j) }
 
         d_out.cols.times do |j|
-          result.unsafe_set(i, j, softmax_out.unsafe_get(i, j) * (d_out.unsafe_get(i, j) - sum))
+          dest.unsafe_set(i, j, softmax_out.unsafe_get(i, j) * (d_out.unsafe_get(i, j) - sum))
         end
       end
 
-      result.sync_to_device!
-      result
+      dest.sync_to_device!
+      dest
     end
 
     # Pre-allocate or reuse workspace matrices based on input dimensions
