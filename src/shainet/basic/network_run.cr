@@ -374,7 +374,7 @@ module SHAInet
                           expected_output : Array(GenNum),
                           cost_function : CostFunction = SHAInet.quadratic_cost)
       seq = input_data.map do |x|
-        @mixed_precision ? x.map { |v| v.to_f32.to_f64 } : x.map(&.to_f64)
+        @mixed_precision ? x.map { |v| v.to_f32 to_f64 } : x.map(&.to_f64)
       end
       outputs = run(seq, stealth: true)
       actual_output = outputs.last
@@ -690,6 +690,9 @@ module SHAInet
         layer.zero_gradients if layer.is_a?(MatrixLayer)
       end
 
+      # Pre-allocate output_grad matrix once per batch to reuse across samples
+      output_grad : SimpleMatrix | CudaMatrix | Nil = nil
+
       batch.each do |sample|
         input_data = sample[0]
         expected_output = sample[1]
@@ -707,70 +710,70 @@ module SHAInet
 
         actual_matrix = run(input_matrix, stealth: true)
 
-        # Optimize: combine cost calculation and gradient computation in single pass
-        # This avoids double matrix access and reduces syncs
+        # Optimize: Use GPU-accelerated cost and gradient computation when possible
         sample_error = 0.0
         output_layer = @output_layers.last
 
         if output_layer.is_a?(MatrixLayer)
-          # Ensure we sync only once for both cost and gradient computation
-          if actual_matrix.is_a?(CudaMatrix)
-            actual_matrix.sync_from_device!("cost_and_grad_calculation")
-          end
-
-          if expected_output.is_a?(SimpleMatrix)
+          # Determine dimensions for output_grad matrix
+          grad_rows, grad_cols = if expected_output.is_a?(SimpleMatrix)
             exp_mat = expected_output.as(SimpleMatrix)
-            output_grad = GPUMemory.like(actual_matrix, exp_mat.rows, exp_mat.cols)
-            exp_mat.rows.times do |i|
-              exp_mat.cols.times do |j|
-                expected = exp_mat[i, j]
-                actual = actual_matrix[i, j]
-                cost_result = cost_proc.call(expected, actual)
-                sample_error += cost_result[:value]
-                output_grad[i, j] = cost_result[:derivative]
-              end
-            end
+            {exp_mat.rows, exp_mat.cols}
           elsif expected_output.is_a?(CudaMatrix)
             exp_mat = expected_output.as(CudaMatrix)
-            output_grad = GPUMemory.like(actual_matrix, exp_mat.rows, exp_mat.cols)
-            exp_mat.rows.times do |i|
-              exp_mat.cols.times do |j|
-                expected = exp_mat[i, j]
-                actual = actual_matrix[i, j]
-                cost_result = cost_proc.call(expected, actual)
-                sample_error += cost_result[:value]
-                output_grad[i, j] = cost_result[:derivative]
-              end
-            end
+            {exp_mat.rows, exp_mat.cols}
           elsif expected_output.is_a?(Array) && expected_output.as(Array).size > 0 && expected_output.as(Array)[0].is_a?(Array)
-            rows = expected_output.as(Array).size
-            cols = expected_output.as(Array)[0].as(Array).size
-            output_grad = GPUMemory.like(actual_matrix, rows, cols)
-            rows.times do |i|
-              cols.times do |j|
-                expected = expected_output.as(Array)[i].as(Array)[j].as(GenNum).to_f64
-                actual = actual_matrix[i, j]
-                cost_result = cost_proc.call(expected, actual)
-                sample_error += cost_result[:value]
-                output_grad[i, j] = cost_result[:derivative]
-              end
-            end
+            {expected_output.as(Array).size, expected_output.as(Array)[0].as(Array).size}
           else
             arr = expected_output.as(Array)
-            output_grad = GPUMemory.like(actual_matrix, 1, arr.size)
-            arr.size.times do |i|
-              expected = arr[i].as(GenNum).to_f64
-              actual = actual_matrix[0, i]
-              cost_result = cost_proc.call(expected, actual)
-              sample_error += cost_result[:value]
-              output_grad[0, i] = cost_result[:derivative]
+            {1, arr.size}
+          end
+
+          # Allocate output_grad matrix only once, reuse across batch samples
+          if output_grad.nil? || output_grad.not_nil!.rows != grad_rows || output_grad.not_nil!.cols != grad_cols
+            output_grad = GPUMemory.like(actual_matrix, grad_rows, grad_cols)
+          else
+            # Zero the existing matrix for reuse
+            existing_grad = output_grad.not_nil!
+            if existing_grad.is_a?(CudaMatrix)
+              existing_grad.zero!
+            else
+              # For SimpleMatrix, manually zero all elements
+              existing_grad.rows.times do |i|
+                existing_grad.cols.times do |j|
+                  existing_grad[i, j] = 0.0
+                end
+              end
             end
+          end
+
+          grad_matrix = output_grad.not_nil!
+
+          # Try GPU-accelerated cross-entropy for CudaMatrix (most common case)
+          if actual_matrix.is_a?(CudaMatrix) && expected_output.is_a?(CudaMatrix) && CUDNN.available?
+            begin
+              loss_value = 0.0
+              CUDNN.softmax_cross_entropy_loss_and_gradient(
+                actual_matrix.as(CudaMatrix),
+                expected_output.as(CudaMatrix),
+                pointerof(loss_value),
+                grad_matrix.as(CudaMatrix)
+              )
+              sample_error = loss_value
+            rescue e : Exception
+              Log.debug { "GPU cross-entropy failed: #{e}, falling back to CPU computation" }
+              # Fall back to CPU computation below
+              sample_error = compute_cost_and_gradient_cpu(actual_matrix, expected_output, grad_matrix, cost_proc)
+            end
+          else
+            # CPU fallback for non-CudaMatrix types or when GPU computation fails
+            sample_error = compute_cost_and_gradient_cpu(actual_matrix, expected_output, grad_matrix, cost_proc)
           end
 
           batch_error += sample_error
 
-          # output_grad is already GPU-compatible from GPUMemory.like()
-          grad = output_layer.backward(output_grad)
+          # grad_matrix is already GPU-compatible and reused across samples
+          grad = output_layer.backward(grad_matrix)
 
           # Handle transformer layers backward pass with proper gradient reshaping
           if @transformer_layers.any?
@@ -1144,6 +1147,58 @@ module SHAInet
       end
       result.sync_to_device! if CUDA.fully_available?
       result
+    end
+
+    # CPU fallback for cost and gradient computation when GPU acceleration fails
+    private def compute_cost_and_gradient_cpu(actual_matrix, expected_output, grad_matrix, cost_proc)
+      sample_error = 0.0
+
+      if expected_output.is_a?(SimpleMatrix)
+        exp_mat = expected_output.as(SimpleMatrix)
+        exp_mat.rows.times do |i|
+          exp_mat.cols.times do |j|
+            expected = exp_mat[i, j]
+            actual = actual_matrix[i, j]
+            cost_result = cost_proc.call(expected, actual)
+            sample_error += cost_result[:value]
+            grad_matrix[i, j] = cost_result[:derivative]
+          end
+        end
+      elsif expected_output.is_a?(CudaMatrix)
+        exp_mat = expected_output.as(CudaMatrix)
+        exp_mat.rows.times do |i|
+          exp_mat.cols.times do |j|
+            expected = exp_mat[i, j]
+            actual = actual_matrix[i, j]
+            cost_result = cost_proc.call(expected, actual)
+            sample_error += cost_result[:value]
+            grad_matrix[i, j] = cost_result[:derivative]
+          end
+        end
+      elsif expected_output.is_a?(Array) && expected_output.as(Array).size > 0 && expected_output.as(Array)[0].is_a?(Array)
+        rows = expected_output.as(Array).size
+        cols = expected_output.as(Array)[0].as(Array).size
+        rows.times do |i|
+          cols.times do |j|
+            expected = expected_output.as(Array)[i].as(Array)[j].as(GenNum).to_f64
+            actual = actual_matrix[i, j]
+            cost_result = cost_proc.call(expected, actual)
+            sample_error += cost_result[:value]
+            grad_matrix[i, j] = cost_result[:derivative]
+          end
+        end
+      else
+        arr = expected_output.as(Array)
+        arr.size.times do |i|
+          expected = arr[i].as(GenNum).to_f64
+          actual = actual_matrix[0, i]
+          cost_result = cost_proc.call(expected, actual)
+          sample_error += cost_result[:value]
+          grad_matrix[0, i] = cost_result[:derivative]
+        end
+      end
+
+      sample_error
     end
   end
 end

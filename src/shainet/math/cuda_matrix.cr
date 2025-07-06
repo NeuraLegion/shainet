@@ -35,7 +35,7 @@ module SHAInet
 
     # Disable workspace pool - use in-place operations instead
     @@matrix_pool = Hash(String, Array(CudaMatrix)).new { |h, k| h[k] = [] of CudaMatrix }
-    @@pool_enabled = false
+    @@pool_enabled = true
     @@max_pool_size = 100
 
     getter rows, cols
@@ -731,8 +731,19 @@ module SHAInet
       self
     end
 
-    # Element-wise sigmoid activation in-place.
+    # Element-wise sigmoid activation in-place using cuDNN.
     def sigmoid!
+      # Use cuDNN for optimized sigmoid
+      if CUDNN.available?
+        begin
+          CUDNN.sigmoid_forward!(self, self)
+          return self
+        rescue e : Exception
+          Log.debug { "cuDNN sigmoid failed: #{e}, falling back to CUDA kernel" }
+        end
+      end
+
+      # Fallback to CUDA kernel
       raise RuntimeError.new("GPU sigmoid requires valid device pointer") unless (dptr = self.device_ptr) && !dptr.null?
 
       # Ensure self has up-to-date GPU data
@@ -936,6 +947,98 @@ module SHAInet
       end
 
       # Mark self as having newer GPU data
+      mark_device_dirty!
+      self
+    end
+
+    # Element-wise multiplication using cuDNN OpTensor
+    def element_mul!(other : CudaMatrix, alpha : Float64 = 1.0, beta : Float64 = 0.0)
+      # Use cuDNN for optimized element-wise multiplication
+      if CUDNN.available?
+        begin
+          CUDNN.element_multiply!(self, self, other, alpha, beta)
+          return self
+        rescue e : Exception
+          Log.debug { "cuDNN element_mul failed: #{e}, falling back to CPU" }
+        end
+      end
+
+      # CPU fallback
+      raise ArgumentError.new("size mismatch") unless @rows == other.rows && @cols == other.cols
+      self.sync_from_device!("cudnn_element_mul_fallback") if device_dirty?
+      other.sync_from_device!("cudnn_element_mul_fallback") if other.device_dirty?
+
+      @rows.times do |i|
+        @cols.times do |j|
+          self_val = self.unsafe_get(i, j)
+          other_val = other.unsafe_get(i, j)
+          result_val = alpha * self_val * other_val + beta * self_val
+          self.unsafe_set(i, j, result_val)
+        end
+      end
+      self.sync_to_device!("cudnn_element_mul_result")
+      mark_device_dirty!
+      self
+    end
+
+    # Optimized dropout using cuDNN
+    def dropout!(prob : Float64, seed : UInt64 = Random.rand(UInt64::MAX))
+      # Use cuDNN for optimized dropout
+      if CUDNN.available?
+        begin
+          CUDNN.dropout_forward!(self, self, prob, seed)
+          return self
+        rescue e : Exception
+          Log.debug { "cuDNN dropout failed: #{e}, falling back to custom kernel or CPU" }
+        end
+      end
+
+      # Fallback to custom CUDA kernel if available
+      if CUDA.fully_available? && (dptr = self.device_ptr) && !dptr.null?
+        begin
+          self.sync_to_device!("dropout_kernel") unless device_dirty?
+          CUDA.dropout(dptr, (@rows * @cols), prob.to_f32, seed)
+          mark_device_dirty!
+          return self
+        rescue e : Exception
+          Log.debug { "CUDA dropout kernel failed: #{e}, falling back to CPU" }
+        end
+      end
+
+      # CPU fallback
+      self.sync_from_device!("dropout_fallback") if device_dirty?
+      @rows.times do |i|
+        @cols.times do |j|
+          result_val = Random.rand < prob ? 0.0 : self.unsafe_get(i, j)
+          self.unsafe_set(i, j, result_val)
+        end
+      end
+      self.sync_to_device!("dropout_result")
+      mark_device_dirty!
+      self
+    end
+
+    # Element-wise tanh activation using cuDNN
+    def tanh!
+      # Use cuDNN for optimized tanh
+      if CUDNN.available?
+        begin
+          CUDNN.tanh_forward!(self, self)
+          return self
+        rescue e : Exception
+          Log.debug { "cuDNN tanh failed: #{e}, falling back to CPU" }
+        end
+      end
+
+      # CPU fallback
+      self.sync_from_device!("tanh_fallback") if device_dirty?
+      @rows.times do |i|
+        @cols.times do |j|
+          val = self.unsafe_get(i, j)
+          self.unsafe_set(i, j, Math.tanh(val))
+        end
+      end
+      self.sync_to_device!("tanh_result")
       mark_device_dirty!
       self
     end

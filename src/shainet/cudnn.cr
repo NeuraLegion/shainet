@@ -63,7 +63,6 @@ lib LibCUDNN
     CUDNN_ACTIVATION_CLIPPED_RELU = 3
     CUDNN_ACTIVATION_ELU          = 4
     CUDNN_ACTIVATION_IDENTITY     = 5
-    CUDNN_ACTIVATION_SWISH        = 6
   end
 
   # Math types
@@ -72,6 +71,29 @@ lib LibCUDNN
     CUDNN_TENSOR_OP_MATH                  = 1
     CUDNN_TENSOR_OP_MATH_ALLOW_CONVERSION = 2
     CUDNN_FMA_MATH                        = 3
+  end
+
+  # Softmax algorithms
+  enum CudnnSoftmaxAlgorithm
+    CUDNN_SOFTMAX_FAST     = 0
+    CUDNN_SOFTMAX_ACCURATE = 1
+    CUDNN_SOFTMAX_LOG      = 2
+  end
+
+  # Softmax mode
+  enum CudnnSoftmaxMode
+    CUDNN_SOFTMAX_MODE_INSTANCE = 0
+    CUDNN_SOFTMAX_MODE_CHANNEL  = 1
+  end
+
+  # OpTensor operations
+  enum CudnnOpTensorOp
+    CUDNN_OP_TENSOR_ADD = 0
+    CUDNN_OP_TENSOR_MUL = 1
+    CUDNN_OP_TENSOR_MIN = 2
+    CUDNN_OP_TENSOR_MAX = 3
+    CUDNN_OP_TENSOR_SQRT = 4
+    CUDNN_OP_TENSOR_NOT = 5
   end
 
   # Core functions
@@ -100,55 +122,44 @@ lib LibCUDNN
                               xDesc : CudnnTensorDescriptor, x : Void*,
                               beta : Void*, dxDesc : CudnnTensorDescriptor, dx : Void*) : CudnnStatus
 
-  # OpTensor functions (for element-wise operations like add, multiply) - commented out for compatibility
-  # fun cudnnCreateOpTensorDescriptor(opTensorDesc : CudnnOpTensorDescriptor*) : CudnnStatus
-  # fun cudnnDestroyOpTensorDescriptor(opTensorDesc : CudnnOpTensorDescriptor) : CudnnStatus
-  # fun cudnnSetOpTensorDescriptor(opTensorDesc : CudnnOpTensorDescriptor, opTensorOp : CudnnOpTensorOp,
-  #                                opTensorCompType : CudnnDataType, opTensorNanOpt : CudnnNanPropagation) : CudnnStatus
-  # fun cudnnOpTensor(handle : CudnnHandle, opTensorDesc : CudnnOpTensorDescriptor,
-  #                   alpha1 : Void*, aDesc : CudnnTensorDescriptor, a : Void*,
-  #                   alpha2 : Void*, bDesc : CudnnTensorDescriptor, b : Void*,
-  #                   beta : Void*, cDesc : CudnnTensorDescriptor, c : Void*) : CudnnStatus
-
-  # Add bias function
-  fun cudnnAddTensor(handle : CudnnHandle, alpha : Void*, biasDesc : CudnnTensorDescriptor, bias : Void*,
-                     beta : Void*, yDesc : CudnnTensorDescriptor, y : Void*) : CudnnStatus
-
   # Softmax functions
-  enum CudnnSoftmaxAlgorithm
-    CUDNN_SOFTMAX_FAST     = 0
-    CUDNN_SOFTMAX_ACCURATE = 1
-    CUDNN_SOFTMAX_LOG      = 2
-  end
-
-  enum CudnnSoftmaxMode
-    CUDNN_SOFTMAX_MODE_INSTANCE = 0
-    CUDNN_SOFTMAX_MODE_CHANNEL  = 1
-  end
-
-  fun cudnnSoftmaxForward(handle : CudnnHandle, algo : CudnnSoftmaxAlgorithm, mode : CudnnSoftmaxMode,
+  fun cudnnSoftmaxForward(handle : CudnnHandle, algorithm : CudnnSoftmaxAlgorithm, mode : CudnnSoftmaxMode,
                           alpha : Void*, xDesc : CudnnTensorDescriptor, x : Void*,
                           beta : Void*, yDesc : CudnnTensorDescriptor, y : Void*) : CudnnStatus
-  fun cudnnSoftmaxBackward(handle : CudnnHandle, algo : CudnnSoftmaxAlgorithm, mode : CudnnSoftmaxMode,
+  fun cudnnSoftmaxBackward(handle : CudnnHandle, algorithm : CudnnSoftmaxAlgorithm, mode : CudnnSoftmaxMode,
                            alpha : Void*, yDesc : CudnnTensorDescriptor, y : Void*,
                            dyDesc : CudnnTensorDescriptor, dy : Void*,
                            beta : Void*, dxDesc : CudnnTensorDescriptor, dx : Void*) : CudnnStatus
 
-  # OpTensor operation types - commented out for compatibility
-  # enum CudnnOpTensorOp
-  #   CUDNN_OP_TENSOR_ADD  = 0
-  #   CUDNN_OP_TENSOR_MUL  = 1
-  #   CUDNN_OP_TENSOR_MIN  = 2
-  #   CUDNN_OP_TENSOR_MAX  = 3
-  #   CUDNN_OP_TENSOR_SQRT = 4
-  #   CUDNN_OP_TENSOR_NOT  = 5
-  # end
+  # Dropout functions
+  fun cudnnCreateDropoutDescriptor(dropoutDesc : CudnnDropoutDescriptor*) : CudnnStatus
+  fun cudnnDestroyDropoutDescriptor(dropoutDesc : CudnnDropoutDescriptor) : CudnnStatus
+  fun cudnnDropoutGetStatesSize(handle : CudnnHandle, sizeInBytes : LibC::SizeT*) : CudnnStatus
+  fun cudnnSetDropoutDescriptor(dropoutDesc : CudnnDropoutDescriptor, handle : CudnnHandle, dropout : LibC::Float,
+                                states : Void*, stateSizeInBytes : LibC::SizeT, seed : LibC::ULongLong) : CudnnStatus
+  fun cudnnDropoutForward(handle : CudnnHandle, dropoutDesc : CudnnDropoutDescriptor,
+                          xDesc : CudnnTensorDescriptor, x : Void*,
+                          yDesc : CudnnTensorDescriptor, y : Void*,
+                          reserveSpace : Void*, reserveSpaceSizeInBytes : LibC::SizeT) : CudnnStatus
+  fun cudnnDropoutBackward(handle : CudnnHandle, dropoutDesc : CudnnDropoutDescriptor,
+                           dyDesc : CudnnTensorDescriptor, dy : Void*,
+                           dxDesc : CudnnTensorDescriptor, dx : Void*,
+                           reserveSpace : Void*, reserveSpaceSizeInBytes : LibC::SizeT) : CudnnStatus
 
-  # NaN propagation options - commented out for compatibility
-  # enum CudnnNanPropagation
-  #   CUDNN_NOT_PROPAGATE_NAN = 0
-  #   CUDNN_PROPAGATE_NAN     = 1
-  # end
+  # OpTensor functions (for element-wise operations)
+  fun cudnnCreateOpTensorDescriptor(opTensorDesc : CudnnOpTensorDescriptor*) : CudnnStatus
+  fun cudnnDestroyOpTensorDescriptor(opTensorDesc : CudnnOpTensorDescriptor) : CudnnStatus
+  fun cudnnSetOpTensorDescriptor(opTensorDesc : CudnnOpTensorDescriptor, opTensorOp : CudnnOpTensorOp,
+                                 opTensorCompType : CudnnDataType, opTensorNanOpt : LibC::Int) : CudnnStatus
+  fun cudnnOpTensor(handle : CudnnHandle, opTensorDesc : CudnnOpTensorDescriptor,
+                    alpha1 : Void*, aDesc : CudnnTensorDescriptor, a : Void*,
+                    alpha2 : Void*, bDesc : CudnnTensorDescriptor, b : Void*,
+                    beta : Void*, cDesc : CudnnTensorDescriptor, c : Void*) : CudnnStatus
+
+  # AddTensor (for bias addition)
+  fun cudnnAddTensor(handle : CudnnHandle,
+                     alpha : Void*, aDesc : CudnnTensorDescriptor, a : Void*,
+                     beta : Void*, cDesc : CudnnTensorDescriptor, c : Void*) : CudnnStatus
 end
 
 module SHAInet
@@ -208,6 +219,25 @@ module SHAInet
         LibCUDNN.cudnnDestroy(h)
         @@handle = nil
       end
+    end
+
+    # Helper function to create 2D tensor descriptors for matrices
+    private def self.create_tensor_descriptor_2d(rows : Int32, cols : Int32)
+      # Create the descriptor first
+      CUDNN.check_status(LibCUDNN.cudnnCreateTensorDescriptor(out desc))
+
+      # Set up 4D tensor descriptor: [batch, channels, height, width] = [rows, cols, 1, 1]
+      dims = [rows, cols, 1, 1]
+      strides = [cols, 1, cols, cols] # Row-major ordering
+      CUDNN.check_status(LibCUDNN.cudnnSetTensorNdDescriptor(
+        desc,
+        LibCUDNN::CudnnDataType::CUDNN_DATA_DOUBLE,
+        4,
+        dims.to_unsafe,
+        strides.to_unsafe
+      ))
+
+      desc
     end
 
     # High-level operations
@@ -476,6 +506,313 @@ module SHAInet
       end
 
       result.sync_to_device!("cudnn_element_mul_result")
+    end
+
+    # Cross-entropy loss and gradient computation on GPU
+    def self.cross_entropy_loss_gradient(predicted : CudaMatrix, target : CudaMatrix, loss_output : CudaMatrix, grad_output : CudaMatrix)
+      raise "Matrices must have same dimensions" unless predicted.rows == target.rows && predicted.cols == target.cols
+
+      # Use softmax forward to normalize predictions
+      softmax_temp = CudaMatrix.new(predicted.rows, predicted.cols)
+      softmax_rows(predicted, softmax_temp)
+
+      # Compute loss and gradient using element-wise operations
+      # Loss: -target * log(softmax_pred)
+      # Gradient: softmax_pred - target
+      element_subtract!(grad_output, softmax_temp, target, 1.0, -1.0)
+
+      # Compute cross-entropy loss (sum over elements)
+      log_probs = CudaMatrix.new(predicted.rows, predicted.cols)
+      element_log!(log_probs, softmax_temp)
+      element_multiply!(loss_output, target, log_probs, -1.0, 0.0)
+    end
+
+    # GPU-accelerated cross-entropy loss and gradient computation
+    def self.cross_entropy_loss_and_gradient(predicted : CudaMatrix, target : CudaMatrix,
+                                            loss_output : Float64*, grad_output : CudaMatrix)
+      raise "Matrices must have same dimensions" unless predicted.rows == target.rows && predicted.cols == target.cols
+
+      # Ensure both matrices are on GPU
+      predicted.sync_to_device!("cross_entropy_pred") unless predicted.device_dirty?
+      target.sync_to_device!("cross_entropy_target") unless target.device_dirty?
+      grad_output.sync_to_device!("cross_entropy_grad") unless grad_output.device_dirty?
+
+      # Get device pointers
+      pred_ptr = predicted.device_ptr
+      target_ptr = target.device_ptr
+      grad_ptr = grad_output.device_ptr
+
+      raise "Device pointers are nil" if pred_ptr.nil? || target_ptr.nil? || grad_ptr.nil?
+
+      # Use CUDA kernel for cross-entropy computation
+      total_elements = predicted.rows * predicted.cols
+      result = CUDA.cross_entropy_loss_gradient(
+        pred_ptr, target_ptr, grad_ptr, loss_output,
+        predicted.rows, predicted.cols
+      )
+
+      raise "CUDA cross-entropy computation failed" if result != 0
+
+      grad_output.mark_device_dirty!
+    end
+
+    # GPU-optimized softmax + cross-entropy loss and gradient computation
+    def self.softmax_cross_entropy_loss_and_gradient(predicted : CudaMatrix, target : CudaMatrix,
+                                                     loss : Float64*, grad_output : CudaMatrix)
+      raise "Predicted and target must have same dimensions" unless predicted.rows == target.rows && predicted.cols == target.cols
+      raise "Gradient output must have same dimensions as predicted" unless grad_output.rows == predicted.rows && grad_output.cols == predicted.cols
+
+      # For now, this is a placeholder - we would implement a custom CUDA kernel
+      # or use cuDNN's cross-entropy functions when available
+      raise "GPU cross-entropy not yet implemented - falling back to CPU"
+    end
+
+    # Element-wise operations using cuDNN OpTensor
+    def self.element_multiply!(output : CudaMatrix, a : CudaMatrix, b : CudaMatrix, alpha : Float64 = 1.0, beta : Float64 = 0.0)
+      raise "Matrices must have same dimensions" unless a.rows == b.rows && a.cols == b.cols && output.rows == a.rows && output.cols == a.cols
+
+      # Create OpTensor descriptor
+      op_desc = uninitialized LibCUDNN::CudnnOpTensorDescriptor
+      CUDNN.check_status(LibCUDNN.cudnnCreateOpTensorDescriptor(out op_desc))
+
+      begin
+        # Set up for element-wise multiplication
+        CUDNN.check_status(LibCUDNN.cudnnSetOpTensorDescriptor(
+          op_desc,
+          LibCUDNN::CudnnOpTensorOp::CUDNN_OP_TENSOR_MUL,
+          LibCUDNN::CudnnDataType::CUDNN_DATA_DOUBLE,
+          0 # NaN propagation option
+        ))
+
+        # Create tensor descriptors
+        a_desc = create_tensor_descriptor_2d(a.rows, a.cols)
+        b_desc = create_tensor_descriptor_2d(b.rows, b.cols)
+        c_desc = create_tensor_descriptor_2d(output.rows, output.cols)
+
+        begin
+          # Ensure matrices are on device
+          a.sync_to_device!("cudnn_element_mul") unless a.device_dirty?
+          b.sync_to_device!("cudnn_element_mul") unless b.device_dirty?
+          output.sync_to_device!("cudnn_element_mul") unless output.device_dirty?
+
+          alpha_val = alpha
+          beta_val = beta
+
+          CUDNN.check_status(LibCUDNN.cudnnOpTensor(
+            CUDNN.handle,
+            op_desc,
+            pointerof(alpha_val).as(Pointer(Void)),
+            a_desc,
+            a.device_ptr.as(Pointer(Void)),
+            pointerof(alpha_val).as(Pointer(Void)),
+            b_desc,
+            b.device_ptr.as(Pointer(Void)),
+            pointerof(beta_val).as(Pointer(Void)),
+            c_desc,
+            output.device_ptr.as(Pointer(Void))
+          ))
+
+          output.mark_device_dirty!
+        ensure
+          LibCUDNN.cudnnDestroyTensorDescriptor(a_desc)
+          LibCUDNN.cudnnDestroyTensorDescriptor(b_desc)
+          LibCUDNN.cudnnDestroyTensorDescriptor(c_desc)
+        end
+      ensure
+        LibCUDNN.cudnnDestroyOpTensorDescriptor(op_desc)
+      end
+    end
+
+    # Element-wise subtraction using OpTensor
+    def self.element_subtract!(output : CudaMatrix, a : CudaMatrix, b : CudaMatrix, alpha : Float64 = 1.0, beta : Float64 = -1.0)
+      raise "Matrices must have same dimensions" unless a.rows == b.rows && a.cols == b.cols && output.rows == a.rows && output.cols == a.cols
+
+      # Use element addition with negative beta to achieve subtraction
+      element_addition!(output, a, b, alpha, beta)
+    end
+
+    # Element-wise addition using OpTensor (more general version)
+    def self.element_addition!(output : CudaMatrix, a : CudaMatrix, b : CudaMatrix, alpha : Float64 = 1.0, beta : Float64 = 1.0)
+      raise "Matrices must have same dimensions" unless a.rows == b.rows && a.cols == b.cols && output.rows == a.rows && output.cols == a.cols
+
+      # Create OpTensor descriptor
+      op_desc = uninitialized LibCUDNN::CudnnOpTensorDescriptor
+      CUDNN.check_status(LibCUDNN.cudnnCreateOpTensorDescriptor(out op_desc))
+
+      begin
+        # Set up for element-wise addition
+        CUDNN.check_status(LibCUDNN.cudnnSetOpTensorDescriptor(
+          op_desc,
+          LibCUDNN::CudnnOpTensorOp::CUDNN_OP_TENSOR_ADD,
+          LibCUDNN::CudnnDataType::CUDNN_DATA_DOUBLE,
+          0 # NaN propagation option
+        ))
+
+        # Create tensor descriptors
+        a_desc = create_tensor_descriptor_2d(a.rows, a.cols)
+        b_desc = create_tensor_descriptor_2d(b.rows, b.cols)
+        c_desc = create_tensor_descriptor_2d(output.rows, output.cols)
+
+        begin
+          # Ensure matrices are on device
+          a.sync_to_device!("cudnn_element_add") unless a.device_dirty?
+          b.sync_to_device!("cudnn_element_add") unless b.device_dirty?
+          output.sync_to_device!("cudnn_element_add") unless output.device_dirty?
+
+          alpha_val = alpha
+          beta_val = beta
+
+          CUDNN.check_status(LibCUDNN.cudnnOpTensor(
+            CUDNN.handle,
+            op_desc,
+            pointerof(alpha_val).as(Pointer(Void)),
+            a_desc,
+            a.device_ptr.as(Pointer(Void)),
+            pointerof(beta_val).as(Pointer(Void)),
+            b_desc,
+            b.device_ptr.as(Pointer(Void)),
+            pointerof(alpha_val).as(Pointer(Void)), # Use alpha again for output scaling
+            c_desc,
+            output.device_ptr.as(Pointer(Void))
+          ))
+
+          output.mark_device_dirty!
+        ensure
+          LibCUDNN.cudnnDestroyTensorDescriptor(a_desc)
+          LibCUDNN.cudnnDestroyTensorDescriptor(b_desc)
+          LibCUDNN.cudnnDestroyTensorDescriptor(c_desc)
+        end
+      ensure
+        LibCUDNN.cudnnDestroyOpTensorDescriptor(op_desc)
+      end
+    end
+
+    # Optimized sigmoid using cuDNN activation
+    def self.sigmoid_forward!(output : CudaMatrix, input : CudaMatrix)
+      activation_forward!(output, input, LibCUDNN::CudnnActivationMode::CUDNN_ACTIVATION_SIGMOID)
+    end
+
+    # Optimized tanh using cuDNN activation
+    def self.tanh_forward!(output : CudaMatrix, input : CudaMatrix)
+      activation_forward!(output, input, LibCUDNN::CudnnActivationMode::CUDNN_ACTIVATION_TANH)
+    end
+
+    # Generic activation forward
+    def self.activation_forward!(output : CudaMatrix, input : CudaMatrix, mode : LibCUDNN::CudnnActivationMode)
+      raise "Input and output must have same dimensions" unless input.rows == output.rows && input.cols == output.cols
+
+      # Create activation descriptor
+      activation_desc = uninitialized LibCUDNN::CudnnActivationDescriptor
+      CUDNN.check_status(LibCUDNN.cudnnCreateActivationDescriptor(pointerof(activation_desc)))
+
+      begin
+        # Set activation mode (sigmoid, tanh, relu, etc.)
+        CUDNN.check_status(LibCUDNN.cudnnSetActivationDescriptor(
+          activation_desc,
+          mode,
+          0, # reluNanOpt (not used for sigmoid/tanh)
+          0.0 # coef (not used for sigmoid/tanh)
+        ))
+
+        # Create tensor descriptors
+        input_desc = create_tensor_descriptor_2d(input.rows, input.cols)
+        output_desc = create_tensor_descriptor_2d(output.rows, output.cols)
+
+        begin
+          # Ensure matrices are on device
+          input.sync_to_device!("cudnn_activation") unless input.device_dirty?
+          output.sync_to_device!("cudnn_activation") unless output.device_dirty?
+
+          alpha = 1.0
+          beta = 0.0        # Get device pointers and ensure they're valid
+        input_ptr = input.device_ptr
+        output_ptr = output.device_ptr
+        raise "Invalid device pointers" unless input_ptr && output_ptr && !input_ptr.null? && !output_ptr.null?
+
+        CUDNN.check_status(LibCUDNN.cudnnActivationForward(
+          CUDNN.handle,
+          activation_desc,
+          pointerof(alpha).as(Pointer(Void)),
+          input_desc,
+          input_ptr.as(Pointer(Void)),
+          pointerof(beta).as(Pointer(Void)),
+          output_desc,
+          output_ptr.as(Pointer(Void))
+        ))
+
+          output.mark_device_dirty!
+        ensure
+          LibCUDNN.cudnnDestroyTensorDescriptor(input_desc)
+          LibCUDNN.cudnnDestroyTensorDescriptor(output_desc)
+        end
+      ensure
+        LibCUDNN.cudnnDestroyActivationDescriptor(activation_desc)
+      end
+    end
+
+    # Dropout forward (GPU-accelerated dropout with mask generation)
+    def self.dropout_forward!(output : CudaMatrix, input : CudaMatrix, dropout_prob : Float64, seed : UInt64 = Random.rand(UInt64::MAX))
+      raise "Input and output must have same dimensions" unless input.rows == output.rows && input.cols == output.cols
+
+      # Get dropout states size
+      states_size = uninitialized LibC::SizeT
+      CUDNN.check_status(LibCUDNN.cudnnDropoutGetStatesSize(CUDNN.handle, out states_size))
+
+      # Allocate dropout states on GPU
+      states_ptr = Pointer(Void).null
+      CUDA.malloc(pointerof(states_ptr), states_size.to_u64)
+
+      begin
+        # Create dropout descriptor
+        dropout_desc = uninitialized LibCUDNN::CudnnDropoutDescriptor
+        CUDNN.check_status(LibCUDNN.cudnnCreateDropoutDescriptor(out dropout_desc))
+
+        begin
+          # Set dropout parameters
+          CUDNN.check_status(LibCUDNN.cudnnSetDropoutDescriptor(
+            dropout_desc,
+            CUDNN.handle,
+            dropout_prob.to_f32,
+            states_ptr,
+            states_size,
+            seed
+          ))
+
+          # Create tensor descriptors
+          input_desc = create_tensor_descriptor_2d(input.rows, input.cols)
+          output_desc = create_tensor_descriptor_2d(output.rows, output.cols)
+
+          begin
+            # Ensure matrices are on device
+            input.sync_to_device!("cudnn_dropout") unless input.device_dirty?
+            output.sync_to_device!("cudnn_dropout") unless output.device_dirty?
+
+            # Reserve space for backward pass (can be null for forward-only)
+            reserve_space_ptr = Pointer(Void).null
+            reserve_space_size = 0_u64
+
+            CUDNN.check_status(LibCUDNN.cudnnDropoutForward(
+              CUDNN.handle,
+              dropout_desc,
+              input_desc,
+              input.device_ptr.as(Pointer(Void)),
+              output_desc,
+              output.device_ptr.as(Pointer(Void)),
+              reserve_space_ptr,
+              reserve_space_size
+            ))
+
+            output.mark_device_dirty!
+          ensure
+            LibCUDNN.cudnnDestroyTensorDescriptor(input_desc)
+            LibCUDNN.cudnnDestroyTensorDescriptor(output_desc)
+          end
+        ensure
+          LibCUDNN.cudnnDestroyDropoutDescriptor(dropout_desc)
+        end
+      ensure
+        CUDA.free(states_ptr) unless states_ptr.null?
+      end
     end
   end
 end
