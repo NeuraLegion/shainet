@@ -100,21 +100,23 @@ module SHAInet
     # GPU path backward - all CudaMatrix operations
     def backward(d_out : CudaMatrix) : CudaMatrix
       d_norm2 = @norm2.backward(d_out)
-      d_ff = @ffn.backward(d_norm2)
-      d_ff = d_ff.as(CudaMatrix) + d_norm2.as(CudaMatrix)
+      d_ff = @ffn.backward(d_norm2).as(CudaMatrix)
+      d_ff.add!(d_norm2.as(CudaMatrix))
       d_norm1 = @norm1.backward(d_ff).as(CudaMatrix)
-      d_attn = @mha.backward(d_norm1)
-      d_attn.as(CudaMatrix) + d_norm1.as(CudaMatrix)
+      d_attn = @mha.backward(d_norm1).as(CudaMatrix)
+      d_attn.add!(d_norm1.as(CudaMatrix))
+      d_attn
     end
 
     # CPU path backward - all SimpleMatrix operations
     def backward(d_out : SimpleMatrix) : SimpleMatrix
       d_norm2 = @norm2.backward(d_out)
-      d_ff = @ffn.backward(d_norm2)
-      d_ff = d_ff.as(SimpleMatrix) + d_norm2.as(SimpleMatrix)
+      d_ff = @ffn.backward(d_norm2).as(SimpleMatrix)
+      d_ff.add!(d_norm2.as(SimpleMatrix))
       d_norm1 = @norm1.backward(d_ff)
-      d_attn = @mha.backward(d_norm1)
-      d_attn.as(SimpleMatrix) + d_norm1.as(SimpleMatrix)
+      d_attn = @mha.backward(d_norm1).as(SimpleMatrix)
+      d_attn.add!(d_norm1.as(SimpleMatrix))
+      d_attn
     end
 
     def apply_gradients(lr : Float64)
