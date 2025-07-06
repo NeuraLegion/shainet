@@ -747,7 +747,7 @@ module SHAInet
       first_input = batch.first[0]
       first_output = batch.first[1]
 
-      get_dims = ->(obj : _) do
+      get_dims = ->(obj : SimpleMatrix | CudaMatrix | Array(Array(Float64)) | Array(Float64)) do
         case obj
         when SimpleMatrix
           {obj.rows, obj.cols}
@@ -793,10 +793,19 @@ module SHAInet
                           else
                             arr = expected_output.as(Array)
                             if expected_workspace
-                              if arr.size > 0 && arr[0].is_a?(Array)
-                                GPUMemory.to_gpu!(arr.as(Array(Array(GenNum))), expected_workspace)
+                              case arr
+                              when Array(Array(GenNum)), Array(Array(Float64))
+                                # 2D: arr is Array(Array(GenNum)) or Array(Array(Float64))
+                                GPUMemory.to_gpu!(arr.map { |row| row.map(&.to_f64) }, expected_workspace)
+                              when Array(Float64)
+                                # 1D: arr is Array(Float64)
+                                GPUMemory.to_gpu!([arr], expected_workspace)
+                              when Array(GenNum)
+                                # 1D: arr is Array(GenNum)
+                                GPUMemory.to_gpu!([arr.map(&.to_f64)], expected_workspace)
                               else
-                                GPUMemory.to_gpu!(arr.as(Array(GenNum)), expected_workspace)
+                                # Scalar fallback (should not happen, but for safety)
+                                GPUMemory.to_gpu!([[arr.to_f64]], expected_workspace)
                               end
                               expected_workspace
                             else
@@ -818,9 +827,9 @@ module SHAInet
                          arr = input_data.as(Array)
                          if input_workspace
                            if arr.size > 0 && arr[0].is_a?(Array)
-                             GPUMemory.to_gpu!(arr.as(Array(Array(GenNum))), input_workspace)
+                             GPUMemory.to_gpu!(arr.as(Array(Array(Float64))), input_workspace)
                            else
-                             GPUMemory.to_gpu!(arr.as(Array(GenNum)), input_workspace)
+                             GPUMemory.to_gpu!(arr.as(Array(Float64)), input_workspace)
                            end
                            input_workspace
                          else
