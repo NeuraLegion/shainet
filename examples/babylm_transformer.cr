@@ -134,7 +134,14 @@ while (val_batch = val_data.next_batch(val_batch_size)).size > 0
       seq = matrix.to_a.map { |row| row.map(&.to_i) }
     end
 
-    tgt = sample[1].as(Array(Float64))
+    case sample[1]
+    when SHAInet::CudaMatrix
+      tgt = sample[1].as(SHAInet::CudaMatrix).to_flat_array
+    when SHAInet::SimpleMatrix
+      tgt = sample[1].as(SHAInet::SimpleMatrix).to_a.first
+    else
+      tgt = sample[1].as(Array(Float64))
+    end
     pred_id = tgt.index(tgt.max) || 0
     output_vec = net.run(seq).last
 

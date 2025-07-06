@@ -696,6 +696,7 @@ module SHAInet
             Log.info { "  Syncs: #{total_syncs} total (#{sync_stats[:sync_to_device_count]} to GPU, #{sync_stats[:sync_from_device_count]} from GPU)" }
             Log.info { "  Data: #{sync_to_mb} MB to GPU, #{sync_from_mb} MB from GPU (#{(sync_to_mb + sync_from_mb).round(2)} MB total)" }
             Log.info { "  Matrix creations: #{sync_stats[:matrix_creation_count]} this epoch" }
+            SHAInet::CudaMatrix.print_top_allocation_sites
 
             # Log top sync sources
             sources = SHAInet::CudaMatrix.sync_sources_stats

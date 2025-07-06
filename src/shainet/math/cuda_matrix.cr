@@ -30,13 +30,16 @@ module SHAInet
     # Matrix creation tracking
     @@matrix_creation_count = 0_u64
 
+    # Track allocation sites (callers)
+    @@allocation_sites = Hash(String, UInt64).new(0_u64)
+
     # Detailed sync tracking by source
     @@sync_sources = Hash(String, UInt64).new(0_u64)
 
     # Disable workspace pool - use in-place operations instead
     @@matrix_pool = Hash(String, Array(CudaMatrix)).new { |h, k| h[k] = [] of CudaMatrix }
     @@pool_enabled = true
-    @@max_pool_size = 100
+    @@max_pool_size = 1024
 
     getter rows, cols
 
@@ -67,6 +70,7 @@ module SHAInet
       @@total_sync_bytes_from_device = 0_u64
       @@matrix_creation_count = 0_u64
       @@sync_sources.clear
+      @@allocation_sites.clear
     end
 
     def self.print_detailed_stats
@@ -79,6 +83,7 @@ module SHAInet
       Log.info { "  Memory limit: #{@@max_gpu_memory} bytes (#{(@@max_gpu_memory / 1024.0 / 1024.0).round(2)} MB)" }
       Log.info { "  Usage %: #{(100.0 * @@total_gpu_memory_allocated / @@max_gpu_memory).round(2)}%" }
       Log.info { "  Average size per matrix: #{@@active_matrices > 0 ? (@@total_gpu_memory_allocated / @@active_matrices).round(2) : 0} bytes" }
+      Log.info { "Allocation sites (top 20): #{SHAInet::CudaMatrix.print_top_allocation_sites(20)} " }
     end
 
     def self.force_cleanup_all
@@ -92,6 +97,17 @@ module SHAInet
       Log.debug { "GPU Memory cleanup: #{old_count} -> #{@@active_matrices} matrices, #{old_bytes} -> #{@@total_gpu_memory_allocated} bytes (freed #{old_bytes - @@total_gpu_memory_allocated} bytes)" }
     end
 
+    def self.print_top_allocation_sites(limit = 20)
+      Log.info { "Top CudaMatrix allocation sites:" }
+      @@allocation_sites.to_a.sort_by { |(_, v)| v }.reverse.first(limit).each do |site, count|
+        Log.info { "%6d  %s" % {count, site} }
+      end
+    end
+
+    def self.reset_allocation_sites
+      @@allocation_sites.clear
+    end
+
     def initialize(@rows : Int32, @cols : Int32, init : Float64 = 0.0)
       @data = Array(Float64).new(@rows * @cols, init)
       @device_ptr = Pointer(Float64).null
@@ -99,9 +115,14 @@ module SHAInet
       # Count matrix creation
       @@matrix_creation_count += 1
 
+      # Track allocation site (top non-cuda_matrix.cr frame)
+      if call = caller.find { |c| !c.includes?("cuda_matrix.cr") }
+        @@allocation_sites[call] += 1
+      end
+
       # CudaMatrix requires CUDA to be available
       raise RuntimeError.new("CudaMatrix requires CUDA to be available") unless CUDA.fully_available?
-
+      # Print the most frequent allocation sites
       size = @rows * @cols
       bytes = (size * 8).to_u64
 
