@@ -13,7 +13,7 @@ describe SHAInet::StreamingData do
     data = SHAInet::StreamingData.new("/tmp/stream.txt")
 
     net = SHAInet::Network.new
-    net.add_layer(:input, 2, SHAInet.sigmoid)
+    net.add_layer(:input, 2)
     net.add_layer(:hidden, 3, SHAInet.sigmoid)
     net.add_layer(:output, 1, SHAInet.sigmoid)
     net.fully_connect

@@ -39,12 +39,21 @@ module SHAInet
 
       return batch unless @gpu_batches && CUDA.fully_available?
 
-      gpu_batch = [] of Array(SimpleMatrix | CudaMatrix)
+      gpu_batch = [] of Array(CudaMatrix)
+
       batch.each do |ex|
         inp = to_matrix(ex[0])
         out_m = to_matrix(ex[1])
-        gpu_batch << [GPUMemory.to_gpu(inp), GPUMemory.to_gpu(out_m)]
+
+        in_ws = CudaMatrix.get_workspace(inp.rows, inp.cols, "stream_in")
+        out_ws = CudaMatrix.get_workspace(out_m.rows, out_m.cols, "stream_out")
+
+        GPUMemory.to_gpu!(inp, in_ws)
+        GPUMemory.to_gpu!(out_m, out_ws)
+
+        gpu_batch << [in_ws, out_ws]
       end
+
       gpu_batch
     end
 

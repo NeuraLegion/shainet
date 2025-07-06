@@ -971,6 +971,14 @@ module SHAInet
 
         # Also clean up any temporary matrices created during gradient computation
         GC.collect
+
+        # Return workspace matrices used for this sample
+        if input_matrix.is_a?(CudaMatrix)
+          CudaMatrix.return_workspace(input_matrix)
+        end
+        if expected_output.is_a?(CudaMatrix)
+          CudaMatrix.return_workspace(expected_output)
+        end
       end
 
       learning_rate = current_learning_rate

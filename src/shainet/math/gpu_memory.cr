@@ -51,21 +51,25 @@ module SHAInet
     end
 
     # Convert SimpleMatrix to CudaMatrix if CUDA is available and input is not already CudaMatrix
-    def to_gpu(matrix : SimpleMatrix)
+    def to_gpu(matrix : SimpleMatrix, dest : CudaMatrix? = nil)
       return matrix if matrix.is_a?(CudaMatrix) || !CUDA.fully_available?
 
-      # Create CudaMatrix with same dimensions
-      result = CudaMatrix.new(matrix.rows, matrix.cols)
+      target = dest || CudaMatrix.new(matrix.rows, matrix.cols)
+      to_gpu!(matrix, target)
+    end
 
-      # Direct bulk copy from SimpleMatrix data array - much more efficient
-      matrix.data.each_with_index do |val, idx|
-        row = idx // matrix.cols
-        col = idx % matrix.cols
-        result.unsafe_set(row, col, val)
+    # Copy values from +src+ into existing GPU matrix +dest+
+    def to_gpu!(src : SimpleMatrix, dest : CudaMatrix)
+      raise ArgumentError.new("size mismatch") unless src.rows == dest.rows && src.cols == dest.cols
+
+      src.data.each_with_index do |val, idx|
+        row = idx // src.cols
+        col = idx % src.cols
+        dest.unsafe_set(row, col, val)
       end
 
-      result.sync_to_device!("gpu_conversion")
-      result
+      dest.sync_to_device!("gpu_conversion!")
+      dest
     end
 
     # Copy data from +matrix+ into an existing CudaMatrix +dest+

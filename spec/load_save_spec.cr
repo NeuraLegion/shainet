@@ -13,7 +13,7 @@ describe SHAInet::Network do
     ]
 
     xor = SHAInet::Network.new
-    xor.add_layer(:input, 2, SHAInet.sigmoid)
+    xor.add_layer(:input, 2)
     xor.add_layer(:hidden, 3, SHAInet.sigmoid)
     xor.add_layer(:output, 1, SHAInet.sigmoid)
     xor.fully_connect
