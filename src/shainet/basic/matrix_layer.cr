@@ -15,6 +15,8 @@ module SHAInet
     @input : SimpleMatrix | CudaMatrix | Nil
     @activations : SimpleMatrix | CudaMatrix | Nil
     @sigma_primes : SimpleMatrix | CudaMatrix | Nil
+    @forward_workspace : CudaMatrix | Nil
+    @grad_workspace : CudaMatrix | Nil
 
     def initialize(in_size : Int32, @size : Int32)
       @l_size = @size
@@ -28,6 +30,8 @@ module SHAInet
       @input = nil
       @activations = nil
       @sigma_primes = nil
+      @forward_workspace = nil
+      @grad_workspace = nil
     end
 
     # Constructor for compatibility with Layer API
@@ -42,6 +46,8 @@ module SHAInet
       @input = nil
       @activations = nil
       @sigma_primes = nil
+      @forward_workspace = nil
+      @grad_workspace = nil
     end
 
     # Constructor with custom activation function
@@ -56,6 +62,8 @@ module SHAInet
       @input = nil
       @activations = nil
       @sigma_primes = nil
+      @forward_workspace = nil
+      @grad_workspace = nil
     end
 
     def inspect
@@ -96,15 +104,35 @@ module SHAInet
       w = @weights.as(CudaMatrix)
       b = @biases.as(CudaMatrix)
 
-      # Linear transformation: input * weights + bias
-      linear_result = input * w
-      linear_result.add_bias!(b)
+      # Linear transformation using workspace
+      fw = CudaMatrix.get_workspace(input.rows, w.cols, "layer_fwd")
+      @forward_workspace = fw
+      fw.gemm!(input, w)
+      fw.add_bias!(b)
+      linear_result = fw
 
       # Apply activation function and store derivatives for backprop
-      @activations = linear_result.clone
-      @sigma_primes = CudaMatrix.new(linear_result.rows, linear_result.cols)
-
+      if @activations && @activations.is_a?(CudaMatrix)
+        act = @activations.as(CudaMatrix)
+        if act.rows != linear_result.rows || act.cols != linear_result.cols
+          CudaMatrix.return_workspace(act)
+          @activations = CudaMatrix.get_workspace(linear_result.rows, linear_result.cols, "layer_act")
+        end
+      else
+        CudaMatrix.return_workspace(@activations.as(CudaMatrix)) if @activations && @activations.is_a?(CudaMatrix)
+        @activations = CudaMatrix.get_workspace(linear_result.rows, linear_result.cols, "layer_act")
+      end
       activations_cuda = @activations.as(CudaMatrix)
+      activations_cuda.copy_from!(linear_result)
+
+      if @sigma_primes && @sigma_primes.is_a?(CudaMatrix)
+        sp = @sigma_primes.as(CudaMatrix)
+        if sp.rows != linear_result.rows || sp.cols != linear_result.cols
+          @sigma_primes = CudaMatrix.new(linear_result.rows, linear_result.cols)
+        end
+      else
+        @sigma_primes = CudaMatrix.new(linear_result.rows, linear_result.cols)
+      end
       sigma_primes_cuda = @sigma_primes.as(CudaMatrix)
 
       # Ensure all matrices are synced to GPU
@@ -125,6 +153,7 @@ module SHAInet
         sigma_primes_cuda.mark_device_dirty!
       when SHAInet.none
         # Identity function: input passes through unchanged, derivatives are all 1.0
+        CudaMatrix.return_workspace(activations_cuda)
         @activations = linear_result
         @sigma_primes = CudaMatrix.ones(linear_result.rows, linear_result.cols)
         @sigma_primes.as(CudaMatrix).mark_device_dirty!
@@ -139,8 +168,12 @@ module SHAInet
           end
         end
       end
-
       @activations.as(CudaMatrix)
+    ensure
+      if fw = @forward_workspace
+        CudaMatrix.return_workspace(fw)
+        @forward_workspace = nil
+      end
     end
 
     # CPU path - all SimpleMatrix operations
@@ -180,41 +213,59 @@ module SHAInet
       sigma_primes = @sigma_primes.as(CudaMatrix)
 
       # Apply activation derivative: grad ⊙ σ'
-      local_grad = grad.clone
+      local_grad : CudaMatrix | Nil = nil
+      begin
+        local_grad = CudaMatrix.get_workspace(grad.rows, grad.cols, "layer_local_grad")
+        local_grad.copy_from!(grad)
 
-      # Use GPU kernel for gradient computation
-      grad.sync_to_device!("matrix_layer_backward") unless grad.device_dirty?
-      sigma_primes.sync_to_device!("matrix_layer_backward") unless sigma_primes.device_dirty?
+        # Use GPU kernel for gradient computation
+        grad.sync_to_device!("matrix_layer_backward") unless grad.device_dirty?
+        sigma_primes.sync_to_device!("matrix_layer_backward") unless sigma_primes.device_dirty?
 
-      size = local_grad.rows * local_grad.cols
-      CUDA.apply_gradient(
-        local_grad.device_ptr.not_nil!,
-        grad.device_ptr.not_nil!,
-        sigma_primes.device_ptr.not_nil!,
-        size
-      )
+        size = local_grad.rows * local_grad.cols
+        CUDA.apply_gradient(
+          local_grad.device_ptr.not_nil!,
+          grad.device_ptr.not_nil!,
+          sigma_primes.device_ptr.not_nil!,
+          size
+        )
 
-      local_grad.mark_device_dirty!
+        local_grad.mark_device_dirty!
 
-      # Accumulate weight gradients: ∂L/∂W += input^T * local_grad
-      @g_w = @g_w.as(CudaMatrix) + input.transpose * local_grad
+        # Accumulate weight gradients: ∂L/∂W += input^T * local_grad
+        gw = CudaMatrix.get_workspace(@g_w.rows, @g_w.cols, "layer_grad")
+        @grad_workspace = gw
+        begin
+          gw.gemm!(input.transpose, local_grad)
+          @g_w.as(CudaMatrix).add!(gw)
+        ensure
+          CudaMatrix.return_workspace(gw)
+          @grad_workspace = nil
+        end
 
-      # Accumulate bias gradients: ∂L/∂b += sum(local_grad, axis=0)
-      g_b_cuda = @g_b.as(CudaMatrix)
-      local_grad.sync_to_device!("matrix_layer_bias_grad") unless local_grad.device_dirty?
-      g_b_cuda.sync_to_device!("matrix_layer_bias_grad") unless g_b_cuda.device_dirty?
+        # Accumulate bias gradients: ∂L/∂b += sum(local_grad, axis=0)
+        g_b_cuda = @g_b.as(CudaMatrix)
+        local_grad.sync_to_device!("matrix_layer_bias_grad") unless local_grad.device_dirty?
+        g_b_cuda.sync_to_device!("matrix_layer_bias_grad") unless g_b_cuda.device_dirty?
 
-      CUDA.accumulate_bias_grad(
-        g_b_cuda.device_ptr.not_nil!,
-        local_grad.device_ptr.not_nil!,
-        local_grad.rows,
-        local_grad.cols
-      )
+        CUDA.accumulate_bias_grad(
+          g_b_cuda.device_ptr.not_nil!,
+          local_grad.device_ptr.not_nil!,
+          local_grad.rows,
+          local_grad.cols
+        )
 
-      g_b_cuda.mark_device_dirty!
+        g_b_cuda.mark_device_dirty!
 
-      # Return gradient for previous layer: local_grad * W^T
-      local_grad * @weights.as(CudaMatrix).transpose
+        # Return gradient for previous layer: local_grad * W^T
+        grad_input = CudaMatrix.get_workspace(local_grad.rows, @weights.rows, "layer_prev_grad")
+        grad_input.gemm!(local_grad, @weights.as(CudaMatrix).transpose)
+
+        grad_input
+      end
+    ensure
+      lg = local_grad
+      CudaMatrix.return_workspace(lg) if lg
     end
 
     # CPU path backward - all SimpleMatrix operations
