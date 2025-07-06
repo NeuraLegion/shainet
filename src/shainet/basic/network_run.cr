@@ -299,9 +299,23 @@ module SHAInet
                 SimpleMatrix.from_a([actual_output])
               end
 
-        diff = act - exp
-        w = GPUMemory.keep_on_gpu(@output_layers.last.weights)
-        @transformer_error = diff * w
+        diff = if act.is_a?(CudaMatrix) && exp.is_a?(CudaMatrix)
+                 act - exp
+               else
+                 act_s = act.is_a?(CudaMatrix) ? act.to_simple : act
+                 exp_s = exp.is_a?(CudaMatrix) ? exp.to_simple : exp
+                 act_s - exp_s
+               end
+        out_w = @output_layers.last.weights
+        w = out_w.is_a?(CudaMatrix) ? out_w : GPUMemory.keep_on_gpu(out_w.as(SimpleMatrix))
+        trans = if diff.is_a?(CudaMatrix) && w.is_a?(CudaMatrix)
+                  diff * w
+                else
+                  d = diff.is_a?(CudaMatrix) ? diff.to_simple : diff
+                  ww = w.is_a?(CudaMatrix) ? w.to_simple : w
+                  d * ww
+                end
+        @transformer_error = trans.is_a?(CudaMatrix) ? trans.to_simple : trans
       end
 
       # puts "@error_signal: #{@error_signal}"
@@ -355,8 +369,16 @@ module SHAInet
                 end
 
         diff = act_m - exp_m
-        w = GPUMemory.keep_on_gpu(@output_layers.last.weights)
-        @transformer_error = diff * w
+        out_w = @output_layers.last.weights
+        w = out_w.is_a?(CudaMatrix) ? out_w : GPUMemory.keep_on_gpu(out_w.as(SimpleMatrix))
+        trans = if diff.is_a?(CudaMatrix) && w.is_a?(CudaMatrix)
+                  diff * w
+                else
+                  d = diff.is_a?(CudaMatrix) ? diff.to_simple : diff
+                  ww = w.is_a?(CudaMatrix) ? w.to_simple : w
+                  d * ww
+                end
+        @transformer_error = trans.is_a?(CudaMatrix) ? trans.to_simple : trans
       end
     rescue e : Exception
       raise NeuralNetRunError.new("Error in evaluate: #{e}")
@@ -403,10 +425,12 @@ module SHAInet
         exp_row = GPUMemory.to_gpu(SimpleMatrix.from_a([expected_output.map(&.to_f64)]))
         act_row = GPUMemory.to_gpu(SimpleMatrix.from_a([actual_output]))
         diff = act_row - exp_row
-        @transformer_error = GPUMemory.zeros_like(diff, outputs.size, diff.cols)
+        tmp = GPUMemory.zeros_like(diff, outputs.size, diff.cols)
+        tmp = tmp.to_simple if tmp.is_a?(CudaMatrix)
 
         # Use efficient row copying instead of element-by-element access
-        @transformer_error.set_row!(outputs.size - 1, diff, 0)
+        tmp.set_row!(outputs.size - 1, diff.is_a?(CudaMatrix) ? diff.to_simple : diff, 0)
+        @transformer_error = tmp
       end
 
       # puts "@error_signal: #{@error_signal}"
@@ -463,9 +487,23 @@ module SHAInet
                 SimpleMatrix.from_a([probs])
               end
 
-        diff = act - exp
-        w = GPUMemory.keep_on_gpu(@output_layers.last.weights)
-        @transformer_error = diff * w
+        diff = if act.is_a?(CudaMatrix) && exp.is_a?(CudaMatrix)
+                 act - exp
+               else
+                 act_s = act.is_a?(CudaMatrix) ? act.to_simple : act
+                 exp_s = exp.is_a?(CudaMatrix) ? exp.to_simple : exp
+                 act_s - exp_s
+               end
+        out_w = @output_layers.last.weights
+        w = out_w.is_a?(CudaMatrix) ? out_w : GPUMemory.keep_on_gpu(out_w.as(SimpleMatrix))
+        trans = if diff.is_a?(CudaMatrix) && w.is_a?(CudaMatrix)
+                  diff * w
+                else
+                  d = diff.is_a?(CudaMatrix) ? diff.to_simple : diff
+                  ww = w.is_a?(CudaMatrix) ? w.to_simple : w
+                  d * ww
+                end
+        @transformer_error = trans.is_a?(CudaMatrix) ? trans.to_simple : trans
       end
     end
 
@@ -519,13 +557,28 @@ module SHAInet
                     SimpleMatrix.from_a([probs])
                   end
 
-        diff = act_row - exp_row
-        w = GPUMemory.keep_on_gpu(@output_layers.last.weights)
-        trans = diff * w
-        @transformer_error = GPUMemory.zeros_like(trans, outputs.size, trans.cols)
+        diff = if act_row.is_a?(CudaMatrix) && exp_row.is_a?(CudaMatrix)
+                 act_row - exp_row
+               else
+                 a = act_row.is_a?(CudaMatrix) ? act_row.to_simple : act_row
+                 e = exp_row.is_a?(CudaMatrix) ? exp_row.to_simple : exp_row
+                 a - e
+               end
+        out_w = @output_layers.last.weights
+        w = out_w.is_a?(CudaMatrix) ? out_w : GPUMemory.keep_on_gpu(out_w.as(SimpleMatrix))
+        trans = if diff.is_a?(CudaMatrix) && w.is_a?(CudaMatrix)
+                  diff * w
+                else
+                  d = diff.is_a?(CudaMatrix) ? diff.to_simple : diff
+                  ww = w.is_a?(CudaMatrix) ? w.to_simple : w
+                  d * ww
+                end
+        tmp = GPUMemory.zeros_like(trans, outputs.size, trans.cols)
+        tmp = tmp.to_simple if tmp.is_a?(CudaMatrix)
         trans.cols.times do |j|
-          @transformer_error[outputs.size - 1, j] = trans[0, j]
+          tmp[outputs.size - 1, j] = trans[0, j]
         end
+        @transformer_error = tmp
       end
     end
 

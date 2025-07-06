@@ -13,9 +13,9 @@ describe SHAInet::StreamingData do
     data = SHAInet::StreamingData.new("/tmp/stream.txt")
 
     net = SHAInet::Network.new
-    net.add_layer(:input, 2, :memory, SHAInet.sigmoid)
-    net.add_layer(:hidden, 3, :memory, SHAInet.sigmoid)
-    net.add_layer(:output, 1, :memory, SHAInet.sigmoid)
+    net.add_layer(:input, 2, SHAInet.sigmoid)
+    net.add_layer(:hidden, 3, SHAInet.sigmoid)
+    net.add_layer(:output, 1, SHAInet.sigmoid)
     net.fully_connect
     net.learning_rate = 0.7
     net.momentum = 0.3

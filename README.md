@@ -126,82 +126,56 @@ reports time per epoch and estimated GPU memory usage.
 
 ## Usage
 
-More usage examples can be found in the specs
+More examples live in the `examples/` folder and the specs.  The network API is
+built on top of `MatrixLayer` which works on both CPU and GPU.
 
-### Standard training on XOR example
+### XOR network (MatrixLayer)
 
 ```crystal
 require "shainet"
 
-training_data = [
+data = [
   [[0, 0], [0]],
   [[1, 0], [1]],
   [[0, 1], [1]],
   [[1, 1], [0]],
 ]
-# Initialize a new network
-xor = SHAInet::Network.new
-# Add a new layer of the input type with 2 neurons and classic neuron type (memory)
-xor.add_layer(:input, 2, :memory, SHAInet.sigmoid)
-# Add a new layer of the hidden type with 2 neurons and classic neuron type (memory)
-xor.add_layer(:hidden, 2, :memory, SHAInet.sigmoid)
-# Add a new layer of the output type with 1 neurons and classic neuron type (memory)
-xor.add_layer(:output, 1, :memory, SHAInet.sigmoid)
-# Fully connect the network layers
-xor.fully_connect
 
-# Adjust network parameters
-xor.learning_rate = 0.7
-xor.momentum = 0.3
-xor.clip_threshold = 5.0
+net = SHAInet::Network.new
+net.add_layer(:input, 2)
+net.add_layer(:hidden, 2)
+net.add_layer(:output, 1)
+net.fully_connect
 
-# data, training_type, cost_function, activation_function, epochs, error_threshold (sum of errors), learning_rate, momentum)
-xor.train(
-      data: training_data,
-      training_type: :sgdm,
-      cost_function: :mse,
-      epochs: 5000,
-      error_threshold: 0.000001,
-      log_each: 1000)
+net.train(data: data,
+  training_type: :sgdm,
+  cost_function: :mse,
+  epochs: 5000,
+  log_each: 1000)
 
-# Run the trained network
-xor.run([0, 0])
+puts net.run([0, 1])
 ```
 
-### Batch training on the iris dataset using adam
+### Iris classification
 
 ```crystal
-# Create a new Data object based on a CSV
 data = SHAInet::Data.new_with_csv_input_target("iris.csv", 0..3, 4)
+train, test = data.split(0.67)
 
-# Split the data in a training set and a test set
-training_set, test_set = data.split(0.67)
-
-# Initiate a new network
 iris = SHAInet::Network.new
-
-# Add layers
-iris.add_layer(:input, 4, :memory, SHAInet.sigmoid)
-iris.add_layer(:hidden, 5, :memory, SHAInet.sigmoid)
-iris.add_layer(:output, 3, :memory, SHAInet.sigmoid)
+iris.add_layer(:input, 4)
+iris.add_layer(:hidden, 5)
+iris.add_layer(:output, 3)
 iris.fully_connect
 
-# Adjust network parameters
-iris.learning_rate = 0.7
-iris.momentum = 0.3
-iris.clip_threshold = 5.0
-
-# Train the network
 iris.train_batch(
-      data: normalized.data.shuffle,
-      training_type: :adam,
-      cost_function: :mse,
-      epochs: 20000,
-      error_threshold: 0.000001,
-      log_each: 1000)
+  data: train,
+  training_type: :adam,
+  cost_function: :mse,
+  epochs: 2000,
+  log_each: 100)
 
-# Test the network's performance
-iris.test(test_set)
+puts iris.test(test)
 ```
 
 ### Training with StreamingData

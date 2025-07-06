@@ -31,7 +31,7 @@ describe SHAInet::MultiHeadAttention do
       out = attn.forward(input)
       diff = out - target
       attn.backward(diff)
-      attn.apply_gradients(0.05)
+      attn.apply_gradients(0.05, SHAInet::SimpleMatrix)
     end
     out = attn.forward(input)
     out[0, 0].should be_close(1.0, 0.1)
@@ -44,7 +44,7 @@ describe SHAInet::MultiHeadAttention do
     input = SHAInet::SimpleMatrix.from_a([[1.0, 0.0], [0.0, 1.0]])
     mask = SHAInet::SimpleMatrix.from_a([[0.0, -1e9], [-1e9, 0.0]])
     out = attn.forward(input, mask)
-    expected = (input * attn.w_v) * attn.w_o
+    expected = (input * attn.w_v.as(SHAInet::SimpleMatrix)) * attn.w_o.as(SHAInet::SimpleMatrix)
     out.rows.times do |i|
       out.cols.times do |j|
         out[i, j].should be_close(expected[i, j], 1e-6)
@@ -104,9 +104,9 @@ describe "Network with TransformerLayer" do
   it "can overfit a small sequence" do
     Random::DEFAULT.new_seed(42_u64, 54_u64)
     net = SHAInet::Network.new
-    net.add_layer(:input, 2, :memory, SHAInet.none)
+    net.add_layer(:input, 2, SHAInet.none)
     net.add_layer(:transformer, 2)
-    net.add_layer(:output, 2, :memory, SHAInet.none)
+    net.add_layer(:output, 2, SHAInet.none)
     net.fully_connect
     training = [[[[1.0, 0.0]], [1.0, 1.0]]]
     net.learning_rate = 0.005
@@ -127,10 +127,10 @@ describe "Network with TransformerLayer" do
   it "works with embeddings and positional encoding" do
     Random::DEFAULT.new_seed(42_u64, 54_u64)
     net = SHAInet::Network.new
-    net.add_layer(:input, 1, :memory, SHAInet.none)
-    net.add_layer(:embedding, 2, :memory, SHAInet.none, vocab_size: 3)
+    net.add_layer(:input, 1, SHAInet.none)
+    net.add_layer(:embedding, 2, SHAInet.none, vocab_size: 3)
     net.add_layer(:transformer, 2)
-    net.add_layer(:output, 2, :memory, SHAInet.none)
+    net.add_layer(:output, 2, SHAInet.none)
     net.fully_connect
 
     # Only set positional encoding on the first transformer layer

@@ -5,10 +5,10 @@ describe SHAInet::CudaMatrix do
     a = SHAInet::GPUMemory.to_gpu(SHAInet::SimpleMatrix.from_a([[1, 2], [3, 4]]))
     b = SHAInet::GPUMemory.to_gpu(SHAInet::SimpleMatrix.from_a([[1, 0], [0, 1]]))
 
-    sum = a + b
+    sum = a.as(SHAInet::CudaMatrix) + b.as(SHAInet::CudaMatrix)
     sum[1, 1].should eq(5.0)
 
-    prod = a * b
+    prod = a.as(SHAInet::CudaMatrix) * b.as(SHAInet::CudaMatrix)
     prod[0, 0].should eq(1.0)
     prod[1, 1].should eq(4.0)
 
@@ -20,8 +20,8 @@ describe SHAInet::CudaMatrix do
     matrix = SHAInet::GPUMemory.to_gpu(SHAInet::SimpleMatrix.from_a([[-1, 2], [-3, 4]]))
     bias = SHAInet::GPUMemory.to_gpu(SHAInet::SimpleMatrix.from_a([[1, 1]]))
 
-    matrix.relu!
-    matrix.add_bias!(bias)
+    matrix.as(SHAInet::CudaMatrix).relu!
+    matrix.as(SHAInet::CudaMatrix).add_bias!(bias.as(SHAInet::CudaMatrix))
 
     if SHAInet::CUDA.fully_available?
       matrix.as(SHAInet::CudaMatrix).device_ptr.should_not be_nil
