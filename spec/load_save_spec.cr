@@ -13,9 +13,9 @@ describe SHAInet::Network do
     ]
 
     xor = SHAInet::Network.new
-    xor.add_layer(:input, 2, :memory, SHAInet.sigmoid)
-    xor.add_layer(:hidden, 3, :memory, SHAInet.sigmoid)
-    xor.add_layer(:output, 1, :memory, SHAInet.sigmoid)
+    xor.add_layer(:input, 2, SHAInet.sigmoid)
+    xor.add_layer(:hidden, 3, SHAInet.sigmoid)
+    xor.add_layer(:output, 1, SHAInet.sigmoid)
     xor.fully_connect
     # data, training_type, cost_function, activation_function, epochs, error_threshold (MSE %), log each steps
     xor.train(training_data, :sgdm, :mse, epochs: 5000, error_threshold: 0.000001, log_each: 100)

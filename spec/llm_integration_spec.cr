@@ -19,10 +19,10 @@ describe "LLM integration" do
     end
 
     net = SHAInet::Network.new
-    net.add_layer(:input, 1, :memory, SHAInet.none)
+    net.add_layer(:input, 1, SHAInet.none)
     net.add_layer(:embedding, 8, vocab_size: tokenizer.vocab.size)
     net.add_layer(:lstm, 16)
-    net.add_layer(:output, tokenizer.vocab.size, :memory, SHAInet.sigmoid)
+    net.add_layer(:output, tokenizer.vocab.size, SHAInet.sigmoid)
     net.fully_connect
     net.learning_rate = 0.01
     net.clip_threshold = 1.0

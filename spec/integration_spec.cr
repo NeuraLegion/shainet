@@ -17,9 +17,9 @@ describe SHAInet::Network do
     iris = SHAInet::Network.new
 
     # Add layers
-    iris.add_layer(:input, 4, :memory, SHAInet.sigmoid)
-    iris.add_layer(:hidden, 5, :memory, SHAInet.sigmoid)
-    iris.add_layer(:output, 3, :memory, SHAInet.sigmoid)
+    iris.add_layer(:input, 4, SHAInet.sigmoid)
+    iris.add_layer(:hidden, 5, SHAInet.sigmoid)
+    iris.add_layer(:output, 3, SHAInet.sigmoid)
     iris.fully_connect
 
     # Train the network

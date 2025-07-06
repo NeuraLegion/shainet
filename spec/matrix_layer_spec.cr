@@ -48,8 +48,12 @@ describe SHAInet::MatrixLayer do
     old_gb = layer.g_b.clone
     old_b = layer.biases.clone
     layer.update_weights(0.1)
-    expected_w = old_w - old_gw * 0.1
-    expected_b = old_b - old_gb * 0.1
+    cpu_w = old_w.is_a?(SHAInet::CudaMatrix) ? old_w.to_simple : old_w
+    cpu_gw = old_gw.is_a?(SHAInet::CudaMatrix) ? old_gw.to_simple : old_gw
+    cpu_b = old_b.is_a?(SHAInet::CudaMatrix) ? old_b.to_simple : old_b
+    cpu_gb = old_gb.is_a?(SHAInet::CudaMatrix) ? old_gb.to_simple : old_gb
+    expected_w = cpu_w - cpu_gw * 0.1
+    expected_b = cpu_b - cpu_gb * 0.1
     expected_w.rows.times do |i|
       expected_w.cols.times do |j|
         layer.weights[i, j].should be_close(expected_w[i, j], 1e-6)

@@ -22,10 +22,10 @@ describe "Minimal Transformer Pipeline" do
     token_count = tokenizer.vocab.size
 
     net = SHAInet::Network.new
-    net.add_layer(:input, 1, :memory, SHAInet.none)
-    net.add_layer(:embedding, d_model, :memory, SHAInet.none, vocab_size: token_count)
+    net.add_layer(:input, 1, SHAInet.none)
+    net.add_layer(:embedding, d_model, SHAInet.none, vocab_size: token_count)
     net.add_layer(:transformer, d_model, num_heads: 1, ff_hidden: 8)
-    net.add_layer(:output, token_count, :memory, SHAInet.identity)
+    net.add_layer(:output, token_count, SHAInet.identity)
     net.fully_connect
 
     # Apply positional encoding to first transformer layer only
@@ -83,10 +83,10 @@ describe "Minimal Transformer Pipeline" do
 
       token_count = tokenizer.vocab.size
       net = SHAInet::Network.new
-      net.add_layer(:input, 1, :memory, SHAInet.none)
-      net.add_layer(:embedding, d_model, :memory, SHAInet.none, vocab_size: token_count)
+      net.add_layer(:input, 1, SHAInet.none)
+      net.add_layer(:embedding, d_model, SHAInet.none, vocab_size: token_count)
       net.add_layer(:transformer, d_model, num_heads: 1, ff_hidden: 8)
-      net.add_layer(:output, token_count, :memory, SHAInet.identity)
+      net.add_layer(:output, token_count, SHAInet.identity)
       net.fully_connect
 
       # Create positional encoding for this sequence length
@@ -114,10 +114,10 @@ describe "Minimal Transformer Pipeline" do
     d_model = 4
 
     net = SHAInet::Network.new
-    net.add_layer(:input, 1, :memory, SHAInet.none)
-    net.add_layer(:embedding, d_model, :memory, SHAInet.none, vocab_size: 10)
+    net.add_layer(:input, 1, SHAInet.none)
+    net.add_layer(:embedding, d_model, SHAInet.none, vocab_size: 10)
     net.add_layer(:transformer, d_model, num_heads: 1, ff_hidden: 8)
-    net.add_layer(:output, 10, :memory, SHAInet.identity)
+    net.add_layer(:output, 10, SHAInet.identity)
     net.fully_connect
 
     # Create positional encoding with sequence length 5

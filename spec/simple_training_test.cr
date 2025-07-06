@@ -6,9 +6,9 @@ describe "Simple Matrix Training Test" do
 
     # Create minimal network: 2 inputs -> 2 hidden -> 1 output
     net = SHAInet::Network.new
-    net.add_layer(:input, 2, :memory, SHAInet.sigmoid)
-    net.add_layer(:hidden, 2, :memory, SHAInet.sigmoid)
-    net.add_layer(:output, 1, :memory, SHAInet.sigmoid)
+    net.add_layer(:input, 2, SHAInet.sigmoid)
+    net.add_layer(:hidden, 2, SHAInet.sigmoid)
+    net.add_layer(:output, 1, SHAInet.sigmoid)
     net.fully_connect
 
     # Tiny training data: XOR-like problem
