@@ -436,9 +436,10 @@ void element_log(double* out, const double* in, int size) {
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
         printf("CUDA Error in element_log: %s\n", cudaGetErrorString(err));
+    }
+}
 
-__global__ void cross_entropy_loss_gradient_kernel(const double* pred, const double* target,
-                                                   double* grad, double* loss, int total) {
+__global__ void cross_entropy_loss_gradient_kernel(const double* pred, const double* target, double* grad, double* loss, int total) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= total) return;
 

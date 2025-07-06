@@ -138,6 +138,13 @@ while (val_batch = val_data.next_batch(val_batch_size)).size > 0
     pred_id = tgt.index(tgt.max) || 0
     output_vec = net.run(seq).last
 
+    # Ensure output_vec is an Array(Float64) for softmax
+    if output_vec.is_a?(SHAInet::CudaMatrix)
+      output_vec = output_vec.to_flat_array
+    elsif output_vec.is_a?(SHAInet::SimpleMatrix)
+      output_vec = output_vec.to_a.first
+    end
+
     # Use native softmax - it's already optimized
     probs = SHAInet.softmax(output_vec)
     total_batch_loss += -Math.log(probs[pred_id].clamp(1e-9, 1.0))

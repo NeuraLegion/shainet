@@ -3,11 +3,11 @@
 SHAInet - stands for Super Human Artificial Intelligence network
 a neural network in pure [Crystal](https://crystal-lang.org/)
 
-This is a free-time project, happily hosted by NeuraLegion that was created as part of some internal research. We started it with research in mind, rather than production, and just kept going, also thanks to members of the community.
+This is a free-time project, happily hosted by BrightSec that was created as part of some internal research. We started it with research in mind, rather than production, and just kept going, also thanks to members of the community.
 
-We wanted to try and implement some inspiration from the biological world into this project. In addition to that, we wanted to try an approach for NNs using object-oriented modeling instead of matrices. The main reason behind that was, to try new types of neurons aiming for more robust learning (if possible) or at least have more fine-tuned control over the manipulation of each neuron (which is difficult using a matrix-driven approach).
+The original version of SHAInet was created with the goal of testing biologically inspired neural networks, but it has since evolved into a more general-purpose neural network library.
 
-At the [Roadmap](https://github.com/NeuraLegion/shainet#development) you can see what we plan to add to the network as the project will progress.
+The latest versions of SHAInet are designed to be used for training and running neural networks, with a focus on simplicity and ease of use. It supports various types of layers, activation functions, and training algorithms.
 
 ## Installation
 
@@ -18,9 +18,6 @@ dependencies:
   shainet:
     github: NeuraLegion/shainet
 ```
-
-SHAInet ships with a built-in `SimpleMatrix` implementation. If you previously
-included `apatite` in your project, you can remove that dependency.
 
 ### Optional CUDA setup
 
@@ -95,9 +92,6 @@ This builds custom CUDA kernels that provide significant speedups for:
 ```bash
 # Manual kernel building
 ./build_cuda_kernels.sh
-
-# Or just build kernels without full install
-make cuda
 ```
 
 Add the library path to your `~/.bashrc` for permanent use:
@@ -105,24 +99,6 @@ Add the library path to your `~/.bashrc` for permanent use:
 ```bash
 echo "export LD_LIBRARY_PATH=\$LD_LIBRARY_PATH:$(pwd)" >> ~/.bashrc
 ```
-
-### GPU benchmarks
-
-Run the benchmark script to compare CPU and GPU performance:
-
-```bash
-crystal run benchmarks/matrix_benchmark.cr --release
-```
-
-You can also run a small transformer training benchmark:
-
-```bash
-make benchmark
-```
-
-It prints timings for matrix multiplication and ReLU. When the GPU libraries are
-loaded you should see lower numbers for the GPU path. The transformer benchmark
-reports time per epoch and estimated GPU memory usage.
 
 ## Usage
 
@@ -212,166 +188,6 @@ When `gpu_batches` is set to `true` and CUDA is available, `next_batch` will
 return `CudaMatrix` pairs so the training loop can operate directly on GPU
 batches.
 
-### Using convolutional network
-
-```crystal
-
-# Load training data (partial dataset)
-raw_data = Array(Array(Float64)).new
-csv = CSV.new(File.read(__DIR__ + "/test_data/mnist_train.csv"))
-10000.times do
-  # CSV.each_row(File.read(__DIR__ + "/test_data/mnist_train.csv")) do |row|
-  csv.next
-  new_row = Array(Float64).new
-  csv.row.to_a.each { |value| new_row << value.to_f64 }
-  raw_data << new_row
-end
-raw_input_data = Array(Array(Float64)).new
-raw_output_data = Array(Array(Float64)).new
-
-raw_data.each do |row|
-  raw_input_data << row[1..-1]
-  raw_output_data << [row[0]]
-end
-
-training_data = SHAInet::CNNData.new(raw_input_data, raw_output_data)
-training_data.for_mnist_conv
-training_data.data_pairs.shuffle!
-
-# Load test data (partial dataset)
-raw_data = Array(Array(Float64)).new
-csv = CSV.new(File.read(__DIR__ + "/test_data/mnist_test.csv"))
-1000.times do
-  csv.next
-  new_row = Array(Float64).new
-  csv.row.to_a.each { |value| new_row << value.to_f64 }
-  raw_data << new_row
-end
-
-raw_input_data = Array(Array(Float64)).new
-raw_output_data = Array(Array(Float64)).new
-
-raw_data.each do |row|
-  raw_input_data << row[1..-1]
-  raw_output_data << [row[0]]
-end
-
-# Load data to a CNNData helper class
-test_data = SHAInet::CNNData.new(raw_input_data, raw_output_data)
-test_data.for_mnist_conv # Normalize and make labels into 'one-hot' vectors
-
-# Initialize Covnolutional network
-cnn = SHAInet::CNN.new
-
-# Add layers to the model
-cnn.add_input([height = 28, width = 28, channels = 1]) # Output shape = 28x28x1
-cnn.add_conv(
-  filters_num: 20,
-  window_size: 5,
-  stride: 1,
-  padding: 2,
-  activation_function: SHAInet.none)  # Output shape = 28x28x20
-cnn.add_relu(0.01)                    # Output shape = 28x28x20
-cnn.add_maxpool(pool: = 2, stride = 2) # Output shape = 14x14x20
-cnn.add_conv(
-  filters_num: 20,
-  window_size: 5,
-  stride: 1,
-  padding: 2,
-  activation_function: SHAInet.none)  # Output shape = 14x14x40
-cnn.add_maxpool(pool:2, stride: 2)    # Output shape = 7x7x40
-cnn.add_fconnect(l_size: 10, activation_function: SHAInet.sigmoid)
-cnn.add_fconnect(l_size: 10, activation_function: SHAInet.sigmoid)
-cnn.add_softmax
-
-cnn.learning_rate = 0.005
-cnn.momentum = 0.02
-
-# Train the model on the training-set
-cnn.train_batch(
-  data: training_data.data_pairs,
-  training_type: :sgdm,
-  cost_function: :mse,
-  epochs: 3,
-  error_threshold: 0.0001,
-  log_each: 1,
-  mini_batch_size: 50)
-
-# Evaluate accuracy on the test-set
-correct_answers = 0
-test_data.data_pairs.each do |data_point|
-  result = cnn.run(data_point[:input], stealth: true)
-  if (result.index(result.max) == data_point[:output].index(data_point[:output].max))
-    correct_answers += 1
-  end
-end
-
-# Print the layer activations
-cnn.inspect("activations")
-puts "We managed #{correct_answers} out of #{test_data.data_pairs.size} total"
-puts "Cnn output: #{cnn.output}"
-```
-
-### Evolutionary optimizer example
-
-```crystal
-label = {
-      "setosa"     => [0.to_f64, 0.to_f64, 1.to_f64],
-      "versicolor" => [0.to_f64, 1.to_f64, 0.to_f64],
-      "virginica"  => [1.to_f64, 0.to_f64, 0.to_f64],
-    }
-
-    iris = SHAInet::Network.new
-    iris.add_layer(:input, 4, :memory, SHAInet.sigmoid)
-    iris.add_layer(:hidden, 4, :memory, SHAInet.sigmoid)
-    iris.add_layer(:output, 3, :memory, SHAInet.sigmoid)
-    iris.fully_connect
-
-    # Get data from a local file
-    outputs = Array(Array(Float64)).new
-    inputs = Array(Array(Float64)).new
-    CSV.each_row(File.read(__DIR__ + "/test_data/iris.csv")) do |row|
-      row_arr = Array(Float64).new
-      row[0..-2].each do |num|
-        row_arr << num.to_f64
-      end
-      inputs << row_arr
-      outputs << label[row[-1]]
-    end
-    data = SHAInet::TrainingData.new(inputs, outputs)
-    data.normalize_min_max
-
-    training_data, test_data = data.split(0.9)
-
-    iris.train_es(
-      data: training_data,
-      pool_size: 50,
-      learning_rate: 0.5,
-      sigma: 0.1,
-      cost_function: :c_ent,
-      epochs: 500,
-      mini_batch_size: 15,
-      error_threshold: 0.00000001,
-      log_each: 100,
-      show_slice: true)
-
-    # Test the trained model
-    correct = 0
-    test_data.data.each do |data_point|
-      result = iris.run(data_point[0], stealth: true)
-      expected = data_point[1]
-      # puts "result: \t#{result.map { |x| x.round(5) }}"
-      # puts "expected: \t#{expected}"
-      error_sum = 0.0
-      result.size.times do |i|
-        error_sum += (result[i] - expected[i]).abs
-      end
-      correct += 1 if error_sum < 0.3
-    end
-    puts "Correct answers: (#{correct} / #{test_data.size})"
-(correct > 10).should eq(true)
-```
-
 ### Autograd::Tensor and TensorMatrix
 
 `Autograd::Tensor` wraps a numeric value and tracks how it was computed so
@@ -433,122 +249,10 @@ The loop above applies a simple gradient descent step. Use
 
 - [x] Support activation functions as Proc
 - [x] Support cost functions as Proc
-- [x] Convolutional Neural Net.
-- [x] Simple recurrent layers
-- [x] LSTM layers
 - [x] Embedding layers
 - [x] Layer normalization for transformer layers
 - [x] Add support for multiple neuron types.
 - [x] Bind and use CUDA (GPU acceleration)
-- [ ] graphic printout of network architecture.
-
-Example use of a recurrent layer:
-
-```crystal
-net = SHAInet::Network.new
-net.add_layer(:input, 1)
-net.add_layer(:recurrent, 2)
-net.add_layer(:output, 1)
-net.fully_connect
-output = net.run([[1.0], [2.0], [3.0]]).last
-```
-
-Example use of an LSTM layer:
-
-```crystal
-net = SHAInet::Network.new
-net.add_layer(:input, 1)
-net.add_layer(:lstm, 2)
-net.add_layer(:output, 1)
-net.fully_connect
-output = net.run([[1.0], [2.0], [3.0]]).last
-```
-
-Example use of an embedding layer followed by an LSTM:
-
-```crystal
-tokenizer = SHAInet::Tokenizer.new
-ids = tokenizer.encode("hello world hello")
-# Convert directly to a matrix, using the GPU when available
-ids_matrix = tokenizer.encode_matrix("hello world hello")
-
-net = SHAInet::Network.new
-net.add_layer(:input, 1)
-net.add_layer(:embedding, 8, vocab_size: tokenizer.vocab.size) # 8 dimensional embeddings
-net.add_layer(:lstm, 4)
-net.add_layer(:output, 1)
-net.fully_connect
-
-sequence = ids.map { |id| [id] }
-output = net.run(sequence).last
-```
-
-Example use of a Transformer layer:
-
-```crystal
-net = SHAInet::Network.new
-net.add_layer(:input, 4)
-net.add_layer(:transformer, 4)
-net.add_layer(:output, 4)
-net.fully_connect
-out = net.run([[1.0, 0.0, 0.0, 0.0]]).first
-```
-
-Example of a Byte-Pair Encoding tokenizer:
-
-```crystal
-tokenizer = SHAInet::BPETokenizer.new
-tokenizer.train("hello world hello world", 30)
-ids = tokenizer.encode("hello world")
-text = tokenizer.decode(ids)
-```
-
-### LLM sample
-
-The file `examples/llm_sample.cr` shows how to tokenize text with
-`BPETokenizer`, build a small LSTM based network and train it using
-cross‑entropy loss.
-
-```bash
-crystal run examples/llm_sample.cr
-```
-
-The example `examples/transformer_lm.cr` trains a small Transformer based
-language model.
-
-```bash
-crystal run examples/transformer_lm.cr
-```
-
-An additional example `examples/transformer_pe.cr` demonstrates using a
-`TransformerLayer` with sinusoidal positional encodings.
-
-```bash
-crystal run examples/transformer_pe.cr
-```
-
-#### Streaming token batches
-
-`StreamingData` can also stream batches of token ids produced by
-`BPETokenizer`. Each line in the data file should contain a JSON array
-describing the tokenized input sequence and expected token:
-
-```crystal
-tokenizer = SHAInet::BPETokenizer.new
-tokenizer.train("hello world hello world", 30)
-ids = tokenizer.encode("hello world hello world")
-
-File.open("tokens.txt", "w") do |f|
-  (0...ids.size - 1).each do |i|
-    pair = [[[ids[i]]], [ids[i + 1]]]
-    f.puts pair.to_json
-  end
-end
-
-stream = SHAInet::StreamingData.new("tokens.txt", shuffle: true, gpu_batches: true)
-batch = stream.next_batch(2)
-stream.rewind # start a new shuffled epoch
-```
 
 ### BabyLM Transformer example
 

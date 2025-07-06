@@ -9,9 +9,9 @@ describe "CUDA element-wise division" do
     result = a.as(SHAInet::CudaMatrix) / b.as(SHAInet::CudaMatrix)
     result.sync_from_device!
 
-    result[0,0].should eq(2.0)
-    result[0,1].should eq(0.0)
-    result[1,0].should eq(1.0)
-    result[1,1].should eq(3.0)
+    result[0, 0].should eq(2.0)
+    result[0, 1].should eq(0.0)
+    result[1, 0].should eq(1.0)
+    result[1, 1].should eq(3.0)
   end
 end
