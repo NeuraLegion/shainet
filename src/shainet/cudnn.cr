@@ -620,13 +620,13 @@ module SHAInet
             op_desc,
             pointerof(alpha_val).as(Pointer(Void)),
             a_desc,
-            a.device_ptr.as(Pointer(Void)),
+            a.device_ptr.not_nil!.as(Pointer(Void)),
             pointerof(alpha_val).as(Pointer(Void)),
             b_desc,
-            b.device_ptr.as(Pointer(Void)),
+            b.device_ptr.not_nil!.as(Pointer(Void)),
             pointerof(beta_val).as(Pointer(Void)),
             c_desc,
-            output.device_ptr.as(Pointer(Void))
+            output.device_ptr.not_nil!.as(Pointer(Void))
           ))
 
           output.mark_device_dirty!
@@ -684,13 +684,13 @@ module SHAInet
             op_desc,
             pointerof(alpha_val).as(Pointer(Void)),
             a_desc,
-            a.device_ptr.as(Pointer(Void)),
+            a.device_ptr.not_nil!.as(Pointer(Void)),
             pointerof(beta_val).as(Pointer(Void)),
             b_desc,
-            b.device_ptr.as(Pointer(Void)),
+            b.device_ptr.not_nil!.as(Pointer(Void)),
             pointerof(alpha_val).as(Pointer(Void)), # Use alpha again for output scaling
             c_desc,
-            output.device_ptr.as(Pointer(Void))
+            output.device_ptr.not_nil!.as(Pointer(Void))
           ))
 
           output.mark_device_dirty!
@@ -773,7 +773,7 @@ module SHAInet
 
       # Get dropout states size
       states_size = uninitialized LibC::SizeT
-      CUDNN.check_status(LibCUDNN.cudnnDropoutGetStatesSize(CUDNN.handle, out states_size))
+      CUDNN.check_status(LibCUDNN.cudnnDropoutGetStatesSize(CUDNN.handle, pointerof(states_size)))
 
       # Allocate dropout states on GPU
       states_ptr = Pointer(Void).null
@@ -782,7 +782,7 @@ module SHAInet
       begin
         # Create dropout descriptor
         dropout_desc = uninitialized LibCUDNN::CudnnDropoutDescriptor
-        CUDNN.check_status(LibCUDNN.cudnnCreateDropoutDescriptor(out dropout_desc))
+        CUDNN.check_status(LibCUDNN.cudnnCreateDropoutDescriptor(pointerof(dropout_desc)))
 
         begin
           # Set dropout parameters
@@ -812,9 +812,9 @@ module SHAInet
               CUDNN.handle,
               dropout_desc,
               input_desc,
-              input.device_ptr.as(Pointer(Void)),
+              input.device_ptr.not_nil!.as(Pointer(Void)),
               output_desc,
-              output.device_ptr.as(Pointer(Void)),
+              output.device_ptr.not_nil!.as(Pointer(Void)),
               reserve_space_ptr,
               reserve_space_size
             ))
