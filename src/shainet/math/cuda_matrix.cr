@@ -345,6 +345,33 @@ module SHAInet
       self
     end
 
+    # Set a specific row from another matrix's row
+    def set_row!(row_idx : Int32, other : CudaMatrix, source_row : Int32 = 0)
+      raise ArgumentError.new("column mismatch") unless other.cols == @cols
+      raise ArgumentError.new("row index out of bounds") unless row_idx >= 0 && row_idx < @rows
+      raise ArgumentError.new("source row index out of bounds") unless source_row >= 0 && source_row < other.rows
+
+      # For now, use GPU copy operations to copy the row
+      # This is more efficient than element-by-element access
+      self.sync_to_device!("set_row") unless device_dirty?
+      other.sync_to_device!("set_row") unless other.device_dirty?
+
+      dptr = self.device_ptr
+      sptr = other.device_ptr
+      raise RuntimeError.new("GPU set_row! requires valid device pointers") unless dptr && sptr && !dptr.null? && !sptr.null?
+
+      # Calculate pointers to the specific rows
+      dest_row_ptr = dptr + (row_idx * @cols)
+      src_row_ptr = sptr + (source_row * other.cols)
+
+      # Copy the row data (cols * 8 bytes for Float64)
+      bytes = (@cols * 8).to_u64
+      CUDA.copy_device_to_device(dest_row_ptr, src_row_ptr, bytes)
+
+      mark_device_dirty!
+      self
+    end
+
     # Optimized cuBLAS matrix multiplication
     def *(other : CudaMatrix)
       raise ArgumentError.new("size mismatch for multiplication") unless @cols == other.rows
@@ -667,11 +694,21 @@ module SHAInet
     end
 
     def to_a
+      # Ensure CPU data is up to date (single sync instead of per-element)
+      sync_from_device!("bulk_to_a") if device_dirty?
+
+      # Use direct data array access to avoid repeated element access syncs
       Array.new(@rows) do |i|
         Array.new(@cols) do |j|
-          self[i, j]
+          @data[i * @cols + j]
         end
       end
+    end
+
+    # More efficient flat array conversion - avoids nested array creation
+    def to_flat_array
+      sync_from_device!("bulk_to_flat_array") if device_dirty?
+      @data.dup
     end
 
     # Force cleanup of GPU memory for this matrix
@@ -842,11 +879,6 @@ module SHAInet
       mark_device_dirty!
       self
     end
-
-    # Matrix workspace pool to reduce allocations
-    @@matrix_pool = Hash(String, Array(CudaMatrix)).new { |h, k| h[k] = [] of CudaMatrix }
-    @@pool_enabled = false
-    @@max_pool_size = 100
 
     # Get a matrix from the pool or create a new one
     def self.get_workspace(rows : Int32, cols : Int32, source : String = "workspace") : CudaMatrix

@@ -691,8 +691,8 @@ module SHAInet
 
     # Cross-entropy loss and gradient computation kernel
     def cross_entropy_loss_gradient(predicted : Pointer(Float64), target : Pointer(Float64),
-                                   grad_output : Pointer(Float64), loss_output : Pointer(Float64),
-                                   rows : Int32, cols : Int32) : Int32
+                                    grad_output : Pointer(Float64), loss_output : Pointer(Float64),
+                                    rows : Int32, cols : Int32) : Int32
       # Use a simple kernel that computes both loss and gradient in one pass
       # Loss: -sum(target * log(predicted))
       # Gradient: predicted - target (for softmax output)
@@ -788,7 +788,7 @@ module SHAInet
 
     # GPU kernel for mean squared error cost and gradient computation
     def mse_cost_gradient(actual_ptr : Pointer(Float64), expected_ptr : Pointer(Float64),
-                         cost_ptr : Pointer(Float64), grad_ptr : Pointer(Float64), size : Int32)
+                          cost_ptr : Pointer(Float64), grad_ptr : Pointer(Float64), size : Int32)
       # This would be a custom CUDA kernel implementation
       # For now, fallback is handled in the calling code
       raise RuntimeError.new("GPU MSE kernel not yet implemented")

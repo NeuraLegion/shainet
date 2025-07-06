@@ -88,12 +88,12 @@ lib LibCUDNN
 
   # OpTensor operations
   enum CudnnOpTensorOp
-    CUDNN_OP_TENSOR_ADD = 0
-    CUDNN_OP_TENSOR_MUL = 1
-    CUDNN_OP_TENSOR_MIN = 2
-    CUDNN_OP_TENSOR_MAX = 3
+    CUDNN_OP_TENSOR_ADD  = 0
+    CUDNN_OP_TENSOR_MUL  = 1
+    CUDNN_OP_TENSOR_MIN  = 2
+    CUDNN_OP_TENSOR_MAX  = 3
     CUDNN_OP_TENSOR_SQRT = 4
-    CUDNN_OP_TENSOR_NOT = 5
+    CUDNN_OP_TENSOR_NOT  = 5
   end
 
   # Core functions
@@ -529,7 +529,7 @@ module SHAInet
 
     # GPU-accelerated cross-entropy loss and gradient computation
     def self.cross_entropy_loss_and_gradient(predicted : CudaMatrix, target : CudaMatrix,
-                                            loss_output : Float64*, grad_output : CudaMatrix)
+                                             loss_output : Float64*, grad_output : CudaMatrix)
       raise "Matrices must have same dimensions" unless predicted.rows == target.rows && predicted.cols == target.cols
 
       # Ensure both matrices are on GPU
@@ -710,7 +710,7 @@ module SHAInet
         CUDNN.check_status(LibCUDNN.cudnnSetActivationDescriptor(
           activation_desc,
           mode,
-          0, # reluNanOpt (not used for sigmoid/tanh)
+          0,  # reluNanOpt (not used for sigmoid/tanh)
           0.0 # coef (not used for sigmoid/tanh)
         ))
 
@@ -724,21 +724,21 @@ module SHAInet
           output.sync_to_device!("cudnn_activation") unless output.device_dirty?
 
           alpha = 1.0
-          beta = 0.0        # Get device pointers and ensure they're valid
-        input_ptr = input.device_ptr
-        output_ptr = output.device_ptr
-        raise "Invalid device pointers" unless input_ptr && output_ptr && !input_ptr.null? && !output_ptr.null?
+          beta = 0.0 # Get device pointers and ensure they're valid
+          input_ptr = input.device_ptr
+          output_ptr = output.device_ptr
+          raise "Invalid device pointers" unless input_ptr && output_ptr && !input_ptr.null? && !output_ptr.null?
 
-        CUDNN.check_status(LibCUDNN.cudnnActivationForward(
-          CUDNN.handle,
-          activation_desc,
-          pointerof(alpha).as(Pointer(Void)),
-          input_desc,
-          input_ptr.as(Pointer(Void)),
-          pointerof(beta).as(Pointer(Void)),
-          output_desc,
-          output_ptr.as(Pointer(Void))
-        ))
+          CUDNN.check_status(LibCUDNN.cudnnActivationForward(
+            CUDNN.handle,
+            activation_desc,
+            pointerof(alpha).as(Pointer(Void)),
+            input_desc,
+            input_ptr.as(Pointer(Void)),
+            pointerof(beta).as(Pointer(Void)),
+            output_desc,
+            output_ptr.as(Pointer(Void))
+          ))
 
           output.mark_device_dirty!
         ensure

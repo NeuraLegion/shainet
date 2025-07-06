@@ -54,12 +54,16 @@ module SHAInet
     def to_gpu(matrix : SimpleMatrix)
       return matrix if matrix.is_a?(CudaMatrix) || !CUDA.fully_available?
 
+      # Create CudaMatrix with same dimensions
       result = CudaMatrix.new(matrix.rows, matrix.cols)
-      matrix.rows.times do |i|
-        matrix.cols.times do |j|
-          result[i, j] = matrix[i, j]
-        end
+
+      # Direct bulk copy from SimpleMatrix data array - much more efficient
+      matrix.data.each_with_index do |val, idx|
+        row = idx // matrix.cols
+        col = idx % matrix.cols
+        result.unsafe_set(row, col, val)
       end
+
       result.sync_to_device!("gpu_conversion")
       result
     end

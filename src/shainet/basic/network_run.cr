@@ -31,7 +31,7 @@ module SHAInet
       # Efficient array extraction - only sync once if needed
       output = if result_matrix.is_a?(CudaMatrix)
                  result_matrix.sync_from_device!("array_output") if result_matrix.device_dirty?
-                 result_matrix.to_a.first
+                 result_matrix.to_flat_array
                else
                  result_matrix.to_a.first
                end
@@ -404,9 +404,9 @@ module SHAInet
         act_row = GPUMemory.to_gpu(SimpleMatrix.from_a([actual_output]))
         diff = act_row - exp_row
         @transformer_error = GPUMemory.zeros_like(diff, outputs.size, diff.cols)
-        diff.cols.times do |j|
-          @transformer_error[outputs.size - 1, j] = diff[0, j]
-        end
+
+        # Use efficient row copying instead of element-by-element access
+        @transformer_error.set_row!(outputs.size - 1, diff, 0)
       end
 
       # puts "@error_signal: #{@error_signal}"
@@ -717,17 +717,17 @@ module SHAInet
         if output_layer.is_a?(MatrixLayer)
           # Determine dimensions for output_grad matrix
           grad_rows, grad_cols = if expected_output.is_a?(SimpleMatrix)
-            exp_mat = expected_output.as(SimpleMatrix)
-            {exp_mat.rows, exp_mat.cols}
-          elsif expected_output.is_a?(CudaMatrix)
-            exp_mat = expected_output.as(CudaMatrix)
-            {exp_mat.rows, exp_mat.cols}
-          elsif expected_output.is_a?(Array) && expected_output.as(Array).size > 0 && expected_output.as(Array)[0].is_a?(Array)
-            {expected_output.as(Array).size, expected_output.as(Array)[0].as(Array).size}
-          else
-            arr = expected_output.as(Array)
-            {1, arr.size}
-          end
+                                   exp_mat = expected_output.as(SimpleMatrix)
+                                   {exp_mat.rows, exp_mat.cols}
+                                 elsif expected_output.is_a?(CudaMatrix)
+                                   exp_mat = expected_output.as(CudaMatrix)
+                                   {exp_mat.rows, exp_mat.cols}
+                                 elsif expected_output.is_a?(Array) && expected_output.as(Array).size > 0 && expected_output.as(Array)[0].is_a?(Array)
+                                   {expected_output.as(Array).size, expected_output.as(Array)[0].as(Array).size}
+                                 else
+                                   arr = expected_output.as(Array)
+                                   {1, arr.size}
+                                 end
 
           # Allocate output_grad matrix only once, reuse across batch samples
           if output_grad.nil? || output_grad.not_nil!.rows != grad_rows || output_grad.not_nil!.cols != grad_cols
