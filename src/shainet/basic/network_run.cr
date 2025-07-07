@@ -681,11 +681,6 @@ module SHAInet
         @error_signal = [avg_error]
         update_mse
 
-        # Aggressive GPU memory cleanup at end of each epoch
-        if CUDA.fully_available?
-          SHAInet::CudaMatrix.force_cleanup_all
-        end
-
         if epoch % log_each == 0
           elapsed = Time.monotonic - start_time
           gpu_stats = SHAInet::CudaMatrix.gpu_memory_stats
@@ -991,8 +986,6 @@ module SHAInet
         # Force cleanup of temporary matrices created during forward/backward pass
         # Persistent GPU buffers handle workspace reuse
 
-        # Also clean up any temporary matrices created during gradient computation
-        GC.collect
 
         # Return workspace matrices used for this sample
         if input_matrix.is_a?(CudaMatrix)

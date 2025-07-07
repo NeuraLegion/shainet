@@ -39,7 +39,7 @@ module SHAInet
     # Disable workspace pool - use in-place operations instead
     @@matrix_pool = Hash(String, Array(CudaMatrix)).new { |h, k| h[k] = [] of CudaMatrix }
     @@pool_enabled = true
-    @@max_pool_size = 1024
+    @@max_pool_size = 5000
 
     getter rows, cols
 
@@ -86,17 +86,6 @@ module SHAInet
       Log.info { "Allocation sites (top 20): #{SHAInet::CudaMatrix.print_top_allocation_sites(20)} " }
     end
 
-    def self.force_cleanup_all
-      old_count = @@active_matrices
-      old_bytes = @@total_gpu_memory_allocated
-
-      # Single garbage collection to allow finalizers to run
-      GC.collect
-      Fiber.yield # Allow finalizers to run
-
-      Log.debug { "GPU Memory cleanup: #{old_count} -> #{@@active_matrices} matrices, #{old_bytes} -> #{@@total_gpu_memory_allocated} bytes (freed #{old_bytes - @@total_gpu_memory_allocated} bytes)" }
-    end
-
     def self.print_top_allocation_sites(limit = 20)
       Log.info { "Top CudaMatrix allocation sites:" }
       @@allocation_sites.to_a.sort_by { |(_, v)| v }.reverse.first(limit).each do |site, count|
@@ -130,8 +119,7 @@ module SHAInet
       if @@total_gpu_memory_allocated + bytes > @@max_gpu_memory ||
          @@total_gpu_memory_allocated > (@@max_gpu_memory * 0.8).to_u64 # 80% threshold
         Log.warn { "CudaMatrix.initialize: GPU memory usage high (#{@@total_gpu_memory_allocated}/#{@@max_gpu_memory} bytes, #{@@active_matrices} matrices). Forcing cleanup..." }
-        # Force cleanup
-        GC.collect
+
         # Try again after cleanup
         if @@total_gpu_memory_allocated + bytes > @@max_gpu_memory
           raise RuntimeError.new("GPU memory limit exceeded: would use #{@@total_gpu_memory_allocated + bytes}/#{@@max_gpu_memory} bytes")
