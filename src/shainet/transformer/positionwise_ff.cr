@@ -327,11 +327,10 @@ module SHAInet
     private def accumulate_bias_gradient(bias_grad : SimpleMatrix | CudaMatrix, d_out : CudaMatrix)
       if CUDA.fully_available? && bias_grad.is_a?(CudaMatrix)
         begin
-          CUDA.row_sum(bias_grad.as(CudaMatrix).device_ptr.not_nil!, d_out.device_ptr.not_nil!, d_out.rows, d_out.cols)
+          CUDA.accumulate_bias_grad(bias_grad.as(CudaMatrix).device_ptr.not_nil!, d_out.device_ptr.not_nil!, d_out.rows, d_out.cols)
           bias_grad.as(CudaMatrix).mark_device_dirty!
           return
         rescue e : Exception
-          # Log GPU failure but continue with CPU fallback
           Log.debug { "GPU bias gradient accumulation failed: #{e.message}" }
         end
       end

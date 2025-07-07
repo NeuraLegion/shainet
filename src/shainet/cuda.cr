@@ -287,6 +287,7 @@ module SHAInet
     @@sigmoid_forward_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Void)? = nil
     @@apply_gradient_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Void)? = nil
     @@accumulate_bias_grad_proc : Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Void)? = nil
+    @@row_sum_proc : Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Void)? = nil
     @@zero_matrix_proc : Proc(Pointer(Float64), Int32, Void)? = nil
     @@element_div_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Void)? = nil
     @@count_pairs_proc : Proc(Pointer(Int32), Pointer(Int32), Pointer(Int32), Pointer(Int32), Int32, Int32, Void)? = nil
@@ -684,14 +685,33 @@ module SHAInet
     # row which works regardless of the underlying memory layout and avoids
     # creating temporary matrices.
     def row_sum(dst : Pointer(Float64), src : Pointer(Float64), rows : Int32, cols : Int32)
-      handle = create_handle
+      unless fn = @@row_sum_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "row_sum")
+          unless sym.null?
+            @@row_sum_proc = Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@row_sum_proc
+          end
+        end
+      end
 
-      # dst += row_i for each row of src
+      if fn
+        begin
+          fn.call(dst, src, rows, cols)
+          return
+        rescue e
+          Log.error { "CUDA Error in row_sum: #{e}" }
+        end
+      end
+
+      handle = create_handle
       rows.times do |i|
         row_start = src + (i * cols)
         axpy(handle, 1.0, row_start, dst, cols)
       end
-
       destroy_handle(handle)
     end
 
