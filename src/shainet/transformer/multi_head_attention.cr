@@ -40,6 +40,13 @@ module SHAInet
     @workspace_scores : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
     @workspace_attn_output : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
 
+    # Cached workspace matrices for backward pass (per head)
+    @d_v_temp_ws : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
+    @d_attn_temp_ws : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
+    @d_scores_temp_ws : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
+    @d_q_temp_ws : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
+    @d_k_temp_ws : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
+
     @last_batch_size : Int32
 
     getter w_q, w_k, w_v, w_o
@@ -76,6 +83,11 @@ module SHAInet
       @workspace_d_x_q = nil
       @workspace_d_x_k = nil
       @workspace_d_x_v = nil
+      @d_v_temp_ws = [] of (CudaMatrix | Nil)
+      @d_attn_temp_ws = [] of (CudaMatrix | Nil)
+      @d_scores_temp_ws = [] of (CudaMatrix | Nil)
+      @d_q_temp_ws = [] of (CudaMatrix | Nil)
+      @d_k_temp_ws = [] of (CudaMatrix | Nil)
       @last_batch_size = 0
 
       # Initialize cached transposes
@@ -110,6 +122,11 @@ module SHAInet
         @workspace_d_x_q = nil
         @workspace_d_x_k = nil
         @workspace_d_x_v = nil
+        @d_v_temp_ws = [] of (CudaMatrix | Nil)
+        @d_attn_temp_ws = [] of (CudaMatrix | Nil)
+        @d_scores_temp_ws = [] of (CudaMatrix | Nil)
+        @d_q_temp_ws = [] of (CudaMatrix | Nil)
+        @d_k_temp_ws = [] of (CudaMatrix | Nil)
         @last_batch_size = 0
 
         # Convert stored head matrices to GPU
@@ -384,7 +401,6 @@ module SHAInet
         d_concat.gemm!(d_out, w_o_t)
         CudaMatrix.return_workspace(w_o_t)
 
-
         # Use workspace pools for head gradients
         d_q_heads = [] of CudaMatrix
         d_k_heads = [] of CudaMatrix
@@ -399,12 +415,12 @@ module SHAInet
           @num_heads.times do |h|
             d_out_h = d_concat.slice_cols(h * @head_dim, @head_dim)
 
-            # Use temporary workspace matrices for computations
-            d_v_temp = CudaMatrix.get_workspace(x.rows, @head_dim, "mha_d_v_temp")
-            d_attn_temp = CudaMatrix.get_workspace(x.rows, x.rows, "mha_d_attn_temp")
-            d_scores_temp = CudaMatrix.get_workspace(x.rows, x.rows, "mha_d_scores_temp")
-            d_q_temp = CudaMatrix.get_workspace(x.rows, @head_dim, "mha_d_q_temp")
-            d_k_temp = CudaMatrix.get_workspace(x.rows, @head_dim, "mha_d_k_temp")
+            # Use cached workspace matrices for computations
+            d_v_temp = @d_v_temp_ws[h].not_nil!
+            d_attn_temp = @d_attn_temp_ws[h].not_nil!
+            d_scores_temp = @d_scores_temp_ws[h].not_nil!
+            d_q_temp = @d_q_temp_ws[h].not_nil!
+            d_k_temp = @d_k_temp_ws[h].not_nil!
 
             # Gradient w.r.t. V
             attn_t = CudaMatrix.get_workspace(@attn[h].as(CudaMatrix).cols, @attn[h].as(CudaMatrix).rows, "mha_attn_t")
@@ -421,7 +437,6 @@ module SHAInet
 
             # Gradient w.r.t. scores (softmax backward)
             softmax_backward(d_attn_temp, @attn[h].as(CudaMatrix), d_scores_temp)
-            CudaMatrix.return_workspace(d_attn_temp)
 
             # Scale by 1/sqrt(d_k) in-place
             d_scores_temp.scale!(1.0 / Math.sqrt(@head_dim.to_f))
@@ -435,7 +450,6 @@ module SHAInet
 
             d_q_heads << d_q_temp
             d_k_heads << d_k_temp
-            CudaMatrix.return_workspace(d_scores_temp)
           end
 
           # Concatenate head gradients (use pre-allocated workspace matrices)
@@ -475,7 +489,6 @@ module SHAInet
           # Gradient w.r.t. input - use workspace pool
           d_x = CudaMatrix.get_workspace(x.rows, x.cols, "mha_d_x")
 
-
           w_q_t = CudaMatrix.get_workspace(@w_q.as(CudaMatrix).cols, @w_q.as(CudaMatrix).rows, "mha_w_q_t")
           @w_q.as(CudaMatrix).transpose_into!(w_q_t)
           w_k_t = CudaMatrix.get_workspace(@w_k.as(CudaMatrix).cols, @w_k.as(CudaMatrix).rows, "mha_w_k_t")
@@ -495,7 +508,6 @@ module SHAInet
           d_x.add!(d_x_k)
           d_x.add!(d_x_v)
 
-
           CudaMatrix.return_workspace(d_x_q)
           CudaMatrix.return_workspace(d_x_k)
           CudaMatrix.return_workspace(d_x_v)
@@ -504,7 +516,6 @@ module SHAInet
           CudaMatrix.return_workspace(w_k_t)
           CudaMatrix.return_workspace(w_v_t)
 
-
           d_x
         ensure
           # Return workspace matrices to pool
@@ -512,10 +523,7 @@ module SHAInet
           CudaMatrix.return_workspace(temp_grad_k)
           CudaMatrix.return_workspace(temp_grad_v)
 
-          # Return head gradient matrices to pool
-          d_q_heads.each { |m| CudaMatrix.return_workspace(m) }
-          d_k_heads.each { |m| CudaMatrix.return_workspace(m) }
-          d_v_heads.each { |m| CudaMatrix.return_workspace(m) }
+          # Cached head gradient workspaces are reused, so no return here
         end
       ensure
         # Return main workspace matrices to pool
@@ -653,13 +661,34 @@ module SHAInet
         # Only reallocate if batch size changed
         if @last_batch_size != batch_size
           # Return previous workspaces to pool if they exist
-          if ws = @workspace_concat; CudaMatrix.return_workspace(ws); end
-          if ws = @workspace_d_q_concat; CudaMatrix.return_workspace(ws); end
-          if ws = @workspace_d_k_concat; CudaMatrix.return_workspace(ws); end
-          if ws = @workspace_d_v_concat; CudaMatrix.return_workspace(ws); end
-          if ws = @workspace_d_x_q; CudaMatrix.return_workspace(ws); end
-          if ws = @workspace_d_x_k; CudaMatrix.return_workspace(ws); end
-          if ws = @workspace_d_x_v; CudaMatrix.return_workspace(ws); end
+          if ws = @workspace_concat
+            CudaMatrix.return_workspace(ws)
+          end
+          if ws = @workspace_d_q_concat
+            CudaMatrix.return_workspace(ws)
+          end
+          if ws = @workspace_d_k_concat
+            CudaMatrix.return_workspace(ws)
+          end
+          if ws = @workspace_d_v_concat
+            CudaMatrix.return_workspace(ws)
+          end
+          if ws = @workspace_d_x_q
+            CudaMatrix.return_workspace(ws)
+          end
+          if ws = @workspace_d_x_k
+            CudaMatrix.return_workspace(ws)
+          end
+          if ws = @workspace_d_x_v
+            CudaMatrix.return_workspace(ws)
+          end
+
+          # Return cached backward workspaces
+          @d_v_temp_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @d_v_temp_ws.any?
+          @d_attn_temp_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @d_attn_temp_ws.any?
+          @d_scores_temp_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @d_scores_temp_ws.any?
+          @d_q_temp_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @d_q_temp_ws.any?
+          @d_k_temp_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @d_k_temp_ws.any?
 
           # Allocate new workspaces for current batch size
           @workspace_concat = CudaMatrix.get_workspace(batch_size, @d_model, "mha_concat_ws")
@@ -673,10 +702,20 @@ module SHAInet
           # Allocate workspace matrices for each attention head
           @workspace_scores = Array(CudaMatrix | Nil).new(@num_heads, nil)
           @workspace_attn_output = Array(CudaMatrix | Nil).new(@num_heads, nil)
+          @d_v_temp_ws = Array(CudaMatrix | Nil).new(@num_heads, nil)
+          @d_attn_temp_ws = Array(CudaMatrix | Nil).new(@num_heads, nil)
+          @d_scores_temp_ws = Array(CudaMatrix | Nil).new(@num_heads, nil)
+          @d_q_temp_ws = Array(CudaMatrix | Nil).new(@num_heads, nil)
+          @d_k_temp_ws = Array(CudaMatrix | Nil).new(@num_heads, nil)
 
           @num_heads.times do |h|
             @workspace_scores[h] = CudaMatrix.new(batch_size, batch_size)     # scores matrix
             @workspace_attn_output[h] = CudaMatrix.new(batch_size, @head_dim) # attn * vs result
+            @d_v_temp_ws[h] = CudaMatrix.get_workspace(batch_size, @head_dim, "mha_d_v_temp_ws")
+            @d_attn_temp_ws[h] = CudaMatrix.get_workspace(batch_size, batch_size, "mha_d_attn_temp_ws")
+            @d_scores_temp_ws[h] = CudaMatrix.get_workspace(batch_size, batch_size, "mha_d_scores_temp_ws")
+            @d_q_temp_ws[h] = CudaMatrix.get_workspace(batch_size, @head_dim, "mha_d_q_temp_ws")
+            @d_k_temp_ws[h] = CudaMatrix.get_workspace(batch_size, @head_dim, "mha_d_k_temp_ws")
           end
 
           @last_batch_size = batch_size
