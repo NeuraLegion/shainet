@@ -27,24 +27,23 @@ puts "Using the GPU? #{SHAInet::CUDA.available? ? "Yes" : "No"}"
 puts "Kernels available? #{SHAInet::CUDA.kernels_available? ? "Yes" : "No"}"
 puts "Training the tokenizer on the dataset..."
 # Train tokenizer and encode text
-vocab_size = 1000 # Much smaller vocab for faster training
+vocab_size = 10000 # Much smaller vocab for faster training
 tokenizer = SHAInet::BPETokenizer.new
-tokenizer.train(text[0..10000], vocab_size) # Much smaller dataset
-ids = tokenizer.encode(text[0..10000])
+tokenizer.train(text[0..100000], vocab_size) # Much smaller dataset
+ids = tokenizer.encode(text[0..100000])
 
 puts "Tokenizer trained with #{tokenizer.vocab.size} tokens."
 puts "Dataset size: #{ids.size} tokens"
-puts "Sample of first 10 tokens: #{ids[0, [ids.size, 10].min]}"
 
 puts "Building the network..."
 # Build the network with much smaller dimensions for fast debugging
-d_model = 32 # Much smaller model dimension
-seq_len = 8  # Shorter sequences
+d_model = 64 # Much smaller model dimension
+seq_len = 16  # Shorter sequences
 token_count = tokenizer.vocab.size
 net = SHAInet::Network.new
 net.add_layer(:input, 1, SHAInet.none)
 net.add_layer(:embedding, d_model, SHAInet.none, vocab_size: token_count)
-1.times { net.add_layer(:transformer, d_model) } # Only 1 layer for fast training
+4.times { net.add_layer(:transformer, d_model) }
 net.add_layer(:output, token_count, SHAInet.identity)
 net.fully_connect
 
@@ -100,8 +99,8 @@ puts "Expected validation sequences: #{val_ids.size - seq_len}"
 train_data = SHAInet::StreamingData.new(train_file, shuffle: true, gpu_batches: true)
 val_data = SHAInet::StreamingData.new(val_file, gpu_batches: true)
 
-epochs = 5
-batch = 8
+epochs = 100
+batch = 1 # Larger batch size for better GPU utilization
 net.learning_rate = 0.001
 
 puts "Training the network for #{epochs} epochs with batch size #{batch}..."

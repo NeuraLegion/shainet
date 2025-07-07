@@ -693,19 +693,19 @@ module SHAInet
             sync_to_mb = (sync_stats[:total_sync_bytes_to_device] / 1024.0 / 1024.0).round(2)
             sync_from_mb = (sync_stats[:total_sync_bytes_from_device] / 1024.0 / 1024.0).round(2)
             total_syncs = sync_stats[:sync_to_device_count] + sync_stats[:sync_from_device_count]
-            Log.info { "Epoch: #{epoch}, Error: #{avg_error.round(6)}, MSE: #{@mse.round(6)}, Time: #{elapsed.total_seconds.round(2)}s" }
-            Log.info { "  GPU: #{gpu_stats[:active_matrices]} matrices, #{(gpu_stats[:total_allocated_bytes] / 1024.0 / 1024.0).round(2)} MB" }
-            Log.info { "  Syncs: #{total_syncs} total (#{sync_stats[:sync_to_device_count]} to GPU, #{sync_stats[:sync_from_device_count]} from GPU)" }
-            Log.info { "  Data: #{sync_to_mb} MB to GPU, #{sync_from_mb} MB from GPU (#{(sync_to_mb + sync_from_mb).round(2)} MB total)" }
-            Log.info { "  Matrix creations: #{sync_stats[:matrix_creation_count]} this epoch" }
+            Log.debug { "Epoch: #{epoch}, Error: #{avg_error.round(6)}, MSE: #{@mse.round(6)}, Time: #{elapsed.total_seconds.round(2)}s" }
+            Log.debug { "  GPU: #{gpu_stats[:active_matrices]} matrices, #{(gpu_stats[:total_allocated_bytes] / 1024.0 / 1024.0).round(2)} MB" }
+            Log.debug { "  Syncs: #{total_syncs} total (#{sync_stats[:sync_to_device_count]} to GPU, #{sync_stats[:sync_from_device_count]} from GPU)" }
+            Log.debug { "  Data: #{sync_to_mb} MB to GPU, #{sync_from_mb} MB from GPU (#{(sync_to_mb + sync_from_mb).round(2)} MB total)" }
+            Log.debug { "  Matrix creations: #{sync_stats[:matrix_creation_count]} this epoch" }
             SHAInet::CudaMatrix.print_top_allocation_sites
 
             # Log top sync sources
             sources = SHAInet::CudaMatrix.sync_sources_stats
             if sources.size > 0
-              Log.info { "  Top sync sources:" }
+              Log.debug { "  Top sync sources:" }
               sources.to_a.sort_by { |k, v| v }.reverse[0, 5].each do |source, count|
-                Log.info { "    #{source}: #{count} times" }
+                Log.debug { "    #{source}: #{count} times" }
               end
             end
           else
@@ -715,10 +715,10 @@ module SHAInet
           # Log matrix pool statistics
           if CUDA.fully_available?
             pool_stats = CudaMatrix.pool_stats
-            Log.info { "  Matrix pool: #{pool_stats[:total_pooled]} matrices pooled across #{pool_stats[:pools].size} sizes" }
+            Log.debug { "  Matrix pool: #{pool_stats[:total_pooled]} matrices pooled across #{pool_stats[:pools].size} sizes" }
             if pool_stats[:pools].size > 0
               top_pools = pool_stats[:pools].to_a.sort_by(&.[1]).reverse.first(3)
-              Log.info { "    Top pool sizes: #{top_pools.map { |k, v| "#{k}(#{v})" }.join(", ")}" }
+              Log.debug { "    Top pool sizes: #{top_pools.map { |k, v| "#{k}(#{v})" }.join(", ")}" }
             end
           end
         end
