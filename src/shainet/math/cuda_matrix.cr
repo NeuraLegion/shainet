@@ -1050,19 +1050,8 @@ module SHAInet
       self
     end
 
-    # Optimized dropout using cuDNN
+    # Dropout using custom CUDA kernel (always, since cuDNN does not support Float64)
     def dropout!(prob : Float64, seed : UInt64 = Random.rand(UInt64::MAX))
-      # Use cuDNN for optimized dropout
-      if CUDNN.available?
-        begin
-          CUDNN.dropout_forward!(self, self, prob, seed)
-          return self
-        rescue e : Exception
-          Log.error { "cuDNN dropout failed: #{e}, falling back to custom kernel or CPU" }
-        end
-      end
-
-      # Fallback to custom CUDA kernel when cuDNN is unavailable
       if CUDA.fully_available? && (dptr = self.device_ptr) && !dptr.null?
         begin
           self.sync_to_device!("dropout_kernel") unless device_dirty?
