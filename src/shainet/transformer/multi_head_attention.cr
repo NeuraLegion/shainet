@@ -628,34 +628,8 @@ module SHAInet
 
     # GPU version of softmax backward
     private def softmax_backward(d_out : CudaMatrix, softmax_out : CudaMatrix, dest : CudaMatrix) : CudaMatrix
-      # Use GPU kernel for softmax backward if available
-      if CUDA.fully_available?
-        begin
-          # Use CUDA kernel for softmax backward pass directly into dest
-          CUDA.softmax_backward(dest.device_ptr.not_nil!, d_out.device_ptr.not_nil!, softmax_out.device_ptr.not_nil!, d_out.rows, d_out.cols)
-          dest.mark_device_dirty!
-          return dest
-        rescue e : Exception
-          # Fall back to CPU computation if CUDA fails
-        end
-      end
-
-      # CPU fallback - sync matrices to host first
-      d_out.sync_from_device!("attention_backward")
-      softmax_out.sync_from_device!("attention_backward")
-
-      # Efficient softmax gradient computation on CPU using unsafe operations
-      d_out.rows.times do |i|
-        # For each row, compute: softmax * (d_out - sum(softmax * d_out))
-        sum = 0.0
-        d_out.cols.times { |j| sum += softmax_out.unsafe_get(i, j) * d_out.unsafe_get(i, j) }
-
-        d_out.cols.times do |j|
-          dest.unsafe_set(i, j, softmax_out.unsafe_get(i, j) * (d_out.unsafe_get(i, j) - sum))
-        end
-      end
-
-      dest.sync_to_device!
+      CUDA.softmax_backward(dest.device_ptr.not_nil!, d_out.device_ptr.not_nil!, softmax_out.device_ptr.not_nil!, d_out.rows, d_out.cols)
+      dest.mark_device_dirty!
       dest
     end
 

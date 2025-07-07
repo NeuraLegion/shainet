@@ -354,6 +354,28 @@ void accumulate_bias_grad(double* bias_grad, const double* local_grad, int rows,
     }
 }
 
+__global__ void row_sum_kernel(double* dst, const double* src, int rows, int cols) {
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col >= cols) return;
+
+    double sum = 0.0;
+    for (int row = 0; row < rows; ++row) {
+        sum += src[row * cols + col];
+    }
+    atomicAdd(&dst[col], sum);
+}
+
+void row_sum(double* dst, const double* src, int rows, int cols) {
+    int threads_per_block = 256;
+    int blocks = (cols + threads_per_block - 1) / threads_per_block;
+
+    row_sum_kernel<<<blocks, threads_per_block>>>(dst, src, rows, cols);
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in row_sum: %s\n", cudaGetErrorString(err));
+    }
+}
+
 __global__ void zero_matrix_kernel(double* matrix, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= size) return;
