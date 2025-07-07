@@ -676,23 +676,23 @@ module SHAInet
 
     # Accumulate the sum over rows of a matrix into an existing row vector.
     # Performs: dst += ones^T * src
+    #
+    # cuBLAS assumes column-major layout which doesn't match the row-major
+    # storage used by `CudaMatrix`.  The previous implementation tried to use a
+    # GEMM with an implicit ones vector but produced incorrect results because
+    # of the layout mismatch.  Instead, use repeated AXPY operations on each
+    # row which works regardless of the underlying memory layout and avoids
+    # creating temporary matrices.
     def row_sum(dst : Pointer(Float64), src : Pointer(Float64), rows : Int32, cols : Int32)
       handle = create_handle
-      ones_host = Array(Float64).new(rows, 1.0)
-      ones_dev = Pointer(Float64).null
-      bytes = (rows * 8).to_u64
-      malloc(pointerof(ones_dev).as(Pointer(Pointer(Void))), bytes)
-      memcpy(ones_dev.as(Pointer(Void)), ones_host.to_unsafe.as(Pointer(Void)), bytes, MemcpyKind::HostToDevice)
-      alpha = 1.0
-      beta = 1.0
-      LibCUBLAS.cublasDgemm_v2(handle,
-        Operation::N.value, Operation::N.value,
-        1, cols, rows,
-        pointerof(alpha), ones_dev, 1,
-        src, rows,
-        pointerof(beta), dst, 1)
+
+      # dst += row_i for each row of src
+      rows.times do |i|
+        row_start = src + (i * cols)
+        axpy(handle, 1.0, row_start, dst, cols)
+      end
+
       destroy_handle(handle)
-      free(ones_dev.as(Pointer(Void)))
     end
 
     # Count token pairs using a custom CUDA kernel when available.
