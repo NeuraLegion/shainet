@@ -1,4 +1,8 @@
+{% if flag?(:enable_cuda) %}
 require "../cuda"
+{% else %}
+require "../cuda_stub"
+{% end %}
 
 module SHAInet
   # GPU Memory Manager - helps minimize CPU-GPU transfers
