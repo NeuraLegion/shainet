@@ -13,6 +13,10 @@ module SHAInet
     @h : SimpleMatrix | CudaMatrix
     @out : SimpleMatrix | CudaMatrix
 
+    # Cached transposed weight matrices
+    @w1_t : SimpleMatrix | CudaMatrix
+    @w2_t : SimpleMatrix | CudaMatrix
+
     # Workspace matrices to avoid repeated allocations
     @workspace_temp_bias : CudaMatrix | Nil = nil
 
@@ -34,6 +38,11 @@ module SHAInet
       @g_b2 = mat_klass.zeros(1, d_model)
       @h = mat_klass.zeros(1, 1)
       @out = mat_klass.zeros(1, 1)
+
+      # Initialize cached transposes
+      @w1_t = mat_klass.new(hidden_dim, d_model)
+      @w2_t = mat_klass.new(d_model, hidden_dim)
+      update_transposes
     end
 
     # Convert all internal matrices to GPU
@@ -50,6 +59,7 @@ module SHAInet
         @h = @h.as(SimpleMatrix).to_cuda if @h && !@h.is_a?(CudaMatrix)
         @out = @out.as(SimpleMatrix).to_cuda if @out && !@out.is_a?(CudaMatrix)
         @x = @x.as(SimpleMatrix).to_cuda if @x && !@x.is_a?(CudaMatrix)
+        update_transposes
       end
     end
 
@@ -105,10 +115,8 @@ module SHAInet
     # GPU path backward
     def backward(d_out : CudaMatrix) : CudaMatrix
       w2_gpu = @w2.as(CudaMatrix)
-      w2_t = w2_gpu.transpose
       dh = CudaMatrix.get_workspace(d_out.rows, w2_gpu.rows, "pw_dh")
-      dh.gemm!(d_out, w2_t)
-      CudaMatrix.return_workspace(w2_t)
+      dh.gemm!(d_out, @w2_t.as(CudaMatrix))
 
       # Use in-place gradient accumulation to avoid creating new matrices
       temp_grad_w2 = CudaMatrix.get_workspace(@h.cols, d_out.cols, "pw_grad_w2")
@@ -137,17 +145,15 @@ module SHAInet
       accumulate_bias_gradient(@g_b1, drelu)
 
       w1_gpu = @w1.as(CudaMatrix)
-      w1_t = w1_gpu.transpose
       d_input = CudaMatrix.get_workspace(drelu.rows, w1_gpu.rows, "pw_d_input")
-      d_input.gemm!(drelu, w1_t)
-      CudaMatrix.return_workspace(w1_t)
+      d_input.gemm!(drelu, @w1_t.as(CudaMatrix))
       d_input
     end
 
     # CPU path backward
     def backward(d_out : SimpleMatrix) : SimpleMatrix
       w2_cpu = @w2.as(SimpleMatrix)
-      dh = d_out * w2_cpu.transpose
+      dh = d_out * @w2_t.as(SimpleMatrix)
 
       # For SimpleMatrix, still need to create temporary (no in-place add for SimpleMatrix yet)
       temp_grad_w2 = @h.as(SimpleMatrix).transpose * d_out
@@ -178,7 +184,7 @@ module SHAInet
       @g_b1 = @g_b1.as(SimpleMatrix) + db1
 
       w1_cpu = @w1.as(SimpleMatrix)
-      d_input = drelu * w1_cpu.transpose
+      d_input = drelu * @w1_t.as(SimpleMatrix)
       d_input
     end
 
@@ -204,6 +210,7 @@ module SHAInet
       @g_w2.as(CudaMatrix).zero!
       @g_b1.as(CudaMatrix).zero!
       @g_b2.as(CudaMatrix).zero!
+      update_transposes
     end
 
     # CPU path gradient application - all SimpleMatrix operations
@@ -217,6 +224,8 @@ module SHAInet
       @g_w2 = SimpleMatrix.zeros(@w2.rows, @w2.cols)
       @g_b1 = SimpleMatrix.zeros(@b1.rows, @b1.cols)
       @g_b2 = SimpleMatrix.zeros(@b2.rows, @b2.cols)
+
+      update_transposes
     end
 
     def zero_gradients
@@ -232,6 +241,26 @@ module SHAInet
         @g_w2 = SimpleMatrix.zeros(@w2.rows, @w2.cols)
         @g_b1 = SimpleMatrix.zeros(@b1.rows, @b1.cols)
         @g_b2 = SimpleMatrix.zeros(@b2.rows, @b2.cols)
+      end
+    end
+
+    # Recompute cached transpose matrices for current weights.
+    private def update_transposes
+      mat_class = @w1.is_a?(CudaMatrix) ? CudaMatrix : SimpleMatrix
+
+      if @w1_t.nil? || @w1_t.not_nil!.rows != @w1.cols || @w1_t.not_nil!.cols != @w1.rows
+        @w1_t = mat_class.new(@w1.cols, @w1.rows)
+      end
+      if @w2_t.nil? || @w2_t.not_nil!.rows != @w2.cols || @w2_t.not_nil!.cols != @w2.rows
+        @w2_t = mat_class.new(@w2.cols, @w2.rows)
+      end
+
+      if mat_class == CudaMatrix
+        @w1.as(CudaMatrix).transpose_into!(@w1_t.as(CudaMatrix))
+        @w2.as(CudaMatrix).transpose_into!(@w2_t.as(CudaMatrix))
+      else
+        @w1.as(SimpleMatrix).transpose_into!(@w1_t.as(SimpleMatrix))
+        @w2.as(SimpleMatrix).transpose_into!(@w2_t.as(SimpleMatrix))
       end
     end
 

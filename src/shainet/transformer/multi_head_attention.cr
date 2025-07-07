@@ -19,6 +19,12 @@ module SHAInet
     @g_w_v : SimpleMatrix | CudaMatrix
     @g_w_o : SimpleMatrix | CudaMatrix
 
+    # Cached transposed weight matrices
+    @w_q_t : SimpleMatrix | CudaMatrix
+    @w_k_t : SimpleMatrix | CudaMatrix
+    @w_v_t : SimpleMatrix | CudaMatrix
+    @w_o_t : SimpleMatrix | CudaMatrix
+
     # Pre-allocated workspace matrices to avoid allocations in forward/backward passes
     @workspace_concat : CudaMatrix | Nil
     @workspace_d_q_concat : CudaMatrix | Nil
@@ -63,6 +69,13 @@ module SHAInet
       @workspace_d_k_concat = nil
       @workspace_d_v_concat = nil
       @last_batch_size = 0
+
+      # Initialize cached transposes
+      @w_q_t = mat_klass.new(@d_model, @d_model)
+      @w_k_t = mat_klass.new(@d_model, @d_model)
+      @w_v_t = mat_klass.new(@d_model, @d_model)
+      @w_o_t = mat_klass.new(@d_model, @d_model)
+      update_transposes
     end
 
     # Convert all internal matrices to GPU
@@ -93,6 +106,7 @@ module SHAInet
         @k_heads = @k_heads.map { |h| h.is_a?(CudaMatrix) ? h.as(SimpleMatrix | CudaMatrix) : h.as(SimpleMatrix).to_cuda.as(SimpleMatrix | CudaMatrix) }
         @v_heads = @v_heads.map { |h| h.is_a?(CudaMatrix) ? h.as(SimpleMatrix | CudaMatrix) : h.as(SimpleMatrix).to_cuda.as(SimpleMatrix | CudaMatrix) }
         @attn = @attn.map { |h| h.is_a?(CudaMatrix) ? h.as(SimpleMatrix | CudaMatrix) : h.as(SimpleMatrix).to_cuda.as(SimpleMatrix | CudaMatrix) }
+        update_transposes
       end
     end
 
@@ -266,7 +280,7 @@ module SHAInet
       @g_w_o = @g_w_o.as(SimpleMatrix) + (concat.transpose * d_out)
 
       # Gradient w.r.t. concat
-      d_concat = d_out * @w_o.transpose.as(SimpleMatrix)
+      d_concat = d_out * @w_o_t.as(SimpleMatrix)
 
       # Gradients w.r.t. each head
       d_q_heads = [] of SimpleMatrix
@@ -320,9 +334,9 @@ module SHAInet
       @g_w_v = @g_w_v.as(SimpleMatrix) + (x.as(SimpleMatrix).transpose * d_v_concat)
 
       # Gradient w.r.t. input
-      d_x = (d_q_concat * @w_q.as(SimpleMatrix).transpose) +
-            (d_k_concat * @w_k.as(SimpleMatrix).transpose) +
-            (d_v_concat * @w_v.as(SimpleMatrix).transpose)
+      d_x = (d_q_concat * @w_q_t.as(SimpleMatrix)) +
+            (d_k_concat * @w_k_t.as(SimpleMatrix)) +
+            (d_v_concat * @w_v_t.as(SimpleMatrix))
 
       d_x
     end
@@ -352,9 +366,7 @@ module SHAInet
         @g_w_o.as(CudaMatrix).add!(temp_grad_o)
 
         # Gradient w.r.t. concat
-        w_o_t = @w_o.as(CudaMatrix).transpose
-        d_concat.gemm!(d_out, w_o_t)
-        CudaMatrix.return_workspace(w_o_t)
+        d_concat.gemm!(d_out, @w_o_t.as(CudaMatrix))
 
         # Use workspace pools for head gradients
         d_q_heads = [] of CudaMatrix
@@ -442,9 +454,9 @@ module SHAInet
           # Gradient w.r.t. input - use workspace pool
           d_x = CudaMatrix.get_workspace(x.rows, x.cols, "mha_d_x")
 
-          w_q_t = @w_q.as(CudaMatrix).transpose
-          w_k_t = @w_k.as(CudaMatrix).transpose
-          w_v_t = @w_v.as(CudaMatrix).transpose
+          w_q_t = @w_q_t.as(CudaMatrix)
+          w_k_t = @w_k_t.as(CudaMatrix)
+          w_v_t = @w_v_t.as(CudaMatrix)
 
           d_x_q = CudaMatrix.get_workspace(d_q_concat.rows, w_q_t.cols, "mha_d_x_q")
           d_x_k = CudaMatrix.get_workspace(d_k_concat.rows, w_k_t.cols, "mha_d_x_k")
@@ -461,9 +473,6 @@ module SHAInet
           CudaMatrix.return_workspace(d_x_q)
           CudaMatrix.return_workspace(d_x_k)
           CudaMatrix.return_workspace(d_x_v)
-          CudaMatrix.return_workspace(w_q_t)
-          CudaMatrix.return_workspace(w_k_t)
-          CudaMatrix.return_workspace(w_v_t)
 
           d_x
         ensure
@@ -497,6 +506,7 @@ module SHAInet
 
       # Clear gradients
       zero_gradients(CudaMatrix)
+      update_transposes
     end
 
     # CPU path for applying gradients
@@ -508,6 +518,7 @@ module SHAInet
 
       # Clear gradients
       zero_gradients(SimpleMatrix)
+      update_transposes
     end
 
     # GPU path for zeroing gradients
@@ -525,6 +536,36 @@ module SHAInet
       @g_w_k = SimpleMatrix.zeros(@d_model, @d_model)
       @g_w_v = SimpleMatrix.zeros(@d_model, @d_model)
       @g_w_o = SimpleMatrix.zeros(@d_model, @d_model)
+    end
+
+    # Recompute cached transpose matrices based on current weights.
+    private def update_transposes
+      mat_class = @w_q.is_a?(CudaMatrix) ? CudaMatrix : SimpleMatrix
+
+      if @w_q_t.nil? || @w_q_t.not_nil!.rows != @w_q.cols || @w_q_t.not_nil!.cols != @w_q.rows
+        @w_q_t = mat_class.new(@w_q.cols, @w_q.rows)
+      end
+      if @w_k_t.nil? || @w_k_t.not_nil!.rows != @w_k.cols || @w_k_t.not_nil!.cols != @w_k.rows
+        @w_k_t = mat_class.new(@w_k.cols, @w_k.rows)
+      end
+      if @w_v_t.nil? || @w_v_t.not_nil!.rows != @w_v.cols || @w_v_t.not_nil!.cols != @w_v.rows
+        @w_v_t = mat_class.new(@w_v.cols, @w_v.rows)
+      end
+      if @w_o_t.nil? || @w_o_t.not_nil!.rows != @w_o.cols || @w_o_t.not_nil!.cols != @w_o.rows
+        @w_o_t = mat_class.new(@w_o.cols, @w_o.rows)
+      end
+
+      if mat_class == CudaMatrix
+        @w_q.as(CudaMatrix).transpose_into!(@w_q_t.as(CudaMatrix))
+        @w_k.as(CudaMatrix).transpose_into!(@w_k_t.as(CudaMatrix))
+        @w_v.as(CudaMatrix).transpose_into!(@w_v_t.as(CudaMatrix))
+        @w_o.as(CudaMatrix).transpose_into!(@w_o_t.as(CudaMatrix))
+      else
+        @w_q.as(SimpleMatrix).transpose_into!(@w_q_t.as(SimpleMatrix))
+        @w_k.as(SimpleMatrix).transpose_into!(@w_k_t.as(SimpleMatrix))
+        @w_v.as(SimpleMatrix).transpose_into!(@w_v_t.as(SimpleMatrix))
+        @w_o.as(SimpleMatrix).transpose_into!(@w_o_t.as(SimpleMatrix))
+      end
     end
 
     private def softmax_backward(d_out : SimpleMatrix, softmax_out : SimpleMatrix, dest : SimpleMatrix)
