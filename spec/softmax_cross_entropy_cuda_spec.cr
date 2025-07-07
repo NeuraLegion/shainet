@@ -47,7 +47,8 @@ describe "CUDA softmax cross entropy" do
     logits = SHAInet::SimpleMatrix.from_a([[1.0, 0.0, -1.0]])
     target = SHAInet::SimpleMatrix.from_a([[0.0, 0.0, 1.0]])
     result = cpu_softmax_cross_entropy(logits, target)
-    result[:loss].should be_close(1.407605, 1e-5)
+    # For target class 3 the expected cross entropy is around 2.4076
+    result[:loss].should be_close(2.407605, 1e-5)
     ENV.delete("SHAINET_DISABLE_CUDA")
   end
 end
