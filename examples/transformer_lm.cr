@@ -56,6 +56,6 @@ net.train(data: train_data,
 
 # Predict the token following "hello"
 hello_id = tokenizer.encode("hello").first
-output = net.run([[hello_id]]).last
+output = net.run([[hello_id]], return_matrix: true).as(SHAInet::CudaMatrix).to_a.last
 pred_id = output.index(output.max) || 0
 puts "Prediction for 'hello' -> #{tokenizer.decode([pred_id])}"
