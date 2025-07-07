@@ -34,9 +34,39 @@ module SHAInet
       batch_size.times do
         line = next_line
         break unless line
-        pair = JSON.parse(line).as_a
-        input = parse_array(pair[0])
-        output = parse_array(pair[1])
+        json = JSON.parse(line)
+
+        input_json : JSON::Any
+        output_json : JSON::Any
+
+        if json.raw.is_a?(Array)
+          pair = json.as_a
+          next if pair.size < 2
+          input_json = pair[0]
+          output_json = pair[1]
+        elsif json.raw.is_a?(Hash)
+          obj = json.as_h
+          if obj["input"]?
+            input_json = obj["input"].not_nil!
+          elsif obj["inputs"]?
+            input_json = obj["inputs"].not_nil!
+          else
+            next
+          end
+
+          if obj["target"]?
+            output_json = obj["target"].not_nil!
+          elsif obj["output"]?
+            output_json = obj["output"].not_nil!
+          else
+            next
+          end
+        else
+          next
+        end
+
+        input = parse_array(input_json)
+        output = parse_array(output_json)
         batch << [input, output]
       end
 
@@ -131,12 +161,16 @@ module SHAInet
     # Parses a JSON array and converts all numeric values to Float64. Supports
     # both 1‑D and 2‑D arrays which is useful for tokenized inputs.
     private def parse_array(json_any : JSON::Any) : Datum
-      arr = json_any.as_a
-      return [] of Float64 if arr.empty?
-      if arr.first.raw.is_a?(Array)
-        Array(Array(Float64)).from_json(json_any.to_json)
+      if json_any.raw.is_a?(Array)
+        arr = json_any.as_a
+        return [] of Float64 if arr.empty?
+        if arr.first.raw.is_a?(Array)
+          Array(Array(Float64)).from_json(json_any.to_json)
+        else
+          Array(Float64).from_json(json_any.to_json)
+        end
       else
-        Array(Float64).from_json(json_any.to_json)
+        [json_any.as_f] of Float64
       end
     end
 
