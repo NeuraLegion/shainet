@@ -1,10 +1,10 @@
 require "log"
 
 {% if flag?(:enable_cuda) %}
-require "./shainet/cuda"
-require "./shainet/cudnn"
+  require "./shainet/cuda"
+  require "./shainet/cudnn"
 {% else %}
-require "./shainet/cuda_stub"
+  require "./shainet/cuda_stub"
 {% end %}
 
 require "./shainet/autograd/tensor"

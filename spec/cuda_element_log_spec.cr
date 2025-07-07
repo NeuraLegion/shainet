@@ -2,6 +2,7 @@ require "./spec_helper"
 
 describe "CUDA element_log" do
   it "matches CPU log" do
+    ENV.delete("SHAINET_DISABLE_CUDA")
     pending! "CUDA kernels not available" unless SHAInet::CUDA.kernels_available?
 
     cpu = SHAInet::SimpleMatrix.from_a([[0.5, 1.0], [2.0, 4.0]])

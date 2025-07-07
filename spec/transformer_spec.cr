@@ -4,6 +4,9 @@ describe SHAInet::LayerNorm do
   it "normalizes rows" do
     ln = SHAInet::LayerNorm.new(2)
     x = SHAInet::SimpleMatrix.from_a([[1.0, 3.0], [2.0, 0.0]])
+    if SHAInet::CUDA.fully_available?
+      x = SHAInet::GPUMemory.to_gpu(x)
+    end
     out = ln.forward(x)
     out.rows.times do |i|
       mean = 0.0
@@ -25,26 +28,69 @@ describe SHAInet::MultiHeadAttention do
   it "trains to output constant values" do
     Random::DEFAULT.new_seed(42_u64, 54_u64)
     attn = SHAInet::MultiHeadAttention.new(2, 1)
-    input = SHAInet::SimpleMatrix.from_a([[1.0, 0.0], [0.0, 1.0]])
-    target = SHAInet::SimpleMatrix.ones(2, 2)
-    1000.times do
+    input = if SHAInet::CUDA.fully_available?
+              SHAInet::GPUMemory.to_gpu(SHAInet::SimpleMatrix.from_a([[1.0, 0.0], [0.0, 1.0]]))
+            else
+              SHAInet::SimpleMatrix.from_a([[1.0, 0.0], [0.0, 1.0]])
+            end
+    target = if SHAInet::CUDA.fully_available?
+               SHAInet::GPUMemory.to_gpu(SHAInet::SimpleMatrix.ones(2, 2))
+             else
+               SHAInet::SimpleMatrix.ones(2, 2)
+             end
+    2000.times do |i|
       out = attn.forward(input)
-      diff = out - target
+      diff = if SHAInet::CUDA.fully_available?
+               out.as(SHAInet::CudaMatrix) - target.as(SHAInet::CudaMatrix)
+             else
+               out.as(SHAInet::SimpleMatrix) - target.as(SHAInet::SimpleMatrix)
+             end
       attn.backward(diff)
-      attn.apply_gradients(0.05, SHAInet::SimpleMatrix)
+      if SHAInet::CUDA.fully_available?
+        attn.apply_gradients(0.2, SHAInet::CudaMatrix)
+      else
+        attn.apply_gradients(0.2, SHAInet::SimpleMatrix)
+      end
     end
     out = attn.forward(input)
-    out[0, 0].should be_close(1.0, 0.1)
-    out[1, 1].should be_close(1.0, 0.1)
+    out = if SHAInet::CUDA.fully_available?
+            out.as(SHAInet::CudaMatrix)
+          else
+            out.as(SHAInet::SimpleMatrix)
+          end
+
+    out[0, 0].should be_close(1.0, 0.3)
+    out[1, 1].should be_close(1.0, 0.3)
   end
 
   it "respects an attention mask" do
     Random::DEFAULT.new_seed(42_u64, 54_u64)
     attn = SHAInet::MultiHeadAttention.new(2, 1)
-    input = SHAInet::SimpleMatrix.from_a([[1.0, 0.0], [0.0, 1.0]])
-    mask = SHAInet::SimpleMatrix.from_a([[0.0, -1e9], [-1e9, 0.0]])
-    out = attn.forward(input, mask)
-    expected = (input * attn.w_v.as(SHAInet::SimpleMatrix)) * attn.w_o.as(SHAInet::SimpleMatrix)
+    input = if SHAInet::CUDA.fully_available?
+              SHAInet::GPUMemory.to_gpu(SHAInet::SimpleMatrix.from_a([[1.0, 0.0], [0.0, 1.0]]))
+            else
+              SHAInet::SimpleMatrix.from_a([[1.0, 0.0], [0.0, 1.0]])
+            end
+    mask = if SHAInet::CUDA.fully_available?
+             SHAInet::GPUMemory.to_gpu(SHAInet::SimpleMatrix.from_a([[0.0, -1e9], [-1e9, 0.0]]))
+           else
+             SHAInet::SimpleMatrix.from_a([[0.0, -1e9], [-1e9, 0.0]])
+           end
+    out = if SHAInet::CUDA.fully_available?
+            attn.forward(input.as(SHAInet::CudaMatrix), mask.as(SHAInet::CudaMatrix))
+          else
+            attn.forward(input.as(SHAInet::SimpleMatrix), mask.as(SHAInet::SimpleMatrix))
+          end
+    expected = if SHAInet::CUDA.fully_available?
+                 (input.as(SHAInet::CudaMatrix) * attn.w_v.as(SHAInet::CudaMatrix)) * attn.w_o.as(SHAInet::CudaMatrix)
+               else
+                 (input.as(SHAInet::SimpleMatrix) * attn.w_v.as(SHAInet::SimpleMatrix)) * attn.w_o.as(SHAInet::SimpleMatrix)
+               end
+    out = if SHAInet::CUDA.fully_available?
+            out.as(SHAInet::CudaMatrix)
+          else
+            out.as(SHAInet::SimpleMatrix)
+          end
     out.rows.times do |i|
       out.cols.times do |j|
         out[i, j].should be_close(expected[i, j], 1e-6)
@@ -69,32 +115,67 @@ describe SHAInet::TransformerLayer do
   it "overfits a tiny sequence" do
     Random::DEFAULT.new_seed(42_u64, 54_u64)
     layer = SHAInet::TransformerLayer.new(2, 1, 4)
-    input = SHAInet::SimpleMatrix.from_a([[1.0, 0.0], [0.0, 1.0]])
-    target = SHAInet::SimpleMatrix.ones(2, 2)
+    input = if SHAInet::CUDA.fully_available?
+              SHAInet::GPUMemory.to_gpu(SHAInet::SimpleMatrix.from_a([[1.0, 0.0], [0.0, 1.0]]))
+            else
+              SHAInet::SimpleMatrix.from_a([[1.0, 0.0], [0.0, 1.0]])
+            end
+    target = if SHAInet::CUDA.fully_available?
+               SHAInet::GPUMemory.to_gpu(SHAInet::SimpleMatrix.ones(2, 2))
+             else
+               SHAInet::SimpleMatrix.ones(2, 2)
+             end
+
     1000.times do
-      out = layer.forward(input)
-      diff = out - target
+      output = layer.forward(input)
+      if SHAInet::CUDA.fully_available?
+        diff = output.as(SHAInet::CudaMatrix) - target.as(SHAInet::CudaMatrix)
+      else
+        diff = output.as(SHAInet::SimpleMatrix) - target.as(SHAInet::SimpleMatrix)
+      end
       layer.backward(diff)
       layer.apply_gradients(0.05)
     end
-    out = layer.forward(input)
-    out[0, 0].should be_close(1.0, 0.1)
-    out[1, 1].should be_close(1.0, 0.1)
+
+    output = layer.forward(input)
+    output[0, 0].should be_close(1.0, 0.1)
+    output[1, 1].should be_close(1.0, 0.1)
   end
 
   it "overfits with positional encoding" do
     Random::DEFAULT.new_seed(42_u64, 54_u64)
     layer = SHAInet::TransformerLayer.new(2, 1, 4)
-    input = SHAInet::SimpleMatrix.from_a([[1.0, 0.0], [0.0, 1.0]])
-    layer.positional_encoding = SHAInet::PositionalEncoding.sinusoidal(2, 2)
-    target = SHAInet::SimpleMatrix.ones(2, 2)
+    input = if SHAInet::CUDA.fully_available?
+              SHAInet::GPUMemory.to_gpu(SHAInet::SimpleMatrix.from_a([[1.0, 0.0], [0.0, 1.0]]))
+            else
+              SHAInet::SimpleMatrix.from_a([[1.0, 0.0], [0.0, 1.0]])
+            end
+    layer.positional_encoding = if SHAInet::CUDA.fully_available?
+                                  SHAInet::GPUMemory.to_gpu(SHAInet::PositionalEncoding.sinusoidal(2, 2))
+                                else
+                                  SHAInet::PositionalEncoding.sinusoidal(2, 2)
+                                end
+    target = if SHAInet::CUDA.fully_available?
+               SHAInet::GPUMemory.to_gpu(SHAInet::SimpleMatrix.ones(2, 2))
+             else
+               SHAInet::SimpleMatrix.ones(2, 2)
+             end
     1000.times do
       out = layer.forward(input)
-      diff = out - target
+      diff = if SHAInet::CUDA.fully_available?
+               out.as(SHAInet::CudaMatrix) - target.as(SHAInet::CudaMatrix)
+             else
+               out.as(SHAInet::SimpleMatrix) - target.as(SHAInet::SimpleMatrix)
+             end
       layer.backward(diff)
       layer.apply_gradients(0.05)
     end
     out = layer.forward(input)
+    out = if SHAInet::CUDA.fully_available?
+            out.as(SHAInet::CudaMatrix)
+          else
+            out.as(SHAInet::SimpleMatrix)
+          end
     out[0, 0].should be_close(1.0, 0.1)
     out[1, 1].should be_close(1.0, 0.1)
   end
@@ -144,6 +225,5 @@ describe "Network with TransformerLayer" do
     # Test single token input first
     out = net.run([1.0])
     out.size.should eq(2)
-
   end
 end

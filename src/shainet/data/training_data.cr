@@ -1,7 +1,7 @@
 {% if flag?(:enable_cuda) %}
-require "../cuda"
+  require "../cuda"
 {% else %}
-require "../cuda_stub"
+  require "../cuda_stub"
 {% end %}
 require "../math/cuda_matrix"
 require "../math/gpu_memory"

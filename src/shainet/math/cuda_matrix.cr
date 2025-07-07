@@ -1,9 +1,9 @@
 require "./simple_matrix"
 {% if flag?(:enable_cuda) %}
-require "../cuda"
-require "../cudnn"
+  require "../cuda"
+  require "../cudnn"
 {% else %}
-require "../cuda_stub"
+  require "../cuda_stub"
 {% end %}
 
 module SHAInet

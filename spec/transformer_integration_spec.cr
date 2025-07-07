@@ -152,7 +152,11 @@ describe "Transformer Integration" do
 
       # Test embedding output dimensions
       ids = [1, 2, 3]
-      embedding_output = embedding.embed_cpu(ids)
+      if SHAInet::CUDA.fully_available?
+        embedding_output = embedding.embed(ids)
+      else
+        embedding_output = embedding.embed_cpu(ids)
+      end
 
       embedding_output.rows.should eq(ids.size)
       embedding_output.cols.should eq(d_model)

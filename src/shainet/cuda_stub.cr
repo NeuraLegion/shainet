@@ -4,9 +4,9 @@ module SHAInet
     Log = ::Log.for(self)
 
     enum MemcpyKind
-      HostToHost = 0
-      HostToDevice = 1
-      DeviceToHost = 2
+      HostToHost     = 0
+      HostToDevice   = 1
+      DeviceToHost   = 2
       DeviceToDevice = 3
     end
 
@@ -203,22 +203,69 @@ module SHAInet
       false
     end
 
-    def add_bias!(*args); raise CudnnError.new("cuDNN not available"); end
-    def relu_forward(*args); raise CudnnError.new("cuDNN not available"); end
-    def relu_backward(*args); raise CudnnError.new("cuDNN not available"); end
-    def sigmoid_forward!(*args); raise CudnnError.new("cuDNN not available"); end
-    def tanh_forward!(*args); raise CudnnError.new("cuDNN not available"); end
-    def softmax_rows(*args); raise CudnnError.new("cuDNN not available"); end
-    def element_add!(*args); raise CudnnError.new("cuDNN not available"); end
-    def element_multiply!(*args); raise CudnnError.new("cuDNN not available"); end
-    def element_mul!(*args); raise CudnnError.new("cuDNN not available"); end
-    def dropout_forward!(*args); raise CudnnError.new("cuDNN not available"); end
-    def softmax_cross_entropy_loss_and_gradient(*args); raise CudnnError.new("cuDNN not available"); end
-    def cross_entropy_loss_gradient(*args); raise CudnnError.new("cuDNN not available"); end
-    def cross_entropy_loss_and_gradient(*args); raise CudnnError.new("cuDNN not available"); end
-    def element_log!(*args); raise CudnnError.new("cuDNN not available"); end
-    def element_subtract!(*args); raise CudnnError.new("cuDNN not available"); end
-    def element_addition!(*args); raise CudnnError.new("cuDNN not available"); end
+    def add_bias!(*args)
+      raise CudnnError.new("cuDNN not available")
+    end
+
+    def relu_forward(*args)
+      raise CudnnError.new("cuDNN not available")
+    end
+
+    def relu_backward(*args)
+      raise CudnnError.new("cuDNN not available")
+    end
+
+    def sigmoid_forward!(*args)
+      raise CudnnError.new("cuDNN not available")
+    end
+
+    def tanh_forward!(*args)
+      raise CudnnError.new("cuDNN not available")
+    end
+
+    def softmax_rows(*args)
+      raise CudnnError.new("cuDNN not available")
+    end
+
+    def element_add!(*args)
+      raise CudnnError.new("cuDNN not available")
+    end
+
+    def element_multiply!(*args)
+      raise CudnnError.new("cuDNN not available")
+    end
+
+    def element_mul!(*args)
+      raise CudnnError.new("cuDNN not available")
+    end
+
+    def dropout_forward!(*args)
+      raise CudnnError.new("cuDNN not available")
+    end
+
+    def softmax_cross_entropy_loss_and_gradient(*args)
+      raise CudnnError.new("cuDNN not available")
+    end
+
+    def cross_entropy_loss_gradient(*args)
+      raise CudnnError.new("cuDNN not available")
+    end
+
+    def cross_entropy_loss_and_gradient(*args)
+      raise CudnnError.new("cuDNN not available")
+    end
+
+    def element_log!(*args)
+      raise CudnnError.new("cuDNN not available")
+    end
+
+    def element_subtract!(*args)
+      raise CudnnError.new("cuDNN not available")
+    end
+
+    def element_addition!(*args)
+      raise CudnnError.new("cuDNN not available")
+    end
 
     class CudnnError < Exception
     end
