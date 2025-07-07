@@ -161,14 +161,7 @@ while (val_batch = val_data.next_batch(val_batch_size)).size > 0
     target = Array(Float64).new(token_count, 0.0)
     target[target_id] = 1.0
 
-    output_vec = net.run(seq).last
-
-    # Ensure output_vec is an Array(Float64) for softmax
-    if output_vec.is_a?(SHAInet::CudaMatrix)
-      output_vec = output_vec.to_flat_array
-    elsif output_vec.is_a?(SHAInet::SimpleMatrix)
-      output_vec = output_vec.to_a.first
-    end
+    output_vec = net.run(seq, return_matrix: true).as(SHAInet::CudaMatrix).to_a.last
 
     # Use native softmax - it's already optimized
     probs = SHAInet.softmax(output_vec)
@@ -184,11 +177,6 @@ puts "Final validation loss: #{val_loss.round(4)}"
 
 # Predict the token following a sequence from the dataset
 test_seq = ids[0, seq_len].map { |id| [id] }
-output = net.run(test_seq).last
-if output.is_a?(SHAInet::CudaMatrix)
-  output = output.to_flat_array
-elsif output.is_a?(SHAInet::SimpleMatrix)
-  output = output.to_a.first
-end
+output = net.run(test_seq, return_matrix: true).as(SHAInet::CudaMatrix).to_a.last
 pred_id = output.index(output.max) || 0
 puts "Prediction -> #{tokenizer.decode([pred_id])}"

@@ -53,6 +53,34 @@ module SHAInet
       raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
     end
 
+    # Overload allowing retrieval of the raw matrix
+    def run(input : Array(GenNum), *, return_matrix : Bool, stealth : Bool = false) : Array(Float64) | CudaMatrix | SimpleMatrix
+      verify_net_before_train
+      expected_size = @input_layers.reduce(0) { |acc, l| acc + l.size }
+      raise NeuralNetRunError.new(
+        "Error input data size: #{input.size} doesn't fit input layer size: #{expected_size}.") unless input.size == expected_size
+
+      processed = @mixed_precision ? input.map { |v| v.to_f32.to_f64 } : input.map(&.to_f64)
+      matrix = GPUMemory.to_gpu(SimpleMatrix.from_a([processed]))
+      result_matrix = run(matrix, stealth: stealth)
+
+      if return_matrix
+        result_matrix
+      else
+        output = if result_matrix.is_a?(CudaMatrix)
+                   result_matrix.sync_from_device!("array_output") if result_matrix.device_dirty?
+                   result_matrix.to_flat_array
+                 else
+                   result_matrix.to_a.first
+                 end
+
+        Log.info { "Input => #{input}, network output => #{output}" } unless stealth
+        output
+      end
+    rescue e : Exception
+      raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
+    end
+
     # GPU path - all CudaMatrix operations
     def run(input : CudaMatrix, stealth : Bool = false) : CudaMatrix
       verify_net_before_train
@@ -218,6 +246,14 @@ module SHAInet
       input.map { |seq| run(seq, stealth: stealth) }
     end
 
+    def run(input : Array(Array(Array(GenNum))), *, return_matrix : Bool, stealth : Bool = false) : Array(Array(Array(Float64))) | Array(CudaMatrix | SimpleMatrix)
+      if return_matrix
+        input.map { |seq| run(seq, stealth: stealth, return_matrix: true) }
+      else
+        input.map { |seq| run(seq, stealth: stealth) }
+      end
+    end
+
     # Accept a sequence of integer tokens for embedding layers
     # This is a convenience wrapper around the standard run method
     def run(input : Array(Array(Int32)), stealth : Bool = false) : Array(Array(Float64))
@@ -225,11 +261,21 @@ module SHAInet
       run(seq, stealth: stealth)
     end
 
+    def run(input : Array(Array(Int32)), *, return_matrix : Bool, stealth : Bool = false) : Array(Array(Float64)) | CudaMatrix | SimpleMatrix
+      seq = input.map { |x| x.map(&.to_f64) }
+      run(seq, stealth: stealth, return_matrix: return_matrix)
+    end
+
     # Accept integer input for embedding layers
     # This is a convenience wrapper around the standard run method
     def run(input : Array(Int32), stealth : Bool = false) : Array(Float64)
       float_in = input.map(&.to_f64)
       run(float_in, stealth: stealth)
+    end
+
+    def run(input : Array(Int32), *, return_matrix : Bool, stealth : Bool = false) : Array(Float64) | CudaMatrix | SimpleMatrix
+      float_in = input.map(&.to_f64)
+      run(float_in, stealth: stealth, return_matrix: return_matrix)
     end
 
     # Accept sequence input - converts to matrix and calls core matrix method
@@ -253,6 +299,33 @@ module SHAInet
         result_matrix.to_a
       else
         result_matrix.to_a
+      end
+    rescue e : Exception
+      raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
+    end
+
+    def run(input : Array(Array(GenNum)), *, return_matrix : Bool, stealth : Bool = false) : Array(Array(Float64)) | CudaMatrix | SimpleMatrix
+      verify_net_before_train
+      expected_size = @input_layers.reduce(0) { |acc, l| acc + l.size }
+      input.each do |step|
+        raise NeuralNetRunError.new("Error input data size: #{step.size} doesn't fit input layer size: #{expected_size}.") unless step.size == expected_size
+      end
+
+      processed = input.map do |x|
+        @mixed_precision ? x.map { |v| v.to_f32.to_f64 } : x.map(&.to_f64)
+      end
+      matrix = GPUMemory.to_gpu(SimpleMatrix.from_a(processed))
+      result_matrix = run(matrix, stealth: stealth)
+
+      if return_matrix
+        result_matrix
+      else
+        if result_matrix.is_a?(CudaMatrix)
+          result_matrix.sync_from_device!("run_output") if result_matrix.device_dirty?
+          result_matrix.to_a
+        else
+          result_matrix.to_a
+        end
       end
     rescue e : Exception
       raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
