@@ -68,10 +68,11 @@ def write_pairs(path, ids, seq_len)
     puts "Max token ID in dataset: #{max_id}"
 
     (0...(ids.size - seq_len)).each do |i|
-      seq = ids[i, seq_len]     # Array(Int32)
-      target = ids[i + seq_len] # Int32
-      # Write as {"input": [id, ...], "target": id}
-      f.puts({"input" => seq, "target" => target}.to_json)
+      seq = ids[i, seq_len]
+      target = ids[i + seq_len]
+      # Transformer expects tokens as a column matrix, so store as [[id], ...]
+      inputs = seq.map { |id| [id] }
+      f.puts({"input" => inputs, "target" => target}.to_json)
     end
   end
 end
