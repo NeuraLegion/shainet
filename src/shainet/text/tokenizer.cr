@@ -1,3 +1,11 @@
+{% if flag?(:enable_cuda) %}
+  require "../cuda"
+{% else %}
+  require "../cuda_stub"
+{% end %}
+require "../math/simple_matrix"
+require "../math/cuda_matrix"
+
 module SHAInet
   # Very small tokenizer used for toy examples. It builds a vocabulary of words
   # from given text and encodes/decodes sentences to arrays of token IDs.
@@ -24,6 +32,16 @@ module SHAInet
       text.split(/\s+/).map do |token|
         add_token(token)
       end
+    end
+
+    # Encode a string into a matrix of token IDs using GPU matrices when CUDA
+    # is available. The returned matrix has one row with each column containing
+    # the token id as a float. This can be used directly as network input when
+    # training language models.
+    def encode_matrix(text : String)
+      ids = encode(text)
+      mat_klass = CUDA.fully_available? ? CudaMatrix : SimpleMatrix
+      mat_klass.from_a([ids.map(&.to_f64)])
     end
 
     # Convert an array of token IDs back to their corresponding words. Unknown

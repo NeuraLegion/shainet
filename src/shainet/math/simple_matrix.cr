@@ -16,6 +16,10 @@ module SHAInet
       new(rows, cols, 1.0)
     end
 
+    def self.tensor(rows : Int32, cols : Int32)
+      TensorMatrix.new(rows, cols)
+    end
+
     def [](r : Int32, c : Int32)
       @data[r * @cols + c]
     end
@@ -81,6 +85,20 @@ module SHAInet
       result
     end
 
+    # Transpose the matrix into an existing destination matrix in-place.
+    # This avoids allocating a new matrix on each call.
+    def transpose_into!(dest : SimpleMatrix)
+      raise ArgumentError.new("size mismatch") unless dest.rows == @cols && dest.cols == @rows
+
+      @rows.times do |i|
+        @cols.times do |j|
+          dest[j, i] = self[i, j]
+        end
+      end
+
+      dest
+    end
+
     def to_a
       Array.new(@rows) do |i|
         Array.new(@cols) do |j|
@@ -142,6 +160,62 @@ module SHAInet
       end
       dup
     end
+
+    # In-place element-wise addition.
+    def add!(other : SimpleMatrix)
+      raise ArgumentError.new("size mismatch") unless other.rows == @rows && other.cols == @cols
+      @rows.times do |i|
+        @cols.times do |j|
+          self[i, j] += other[i, j]
+        end
+      end
+      self
+    end
+
+    # Add a bias row vector to each row of the matrix in-place.
+    def add_bias!(bias : SimpleMatrix)
+      raise ArgumentError.new("bias size mismatch") unless bias.rows == 1 && bias.cols == @cols
+      @rows.times do |i|
+        @cols.times do |j|
+          self[i, j] += bias[0, j]
+        end
+      end
+      self
+    end
+
+    # Element-wise ReLU activation in-place.
+    def relu!
+      @rows.times do |i|
+        @cols.times do |j|
+          v = self[i, j]
+          self[i, j] = v > 0 ? v : 0.0
+        end
+      end
+      self
+    end
+
+    # Multiply each column by the corresponding value in a row vector in-place.
+    def mul_row_vector!(vec : SimpleMatrix)
+      raise ArgumentError.new("vector size mismatch") unless vec.rows == 1 && vec.cols == @cols
+      @rows.times do |i|
+        @cols.times do |j|
+          self[i, j] *= vec[0, j]
+        end
+      end
+      self
+    end
+
+    # Convert SimpleMatrix to CudaMatrix for GPU operations
+    def to_cuda : CudaMatrix
+      result = CudaMatrix.new(@rows, @cols)
+      # Use batch copy through raw data for better performance
+      @rows.times do |i|
+        @cols.times do |j|
+          result.unsafe_set(i, j, self[i, j])
+        end
+      end
+      result.sync_to_device!("simple_to_cuda_conversion")
+      result
+    end
   end
 end
-

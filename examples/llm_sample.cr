@@ -19,9 +19,9 @@ ids = tokenizer.encode(text)
 token_count = tokenizer.vocab.size
 net = SHAInet::Network.new
 net.add_layer(:input, 1, :memory, SHAInet.none)
-net.add_layer(:embedding, 8, :memory, SHAInet.none)
+net.add_layer(:embedding, 8, :memory, SHAInet.none, vocab_size: token_count)
 net.add_layer(:lstm, 16)
-net.add_layer(:output, token_count, :memory, SHAInet.softmax)
+net.add_layer(:output, token_count, :memory, SHAInet.sigmoid)
 net.fully_connect
 
 # Helper to create one-hot vectors
@@ -32,15 +32,18 @@ one_hot = ->(id : Int32, size : Int32) do
 end
 
 # Build training pairs: each token predicts the next token
-training = [] of Tuple(Array(Array(Float64)), Array(Float64))
+training = [] of Tuple(Array(Array(Int32)), Array(Float64))
 (0...ids.size - 1).each do |i|
-  input = [[ids[i].to_f64]]
+  input = [[ids[i]]]
   expected = one_hot.call(ids[i + 1], token_count)
   training << {input, expected}
 end
 
+# Convert tuples to arrays for training
+train_data = training.map { |seq, target| [seq, target] }
+
 net.learning_rate = 0.1
-net.train(data: training,
+net.train(data: train_data,
   training_type: :sgdm,
   cost_function: :c_ent,
   epochs: 200,
@@ -49,6 +52,6 @@ net.train(data: training,
 
 # Predict the token following "hello"
 hello_id = tokenizer.encode("hello").first
-output = net.run([[hello_id.to_f64]]).last
+output = net.run([[hello_id]]).last
 pred_id = output.index(output.max) || 0
 puts "Prediction for 'hello' -> #{tokenizer.decode([pred_id])}"

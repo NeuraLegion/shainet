@@ -10,7 +10,4 @@ module SHAInet
 
   class NeuralNetTrainError < Exception
   end
-
-  class CNNInitializationError < Exception
-  end
 end
