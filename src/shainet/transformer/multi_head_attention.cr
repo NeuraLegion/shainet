@@ -39,6 +39,8 @@ module SHAInet
     # Workspace matrices for attention computation (per head)
     @workspace_scores : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
     @workspace_attn_output : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
+    @workspace_k_transposed : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
+    @workspace_q_transposed : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
 
     # Cached workspace matrices for backward pass (per head)
     @d_v_temp_ws : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
@@ -83,6 +85,8 @@ module SHAInet
       @workspace_d_x_q = nil
       @workspace_d_x_k = nil
       @workspace_d_x_v = nil
+      @workspace_k_transposed = [] of (CudaMatrix | Nil)
+      @workspace_q_transposed = [] of (CudaMatrix | Nil)
       @d_v_temp_ws = [] of (CudaMatrix | Nil)
       @d_attn_temp_ws = [] of (CudaMatrix | Nil)
       @d_scores_temp_ws = [] of (CudaMatrix | Nil)
@@ -122,6 +126,8 @@ module SHAInet
         @workspace_d_x_q = nil
         @workspace_d_x_k = nil
         @workspace_d_x_v = nil
+        @workspace_k_transposed = [] of (CudaMatrix | Nil)
+        @workspace_q_transposed = [] of (CudaMatrix | Nil)
         @d_v_temp_ws = [] of (CudaMatrix | Nil)
         @d_attn_temp_ws = [] of (CudaMatrix | Nil)
         @d_scores_temp_ws = [] of (CudaMatrix | Nil)
@@ -173,16 +179,15 @@ module SHAInet
           @v_heads << vs
 
           # Attention computation - reuse workspace matrices
-          ks_transposed = ks.transpose
+          ks.transpose_into!(@workspace_k_transposed[h].not_nil!)
 
           # Use workspace matrix for scores computation
           scores_workspace = @workspace_scores[h].not_nil!
           scores_workspace.zero!
 
           # Compute attention scores directly into workspace
-          temp_scores = qs * ks_transposed
-          temp_scores.scale!(1.0 / Math.sqrt(@head_dim.to_f))
-          scores_workspace.copy_from!(temp_scores)
+          scores_workspace.gemm!(qs, @workspace_k_transposed[h].not_nil!)
+          scores_workspace.scale!(1.0 / Math.sqrt(@head_dim.to_f))
 
           # Apply mask if provided
           if m = mask
@@ -199,8 +204,7 @@ module SHAInet
           attn_output_workspace.zero!
 
           # Compute attention output directly into workspace
-          temp_output = attn * vs
-          attn_output_workspace.copy_from!(temp_output)
+          attn_output_workspace.gemm!(attn, vs)
           outputs << attn_output_workspace
         end
 
@@ -702,6 +706,8 @@ module SHAInet
           # Allocate workspace matrices for each attention head
           @workspace_scores = Array(CudaMatrix | Nil).new(@num_heads, nil)
           @workspace_attn_output = Array(CudaMatrix | Nil).new(@num_heads, nil)
+          @workspace_k_transposed = Array(CudaMatrix | Nil).new(@num_heads, nil)
+          @workspace_q_transposed = Array(CudaMatrix | Nil).new(@num_heads, nil)
           @d_v_temp_ws = Array(CudaMatrix | Nil).new(@num_heads, nil)
           @d_attn_temp_ws = Array(CudaMatrix | Nil).new(@num_heads, nil)
           @d_scores_temp_ws = Array(CudaMatrix | Nil).new(@num_heads, nil)
@@ -711,6 +717,8 @@ module SHAInet
           @num_heads.times do |h|
             @workspace_scores[h] = CudaMatrix.new(batch_size, batch_size)     # scores matrix
             @workspace_attn_output[h] = CudaMatrix.new(batch_size, @head_dim) # attn * vs result
+            @workspace_k_transposed[h] = CudaMatrix.new(@head_dim, batch_size)
+            @workspace_q_transposed[h] = CudaMatrix.new(@head_dim, batch_size)
             @d_v_temp_ws[h] = CudaMatrix.get_workspace(batch_size, @head_dim, "mha_d_v_temp_ws")
             @d_attn_temp_ws[h] = CudaMatrix.get_workspace(batch_size, batch_size, "mha_d_attn_temp_ws")
             @d_scores_temp_ws[h] = CudaMatrix.get_workspace(batch_size, batch_size, "mha_d_scores_temp_ws")
