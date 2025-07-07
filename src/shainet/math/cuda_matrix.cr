@@ -253,19 +253,16 @@ module SHAInet
       result
     end
 
-    # Transpose `self` into the provided destination matrix without allocating
-    # a new matrix. The destination matrix must have dimensions cols x rows.
+    # Transpose the matrix into the provided destination matrix in-place.
+    # Avoids allocating a new matrix when a persistent transpose is needed.
     def transpose_into!(dest : CudaMatrix)
       raise ArgumentError.new("size mismatch") unless dest.rows == @cols && dest.cols == @rows
       raise RuntimeError.new("GPU transpose requires valid device pointers") unless (src_ptr = self.device_ptr) && (dst_ptr = dest.device_ptr) && !src_ptr.null? && !dst_ptr.null?
-
-      # Ensure source data is on GPU
+      # Ensure source data is on the GPU
       self.sync_to_device!("transpose_into") unless device_dirty?
 
-      # Perform the transpose using CUDA
+      # Perform transpose using CUDA kernel
       CUDA.transpose(dst_ptr, src_ptr, @rows, @cols)
-
-      # Mark destination as having newer GPU data
       dest.mark_device_dirty!
       dest
     end

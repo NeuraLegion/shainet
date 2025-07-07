@@ -85,6 +85,20 @@ module SHAInet
       result
     end
 
+    # Transpose the matrix into an existing destination matrix in-place.
+    # This avoids allocating a new matrix on each call.
+    def transpose_into!(dest : SimpleMatrix)
+      raise ArgumentError.new("size mismatch") unless dest.rows == @cols && dest.cols == @rows
+
+      @rows.times do |i|
+        @cols.times do |j|
+          dest[j, i] = self[i, j]
+        end
+      end
+
+      dest
+    end
+
     def to_a
       Array.new(@rows) do |i|
         Array.new(@cols) do |j|
