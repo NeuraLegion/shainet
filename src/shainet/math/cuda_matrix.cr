@@ -1,6 +1,10 @@
 require "./simple_matrix"
+{% if flag?(:enable_cuda) %}
 require "../cuda"
 require "../cudnn"
+{% else %}
+require "../cuda_stub"
+{% end %}
 
 module SHAInet
   # Basic GPU matrix wrapper. Allocates device memory when CUDA is

@@ -1,6 +1,11 @@
 require "log"
 require "json"
+{% if flag?(:enable_cuda) %}
 require "../cuda"
+require "../cudnn"
+{% else %}
+require "../cuda_stub"
+{% end %}
 require "../math/simple_matrix"
 require "../math/cuda_matrix"
 
