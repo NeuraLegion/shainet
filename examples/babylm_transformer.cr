@@ -37,8 +37,8 @@ puts "Dataset size: #{ids.size} tokens"
 
 puts "Building the network..."
 # Build the network with much smaller dimensions for fast debugging
-d_model = 64
-seq_len = 16
+d_model = 128
+seq_len = 64
 token_count = tokenizer.vocab.size
 net = SHAInet::Network.new
 net.add_layer(:input, 1, SHAInet.none)
@@ -55,7 +55,9 @@ pos_enc = SHAInet::PositionalEncoding.sinusoidal(seq_len, d_model)
 net.transformer_layers.first.positional_encoding = pos_enc
 
 # Build training/validation splits and write pairs to disk for streaming
-def write_pairs(path, ids, seq_len, vocab_size)
+
+# Write pairs as much smaller JSONL: input is a sequence of token IDs, target is the next token ID (integer)
+def write_pairs(path, ids, seq_len)
   File.open(path, "w") do |f|
     if ids.size <= seq_len
       puts "Warning: Dataset too small (#{ids.size} tokens) for sequence length #{seq_len}"
@@ -65,19 +67,11 @@ def write_pairs(path, ids, seq_len, vocab_size)
     max_id = ids.max
     puts "Max token ID in dataset: #{max_id}"
 
-    # Helper to create one-hot vectors
-    one_hot = ->(id : Int32, size : Int32) do
-      arr = Array(Float64).new(size, 0.0)
-      arr[id] = 1.0
-      arr
-    end
-
     (0...(ids.size - seq_len)).each do |i|
-      # Use proper sequence format for transformer training
-      seq = ids[i, seq_len].map { |id| [id] } # Each token as [token_id]
-      target = one_hot.call(ids[i + seq_len], vocab_size)
-      pair = [seq, target]
-      f.puts pair.to_json
+      seq = ids[i, seq_len]     # Array(Int32)
+      target = ids[i + seq_len] # Int32
+      # Write as {"input": [id, ...], "target": id}
+      f.puts({"input" => seq, "target" => target}.to_json)
     end
   end
 end
@@ -89,18 +83,19 @@ val_ids = ids[split, ids.size - split]
 train_file = "train_pairs.jsonl"
 val_file = "val_pairs.jsonl"
 
-write_pairs(train_file, train_ids, seq_len, token_count)
-write_pairs(val_file, val_ids, seq_len, token_count)
+write_pairs(train_file, train_ids, seq_len)
+write_pairs(val_file, val_ids, seq_len)
 
 puts "Training pairs written. Train size: #{train_ids.size}, Val size: #{val_ids.size}"
 puts "Expected training sequences: #{train_ids.size - seq_len}"
 puts "Expected validation sequences: #{val_ids.size - seq_len}"
 
+# Data loader now expects {"input": [...], "target": ...} format.
 train_data = SHAInet::StreamingData.new(train_file, shuffle: true, gpu_batches: true)
 val_data = SHAInet::StreamingData.new(val_file, gpu_batches: true)
 
 epochs = 100
-batch = 1 # Larger batch size for better GPU utilization
+batch = 1000 # Larger batch size for better GPU utilization
 net.learning_rate = 0.001
 
 puts "Training the network for #{epochs} epochs with batch size #{batch}..."
@@ -123,25 +118,49 @@ while (val_batch = val_data.next_batch(val_batch_size)).size > 0
   total_batch_loss = 0.0
 
   val_batch.each do |sample|
-    # Handle the case where sample[0] might be a matrix due to GPU batching
-    seq_data = sample[0]
-    if seq_data.is_a?(Array)
-      seq = seq_data.as(Array(Array(Float64))).map { |token_arr| token_arr.map(&.to_i) }
-    else
-      # If it's a matrix, convert to array format
-      matrix = seq_data.as(SHAInet::CudaMatrix | SHAInet::SimpleMatrix)
-      seq = matrix.to_a.map { |row| row.map(&.to_i) }
-    end
+    # sample is likely an Array: [input, target], but input can be various types
+    input_raw = sample[0]
+    input_ids = case input_raw
+                when Array(Int32)
+                  input_raw
+                when Array(Array(Float64))
+                  input_raw.map { |row| row[0].to_i }
+                when Array(Float64)
+                  input_raw.map(&.to_i)
+                when SHAInet::CudaMatrix
+                  input_raw.to_a.map { |row| row[0].to_i }
+                when SHAInet::SimpleMatrix
+                  input_raw.to_a.map { |row| row[0].to_i }
+                else
+                  raise "Unknown input type: #{input_raw.class}"
+                end
 
-    case sample[1]
-    when SHAInet::CudaMatrix
-      tgt = sample[1].as(SHAInet::CudaMatrix).to_flat_array
-    when SHAInet::SimpleMatrix
-      tgt = sample[1].as(SHAInet::SimpleMatrix).to_a.first
-    else
-      tgt = sample[1].as(Array(Float64))
-    end
-    pred_id = tgt.index(tgt.max) || 0
+    target_raw = sample[1]
+    target_id = case target_raw
+                when Int32
+                  target_raw
+                when Array(Float64)
+                  target_raw.index(target_raw.max) || 0
+                when Array(Array(Float64))
+                  flat = target_raw.flatten
+                  flat.index(flat.max) || 0
+                when SHAInet::CudaMatrix
+                  arr = target_raw.to_flat_array
+                  arr.index(arr.max) || 0
+                when SHAInet::SimpleMatrix
+                  arr = target_raw.to_a.flatten
+                  arr.index(arr.max) || 0
+                else
+                  raise "Unknown target type: #{target_raw.class}"
+                end
+
+    # Convert input_ids to [[id], [id], ...] for transformer
+    seq = input_ids.map { |id| [id] }
+
+    # Convert target_id to one-hot vector for loss calculation
+    target = Array(Float64).new(token_count, 0.0)
+    target[target_id] = 1.0
+
     output_vec = net.run(seq).last
 
     # Ensure output_vec is an Array(Float64) for softmax
@@ -153,7 +172,7 @@ while (val_batch = val_data.next_batch(val_batch_size)).size > 0
 
     # Use native softmax - it's already optimized
     probs = SHAInet.softmax(output_vec)
-    total_batch_loss += -Math.log(probs[pred_id].clamp(1e-9, 1.0))
+    total_batch_loss += -Math.log(probs[target_id].clamp(1e-9, 1.0))
     count += 1
   end
 
@@ -166,5 +185,10 @@ puts "Final validation loss: #{val_loss.round(4)}"
 # Predict the token following a sequence from the dataset
 test_seq = ids[0, seq_len].map { |id| [id] }
 output = net.run(test_seq).last
+if output.is_a?(SHAInet::CudaMatrix)
+  output = output.to_flat_array
+elsif output.is_a?(SHAInet::SimpleMatrix)
+  output = output.to_a.first
+end
 pred_id = output.index(output.max) || 0
 puts "Prediction -> #{tokenizer.decode([pred_id])}"
