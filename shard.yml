@@ -1,9 +1,9 @@
 name: shainet
-version: 2.4.0
+version: 3.0.0
 
 authors:
-  - Bar Hofesh <bar.hofesh@neuralegion.com>
-  - Art Linkov <art.linkov@neuralegion.com>
+  - Bar Hofesh <bar.hofesh@brightsec.com>
+  - Art Linkov <artlinkov@gmail.com>
 
 crystal: 1.6.2
 
