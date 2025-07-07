@@ -341,45 +341,34 @@ module SHAInet
                  expected_output : SimpleMatrix | CudaMatrix,
                  cost_function : CostFunction = SHAInet.quadratic_cost)
       actual_matrix = run(input_data, stealth: true)
-      exp = expected_output.to_a.first
-      act = actual_matrix.to_a.first
-      validate_values(act, "actual_output")
 
-      @error_signal = [] of Float64
-      act.size.times do |i|
-        # For matrix-based implementation, store gradients in matrices
-        cost = cost_function.call(exp[i], act[i])
+      output_layer = @output_layers.last
+      grad = GPUMemory.like(actual_matrix, actual_matrix.rows, actual_matrix.cols)
 
-        # Matrix-based approach - store gradient in activation matrix
-        @output_layers.last.activations[0, i] = cost[:derivative]*@output_layers.last.sigma_primes[0, i]
+      loss_value = 0.0
 
-        @error_signal << cost[:value]
+      if actual_matrix.is_a?(CudaMatrix) && expected_output.is_a?(CudaMatrix) && CUDNN.available?
+        begin
+          CUDNN.softmax_cross_entropy_loss_and_gradient(
+            actual_matrix.as(CudaMatrix),
+            expected_output.as(CudaMatrix),
+            pointerof(loss_value),
+            grad.as(CudaMatrix)
+          )
+        rescue e
+          loss_value = compute_cost_and_gradient_cpu(actual_matrix, expected_output, grad, cost_function)
+        end
+      else
+        loss_value = compute_cost_and_gradient_cpu(actual_matrix, expected_output, grad, cost_function)
       end
 
-      validate_values(@error_signal, "error_signal")
-      @total_error = @error_signal.reduce(0.0) { |acc, i| acc + i }
+      @error_signal = [loss_value]
+      @total_error = loss_value
 
       if @hidden_layers.any? &.is_a?(TransformerLayer)
-        # Use existing matrices efficiently - avoid recreating if possible
-        exp_m = if expected_output.rows == 1 && expected_output.cols == exp.size
-                  expected_output
-                else
-                  GPUMemory.like(actual_matrix, 1, exp.size).tap do |m|
-                    exp.each_with_index { |val, i| m[0, i] = val }
-                  end
-                end
-
-        act_m = if actual_matrix.rows == 1 && actual_matrix.cols == act.size
-                  actual_matrix
-                else
-                  GPUMemory.like(actual_matrix, 1, act.size).tap do |m|
-                    act.each_with_index { |val, i| m[0, i] = val }
-                  end
-                end
-
-        diff = act_m - exp_m
+        diff = grad
         out_w = @output_layers.last.weights
-        w = out_w.is_a?(CudaMatrix) ? out_w : GPUMemory.keep_on_gpu(out_w.as(SimpleMatrix))
+        w = out_w.is_a?(CudaMatrix) ? out_w.as(CudaMatrix) : GPUMemory.keep_on_gpu(out_w.as(SimpleMatrix)).as(CudaMatrix)
         trans = if diff.is_a?(CudaMatrix) && w.is_a?(CudaMatrix)
                   diff * w
                 else
@@ -458,61 +447,54 @@ module SHAInet
 
     # Evaluate a single example using a class label and softmax cross entropy
     def evaluate_label(input_data : Array(GenNum), label : Int32)
-      actual_output = run(input_data.map(&.to_f64), stealth: true)
-      validate_values(actual_output, "actual_output")
-      probs = SHAInet.softmax(actual_output)
+      processed = input_data.map(&.to_f64)
+      matrix = GPUMemory.to_gpu(SimpleMatrix.from_a([processed]))
+      logits = run(matrix, stealth: true)
 
-      if label < 0 || label >= probs.size
-        raise NeuralNetRunError.new("Label #{label} out of bounds for output size #{probs.size}")
-      end
+      if logits.is_a?(CudaMatrix)
+        target = CudaMatrix.zeros(1, logits.cols)
+        target[0, label] = 1.0
+        target.sync_to_device!
 
-      @error_signal = [] of Float64
-      probs.size.times do |i|
-        @error_signal << (i == label ? -Math.log(probs[i].clamp(1e-9, 1.0)) : 0.0)
-      end
+        grad = CudaMatrix.new(1, logits.cols)
+        loss_val = 0.0
 
-      validate_values(@error_signal, "error_signal")
-      @total_error = -Math.log(probs[label].clamp(1e-9, 1.0))
+        if CUDNN.available?
+          CUDNN.softmax_cross_entropy_loss_and_gradient(logits.as(CudaMatrix), target, pointerof(loss_val), grad)
+        else
+          probs = SHAInet.softmax_rows(logits.as(CudaMatrix))
+          grad.copy_from!(probs)
+          grad[0, label] = grad[0, label] - 1.0
+          probs.sync_from_device!("eval_label")
+          loss_val = -Math.log(probs.unsafe_get(0, label).clamp(1e-9, 1.0))
+        end
 
-      if @hidden_layers.any? &.is_a?(TransformerLayer)
-        # Create one-hot and probs matrices efficiently on GPU
-        exp = if CUDA.fully_available?
-                mat = CudaMatrix.zeros(1, probs.size)
-                mat[0, label] = 1.0
-                mat.sync_to_device!
-                mat
-              else
-                mat = SimpleMatrix.zeros(1, probs.size)
-                mat[0, label] = 1.0
-                mat
-              end
+        @error_signal = Array(Float64).new(logits.cols, 0.0)
+        @error_signal[label] = loss_val
+        @total_error = loss_val
 
-        act = if CUDA.fully_available?
-                mat = CudaMatrix.new(1, probs.size)
-                probs.each_with_index { |val, i| mat[0, i] = val }
-                mat.sync_to_device!
-                mat
-              else
-                SimpleMatrix.from_a([probs])
-              end
+        if @hidden_layers.any? &.is_a?(TransformerLayer)
+          out_w = @output_layers.last.weights
+          w = out_w.is_a?(CudaMatrix) ? out_w.as(CudaMatrix) : GPUMemory.keep_on_gpu(out_w.as(SimpleMatrix)).as(CudaMatrix)
+          trans = grad * w
+          @transformer_error = trans.is_a?(CudaMatrix) ? trans.to_simple : trans
+        end
+      else
+        actual_output = logits.as(SimpleMatrix).to_a.first
+        validate_values(actual_output, "actual_output")
+        probs = SHAInet.softmax(actual_output)
 
-        diff = if act.is_a?(CudaMatrix) && exp.is_a?(CudaMatrix)
-                 act - exp
-               else
-                 act_s = act.is_a?(CudaMatrix) ? act.to_simple : act
-                 exp_s = exp.is_a?(CudaMatrix) ? exp.to_simple : exp
-                 act_s - exp_s
-               end
-        out_w = @output_layers.last.weights
-        w = out_w.is_a?(CudaMatrix) ? out_w : GPUMemory.keep_on_gpu(out_w.as(SimpleMatrix))
-        trans = if diff.is_a?(CudaMatrix) && w.is_a?(CudaMatrix)
-                  diff * w
-                else
-                  d = diff.is_a?(CudaMatrix) ? diff.to_simple : diff
-                  ww = w.is_a?(CudaMatrix) ? w.to_simple : w
-                  d * ww
-                end
-        @transformer_error = trans.is_a?(CudaMatrix) ? trans.to_simple : trans
+        if label < 0 || label >= probs.size
+          raise NeuralNetRunError.new("Label #{label} out of bounds for output size #{probs.size}")
+        end
+
+        @error_signal = [] of Float64
+        probs.size.times do |i|
+          @error_signal << (i == label ? -Math.log(probs[i].clamp(1e-9, 1.0)) : 0.0)
+        end
+
+        validate_values(@error_signal, "error_signal")
+        @total_error = -Math.log(probs[label].clamp(1e-9, 1.0))
       end
     end
 
@@ -530,64 +512,70 @@ module SHAInet
     # Evaluate a sequence example with a class label and softmax cross entropy
     def evaluate_sequence_label(input_data : Array(Array(GenNum)), label : Int32)
       seq = input_data.map { |x| x.map(&.to_f64) }
-      outputs = run(seq, stealth: true)
-      actual_output = outputs.last
-      validate_values(actual_output, "actual_output")
-      probs = SHAInet.softmax(actual_output)
+      matrix = GPUMemory.to_gpu(SimpleMatrix.from_a(seq))
+      logits = run(matrix, stealth: true)
 
-      if label < 0 || label >= probs.size
-        raise NeuralNetRunError.new("Label #{label} out of bounds for output size #{probs.size}")
-      end
+      if logits.is_a?(CudaMatrix)
+        target = CudaMatrix.zeros(1, logits.cols)
+        target[0, label] = 1.0
+        target.sync_to_device!
 
-      @error_signal = [] of Float64
+        grad = CudaMatrix.new(1, logits.cols)
+        loss_val = 0.0
 
-      validate_values(@error_signal, "error_signal")
-      @total_error = -Math.log(probs[label].clamp(1e-9, 1.0))
-
-      if @hidden_layers.any? &.is_a?(TransformerLayer)
-        # Create one-hot and probs matrices efficiently on GPU
-        exp_row = if CUDA.fully_available?
-                    mat = CudaMatrix.zeros(1, probs.size)
-                    mat[0, label] = 1.0
-                    mat.sync_to_device!
-                    mat
-                  else
-                    mat = SimpleMatrix.zeros(1, probs.size)
-                    mat[0, label] = 1.0
-                    mat
-                  end
-
-        act_row = if CUDA.fully_available?
-                    mat = CudaMatrix.new(1, probs.size)
-                    probs.each_with_index { |val, i| mat[0, i] = val }
-                    mat.sync_to_device!
-                    mat
-                  else
-                    SimpleMatrix.from_a([probs])
-                  end
-
-        diff = if act_row.is_a?(CudaMatrix) && exp_row.is_a?(CudaMatrix)
-                 act_row - exp_row
-               else
-                 a = act_row.is_a?(CudaMatrix) ? act_row.to_simple : act_row
-                 e = exp_row.is_a?(CudaMatrix) ? exp_row.to_simple : exp_row
-                 a - e
-               end
-        out_w = @output_layers.last.weights
-        w = out_w.is_a?(CudaMatrix) ? out_w : GPUMemory.keep_on_gpu(out_w.as(SimpleMatrix))
-        trans = if diff.is_a?(CudaMatrix) && w.is_a?(CudaMatrix)
-                  diff * w
-                else
-                  d = diff.is_a?(CudaMatrix) ? diff.to_simple : diff
-                  ww = w.is_a?(CudaMatrix) ? w.to_simple : w
-                  d * ww
-                end
-        tmp = GPUMemory.zeros_like(trans, outputs.size, trans.cols)
-        tmp = tmp.to_simple if tmp.is_a?(CudaMatrix)
-        trans.cols.times do |j|
-          tmp[outputs.size - 1, j] = trans[0, j]
+        if CUDNN.available?
+          CUDNN.softmax_cross_entropy_loss_and_gradient(logits.as(CudaMatrix), target, pointerof(loss_val), grad)
+        else
+          probs = SHAInet.softmax_rows(logits.as(CudaMatrix))
+          grad.copy_from!(probs)
+          grad[0, label] = grad[0, label] - 1.0
+          probs.sync_from_device!("eval_seq_label")
+          loss_val = -Math.log(probs.unsafe_get(0, label).clamp(1e-9, 1.0))
         end
-        @transformer_error = tmp
+
+        @error_signal = Array(Float64).new(logits.cols, 0.0)
+        @error_signal[label] = loss_val
+        @total_error = loss_val
+
+        if @hidden_layers.any? &.is_a?(TransformerLayer)
+          out_w = @output_layers.last.weights
+          w = out_w.is_a?(CudaMatrix) ? out_w.as(CudaMatrix) : GPUMemory.keep_on_gpu(out_w.as(SimpleMatrix)).as(CudaMatrix)
+          trans = grad * w
+          tmp = GPUMemory.zeros_like(trans, matrix.rows, trans.cols)
+          tmp = tmp.to_simple if tmp.is_a?(CudaMatrix)
+          trans_s = trans.is_a?(CudaMatrix) ? trans.to_simple : trans
+          trans.cols.times do |j|
+            tmp[matrix.rows - 1, j] = trans_s[0, j]
+          end
+          @transformer_error = tmp
+        end
+      else
+        outputs = logits.as(SimpleMatrix).to_a
+        actual_output = outputs.last
+        validate_values(actual_output, "actual_output")
+        probs = SHAInet.softmax(actual_output)
+
+        if label < 0 || label >= probs.size
+          raise NeuralNetRunError.new("Label #{label} out of bounds for output size #{probs.size}")
+        end
+
+        @error_signal = [] of Float64
+        @total_error = -Math.log(probs[label].clamp(1e-9, 1.0))
+
+        if @hidden_layers.any? &.is_a?(TransformerLayer)
+          exp_row = SimpleMatrix.zeros(1, probs.size)
+          exp_row[0, label] = 1.0
+          act_row = SimpleMatrix.from_a([probs])
+          diff = act_row - exp_row
+          out_w = @output_layers.last.weights
+          w = out_w.is_a?(CudaMatrix) ? out_w.to_simple : out_w.as(SimpleMatrix)
+          trans = diff * w
+          tmp = SimpleMatrix.zeros(matrix.rows, trans.cols)
+          trans.cols.times do |j|
+            tmp[matrix.rows - 1, j] = trans[0, j]
+          end
+          @transformer_error = tmp
+        end
       end
     end
 
