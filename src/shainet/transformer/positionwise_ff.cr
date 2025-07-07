@@ -105,14 +105,16 @@ module SHAInet
     # GPU path backward
     def backward(d_out : CudaMatrix) : CudaMatrix
       w2_gpu = @w2.as(CudaMatrix)
-      w2_t = w2_gpu.transpose
+      w2_t = CudaMatrix.get_workspace(w2_gpu.cols, w2_gpu.rows, "pw_w2_t")
+      w2_gpu.transpose_into!(w2_t)
       dh = CudaMatrix.get_workspace(d_out.rows, w2_gpu.rows, "pw_dh")
       dh.gemm!(d_out, w2_t)
       CudaMatrix.return_workspace(w2_t)
 
       # Use in-place gradient accumulation to avoid creating new matrices
       temp_grad_w2 = CudaMatrix.get_workspace(@h.cols, d_out.cols, "pw_grad_w2")
-      h_t = @h.as(CudaMatrix).transpose
+      h_t = CudaMatrix.get_workspace(@h.as(CudaMatrix).cols, @h.as(CudaMatrix).rows, "pw_h_t")
+      @h.as(CudaMatrix).transpose_into!(h_t)
       temp_grad_w2.gemm!(h_t, d_out)
       @g_w2.as(CudaMatrix).add!(temp_grad_w2)
       CudaMatrix.return_workspace(temp_grad_w2)
@@ -127,7 +129,8 @@ module SHAInet
 
       # Use in-place gradient accumulation to avoid creating new matrices
       temp_grad_w1 = CudaMatrix.get_workspace(@x.not_nil!.cols, drelu.cols, "pw_grad_w1")
-      x_t = @x.not_nil!.as(CudaMatrix).transpose
+      x_t = CudaMatrix.get_workspace(@x.not_nil!.as(CudaMatrix).cols, @x.not_nil!.as(CudaMatrix).rows, "pw_x_t")
+      @x.not_nil!.as(CudaMatrix).transpose_into!(x_t)
       temp_grad_w1.gemm!(x_t, drelu)
       @g_w1.as(CudaMatrix).add!(temp_grad_w1)
       CudaMatrix.return_workspace(temp_grad_w1)
@@ -137,7 +140,8 @@ module SHAInet
       accumulate_bias_gradient(@g_b1, drelu)
 
       w1_gpu = @w1.as(CudaMatrix)
-      w1_t = w1_gpu.transpose
+      w1_t = CudaMatrix.get_workspace(w1_gpu.cols, w1_gpu.rows, "pw_w1_t")
+      w1_gpu.transpose_into!(w1_t)
       d_input = CudaMatrix.get_workspace(drelu.rows, w1_gpu.rows, "pw_d_input")
       d_input.gemm!(drelu, w1_t)
       CudaMatrix.return_workspace(w1_t)

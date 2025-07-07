@@ -346,13 +346,15 @@ module SHAInet
         end
 
         # Compute gradient and accumulate in-place
-        concat_t = concat.transpose
+        concat_t = CudaMatrix.get_workspace(concat.cols, concat.rows, "mha_concat_t")
+        concat.transpose_into!(concat_t)
         temp_grad_o.gemm!(concat_t, d_out)
         CudaMatrix.return_workspace(concat_t)
         @g_w_o.as(CudaMatrix).add!(temp_grad_o)
 
         # Gradient w.r.t. concat
-        w_o_t = @w_o.as(CudaMatrix).transpose
+        w_o_t = CudaMatrix.get_workspace(@w_o.as(CudaMatrix).cols, @w_o.as(CudaMatrix).rows, "mha_w_o_t")
+        @w_o.as(CudaMatrix).transpose_into!(w_o_t)
         d_concat.gemm!(d_out, w_o_t)
         CudaMatrix.return_workspace(w_o_t)
 
@@ -378,13 +380,15 @@ module SHAInet
             d_k_temp = CudaMatrix.get_workspace(x.rows, @head_dim, "mha_d_k_temp")
 
             # Gradient w.r.t. V
-            attn_t = @attn[h].as(CudaMatrix).transpose
+            attn_t = CudaMatrix.get_workspace(@attn[h].as(CudaMatrix).cols, @attn[h].as(CudaMatrix).rows, "mha_attn_t")
+            @attn[h].as(CudaMatrix).transpose_into!(attn_t)
             d_v_temp.gemm!(attn_t, d_out_h)
             CudaMatrix.return_workspace(attn_t)
             d_v_heads << d_v_temp
 
             # Gradient w.r.t. attention weights
-            v_t = @v_heads[h].as(CudaMatrix).transpose
+            v_t = CudaMatrix.get_workspace(@v_heads[h].as(CudaMatrix).cols, @v_heads[h].as(CudaMatrix).rows, "mha_v_t")
+            @v_heads[h].as(CudaMatrix).transpose_into!(v_t)
             d_attn_temp.gemm!(d_out_h, v_t)
             CudaMatrix.return_workspace(v_t)
 
@@ -397,7 +401,8 @@ module SHAInet
 
             # Gradients w.r.t. Q and K
             d_q_temp.gemm!(d_scores_temp, @k_heads[h].as(CudaMatrix))
-            scores_t = d_scores_temp.transpose
+            scores_t = CudaMatrix.get_workspace(d_scores_temp.cols, d_scores_temp.rows, "mha_scores_t")
+            d_scores_temp.transpose_into!(scores_t)
             d_k_temp.gemm!(scores_t, @q_heads[h].as(CudaMatrix))
             CudaMatrix.return_workspace(scores_t)
 
@@ -429,7 +434,8 @@ module SHAInet
 
         begin
           # Gradients w.r.t. projection weights - use in-place accumulation
-          x_t = x.transpose
+          x_t = CudaMatrix.get_workspace(x.cols, x.rows, "mha_x_t")
+          x.transpose_into!(x_t)
           temp_grad_q.gemm!(x_t, d_q_concat)
           temp_grad_k.gemm!(x_t, d_k_concat)
           temp_grad_v.gemm!(x_t, d_v_concat)
@@ -442,9 +448,12 @@ module SHAInet
           # Gradient w.r.t. input - use workspace pool
           d_x = CudaMatrix.get_workspace(x.rows, x.cols, "mha_d_x")
 
-          w_q_t = @w_q.as(CudaMatrix).transpose
-          w_k_t = @w_k.as(CudaMatrix).transpose
-          w_v_t = @w_v.as(CudaMatrix).transpose
+          w_q_t = CudaMatrix.get_workspace(@w_q.as(CudaMatrix).cols, @w_q.as(CudaMatrix).rows, "mha_w_q_t")
+          @w_q.as(CudaMatrix).transpose_into!(w_q_t)
+          w_k_t = CudaMatrix.get_workspace(@w_k.as(CudaMatrix).cols, @w_k.as(CudaMatrix).rows, "mha_w_k_t")
+          @w_k.as(CudaMatrix).transpose_into!(w_k_t)
+          w_v_t = CudaMatrix.get_workspace(@w_v.as(CudaMatrix).cols, @w_v.as(CudaMatrix).rows, "mha_w_v_t")
+          @w_v.as(CudaMatrix).transpose_into!(w_v_t)
 
           d_x_q = CudaMatrix.get_workspace(d_q_concat.rows, w_q_t.cols, "mha_d_x_q")
           d_x_k = CudaMatrix.get_workspace(d_k_concat.rows, w_k_t.cols, "mha_d_x_k")
