@@ -1,17 +1,23 @@
-# SHAInet
+## SHAInet - A neural network in pure [Crystal](https://crystal-lang.org/)
 
-SHAInet - stands for Super Human Artificial Intelligence network
-a neural network in pure [Crystal](https://crystal-lang.org/)
+SHAInet (Super Human Artificial Intelligence Network) is a neural network library written in pure [Crystal](https://crystal-lang.org/). Originally created for biologically inspired neural network research, it has evolved into a general-purpose library for training and running neural networks, with a focus on simplicity and ease of use.
 
-This is a free-time project, happily hosted by BrightSec that was created as part of some internal research. We started it with research in mind, rather than production, and just kept going, also thanks to members of the community.
+---
 
-The original version of SHAInet was created with the goal of testing biologically inspired neural networks, but it has since evolved into a more general-purpose neural network library.
+## Features
 
-The latest versions of SHAInet are designed to be used for training and running neural networks, with a focus on simplicity and ease of use. It supports various types of layers, activation functions, and training algorithms.
+- CPU and GPU (CUDA) support
+- Multiple layer types and activation functions
+- Various training algorithms (SGD, Adam, iRprop+, etc.)
+- Streaming data support for large datasets
+- PyTorch and HuggingFace model import
+- Transformer and modern NLP support
+
+---
 
 ## Installation
 
-Add this to your application's `shard.yml`:
+Add to your `shard.yml`:
 
 ```yaml
 dependencies:
@@ -19,17 +25,14 @@ dependencies:
     github: NeuraLegion/shainet
 ```
 
-### Optional CUDA setup
+### GPU Acceleration (Optional)
 
-To enable GPU acceleration install the CUDA Toolkit so that `libcudart.so` and
-`libcublas.so` are reachable in your `LD_LIBRARY_PATH`. SHAInet will
-automatically detect these libraries at runtime and switch to GPU matrices when
-available. 
-You should also ensure you compile your code with `-Denable_cuda`
-When CUDA cannot be loaded, training falls back to the CPU
-implementation.
+- Install the CUDA Toolkit and ensure `libcudart.so` and `libcublas.so` are in your `LD_LIBRARY_PATH`.
+- SHAInet will auto-detect CUDA and use GPU acceleration if available.
+- For cuDNN support, ensure `libcudnn.so` is also in your `LD_LIBRARY_PATH`.
+- Compile the project with `-Denable_cuda`
 
-Verify CUDA support with:
+Check CUDA availability:
 
 ```crystal
 require "shainet"
@@ -37,77 +40,31 @@ puts "CUDA available: #{SHAInet::CUDA.available?}"
 puts "CUDA version: #{SHAInet::CUDA.version || "unknown"}"
 ```
 
-If the libraries are installed in a non-standard location set
-`LD_LIBRARY_PATH` accordingly before running the specs or your program:
+#### Optimized GPU Setup
+
+For best performance (especially with transformers):
 
 ```bash
-export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
-```
-
-You can verify the path with `ldconfig -p | grep libcudart` and add the export line to your shell profile (e.g. `~/.bashrc`) to persist the setting.
-
-No additional build flags are required as the CUDA and cuBLAS libraries are
-dynamically loaded at runtime.
-
-cuDNN support is detected in the same way. Ensure `libcudnn.so` can be found in
-`LD_LIBRARY_PATH` if you want to use optimized convolution or activation
-kernels:
-
-```crystal
-puts "cuDNN available: #{SHAInet::CUDA.cudnn_available?}"
-```
-
-Optional custom kernels can be provided in `libshainet_cuda_kernels.so`. Their
-presence is reported by `SHAInet::CUDA.kernels_available?`.
-
-### Optimized GPU Setup (Recommended)
-
-For maximum GPU performance, especially with transformer models, use the optimized installation that builds custom CUDA kernels:
-
-```bash
-# Clone the repository
 git clone https://github.com/NeuraLegion/shainet.git
 cd shainet
-
-# Install dependencies and build CUDA kernels
 make install
-
-# Set library path for GPU acceleration
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(pwd)
-
-# Verify GPU acceleration is working
 make test
 ```
 
-This builds custom CUDA kernels that provide significant speedups for:
-
-- Softmax operations (attention mechanisms)
-- Layer normalization
-- Dropout layers
-- Embedding lookups
-- Matrix operations
-
-**Performance Impact:** This can improve GPU utilization from ~2% to 60-90% in transformer training, resulting in 3-10x faster training speeds.
-
-**Alternative installation:**
+To build kernels manually:
 
 ```bash
-# Manual kernel building
 ./build_cuda_kernels.sh
 ```
 
-Add the library path to your `~/.bashrc` for permanent use:
-
-```bash
-echo "export LD_LIBRARY_PATH=\$LD_LIBRARY_PATH:$(pwd)" >> ~/.bashrc
-```
+---
 
 ## Usage
 
-More examples live in the `examples/` folder and the specs.  The network API is
-built on top of `MatrixLayer` which works on both CPU and GPU.
+See `examples/` for more.
 
-### XOR network (MatrixLayer)
+### XOR Example
 
 ```crystal
 require "shainet"
@@ -134,7 +91,7 @@ net.train(data: data,
 puts net.run([0, 1])
 ```
 
-### Iris classification
+### Iris Classification
 
 ```crystal
 data = SHAInet::Data.new_with_csv_input_target("iris.csv", 0..3, 4)
@@ -156,13 +113,9 @@ iris.train_batch(
 puts iris.test(test)
 ```
 
-### Training with StreamingData
+### Streaming Data
 
-`StreamingData` reads batches lazily from disk using a small buffer so even
-massive corpora can be processed. Each line in the data file should contain a
-JSON array describing the input and expected output: `[[1,0],[1]]`. Use the
-`chunk_size` argument to control how many lines are buffered and shuffled at a
-time.
+Efficiently train on large datasets:
 
 ```crystal
 # Buffer at most 1,024 lines and shuffle each chunk
@@ -186,16 +139,13 @@ net.train(
   log_each: 1000)
 ```
 
-When `gpu_batches` is set to `true` and CUDA is available, `next_batch` will
-return `CudaMatrix` pairs so the training loop can operate directly on GPU
-batches.
+---
 
-### Autograd::Tensor and TensorMatrix
+## Advanced
 
-`Autograd::Tensor` wraps a numeric value and tracks how it was computed so
-gradients can be propagated automatically. `TensorMatrix` is a lightweight
-matrix made of tensors for differentiable operations. Each tensor stores its
-value in `data` and accumulates gradients in `grad` during backpropagation.
+- See `examples/babylm_transformer.cr` for a transformer language model.
+- Import PyTorch models with `net.load_from_pt("model.pt")`.
+- Import HuggingFace GPT weights directly from `pytorch_model.bin`.
 
 ```crystal
 a = SHAInet::SimpleMatrix.tensor(1, 2)
@@ -219,119 +169,14 @@ w.rows.times do |i|
 end
 ```
 
-After calling `backward` the gradients reside in each tensor's `grad` field.
-The loop above applies a simple gradient descent step. Use
-`TensorMatrix#zero_grads!` to clear gradients when starting a new iteration.
-
-## Development
-
-### Basic Features
-
-- [x] Train network
-- [x] Save/load
-- [x] Activation functions:
-  - [x] Sigmoid
-  - [x] Bipolar sigmoid
-  - [x] log-sigmoid
-  - [x] Tanh
-  - [x] ReLU
-  - [x] Leaky ReLU
-  - [x] Softmax
-- [x] Cost functions:
-  - [x] Quadratic
-  - [x] Cross-entropy
-- [x] Gradient optimizers
-  - [x] SGD + momentum
-  - [x] iRprop+
-  - [x] ADAM
-  - [x] ES (evolutionary strategy, non-backprop)
-- [x] Autosave during training
-
-### Advanced Features
-
-- [x] Support activation functions as Proc
-- [x] Support cost functions as Proc
-- [x] Embedding layers
-- [x] Layer normalization for transformer layers
-- [x] Add support for multiple neuron types.
-- [x] Bind and use CUDA (GPU acceleration)
-
-### BabyLM Transformer example
-
-The file `examples/babylm_transformer.cr` trains a small Transformer
-language model on the BabyLM corpus. After tokenizing the text,
-generate streaming pairs with:
-
-```bash
-python3 scripts/write_token_pairs.py tokens.txt 16 train_pairs.jsonl
-```
-
-Then train using `StreamingData`:
-
-```bash
-crystal run examples/babylm_transformer.cr
-```
-
-### Loading a PyTorch model
-
-SHAInet can import simple sequential models or a tiny Transformer
-exported from PyTorch as TorchScript. First export your model from
-Python:
-
-```python
-import torch
-
-model = torch.nn.Sequential(
-    torch.nn.Linear(2, 3),
-    torch.nn.ReLU(),
-    torch.nn.Linear(3, 1)
-)
-example = torch.randn(1, 2)
-traced = torch.jit.trace(model, example)
-traced.save("model.pt")
-```
-
-Then load the file in Crystal:
-
-```crystal
-net = SHAInet::Network.new
-net.load_from_pt("model.pt")
-output = net.run([1.0, 2.0])
-```
-
-To create a tiny Transformer model for import you can use the helper
-script:
-
-```bash
-python3 scripts/build_transformer_model.py transformer.pt
-```
-
-Then load it the same way (input is a token id):
-
-```crystal
-net = SHAInet::Network.new
-net.load_from_pt("transformer.pt")
-out = net.run([1])
-```
-
-### Loading a HuggingFace GPT model
-
-Weights from models like GPT-2 published on HuggingFace can be loaded
-directly from the `pytorch_model.bin` file. The conversion happens
-automatically using `scripts/pt_to_json.py`.
-
-```crystal
-net = SHAInet::Network.new
-net.load_from_pt("pytorch_model.bin")
-```
-
 ## Contributing
 
-1. Fork it [https://github.com/NeuraLegion/shainet/fork](fork)
-2. Create your feature branch (git checkout -b my-new-feature)
-3. Commit your changes (git commit -am 'Add some feature')
-4. Push to the branch (git push origin my-new-feature)
-5. Create a new Pull Request
+1. Fork [https://github.com/NeuraLegion/shainet](https://github.com/NeuraLegion/shainet)
+2. Create a feature branch
+3. Commit and push your changes
+4. Open a Pull Request
+
+---
 
 ## Contributors
 
@@ -340,4 +185,6 @@ net.load_from_pt("pytorch_model.bin")
 - [drujensen](https://github.com/drujensen) - contributor
 - [hugoabonizio](https://github.com/hugoabonizio) - contributor
 - [Rémy Marronnier](https://github.com/rmarronnier) - contributor
-- [psikoz](https://github.com/psikoz) - logo desgin
+- [psikoz](https://github.com/psikoz) - logo design
+
+---
