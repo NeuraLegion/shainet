@@ -1299,26 +1299,42 @@ module SHAInet
     private def compute_cost_and_gradient_cpu(actual_matrix, expected_output, grad_matrix, cost_proc)
       sample_error = 0.0
 
+      if actual_matrix.is_a?(CudaMatrix)
+        actual_matrix.as(CudaMatrix).sync_from_device!("cost_grad_cpu")
+      end
+
+      if expected_output.is_a?(CudaMatrix)
+        expected_output.as(CudaMatrix).sync_from_device!("cost_grad_cpu")
+      end
+
       if expected_output.is_a?(SimpleMatrix)
         exp_mat = expected_output.as(SimpleMatrix)
         exp_mat.rows.times do |i|
           exp_mat.cols.times do |j|
             expected = exp_mat[i, j]
-            actual = actual_matrix[i, j]
+            actual = actual_matrix.is_a?(CudaMatrix) ? actual_matrix.as(CudaMatrix).unsafe_get(i, j) : actual_matrix.as(SimpleMatrix)[i, j]
             cost_result = cost_proc.call(expected, actual)
             sample_error += cost_result[:value]
-            grad_matrix[i, j] = cost_result[:derivative]
+            if grad_matrix.is_a?(CudaMatrix)
+              grad_matrix.as(CudaMatrix).unsafe_set(i, j, cost_result[:derivative])
+            else
+              grad_matrix.as(SimpleMatrix)[i, j] = cost_result[:derivative]
+            end
           end
         end
       elsif expected_output.is_a?(CudaMatrix)
         exp_mat = expected_output.as(CudaMatrix)
         exp_mat.rows.times do |i|
           exp_mat.cols.times do |j|
-            expected = exp_mat[i, j]
-            actual = actual_matrix[i, j]
+            expected = exp_mat.unsafe_get(i, j)
+            actual = actual_matrix.is_a?(CudaMatrix) ? actual_matrix.as(CudaMatrix).unsafe_get(i, j) : actual_matrix.as(SimpleMatrix)[i, j]
             cost_result = cost_proc.call(expected, actual)
             sample_error += cost_result[:value]
-            grad_matrix[i, j] = cost_result[:derivative]
+            if grad_matrix.is_a?(CudaMatrix)
+              grad_matrix.as(CudaMatrix).unsafe_set(i, j, cost_result[:derivative])
+            else
+              grad_matrix.as(SimpleMatrix)[i, j] = cost_result[:derivative]
+            end
           end
         end
       elsif expected_output.is_a?(Array) && expected_output.as(Array).size > 0 && expected_output.as(Array)[0].is_a?(Array)
@@ -1327,21 +1343,34 @@ module SHAInet
         rows.times do |i|
           cols.times do |j|
             expected = expected_output.as(Array)[i].as(Array)[j].as(GenNum).to_f64
-            actual = actual_matrix[i, j]
+            actual = actual_matrix.is_a?(CudaMatrix) ? actual_matrix.as(CudaMatrix).unsafe_get(i, j) : actual_matrix.as(SimpleMatrix)[i, j]
             cost_result = cost_proc.call(expected, actual)
             sample_error += cost_result[:value]
-            grad_matrix[i, j] = cost_result[:derivative]
+            if grad_matrix.is_a?(CudaMatrix)
+              grad_matrix.as(CudaMatrix).unsafe_set(i, j, cost_result[:derivative])
+            else
+              grad_matrix.as(SimpleMatrix)[i, j] = cost_result[:derivative]
+            end
           end
         end
       else
         arr = expected_output.as(Array)
         arr.size.times do |i|
           expected = arr[i].as(GenNum).to_f64
-          actual = actual_matrix[0, i]
+          actual = actual_matrix.is_a?(CudaMatrix) ? actual_matrix.as(CudaMatrix).unsafe_get(0, i) : actual_matrix.as(SimpleMatrix)[0, i]
           cost_result = cost_proc.call(expected, actual)
           sample_error += cost_result[:value]
-          grad_matrix[0, i] = cost_result[:derivative]
+          if grad_matrix.is_a?(CudaMatrix)
+            grad_matrix.as(CudaMatrix).unsafe_set(0, i, cost_result[:derivative])
+          else
+            grad_matrix.as(SimpleMatrix)[0, i] = cost_result[:derivative]
+          end
         end
+      end
+
+      if grad_matrix.is_a?(CudaMatrix)
+        grad_matrix.as(CudaMatrix).sync_to_device!("cost_grad_cpu")
+        grad_matrix.as(CudaMatrix).mark_device_dirty!
       end
 
       sample_error
