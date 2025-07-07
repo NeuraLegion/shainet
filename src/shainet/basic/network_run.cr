@@ -15,6 +15,10 @@ module SHAInet
     # for methods regarding creating and maintaining go to network_setup.cr
     # ------------
 
+    @batch_in_ws : CudaMatrix? = nil
+    @batch_out_ws : CudaMatrix? = nil
+    @batch_grad_ws : CudaMatrix? = nil
+
     # Run an input through the network to get an output (weights & biases do not change)
     # Simple wrapper that converts array input to matrix and calls the core matrix method
     def run(input : Array(GenNum), stealth : Bool = false) : Array(Float64)
@@ -772,9 +776,19 @@ module SHAInet
       output_grad : SimpleMatrix | CudaMatrix | Nil = nil
 
       if CUDA.fully_available?
-        input_workspace = CudaMatrix.get_workspace(in_rows, in_cols, "batch_input")
-        expected_workspace = CudaMatrix.get_workspace(out_rows, out_cols, "batch_expected")
-        output_grad = CudaMatrix.get_workspace(out_rows, out_cols, "batch_grad")
+        if @batch_in_ws.nil? || @batch_in_ws.not_nil!.rows != in_rows || @batch_in_ws.not_nil!.cols != in_cols
+          @batch_in_ws = CudaMatrix.new(in_rows, in_cols)
+        end
+        if @batch_out_ws.nil? || @batch_out_ws.not_nil!.rows != out_rows || @batch_out_ws.not_nil!.cols != out_cols
+          @batch_out_ws = CudaMatrix.new(out_rows, out_cols)
+        end
+        if @batch_grad_ws.nil? || @batch_grad_ws.not_nil!.rows != out_rows || @batch_grad_ws.not_nil!.cols != out_cols
+          @batch_grad_ws = CudaMatrix.new(out_rows, out_cols)
+        end
+
+        input_workspace = @batch_in_ws
+        expected_workspace = @batch_out_ws
+        output_grad = @batch_grad_ws
       end
 
       batch.each do |sample|
@@ -975,9 +989,7 @@ module SHAInet
 
         # Explicit GPU memory cleanup after processing each sample
         # Force cleanup of temporary matrices created during forward/backward pass
-        if actual_matrix.is_a?(CudaMatrix)
-          CudaMatrix.return_workspace(actual_matrix.as(CudaMatrix))
-        end
+        # Persistent GPU buffers handle workspace reuse
 
         # Also clean up any temporary matrices created during gradient computation
         GC.collect
@@ -1006,16 +1018,6 @@ module SHAInet
       end
 
       update_transformer_layers if @transformer_layers.any?
-
-      if input_workspace
-        CudaMatrix.return_workspace(input_workspace)
-      end
-      if expected_workspace
-        CudaMatrix.return_workspace(expected_workspace)
-      end
-      if output_grad && output_grad.is_a?(CudaMatrix)
-        CudaMatrix.return_workspace(output_grad.as(CudaMatrix))
-      end
 
       batch_error
     end
