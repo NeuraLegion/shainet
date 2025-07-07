@@ -81,6 +81,10 @@ module SHAInet
       @cached_expanded_grad = nil
       @cached_seq_len = 0
       @cached_d_model = 0
+
+      @batch_in_ws = nil
+      @batch_out_ws = nil
+      @batch_grad_ws = nil
     end
 
     # Create and populate a layer

@@ -11,6 +11,9 @@ module SHAInet
     @chunk_size : Int32
     @gpu_batches : Bool
     getter gpu_batches
+    @gpu_in_ws : Array(CudaMatrix) = [] of CudaMatrix
+    @gpu_out_ws : Array(CudaMatrix) = [] of CudaMatrix
+    @ws_batch_size : Int32 = 0
 
     # Reads data from `path`. The file is buffered in chunks to avoid loading
     # everything into memory. When `shuffle` is true the buffer is shuffled at
@@ -39,19 +42,44 @@ module SHAInet
 
       return batch unless @gpu_batches && CUDA.fully_available?
 
+      # Determine matrix dimensions from first sample
+      if batch.empty?
+        return [] of Array(CudaMatrix)
+      end
+
+      first_in = batch.first[0]
+      first_out = batch.first[1]
+
+      get_dims = ->(d : Datum) do
+        if d.is_a?(Array(Array(Float64)))
+          {d.size, d.first.size}
+        else
+          {1, d.as(Array(Float64)).size}
+        end
+      end
+
+      in_rows, in_cols = get_dims.call(first_in)
+      out_rows, out_cols = get_dims.call(first_out)
+
+      # Reallocate persistent buffers when batch size or dimensions change
+      if @gpu_in_ws.empty? || @ws_batch_size != batch_size ||
+         @gpu_in_ws.first.rows != in_rows || @gpu_in_ws.first.cols != in_cols ||
+         @gpu_out_ws.first.rows != out_rows || @gpu_out_ws.first.cols != out_cols
+        @gpu_in_ws = Array(CudaMatrix).new(batch_size) { CudaMatrix.new(in_rows, in_cols) }
+        @gpu_out_ws = Array(CudaMatrix).new(batch_size) { CudaMatrix.new(out_rows, out_cols) }
+        @ws_batch_size = batch_size
+      end
+
       gpu_batch = [] of Array(CudaMatrix)
 
-      batch.each do |ex|
-        inp = to_matrix(ex[0])
-        out_m = to_matrix(ex[1])
+      batch.each_with_index do |ex, idx|
+        inp = ex[0]
+        out_m = ex[1]
 
-        in_ws = CudaMatrix.get_workspace(inp.rows, inp.cols, "stream_in")
-        out_ws = CudaMatrix.get_workspace(out_m.rows, out_m.cols, "stream_out")
+        GPUMemory.to_gpu!(inp, @gpu_in_ws[idx])
+        GPUMemory.to_gpu!(out_m, @gpu_out_ws[idx])
 
-        GPUMemory.to_gpu!(inp, in_ws)
-        GPUMemory.to_gpu!(out_m, out_ws)
-
-        gpu_batch << [in_ws, out_ws]
+        gpu_batch << [@gpu_in_ws[idx], @gpu_out_ws[idx]]
       end
 
       gpu_batch
