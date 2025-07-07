@@ -618,6 +618,9 @@ module SHAInet
       verify_net_before_train
 
       stream = data.is_a?(SHAInet::StreamingData) ? data : nil
+      if data.is_a?(SHAInet::TrainingData) && data.preload_gpu? && CUDA.fully_available?
+        data.preload_gpu!
+      end
       # Convert TrainingData to raw data array
       raw_data = if data.is_a?(SHAInet::TrainingData)
                    data.data
@@ -771,18 +774,21 @@ module SHAInet
       output_grad : SimpleMatrix | CudaMatrix | Nil = nil
 
       if CUDA.fully_available?
-        if @batch_in_ws.nil? || @batch_in_ws.not_nil!.rows != in_rows || @batch_in_ws.not_nil!.cols != in_cols
-          @batch_in_ws = CudaMatrix.new(in_rows, in_cols)
+        if !first_input.is_a?(CudaMatrix)
+          if @batch_in_ws.nil? || @batch_in_ws.not_nil!.rows != in_rows || @batch_in_ws.not_nil!.cols != in_cols
+            @batch_in_ws = CudaMatrix.new(in_rows, in_cols)
+          end
+          input_workspace = @batch_in_ws
         end
-        if @batch_out_ws.nil? || @batch_out_ws.not_nil!.rows != out_rows || @batch_out_ws.not_nil!.cols != out_cols
-          @batch_out_ws = CudaMatrix.new(out_rows, out_cols)
+        if !first_output.is_a?(CudaMatrix)
+          if @batch_out_ws.nil? || @batch_out_ws.not_nil!.rows != out_rows || @batch_out_ws.not_nil!.cols != out_cols
+            @batch_out_ws = CudaMatrix.new(out_rows, out_cols)
+          end
+          expected_workspace = @batch_out_ws
         end
         if @batch_grad_ws.nil? || @batch_grad_ws.not_nil!.rows != out_rows || @batch_grad_ws.not_nil!.cols != out_cols
           @batch_grad_ws = CudaMatrix.new(out_rows, out_cols)
         end
-
-        input_workspace = @batch_in_ws
-        expected_workspace = @batch_out_ws
         output_grad = @batch_grad_ws
       end
 
@@ -988,11 +994,11 @@ module SHAInet
 
 
         # Return workspace matrices used for this sample
-        if input_matrix.is_a?(CudaMatrix)
+        if input_matrix.is_a?(CudaMatrix) && input_workspace && input_matrix.object_id == input_workspace.object_id
           CudaMatrix.return_workspace(input_matrix)
         end
-        if expected_output.is_a?(CudaMatrix)
-          CudaMatrix.return_workspace(expected_output)
+        if expected_matrix.is_a?(CudaMatrix) && expected_workspace && expected_matrix.object_id == expected_workspace.object_id
+          CudaMatrix.return_workspace(expected_matrix)
         end
       end
 
