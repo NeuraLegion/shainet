@@ -992,7 +992,6 @@ module SHAInet
         # Force cleanup of temporary matrices created during forward/backward pass
         # Persistent GPU buffers handle workspace reuse
 
-
         # Return workspace matrices used for this sample
         if input_matrix.is_a?(CudaMatrix) && input_workspace && input_matrix.object_id == input_workspace.object_id
           CudaMatrix.return_workspace(input_matrix)

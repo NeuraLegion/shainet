@@ -126,7 +126,6 @@ module SHAInet
         end
       end
 
-      Log.debug { "CudaMatrix.initialize: Attempting GPU memory allocation for #{@rows}x#{@cols} matrix (#{bytes} bytes). Current usage: #{@@active_matrices} matrices, #{@@total_gpu_memory_allocated} bytes" }
       @@allocation_attempts += 1
 
       ptr = Pointer(Float64).null
@@ -137,7 +136,6 @@ module SHAInet
         @gpu_memory_size = bytes
         @@total_gpu_memory_allocated += bytes
         @@active_matrices += 1
-        Log.debug { "CudaMatrix.initialize: Successfully allocated #{bytes} bytes GPU memory at #{ptr.address} for #{@rows}x#{@cols}. Total: #{@@active_matrices} matrices, #{@@total_gpu_memory_allocated} bytes" }
       else
         @@allocation_failures += 1
         Log.error { "CudaMatrix.initialize: GPU allocation failed with result #{result} for #{@rows}x#{@cols}. Total usage: #{@@active_matrices} matrices, #{@@total_gpu_memory_allocated} bytes" }
@@ -208,13 +206,11 @@ module SHAInet
       if dptr = @device_ptr
         unless dptr.null?
           begin
-            Log.debug { "CudaMatrix.finalize: Freeing #{@gpu_memory_size} bytes GPU memory at #{dptr.address} for #{@rows}x#{@cols}" }
             CUDA.free(dptr.as(Pointer(Void)))
             @@total_gpu_memory_allocated -= @gpu_memory_size
             @@active_matrices -= 1
             @device_ptr = Pointer(Float64).null
             @gpu_memory_size = 0_u64
-            Log.debug { "CudaMatrix.finalize: Freed GPU memory. Remaining: #{@@active_matrices} matrices, #{@@total_gpu_memory_allocated} bytes" }
           rescue ex
             Log.warn { "CudaMatrix.finalize: Failed to free GPU memory for #{@rows}x#{@cols}: #{ex}" }
           end
@@ -271,8 +267,6 @@ module SHAInet
       return unless dptr = @device_ptr
       return if dptr.null?
 
-      Log.debug { "CudaMatrix.sync_to_device!: Syncing #{@rows}x#{@cols} matrix to GPU at #{dptr.address}" }
-
       begin
         # Use regular memory for host-device transfer (avoiding pinned memory limits)
         size = @rows * @cols
@@ -296,7 +290,6 @@ module SHAInet
           Log.error { "CudaMatrix.sync_to_device!: GPU memcpy failed with result #{copy_result} for #{@rows}x#{@cols}" }
           @device_ptr = Pointer(Float64).null
         else
-          Log.debug { "CudaMatrix.sync_to_device!: Successfully synced #{@rows}x#{@cols} to GPU" }
           mark_device_clean!
         end
       rescue ex : Exception
@@ -400,8 +393,6 @@ module SHAInet
       raise ArgumentError.new("size mismatch for multiplication") unless @cols == other.rows
       raise RuntimeError.new("GPU multiplication requires valid device pointers") unless (ptr_a = self.device_ptr) && (ptr_b = other.device_ptr) && !ptr_a.null? && !ptr_b.null?
 
-      Log.debug { "CudaMatrix.*: Multiplying #{@rows}x#{@cols} * #{other.rows}x#{other.cols}" }
-
       # Ensure both operands have up-to-date GPU data
       self.sync_to_device!("matrix_multiply") unless device_dirty?
       other.sync_to_device!("matrix_multiply") unless other.device_dirty?
@@ -424,7 +415,6 @@ module SHAInet
 
       # Mark result as having newer GPU data
       result.mark_device_dirty!
-      Log.debug { "CudaMatrix.*: GPU matrix multiplication completed successfully" }
       result
     end
 
@@ -447,7 +437,7 @@ module SHAInet
           CUDNN.element_add!(result, self, other, 1.0, 1.0)
           return result
         rescue e : Exception
-          Log.debug { "cuDNN element_add failed: #{e}, falling back to cuBLAS" }
+          Log.error { "cuDNN element_add failed: #{e}, falling back to cuBLAS" }
         end
       end
 
@@ -529,7 +519,7 @@ module SHAInet
           CUDNN.element_add!(self, self, other, 1.0, 1.0)
           return self
         rescue e : Exception
-          Log.debug { "cuDNN element_add failed: #{e}, falling back to cuBLAS" }
+          Log.error { "cuDNN element_add failed: #{e}, falling back to cuBLAS" }
         end
       end
 
@@ -632,7 +622,7 @@ module SHAInet
           CUDNN.add_bias!(self, bias)
           return self
         rescue e : Exception
-          Log.debug { "cuDNN add_bias failed: #{e}, falling back to CUDA kernel" }
+          Log.error { "cuDNN add_bias failed: #{e}, falling back to CUDA kernel" }
         end
       end
 
@@ -658,7 +648,7 @@ module SHAInet
           CUDNN.relu_forward(self, self)
           return self
         rescue e : Exception
-          Log.debug { "cuDNN ReLU failed: #{e}, falling back to CUDA kernel" }
+          Log.error { "cuDNN ReLU failed: #{e}, falling back to CUDA kernel" }
         end
       end
 
@@ -738,7 +728,6 @@ module SHAInet
     def cleanup!
       if dptr = @device_ptr
         unless dptr.null?
-          Log.debug { "CudaMatrix.cleanup!: Explicitly freeing #{@gpu_memory_size} bytes GPU memory at #{dptr.address} for #{@rows}x#{@cols}" }
           CUDA.free(dptr.as(Pointer(Void)))
           @@total_gpu_memory_allocated -= @gpu_memory_size
           @@active_matrices -= 1
@@ -799,7 +788,7 @@ module SHAInet
           CUDNN.sigmoid_forward!(self, self)
           return self
         rescue e : Exception
-          Log.debug { "cuDNN sigmoid failed: #{e}, falling back to CUDA kernel" }
+          Log.error { "cuDNN sigmoid failed: #{e}, falling back to CUDA kernel" }
         end
       end
 
@@ -879,7 +868,7 @@ module SHAInet
           CUDNN.softmax_rows(self, self)
           return self
         rescue e : Exception
-          Log.debug { "cuDNN softmax failed: #{e}, falling back to CUDA kernel" }
+          Log.error { "cuDNN softmax failed: #{e}, falling back to CUDA kernel" }
         end
       end
 
@@ -891,7 +880,7 @@ module SHAInet
           mark_device_dirty!
           return self
         rescue e : Exception
-          Log.debug { "CUDA softmax kernel failed: #{e}, falling back to CPU" }
+          Log.error { "CUDA softmax kernel failed: #{e}, falling back to CPU" }
         end
       end
 
@@ -931,11 +920,9 @@ module SHAInet
       if matrix = pool.pop?
         # Reuse existing matrix - zero it out for cleanliness
         matrix.zero!
-        Log.debug { "CudaMatrix.get_workspace: Reused #{key} matrix from pool (pool size: #{pool.size})" }
         matrix
       else
         # Create new matrix
-        Log.debug { "CudaMatrix.get_workspace: Created new #{key} matrix (pool empty)" }
         new(rows, cols)
       end
     end
@@ -950,9 +937,6 @@ module SHAInet
       # Only pool if we haven't exceeded the limit
       if pool.size < @@max_pool_size
         pool << matrix
-        Log.debug { "CudaMatrix.return_workspace: Returned #{key} matrix to pool (pool size: #{pool.size})" }
-      else
-        Log.debug { "CudaMatrix.return_workspace: Pool full for #{key}, not caching" }
       end
     end
 
@@ -963,7 +947,6 @@ module SHAInet
         total_freed += pool.size
         pool.clear
       end
-      Log.debug { "CudaMatrix.clear_workspace_pool: Cleared #{total_freed} pooled matrices" }
     end
 
     # Get pool statistics
@@ -1041,7 +1024,7 @@ module SHAInet
           CUDNN.element_multiply!(self, self, other, alpha, beta)
           return self
         rescue e : Exception
-          Log.debug { "cuDNN element_mul failed: #{e}, falling back to CPU" }
+          Log.error { "cuDNN element_mul failed: #{e}, falling back to CPU" }
         end
       end
 
@@ -1071,7 +1054,7 @@ module SHAInet
           CUDNN.dropout_forward!(self, self, prob, seed)
           return self
         rescue e : Exception
-          Log.debug { "cuDNN dropout failed: #{e}, falling back to custom kernel or CPU" }
+          Log.error { "cuDNN dropout failed: #{e}, falling back to custom kernel or CPU" }
         end
       end
 
@@ -1085,7 +1068,7 @@ module SHAInet
             return self
           end
         rescue e : Exception
-          Log.debug { "CUDA dropout kernel failed: #{e}, falling back to CPU" }
+          Log.error { "CUDA dropout kernel failed: #{e}, falling back to CPU" }
         end
       end
 
@@ -1110,7 +1093,7 @@ module SHAInet
           CUDNN.tanh_forward!(self, self)
           return self
         rescue e : Exception
-          Log.debug { "cuDNN tanh failed: #{e}, falling back to CPU" }
+          Log.error { "cuDNN tanh failed: #{e}, falling back to CPU" }
         end
       end
 

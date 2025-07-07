@@ -10,15 +10,11 @@ module SHAInet
           self.sync_to_device! unless device_dirty?
 
           # Verify source data
-          Log.debug { "Softmax source data verification" }
           test_buf = Array(Float64).new(@rows * @cols, 0.0)
           CUDA.memcpy(test_buf.to_unsafe.as(Pointer(Void)),
             dptr.as(Pointer(Void)),
             (@rows * @cols * 8).to_u64,
             CUDA::MemcpyKind::DeviceToHost)
-
-          # Log a sample of the source data
-          Log.debug { "Source data sample: #{test_buf[0...4].join(", ")}" }
 
           # Ensure result is zeroed
           zeroes = Array(Float64).new(@rows * @cols, 0.0)
@@ -28,7 +24,6 @@ module SHAInet
             CUDA::MemcpyKind::HostToDevice)
 
           # Run the kernel
-          Log.debug { "Running CUDA softmax_rows with rows=#{@rows}, cols=#{@cols}" }
           CUDA.softmax_rows(rptr, dptr, @rows, @cols)
 
           # Check result data
@@ -37,9 +32,6 @@ module SHAInet
             rptr.as(Pointer(Void)),
             (@rows * @cols * 8).to_u64,
             CUDA::MemcpyKind::DeviceToHost)
-
-          # Log a sample of the result data
-          Log.debug { "Result data sample: #{test_result[0...4].join(", ")}" }
 
           # Check if all results are zero
           if test_result.all? { |v| v == 0.0 }

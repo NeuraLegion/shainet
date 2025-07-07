@@ -2,6 +2,7 @@ require "./spec_helper"
 
 describe SHAInet::CudaMatrix do
   it "mirrors SimpleMatrix operations" do
+    pending! "CUDA not available" unless SHAInet::CUDA.available?
     a = SHAInet::GPUMemory.to_gpu(SHAInet::SimpleMatrix.from_a([[1, 2], [3, 4]]))
     b = SHAInet::GPUMemory.to_gpu(SHAInet::SimpleMatrix.from_a([[1, 0], [0, 1]]))
 
@@ -17,6 +18,7 @@ describe SHAInet::CudaMatrix do
   end
 
   it "performs relu and add_bias on GPU when available" do
+    pending! "CUDA not available" unless SHAInet::CUDA.available?
     matrix = SHAInet::GPUMemory.to_gpu(SHAInet::SimpleMatrix.from_a([[-1, 2], [-3, 4]]))
     bias = SHAInet::GPUMemory.to_gpu(SHAInet::SimpleMatrix.from_a([[1, 1]]))
 

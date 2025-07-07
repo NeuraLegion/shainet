@@ -29,16 +29,16 @@ puts "Training the tokenizer on the dataset..."
 # Train tokenizer and encode text
 vocab_size = 10000 # Much smaller vocab for faster training
 tokenizer = SHAInet::BPETokenizer.new
-tokenizer.train(text[0..100000], vocab_size) # Much smaller dataset
-ids = tokenizer.encode(text[0..100000])
+tokenizer.train(text, vocab_size) # Much smaller dataset
+ids = tokenizer.encode(text)
 
 puts "Tokenizer trained with #{tokenizer.vocab.size} tokens."
 puts "Dataset size: #{ids.size} tokens"
 
 puts "Building the network..."
 # Build the network with much smaller dimensions for fast debugging
-d_model = 64 # Much smaller model dimension
-seq_len = 16  # Shorter sequences
+d_model = 64
+seq_len = 16
 token_count = tokenizer.vocab.size
 net = SHAInet::Network.new
 net.add_layer(:input, 1, SHAInet.none)

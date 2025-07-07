@@ -147,10 +147,12 @@ module SHAInet
     end
 
     def malloc(ptr : Pointer(Pointer(Void)), size : LibC::SizeT)
-      Log.debug { "CUDA.malloc: Attempting allocation of #{size} bytes" }
-      result = LibCUDARuntime.cudaMalloc(ptr, size)
-      Log.debug { "CUDA.malloc: cudaMalloc returned #{result}, ptr=#{ptr.value.null? ? "null" : "valid"}" }
-      result
+      rslt = LibCUDARuntime.cudaMalloc(ptr, size)
+      unless rslt.zero?
+        Log.error { "CUDA.malloc: cudaMalloc failed with result #{rslt} for size #{size}" }
+        raise "CUDA memory allocation failed"
+      end
+      rslt
     end
 
     def free(ptr : Pointer(Void))
@@ -166,9 +168,11 @@ module SHAInet
     end
 
     def malloc_host(ptr : Pointer(Pointer(Void)), size : LibC::SizeT)
-      Log.debug { "CUDA.malloc_host: Attempting pinned allocation of #{size} bytes" }
       result = LibCUDARuntime.cudaMallocHost(ptr, size)
-      Log.debug { "CUDA.malloc_host: cudaMallocHost returned #{result}, ptr=#{ptr.value.null? ? "null" : "valid"}" }
+      unless result.zero?
+        Log.error { "CUDA.malloc_host: cudaMallocHost failed with result #{result} for size #{size}" }
+        raise "CUDA host memory allocation failed"
+      end
       result
     end
 
@@ -507,9 +511,6 @@ module SHAInet
         return
       end
 
-      # Add detailed logging for transpose operations
-      Log.debug { "CUDA transpose: output=#{output.address}, input=#{input.address}, rows=#{rows}, cols=#{cols}, size=#{rows*cols}" }
-
       unless fn = @@transpose_proc
         if @@kernels_handle.null?
           @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
@@ -526,7 +527,6 @@ module SHAInet
 
       begin
         fn.call(output, input, rows, cols)
-        Log.debug { "CUDA transpose completed successfully" }
       rescue e
         Log.error { "CUDA Error in transpose: #{e}, output=#{output.address}, input=#{input.address}, rows=#{rows}, cols=#{cols}" }
         Log.warn { "Falling back to CPU transpose due to GPU error" }
@@ -594,7 +594,6 @@ module SHAInet
       end
 
       # Add detailed logging for zero_matrix operations
-      Log.debug { "CUDA zero_matrix: matrix=#{matrix.address}, size=#{size}" }
 
       unless fn = @@zero_matrix_proc
         if @@kernels_handle.null?
@@ -612,7 +611,6 @@ module SHAInet
 
       begin
         fn.call(matrix, size)
-        Log.debug { "CUDA zero_matrix completed successfully" }
       rescue e
         Log.error { "CUDA Error in zero_matrix: #{e}, matrix=#{matrix.address}, size=#{size}" }
         raise e

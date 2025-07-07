@@ -115,7 +115,7 @@ module SHAInet
     # GPU path backward
     def backward(d_out : CudaMatrix) : CudaMatrix
       w2_gpu = @w2.as(CudaMatrix)
- 
+
       w2_t = CudaMatrix.get_workspace(w2_gpu.cols, w2_gpu.rows, "pw_w2_t")
       w2_gpu.transpose_into!(w2_t)
 
