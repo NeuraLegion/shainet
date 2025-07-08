@@ -35,7 +35,10 @@ module SHAInet
         @embeddings = @embeddings.as(SimpleMatrix).to_cuda
         @gradients = @gradients.as(SimpleMatrix).to_cuda
 
-        # Reset workspace so it gets allocated as CudaMatrix on next use
+        # Return existing workspace to pool and reset
+        if ws = @workspace_result
+          CudaMatrix.return_workspace(ws)
+        end
         @workspace_result = nil
         @last_ids_size = 0
       end
@@ -46,6 +49,11 @@ module SHAInet
       if @embeddings.is_a?(CudaMatrix)
         @embeddings = @embeddings.as(CudaMatrix).to_simple
         @gradients = @gradients.as(CudaMatrix).to_simple
+        if ws = @workspace_result
+          CudaMatrix.return_workspace(ws)
+        end
+        @workspace_result = nil
+        @last_ids_size = 0
       end
     end
 
@@ -242,12 +250,18 @@ module SHAInet
 
     # Pre-allocate or reuse workspace result matrix based on batch size
     private def ensure_workspace_result(ids_size : Int32)
-      if CUDA.fully_available?
-        # Only reallocate if batch size changed
-        if @last_ids_size != ids_size
-          @workspace_result = CudaMatrix.zeros(ids_size, @l_size)
-          @last_ids_size = ids_size
+      return unless CUDA.fully_available?
+
+      # Only reallocate if batch size changed
+      if @last_ids_size != ids_size
+        if ws = @workspace_result
+          CudaMatrix.return_workspace(ws)
         end
+
+        @workspace_result = CudaMatrix.get_workspace(ids_size, @l_size, "embed_ws")
+        @workspace_result.not_nil!.zero!
+
+        @last_ids_size = ids_size
       end
     end
   end
