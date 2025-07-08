@@ -55,6 +55,6 @@ module SHAInet
   }
 
   log_level = (ENV["LOG_LEVEL"]? || "info")
-
-  ::Log.setup(lvl[log_level.downcase])
+  iobackend = ::Log::IOBackend.new(io: STDOUT, dispatcher: ::Log::DispatchMode::Sync)
+  ::Log.setup(lvl[log_level.downcase], backend: iobackend)
 end

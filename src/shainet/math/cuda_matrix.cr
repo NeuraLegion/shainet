@@ -78,22 +78,22 @@ module SHAInet
     end
 
     def self.print_detailed_stats
-      Log.info { "GPU Memory Statistics:" }
-      Log.info { "  Total attempts: #{@@allocation_attempts}" }
-      Log.info { "  Failed attempts: #{@@allocation_failures}" }
-      Log.info { "  Success rate: #{@@allocation_attempts > 0 ? (100.0 * (@@allocation_attempts - @@allocation_failures) / @@allocation_attempts).round(2) : 0}%" }
-      Log.info { "  Active matrices: #{@@active_matrices}" }
-      Log.info { "  Total GPU memory: #{@@total_gpu_memory_allocated} bytes (#{(@@total_gpu_memory_allocated / 1024.0 / 1024.0).round(2)} MB)" }
-      Log.info { "  Memory limit: #{@@max_gpu_memory} bytes (#{(@@max_gpu_memory / 1024.0 / 1024.0).round(2)} MB)" }
-      Log.info { "  Usage %: #{(100.0 * @@total_gpu_memory_allocated / @@max_gpu_memory).round(2)}%" }
-      Log.info { "  Average size per matrix: #{@@active_matrices > 0 ? (@@total_gpu_memory_allocated / @@active_matrices).round(2) : 0} bytes" }
-      Log.info { "Allocation sites (top 20): #{SHAInet::CudaMatrix.print_top_allocation_sites(20)} " }
+      Log.debug { "GPU Memory Statistics:" }
+      Log.debug { "  Total attempts: #{@@allocation_attempts}" }
+      Log.debug { "  Failed attempts: #{@@allocation_failures}" }
+      Log.debug { "  Success rate: #{@@allocation_attempts > 0 ? (100.0 * (@@allocation_attempts - @@allocation_failures) / @@allocation_attempts).round(2) : 0}%" }
+      Log.debug { "  Active matrices: #{@@active_matrices}" }
+      Log.debug { "  Total GPU memory: #{@@total_gpu_memory_allocated} bytes (#{(@@total_gpu_memory_allocated / 1024.0 / 1024.0).round(2)} MB)" }
+      Log.debug { "  Memory limit: #{@@max_gpu_memory} bytes (#{(@@max_gpu_memory / 1024.0 / 1024.0).round(2)} MB)" }
+      Log.debug { "  Usage %: #{(100.0 * @@total_gpu_memory_allocated / @@max_gpu_memory).round(2)}%" }
+      Log.debug { "  Average size per matrix: #{@@active_matrices > 0 ? (@@total_gpu_memory_allocated / @@active_matrices).round(2) : 0} bytes" }
+      Log.debug { "Allocation sites (top 20): #{SHAInet::CudaMatrix.print_top_allocation_sites(20)} " }
     end
 
     def self.print_top_allocation_sites(limit = 20)
-      Log.info { "Top CudaMatrix allocation sites:" }
+      Log.debug { "Top CudaMatrix allocation sites:" }
       @@allocation_sites.to_a.sort_by { |(_, v)| v }.reverse.first(limit).each do |site, count|
-        Log.info { "%6d  %s" % {count, site} }
+        Log.debug { "%6d  %s" % {count, site} }
       end
     end
 

@@ -1,6 +1,5 @@
 require "./spec_helper"
 
-
 # Use SHAInet.softmax for reference, matching main code logic
 private def cpu_softmax_cross_entropy_label(logits : SHAInet::SimpleMatrix, labels : Array(Int32))
   rows = logits.rows
@@ -29,7 +28,6 @@ describe "CUDA softmax cross entropy with labels" do
     logits = SHAInet::SimpleMatrix.from_a([[1.0, 2.0, 0.5], [0.1, -1.0, 0.3]])
     labels = [1, 0]
     ref = cpu_softmax_cross_entropy_label(logits, labels)
-
 
     # Ensure logits are synced to device and not overwritten
     g_pred = SHAInet::GPUMemory.to_gpu(logits).as(SHAInet::CudaMatrix)

@@ -592,7 +592,6 @@ module SHAInet
       raise "Label rows must match predictions" unless labels.rows == predicted.rows
       raise "Gradient output must have same dimensions as predicted" unless grad_output.rows == predicted.rows && grad_output.cols == predicted.cols
 
-
       # Do NOT compute softmax into grad_output before calling the kernel!
       # The kernel expects logits as input and writes softmax/grad to grad_output.
 

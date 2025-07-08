@@ -828,7 +828,7 @@ module SHAInet
       if first_output.is_a?(Array) && first_output.as(Array).size == 1 &&
          !first_output.as(Array)[0].is_a?(Array) && @output_layers.last.is_a?(MatrixLayer)
         if !(CUDA.fully_available? && CUDNN.available? &&
-             @output_layers.last.as(MatrixLayer).size > 1)
+           @output_layers.last.as(MatrixLayer).size > 1)
           label = first_output.as(Array).first.as(GenNum).to_i
           oh = Array(Float64).new(@output_layers.last.as(MatrixLayer).size, 0.0)
           oh[label] = 1.0 if label >= 0 && label < oh.size
@@ -886,7 +886,7 @@ module SHAInet
         if expected_output.is_a?(Array) && expected_output.as(Array).size == 1 &&
            !expected_output.as(Array)[0].is_a?(Array) && @output_layers.last.is_a?(MatrixLayer)
           if !(CUDA.fully_available? && CUDNN.available? &&
-               @output_layers.last.as(MatrixLayer).size > 1)
+             @output_layers.last.as(MatrixLayer).size > 1)
             label = expected_output.as(Array).first.as(GenNum).to_i
             oh = Array(Float64).new(@output_layers.last.as(MatrixLayer).size, 0.0)
             oh[label] = 1.0 if label >= 0 && label < oh.size

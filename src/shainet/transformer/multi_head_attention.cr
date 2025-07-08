@@ -57,7 +57,6 @@ module SHAInet
     # Workspace slices of d_concat for each head
     @d_concat_slices_ws : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
 
-
     @last_batch_size : Int32
 
     getter w_q, w_k, w_v, w_o
@@ -682,7 +681,6 @@ module SHAInet
           @scores_t_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @scores_t_ws.any?
           @d_concat_slices_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @d_concat_slices_ws.any?
 
-
           # Allocate new workspaces for current batch size
           @workspace_concat = CudaMatrix.get_workspace(batch_size, @d_model, "mha_concat_ws")
           @workspace_d_q_concat = CudaMatrix.get_workspace(batch_size, @d_model, "mha_d_q_concat_ws")
@@ -706,7 +704,6 @@ module SHAInet
           @v_t_ws = Array(CudaMatrix | Nil).new(@num_heads, nil)
           @scores_t_ws = Array(CudaMatrix | Nil).new(@num_heads, nil)
           @d_concat_slices_ws = Array(CudaMatrix | Nil).new(@num_heads, nil)
-
 
           @num_heads.times do |h|
             @workspace_scores[h] = CudaMatrix.new(batch_size, batch_size)     # scores matrix

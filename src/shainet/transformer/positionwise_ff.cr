@@ -206,7 +206,6 @@ module SHAInet
 
       drelu = relu_grad(@h.as(SimpleMatrix), dh, dh)
 
-
       # For SimpleMatrix, still need to create temporary (no in-place add for SimpleMatrix yet)
       temp_grad_w1 = @x.not_nil!.as(SimpleMatrix).transpose * drelu
       @g_w1 = @g_w1.as(SimpleMatrix) + temp_grad_w1
