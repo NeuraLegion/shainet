@@ -584,6 +584,47 @@ module SHAInet
       grad_output.mark_device_dirty!
     end
 
+    # GPU-optimized softmax + cross-entropy using label indices.
+    # +labels+ should be a column vector (rows x 1) containing integer class indices.
+    def self.softmax_cross_entropy_label_loss_and_gradient(predicted : CudaMatrix, labels : CudaMatrix,
+                                                           loss : Float64*, grad_output : CudaMatrix)
+      raise "Labels must have one column" unless labels.cols == 1
+      raise "Label rows must match predictions" unless labels.rows == predicted.rows
+      raise "Gradient output must have same dimensions as predicted" unless grad_output.rows == predicted.rows && grad_output.cols == predicted.cols
+
+      # Compute softmax probabilities into grad_output
+      softmax_rows(predicted, grad_output)
+
+      # Pull labels to host as Int32 array
+      labels.sync_from_device!("sm_xent_labels") if labels.device_dirty?
+      label_ids = Array(Int32).new(labels.rows) do |i|
+        labels.unsafe_get(i, 0).to_i
+      end
+
+      bytes = (label_ids.size * 4).to_u64
+      labels_dev = Pointer(Int32).null
+      CUDA.malloc(pointerof(labels_dev).as(Pointer(Pointer(Void))), bytes)
+      begin
+        CUDA.memcpy(labels_dev.as(Pointer(Void)), label_ids.to_unsafe.as(Pointer(Void)), bytes, CUDA::MemcpyKind::HostToDevice)
+
+        # Compute cross-entropy using CUDA kernel
+        result = CUDA.softmax_cross_entropy_label(
+          grad_output.device_ptr.not_nil!,
+          labels_dev,
+          grad_output.device_ptr.not_nil!,
+          loss,
+          predicted.rows,
+          predicted.cols
+        )
+
+        raise "CUDA softmax cross-entropy label failed" if result != 0
+      ensure
+        CUDA.free(labels_dev.as(Pointer(Void))) unless labels_dev.null?
+      end
+
+      grad_output.mark_device_dirty!
+    end
+
     # Element-wise operations using cuDNN OpTensor
     def self.element_multiply!(output : CudaMatrix, a : CudaMatrix, b : CudaMatrix, alpha : Float64 = 1.0, beta : Float64 = 0.0)
       raise "Matrices must have same dimensions" unless a.rows == b.rows && a.cols == b.cols && output.rows == a.rows && output.cols == a.cols
