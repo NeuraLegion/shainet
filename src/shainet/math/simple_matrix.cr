@@ -237,5 +237,25 @@ module SHAInet
       result.sync_to_device!("simple_to_cuda_conversion")
       result
     end
+
+    # Apply softmax to each row in-place.
+    def softmax_rows!
+      @rows.times do |i|
+        row_max = -Float64::INFINITY
+        @cols.times { |j| row_max = Math.max(row_max, self[i, j]) }
+
+        row_sum = 0.0
+        @cols.times do |j|
+          val = Math.exp(self[i, j] - row_max)
+          self[i, j] = val
+          row_sum += val
+        end
+
+        @cols.times do |j|
+          self[i, j] = self[i, j] / row_sum
+        end
+      end
+      self
+    end
   end
 end
