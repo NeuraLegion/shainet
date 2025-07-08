@@ -35,6 +35,8 @@ module SHAInet
     @workspace_d_x_q : CudaMatrix | Nil
     @workspace_d_x_k : CudaMatrix | Nil
     @workspace_d_x_v : CudaMatrix | Nil
+    # Persistent workspace for transposed input
+    @workspace_x_t : CudaMatrix | Nil
 
     # Workspace matrices for attention computation (per head)
     @workspace_scores : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
@@ -93,6 +95,7 @@ module SHAInet
       @workspace_d_x_q = nil
       @workspace_d_x_k = nil
       @workspace_d_x_v = nil
+      @workspace_x_t = nil
       @workspace_k_transposed = [] of (CudaMatrix | Nil)
       @workspace_q_transposed = [] of (CudaMatrix | Nil)
       @d_v_temp_ws = [] of (CudaMatrix | Nil)
@@ -135,14 +138,15 @@ module SHAInet
         @workspace_concat = nil
         @workspace_d_q_concat = nil
         @workspace_d_k_concat = nil
-        @workspace_d_v_concat = nil
-        @workspace_d_x_q = nil
-        @workspace_d_x_k = nil
-        @workspace_d_x_v = nil
-        @workspace_k_transposed = [] of (CudaMatrix | Nil)
-        @workspace_q_transposed = [] of (CudaMatrix | Nil)
-        @d_v_temp_ws = [] of (CudaMatrix | Nil)
-        @d_attn_temp_ws = [] of (CudaMatrix | Nil)
+      @workspace_d_v_concat = nil
+      @workspace_d_x_q = nil
+      @workspace_d_x_k = nil
+      @workspace_d_x_v = nil
+      @workspace_x_t = nil
+      @workspace_k_transposed = [] of (CudaMatrix | Nil)
+      @workspace_q_transposed = [] of (CudaMatrix | Nil)
+      @d_v_temp_ws = [] of (CudaMatrix | Nil)
+      @d_attn_temp_ws = [] of (CudaMatrix | Nil)
         @d_scores_temp_ws = [] of (CudaMatrix | Nil)
         @d_q_temp_ws = [] of (CudaMatrix | Nil)
         @d_k_temp_ws = [] of (CudaMatrix | Nil)
@@ -488,19 +492,18 @@ module SHAInet
           end
         end
 
-        # Use workspace pools for weight gradients
-        temp_grad_q = CudaMatrix.get_workspace(@d_model, @d_model, "mha_temp_grad_q")
-        temp_grad_k = CudaMatrix.get_workspace(@d_model, @d_model, "mha_temp_grad_k")
-        temp_grad_v = CudaMatrix.get_workspace(@d_model, @d_model, "mha_temp_grad_v")
+          # Use workspace pools for weight gradients
+          temp_grad_q = CudaMatrix.get_workspace(@d_model, @d_model, "mha_temp_grad_q")
+          temp_grad_k = CudaMatrix.get_workspace(@d_model, @d_model, "mha_temp_grad_k")
+          temp_grad_v = CudaMatrix.get_workspace(@d_model, @d_model, "mha_temp_grad_v")
 
-        begin
-          # Gradients w.r.t. projection weights - use in-place accumulation
-          x_t = CudaMatrix.get_workspace(x.cols, x.rows, "mha_x_t")
-          x.transpose_into!(x_t)
-          temp_grad_q.gemm!(x_t, d_q_concat)
-          temp_grad_k.gemm!(x_t, d_k_concat)
-          temp_grad_v.gemm!(x_t, d_v_concat)
-          CudaMatrix.return_workspace(x_t)
+          begin
+            # Gradients w.r.t. projection weights - use persistent workspace
+            x_t = @workspace_x_t.not_nil!
+            x.transpose_into!(x_t)
+            temp_grad_q.gemm!(x_t, d_q_concat)
+            temp_grad_k.gemm!(x_t, d_k_concat)
+            temp_grad_v.gemm!(x_t, d_v_concat)
 
           @g_w_q.as(CudaMatrix).add!(temp_grad_q)
           @g_w_k.as(CudaMatrix).add!(temp_grad_k)
@@ -669,6 +672,9 @@ module SHAInet
           if ws = @workspace_d_x_v
             CudaMatrix.return_workspace(ws)
           end
+          if ws = @workspace_x_t
+            CudaMatrix.return_workspace(ws)
+          end
 
           # Return cached backward workspaces
           @d_v_temp_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @d_v_temp_ws.any?
@@ -689,6 +695,7 @@ module SHAInet
           @workspace_d_x_q = CudaMatrix.get_workspace(batch_size, @d_model, "mha_d_x_q_ws")
           @workspace_d_x_k = CudaMatrix.get_workspace(batch_size, @d_model, "mha_d_x_k_ws")
           @workspace_d_x_v = CudaMatrix.get_workspace(batch_size, @d_model, "mha_d_x_v_ws")
+          @workspace_x_t = CudaMatrix.get_workspace(@d_model, batch_size, "mha_x_t_ws")
 
           # Allocate workspace matrices for each attention head
           @workspace_scores = Array(CudaMatrix | Nil).new(@num_heads, nil)
