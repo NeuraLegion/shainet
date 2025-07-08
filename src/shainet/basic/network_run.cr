@@ -525,6 +525,10 @@ module SHAInet
       logits = run(matrix, stealth: true)
 
       if logits.is_a?(CudaMatrix)
+        if label < 0 || label >= logits.cols
+          raise NeuralNetRunError.new("Label #{label} out of bounds for output size #{logits.cols}")
+        end
+
         target = CudaMatrix.zeros(1, logits.cols)
         target[0, label] = 1.0
         target.sync_to_device!
@@ -589,6 +593,10 @@ module SHAInet
       logits = run(matrix, stealth: true)
 
       if logits.is_a?(CudaMatrix)
+        if label < 0 || label >= logits.cols
+          raise NeuralNetRunError.new("Label #{label} out of bounds for output size #{logits.cols}")
+        end
+
         target = CudaMatrix.zeros(1, logits.cols)
         target[0, label] = 1.0
         target.sync_to_device!
