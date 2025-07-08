@@ -1157,28 +1157,52 @@ module SHAInet
     # This method is only called when input is NOT already a matrix
     private def to_matrix(obj) : SimpleMatrix | CudaMatrix
       arr = obj.as(Array)
-      mat = if arr.size > 0 && arr[0].is_a?(Array)
-              # 2D array input
-              rows = arr.size
-              cols = arr[0].as(Array).size
-              SimpleMatrix.new(rows, cols).tap do |m|
-                rows.times do |i|
-                  cols.times do |j|
-                    m[i, j] = arr[i].as(Array)[j].as(GenNum).to_f64
+
+      # When CUDA is available, allocate CudaMatrix directly and
+      # populate it using unsafe_set to avoid an intermediate
+      # SimpleMatrix allocation.
+      if CUDA.fully_available?
+        if arr.size > 0 && arr[0].is_a?(Array)
+          rows = arr.size
+          cols = arr[0].as(Array).size
+          mat = CudaMatrix.new(rows, cols)
+          rows.times do |i|
+            cols.times do |j|
+              mat.unsafe_set(i, j, arr[i].as(Array)[j].as(GenNum).to_f64)
+            end
+          end
+          mat.sync_to_device!
+          mat
+        else
+          cols = arr.size
+          mat = CudaMatrix.new(1, cols)
+          cols.times do |i|
+            mat.unsafe_set(0, i, arr[i].as(GenNum).to_f64)
+          end
+          mat.sync_to_device!
+          mat
+        end
+      else
+        # CPU-only fallback uses SimpleMatrix as before
+        mat = if arr.size > 0 && arr[0].is_a?(Array)
+                rows = arr.size
+                cols = arr[0].as(Array).size
+                SimpleMatrix.new(rows, cols).tap do |m|
+                  rows.times do |i|
+                    cols.times do |j|
+                      m[i, j] = arr[i].as(Array)[j].as(GenNum).to_f64
+                    end
+                  end
+                end
+              else
+                SimpleMatrix.new(1, arr.size).tap do |m|
+                  arr.size.times do |i|
+                    m[0, i] = arr[i].as(GenNum).to_f64
                   end
                 end
               end
-            else
-              # 1D array input (convert to row vector)
-              SimpleMatrix.new(1, arr.size).tap do |m|
-                arr.size.times do |i|
-                  m[0, i] = arr[i].as(GenNum).to_f64
-                end
-              end
-            end
-
-      # Convert to GPU if available
-      GPUMemory.to_gpu(mat)
+        mat
+      end
     end
 
     def current_learning_rate
