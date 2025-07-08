@@ -272,7 +272,6 @@ module SHAInet
       return if dptr.null?
 
       begin
-        # Use regular memory for host-device transfer (avoiding pinned memory limits)
         size = @rows * @cols
         bytes = (size * 8).to_u64
 
@@ -281,14 +280,9 @@ module SHAInet
         @@total_sync_bytes_to_device += bytes
         self.class.track_sync("to_device:#{source}")
 
-        # Create a stable buffer that won't be moved by GC
-        buffer = Slice(Float64).new(size) do |i|
-          row = i // @cols
-          col = i % @cols
-          unsafe_get(row, col)
-        end
-
-        copy_result = CUDA.memcpy(dptr.as(Pointer(Void)), buffer.to_unsafe.as(Pointer(Void)), bytes, CUDA::MemcpyKind::HostToDevice)
+        # Directly copy from the matrix's backing array
+        slice = Slice.new(@data.to_unsafe, size)
+        copy_result = CUDA.memcpy(dptr.as(Pointer(Void)), slice.to_unsafe.as(Pointer(Void)), bytes, CUDA::MemcpyKind::HostToDevice)
 
         if copy_result != 0
           Log.error { "CudaMatrix.sync_to_device!: GPU memcpy failed with result #{copy_result} for #{@rows}x#{@cols}" }
@@ -316,16 +310,10 @@ module SHAInet
         @@total_sync_bytes_from_device += bytes
         self.class.track_sync("from_device:#{source}")
 
-        # Use regular memory copy (avoiding pinned memory limits)
-        buffer = Slice(Float64).new(size, 0.0)
-        copy_result = CUDA.memcpy(buffer.to_unsafe.as(Pointer(Void)), dptr.as(Pointer(Void)), bytes, CUDA::MemcpyKind::DeviceToHost)
+        slice = Slice.new(@data.to_unsafe, size)
+        copy_result = CUDA.memcpy(slice.to_unsafe.as(Pointer(Void)), dptr.as(Pointer(Void)), bytes, CUDA::MemcpyKind::DeviceToHost)
 
         if copy_result == 0
-          size.times do |i|
-            row = i // @cols
-            col = i % @cols
-            unsafe_set(row, col, buffer[i])
-          end
           mark_device_clean!
         else
           @device_ptr = Pointer(Float64).null
