@@ -24,6 +24,7 @@ module SHAInet
     @workspace_mean : CudaMatrix | Nil
     @workspace_var : CudaMatrix | Nil
     @workspace_norm : CudaMatrix | Nil
+    @workspace_result : CudaMatrix | Nil
     @workspace_d_x : CudaMatrix | Nil
     @workspace_d_gamma : CudaMatrix | Nil
     @workspace_d_beta : CudaMatrix | Nil
@@ -49,6 +50,7 @@ module SHAInet
       @workspace_mean = nil
       @workspace_var = nil
       @workspace_norm = nil
+      @workspace_result = nil
       @workspace_d_x = nil
       @workspace_d_gamma = nil
       @workspace_d_beta = nil
@@ -70,6 +72,7 @@ module SHAInet
         @workspace_mean = nil
         @workspace_var = nil
         @workspace_norm = nil
+        @workspace_result = nil
         @workspace_d_x = nil
         @workspace_d_gamma = nil
         @workspace_d_beta = nil
@@ -85,6 +88,7 @@ module SHAInet
           @workspace_mean = CudaMatrix.new(batch_size, 1)
           @workspace_var = CudaMatrix.new(batch_size, 1)
           @workspace_norm = CudaMatrix.new(batch_size, d_model)
+          @workspace_result = CudaMatrix.new(batch_size, d_model)
           @workspace_d_x = CudaMatrix.new(batch_size, d_model)
           @workspace_d_gamma = CudaMatrix.zeros(1, d_model)
           @workspace_d_beta = CudaMatrix.zeros(1, d_model)
@@ -106,6 +110,7 @@ module SHAInet
       cuda_mean = @workspace_mean.not_nil!
       cuda_var = @workspace_var.not_nil!
       cuda_norm = @workspace_norm.not_nil!
+      cuda_result = @workspace_result.not_nil!
 
       begin
         # Try to use CUDA kernels - if they fail, fallback to CPU
@@ -130,7 +135,8 @@ module SHAInet
         @norm = cuda_norm # Keep as CudaMatrix
 
         # Use in-place operations for better performance
-        result = cuda_norm.clone
+        result = cuda_result
+        result.copy_from!(cuda_norm)
         result.mul_row_vector!(@gamma.as(CudaMatrix))
         result.add_bias!(@beta.as(CudaMatrix))
         return result

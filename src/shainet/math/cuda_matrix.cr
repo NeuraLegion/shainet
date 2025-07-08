@@ -335,18 +335,24 @@ module SHAInet
       end
     end
 
-    def slice_cols(start_col : Int32, length : Int32)
-      # Create new matrix directly - slice operations create new views
-      result = CudaMatrix.new(@rows, length)
-      raise RuntimeError.new("GPU slice_cols requires valid device pointers") unless (sptr = self.device_ptr) && (dptr = result.device_ptr) && !sptr.null? && !dptr.null?
+    # Slice a range of columns into an existing destination matrix using the
+    # CUDA `slice_cols` kernel.
+    def slice_cols_into!(dest : CudaMatrix, start_col : Int32, length : Int32)
+      raise ArgumentError.new("size mismatch") unless dest.rows == @rows && dest.cols == length
+      raise RuntimeError.new("GPU slice_cols_into! requires valid device pointers") unless (sptr = self.device_ptr) && (dptr = dest.device_ptr) && !sptr.null? && !dptr.null?
 
-      # Ensure source has up-to-date GPU data
-      self.sync_to_device!("slice_cols") unless device_dirty?
+      # Ensure source data is on the GPU
+      self.sync_to_device!("slice_cols_into") unless device_dirty?
 
       CUDA.slice_cols(dptr, sptr, @rows, @cols, start_col, length)
 
-      # Mark result as having newer GPU data
-      result.mark_device_dirty!
+      dest.mark_device_dirty!
+      dest
+    end
+
+    def slice_cols(start_col : Int32, length : Int32)
+      result = CudaMatrix.new(@rows, length)
+      slice_cols_into!(result, start_col, length)
       result
     end
 
