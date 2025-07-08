@@ -264,5 +264,12 @@ module SHAInet
         @last_ids_size = ids_size
       end
     end
+
+    def finalize
+      if ws = @workspace_result
+        CudaMatrix.return_workspace(ws)
+        @workspace_result = nil
+      end
+    end
   end
 end
