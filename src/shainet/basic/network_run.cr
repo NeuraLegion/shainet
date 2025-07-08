@@ -1158,28 +1158,51 @@ module SHAInet
     private def to_matrix(obj) : SimpleMatrix | CudaMatrix
       arr = obj.as(Array)
 
-      # When CUDA is available, allocate CudaMatrix directly and
-      # populate it using unsafe_set to avoid an intermediate
-      # SimpleMatrix allocation.
+      # When CUDA is available, allocate CudaMatrix directly and copy the
+      # contiguous data buffer instead of filling element by element.
       if CUDA.fully_available?
         if arr.size > 0 && arr[0].is_a?(Array)
           rows = arr.size
           cols = arr[0].as(Array).size
           mat = CudaMatrix.new(rows, cols)
-          rows.times do |i|
-            cols.times do |j|
-              mat.unsafe_set(i, j, arr[i].as(Array)[j].as(GenNum).to_f64)
-            end
+
+          flat_slice = Slice(Float64).new(rows * cols) do |idx|
+            r = idx // cols
+            c = idx % cols
+            arr[r].as(Array)[c].as(GenNum).to_f64
           end
-          mat.sync_to_device!
+
+          if dptr = mat.device_ptr
+            CUDA.memcpy(
+              dptr.as(Pointer(Void)),
+              flat_slice.to_unsafe.as(Pointer(Void)),
+              (flat_slice.size * 8).to_u64,
+              CUDA::MemcpyKind::HostToDevice
+            )
+            mat.mark_device_dirty!
+          end
+
+          flat_slice.each_with_index { |v, i| mat.raw_data[i] = v }
+
           mat
         else
           cols = arr.size
           mat = CudaMatrix.new(1, cols)
-          cols.times do |i|
-            mat.unsafe_set(0, i, arr[i].as(GenNum).to_f64)
+
+          flat_slice = Slice(Float64).new(cols) { |i| arr[i].as(GenNum).to_f64 }
+
+          if dptr = mat.device_ptr
+            CUDA.memcpy(
+              dptr.as(Pointer(Void)),
+              flat_slice.to_unsafe.as(Pointer(Void)),
+              (flat_slice.size * 8).to_u64,
+              CUDA::MemcpyKind::HostToDevice
+            )
+            mat.mark_device_dirty!
           end
-          mat.sync_to_device!
+
+          flat_slice.each_with_index { |v, i| mat.raw_data[i] = v }
+
           mat
         end
       else
