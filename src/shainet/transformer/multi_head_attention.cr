@@ -214,16 +214,16 @@ module SHAInet
             scores_workspace.add!(m) # in-place addition
           end
 
-          # GPU-accelerated softmax
-          attn = SHAInet.softmax_rows(scores_workspace)
-          @attn << attn
+          # GPU-accelerated softmax in-place on workspace
+          scores_workspace.softmax_rows!
+          @attn << scores_workspace
 
           # Compute output for this head using workspace
           attn_output_workspace = @workspace_attn_output[h].not_nil!
           attn_output_workspace.zero!
 
           # Compute attention output directly into workspace
-          attn_output_workspace.gemm!(attn, vs)
+          attn_output_workspace.gemm!(scores_workspace, vs)
           outputs << attn_output_workspace
         end
 
@@ -297,12 +297,12 @@ module SHAInet
           scores = scores + m
         end
 
-        # CPU softmax
-        attn = SHAInet.softmax_rows(scores)
-        @attn << attn
+        # CPU softmax in-place
+        scores.softmax_rows!
+        @attn << scores
 
         # Compute output for this head
-        outputs << (attn * vs)
+        outputs << (scores * vs)
       end
 
       # Concatenate heads - CPU

@@ -258,6 +258,14 @@ module SHAInet
     m.softmax_rows
   end
 
+  def self.softmax_rows!(m : SimpleMatrix)
+    m.softmax_rows!
+  end
+
+  def self.softmax_rows!(m : CudaMatrix)
+    m.softmax_rows!
+  end
+
   def self.dropout(m : SimpleMatrix, drop_percent : Int32)
     raise ArgumentError.new("drop_percent must be between 0 and 100") unless 0 <= drop_percent && drop_percent <= 100
     result = SimpleMatrix.new(m.rows, m.cols)

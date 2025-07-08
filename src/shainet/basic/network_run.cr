@@ -539,11 +539,11 @@ module SHAInet
         if CUDNN.available?
           CUDNN.softmax_cross_entropy_loss_and_gradient(logits.as(CudaMatrix), target, pointerof(loss_val), grad)
         else
-          probs = SHAInet.softmax_rows(logits.as(CudaMatrix))
-          grad.copy_from!(probs)
+          logits.as(CudaMatrix).softmax_rows!
+          grad.copy_from!(logits.as(CudaMatrix))
           grad[0, label] = grad[0, label] - 1.0
-          probs.sync_from_device!("eval_label")
-          loss_val = -Math.log(probs.unsafe_get(0, label).clamp(1e-9, 1.0))
+          logits.as(CudaMatrix).sync_from_device!("eval_label")
+          loss_val = -Math.log(logits.as(CudaMatrix).unsafe_get(0, label).clamp(1e-9, 1.0))
         end
 
         @error_signal = Array(Float64).new(logits.cols, 0.0)
@@ -607,11 +607,11 @@ module SHAInet
         if CUDNN.available?
           CUDNN.softmax_cross_entropy_loss_and_gradient(logits.as(CudaMatrix), target, pointerof(loss_val), grad)
         else
-          probs = SHAInet.softmax_rows(logits.as(CudaMatrix))
-          grad.copy_from!(probs)
+          logits.as(CudaMatrix).softmax_rows!
+          grad.copy_from!(logits.as(CudaMatrix))
           grad[0, label] = grad[0, label] - 1.0
-          probs.sync_from_device!("eval_seq_label")
-          loss_val = -Math.log(probs.unsafe_get(0, label).clamp(1e-9, 1.0))
+          logits.as(CudaMatrix).sync_from_device!("eval_seq_label")
+          loss_val = -Math.log(logits.as(CudaMatrix).unsafe_get(0, label).clamp(1e-9, 1.0))
         end
 
         @error_signal = Array(Float64).new(logits.cols, 0.0)
