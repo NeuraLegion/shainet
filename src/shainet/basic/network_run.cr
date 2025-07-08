@@ -861,6 +861,13 @@ module SHAInet
       batch.each do |sample|
         input_data = sample[0]
         expected_output = sample[1]
+        # If the expected output is a single label, expand to one-hot vector to match output layer size
+        if expected_output.is_a?(Array) && expected_output.as(Array).size == 1 && !expected_output.as(Array)[0].is_a?(Array) && @output_layers.last.is_a?(MatrixLayer)
+          label = expected_output.as(Array).first.as(GenNum).to_i
+          oh = Array(Float64).new(@output_layers.last.as(MatrixLayer).size, 0.0)
+          oh[label] = 1.0 if label >= 0 && label < oh.size
+          expected_output = oh
+        end
 
         # Prepare expected output matrix using workspace when on GPU
         expected_matrix = case expected_output
