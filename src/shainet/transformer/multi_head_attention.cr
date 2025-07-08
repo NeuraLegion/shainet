@@ -791,15 +791,70 @@ module SHAInet
 
     def finalize
       if CUDA.fully_available?
-        if ws = @workspace_q
-          CudaMatrix.return_workspace(ws)
+        [
+          @workspace_scores,
+          @workspace_attn_output,
+          @workspace_head_out,
+          @workspace_k_transposed,
+          @workspace_q_transposed,
+          @q_head_ws,
+          @k_head_ws,
+          @v_head_ws,
+          @d_v_temp_ws,
+          @d_attn_temp_ws,
+          @d_scores_temp_ws,
+          @d_q_temp_ws,
+          @d_k_temp_ws,
+          @attn_t_ws,
+          @v_t_ws,
+          @scores_t_ws,
+          @d_concat_slices_ws,
+        ].each do |arr|
+          arr.each { |ws| CudaMatrix.return_workspace(ws) if ws }
+          arr.clear
         end
-        if ws = @workspace_k
-          CudaMatrix.return_workspace(ws)
+
+        [
+          @workspace_concat,
+          @workspace_d_q_concat,
+          @workspace_d_k_concat,
+          @workspace_d_v_concat,
+          @workspace_q,
+          @workspace_k,
+          @workspace_v,
+          @workspace_d_x_q,
+          @workspace_d_x_k,
+          @workspace_d_x_v,
+          @workspace_x_t,
+          @workspace_concat_t,
+          @workspace_w_o_t,
+          @workspace_temp_grad_o,
+          @workspace_temp_grad_q,
+          @workspace_temp_grad_k,
+          @workspace_temp_grad_v,
+          @workspace_d_x,
+        ].each do |ws|
+          CudaMatrix.return_workspace(ws) if ws
         end
-        if ws = @workspace_v
-          CudaMatrix.return_workspace(ws)
-        end
+
+        @workspace_concat = nil
+        @workspace_d_q_concat = nil
+        @workspace_d_k_concat = nil
+        @workspace_d_v_concat = nil
+        @workspace_q = nil
+        @workspace_k = nil
+        @workspace_v = nil
+        @workspace_d_x_q = nil
+        @workspace_d_x_k = nil
+        @workspace_d_x_v = nil
+        @workspace_x_t = nil
+        @workspace_concat_t = nil
+        @workspace_w_o_t = nil
+        @workspace_temp_grad_o = nil
+        @workspace_temp_grad_q = nil
+        @workspace_temp_grad_k = nil
+        @workspace_temp_grad_v = nil
+        @workspace_d_x = nil
       end
     end
   end
