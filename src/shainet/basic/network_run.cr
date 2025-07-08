@@ -767,7 +767,7 @@ module SHAInet
             sync_to_mb = (sync_stats[:total_sync_bytes_to_device] / 1024.0 / 1024.0).round(2)
             sync_from_mb = (sync_stats[:total_sync_bytes_from_device] / 1024.0 / 1024.0).round(2)
             total_syncs = sync_stats[:sync_to_device_count] + sync_stats[:sync_from_device_count]
-            Log.debug { "Epoch: #{epoch}, Error: #{avg_error.round(6)}, MSE: #{@mse.round(6)}, Time: #{elapsed.total_seconds.round(2)}s" }
+            Log.info { "Epoch: #{epoch}, Error: #{avg_error.round(6)}, MSE: #{@mse.round(6)}, Time: #{elapsed.total_seconds.round(2)}s" }
             Log.debug { "  GPU: #{gpu_stats[:active_matrices]} matrices, #{(gpu_stats[:total_allocated_bytes] / 1024.0 / 1024.0).round(2)} MB" }
             Log.debug { "  Syncs: #{total_syncs} total (#{sync_stats[:sync_to_device_count]} to GPU, #{sync_stats[:sync_from_device_count]} from GPU)" }
             Log.debug { "  Data: #{sync_to_mb} MB to GPU, #{sync_from_mb} MB from GPU (#{(sync_to_mb + sync_from_mb).round(2)} MB total)" }

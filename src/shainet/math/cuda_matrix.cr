@@ -43,7 +43,7 @@ module SHAInet
     # Disable workspace pool - use in-place operations instead
     @@matrix_pool = Hash(String, Array(CudaMatrix)).new { |h, k| h[k] = [] of CudaMatrix }
     @@pool_enabled = true
-    @@max_pool_size = 5000
+    @@max_pool_size = 30_000
 
     getter rows, cols
 

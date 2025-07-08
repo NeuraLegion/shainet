@@ -43,7 +43,7 @@ token_count = tokenizer.vocab.size
 net = SHAInet::Network.new
 net.add_layer(:input, 1, SHAInet.none)
 net.add_layer(:embedding, d_model, SHAInet.none, vocab_size: token_count)
-1.times { net.add_layer(:transformer, d_model) }
+2.times { net.add_layer(:transformer, d_model) }
 net.add_layer(:output, token_count, SHAInet.identity)
 net.fully_connect
 
@@ -96,8 +96,8 @@ train_data = SHAInet::StreamingData.new(train_file, shuffle: true, gpu_batches: 
 val_data = SHAInet::StreamingData.new(val_file, gpu_batches: true)
 
 epochs = 100
-batch = 1000 # Larger batch size for better GPU utilization
-net.learning_rate = 0.001
+batch = 64 # Larger batch size for better GPU utilization
+net.learning_rate = 0.01
 
 puts "Training the network for #{epochs} epochs with batch size #{batch}..."
 # Train for all epochs at once with proper logging
