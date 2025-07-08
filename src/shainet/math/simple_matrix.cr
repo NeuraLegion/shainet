@@ -201,6 +201,19 @@ module SHAInet
       self
     end
 
+    # Apply dropout in-place using the given probability in the range 0.0..1.0.
+    def dropout!(prob : Float64)
+      raise ArgumentError.new("prob must be between 0 and 1") unless 0.0 <= prob && prob <= 1.0
+
+      @rows.times do |i|
+        @cols.times do |j|
+          self[i, j] = Random.rand < prob ? 0.0 : self[i, j]
+        end
+      end
+
+      self
+    end
+
     # Multiply each column by the corresponding value in a row vector in-place.
     def mul_row_vector!(vec : SimpleMatrix)
       raise ArgumentError.new("vector size mismatch") unless vec.rows == 1 && vec.cols == @cols

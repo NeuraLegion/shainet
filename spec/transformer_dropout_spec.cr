@@ -18,4 +18,18 @@ describe SHAInet::TransformerDropout do
     average = total_ratio / runs
     (average).should be_close(0.30, 0.05)
   end
+
+  it "operates in-place on SimpleMatrix" do
+    mat = SHAInet::SimpleMatrix.ones(4, 4)
+    SHAInet::TransformerDropout.apply!(mat, 100)
+
+    zero_count = 0
+    mat.rows.times do |i|
+      mat.cols.times do |j|
+        zero_count += 1 if mat[i, j] == 0.0
+      end
+    end
+
+    zero_count.should eq(16)
+  end
 end
