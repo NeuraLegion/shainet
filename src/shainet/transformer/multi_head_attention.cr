@@ -48,10 +48,15 @@ module SHAInet
     @d_scores_temp_ws : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
     @d_q_temp_ws : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
     @d_k_temp_ws : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
+
     # Workspace matrices for temporary transposes during backward pass
     @attn_t_ws : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
     @v_t_ws : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
     @scores_t_ws : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
+
+    # Workspace slices of d_concat for each head
+    @d_concat_slices_ws : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
+
 
     @last_batch_size : Int32
 
@@ -99,6 +104,8 @@ module SHAInet
       @attn_t_ws = [] of (CudaMatrix | Nil)
       @v_t_ws = [] of (CudaMatrix | Nil)
       @scores_t_ws = [] of (CudaMatrix | Nil)
+      @d_concat_slices_ws = [] of (CudaMatrix | Nil)
+
       @last_batch_size = 0
 
       # Initialize cached transposes
@@ -143,6 +150,8 @@ module SHAInet
         @attn_t_ws = [] of (CudaMatrix | Nil)
         @v_t_ws = [] of (CudaMatrix | Nil)
         @scores_t_ws = [] of (CudaMatrix | Nil)
+        @d_concat_slices_ws = [] of (CudaMatrix | Nil)
+
         @last_batch_size = 0
 
         # Convert stored head matrices to GPU
@@ -427,7 +436,8 @@ module SHAInet
 
         begin
           @num_heads.times do |h|
-            d_out_h = d_concat.slice_cols(h * @head_dim, @head_dim)
+            d_out_h = @d_concat_slices_ws[h].not_nil!
+            d_concat.slice_cols_into!(d_out_h, h * @head_dim, @head_dim)
 
             # Use cached workspace matrices for computations
             d_v_temp = @d_v_temp_ws[h].not_nil!
@@ -677,6 +687,8 @@ module SHAInet
           @attn_t_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @attn_t_ws.any?
           @v_t_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @v_t_ws.any?
           @scores_t_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @scores_t_ws.any?
+          @d_concat_slices_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @d_concat_slices_ws.any?
+
 
           # Allocate new workspaces for current batch size
           @workspace_concat = CudaMatrix.get_workspace(batch_size, @d_model, "mha_concat_ws")
@@ -700,6 +712,8 @@ module SHAInet
           @attn_t_ws = Array(CudaMatrix | Nil).new(@num_heads, nil)
           @v_t_ws = Array(CudaMatrix | Nil).new(@num_heads, nil)
           @scores_t_ws = Array(CudaMatrix | Nil).new(@num_heads, nil)
+          @d_concat_slices_ws = Array(CudaMatrix | Nil).new(@num_heads, nil)
+
 
           @num_heads.times do |h|
             @workspace_scores[h] = CudaMatrix.new(batch_size, batch_size)     # scores matrix
@@ -714,6 +728,7 @@ module SHAInet
             @attn_t_ws[h] = CudaMatrix.get_workspace(batch_size, batch_size, "mha_attn_t_ws")
             @v_t_ws[h] = CudaMatrix.get_workspace(@head_dim, batch_size, "mha_v_t_ws")
             @scores_t_ws[h] = CudaMatrix.get_workspace(batch_size, batch_size, "mha_scores_t_ws")
+            @d_concat_slices_ws[h] = CudaMatrix.get_workspace(batch_size, @head_dim, "mha_d_concat_slice_ws")
           end
 
           @last_batch_size = batch_size
