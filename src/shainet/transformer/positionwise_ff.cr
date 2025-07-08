@@ -135,8 +135,7 @@ module SHAInet
       # Use optimized bias gradient accumulation
       accumulate_bias_gradient(@g_b2, d_out)
 
-      drelu = relu_grad(@h.as(CudaMatrix), dh)
-      CudaMatrix.return_workspace(dh)
+      drelu = relu_grad(@h.as(CudaMatrix), dh, dh)
 
       # Use in-place gradient accumulation to avoid creating new matrices
       temp_grad_w1 = CudaMatrix.get_workspace(@x.not_nil!.cols, drelu.cols, "pw_grad_w1")
@@ -157,6 +156,7 @@ module SHAInet
 
       d_input = CudaMatrix.get_workspace(drelu.rows, w1_gpu.rows, "pw_d_input")
       d_input.gemm!(drelu, @w1_t.as(CudaMatrix))
+      CudaMatrix.return_workspace(drelu)
       d_input
     end
 
@@ -178,7 +178,7 @@ module SHAInet
       end
       @g_b2 = @g_b2.as(SimpleMatrix) + db2
 
-      drelu = relu_grad(@h.as(SimpleMatrix), dh)
+      drelu = relu_grad(@h.as(SimpleMatrix), dh, dh)
 
       # For SimpleMatrix, still need to create temporary (no in-place add for SimpleMatrix yet)
       temp_grad_w1 = @x.not_nil!.as(SimpleMatrix).transpose * drelu
@@ -274,13 +274,14 @@ module SHAInet
       end
     end
 
-    private def relu_grad(m : CudaMatrix, grad : CudaMatrix) : CudaMatrix
+    private def relu_grad(m : CudaMatrix, grad : CudaMatrix, dest : CudaMatrix) : CudaMatrix
+      raise ArgumentError.new("size mismatch") unless grad.rows == dest.rows && grad.cols == dest.cols
+
       # Use cuDNN for optimized ReLU gradient if available
       if CUDNN.available?
         begin
-          result = CudaMatrix.new(grad.rows, grad.cols)
-          CUDNN.relu_backward(m, grad, result)
-          return result
+          CUDNN.relu_backward(m, grad, dest)
+          return dest
         rescue e : Exception
           Log.debug { "cuDNN ReLU backward failed: #{e}, falling back to CUDA kernel" }
         end
@@ -289,38 +290,38 @@ module SHAInet
       # Use GPU kernel for ReLU gradient if available
       if CUDA.fully_available?
         begin
-          result = grad.clone
+          dest.copy_from!(grad) unless dest.object_id == grad.object_id
           # Use CUDA kernel for ReLU backward pass
-          CUDA.relu_backward(result.device_ptr.not_nil!, m.device_ptr.not_nil!, grad.device_ptr.not_nil!, m.rows * m.cols)
-          result.mark_device_dirty!
-          return result
+          CUDA.relu_backward(dest.device_ptr.not_nil!, m.device_ptr.not_nil!, grad.device_ptr.not_nil!, m.rows * m.cols)
+          dest.mark_device_dirty!
+          return dest
         rescue e : Exception
           # Fall back to CPU computation if CUDA fails
         end
       end
 
       # CPU fallback - sync matrices to host first
-      m.sync_from_device!("ff_gradient_debug")
-      grad.sync_from_device!("ff_gradient_debug")
-      result = grad.clone
+      m.sync_from_device!("ff_gradient_debug") if m.device_dirty?
+      grad.sync_from_device!("ff_gradient_debug") if grad.device_dirty?
+      dest.copy_from!(grad) unless dest.object_id == grad.object_id
       # Use unsafe_get for better performance
       m.rows.times do |i|
         m.cols.times do |j|
-          result.unsafe_set(i, j, m.unsafe_get(i, j) > 0 ? grad.unsafe_get(i, j) : 0.0)
+          dest.unsafe_set(i, j, m.unsafe_get(i, j) > 0 ? grad.unsafe_get(i, j) : 0.0)
         end
       end
-      result.sync_to_device!("ff_backward_result")
-      result
+      dest.sync_to_device!("ff_backward_result")
+      dest
     end
 
-    private def relu_grad(m : SimpleMatrix, grad : SimpleMatrix) : SimpleMatrix
-      out = grad.clone
+    private def relu_grad(m : SimpleMatrix, grad : SimpleMatrix, dest : SimpleMatrix) : SimpleMatrix
+      raise ArgumentError.new("size mismatch") unless grad.rows == dest.rows && grad.cols == dest.cols
       m.rows.times do |i|
         m.cols.times do |j|
-          out[i, j] = m[i, j] > 0 ? grad[i, j] : 0.0
+          dest[i, j] = m[i, j] > 0 ? grad[i, j] : 0.0
         end
       end
-      out
+      dest
     end
 
     # Optimized bias gradient accumulation with minimal CPU-GPU sync
