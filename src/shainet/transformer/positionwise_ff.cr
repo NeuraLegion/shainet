@@ -165,7 +165,9 @@ module SHAInet
 
       accumulate_bias_gradient(@g_b2, d_out)
 
+      drelu = relu_grad(@h.as(CudaMatrix), dh, dh)
       relu_grad!(dh, @h.as(CudaMatrix), dh)
+
 
       temp_grad_w1 = @workspace_temp_grad_w1.not_nil!
       x_t = @workspace_x_t.not_nil!
@@ -179,8 +181,10 @@ module SHAInet
       w1_t = @workspace_w1_t.not_nil!
       w1_gpu.transpose_into!(w1_t)
 
-      d_input = @workspace_d_input.not_nil!
-      d_input.gemm!(dh, w1_t)
+      d_input = CudaMatrix.get_workspace(drelu.rows, w1_gpu.rows, "pw_d_input")
+      d_input.gemm!(drelu, @w1_t.as(CudaMatrix))
+      CudaMatrix.return_workspace(drelu)
+
       d_input
     end
 
@@ -202,8 +206,8 @@ module SHAInet
       end
       @g_b2 = @g_b2.as(SimpleMatrix) + db2
 
-      drelu = dh
-      relu_grad!(drelu, @h.as(SimpleMatrix), drelu)
+      drelu = relu_grad(@h.as(SimpleMatrix), dh, dh)
+
 
       # For SimpleMatrix, still need to create temporary (no in-place add for SimpleMatrix yet)
       temp_grad_w1 = @x.not_nil!.as(SimpleMatrix).transpose * drelu
@@ -299,7 +303,9 @@ module SHAInet
       end
     end
 
-    private def relu_grad!(dest : CudaMatrix, m : CudaMatrix, grad : CudaMatrix) : CudaMatrix
+    private def relu_grad(m : CudaMatrix, grad : CudaMatrix, dest : CudaMatrix) : CudaMatrix
+      raise ArgumentError.new("size mismatch") unless grad.rows == dest.rows && grad.cols == dest.cols
+
       # Use cuDNN for optimized ReLU gradient if available
       if CUDNN.available?
         begin
@@ -312,6 +318,8 @@ module SHAInet
 
       if CUDA.fully_available?
         begin
+          dest.copy_from!(grad) unless dest.object_id == grad.object_id
+          # Use CUDA kernel for ReLU backward pass
           CUDA.relu_backward(dest.device_ptr.not_nil!, m.device_ptr.not_nil!, grad.device_ptr.not_nil!, m.rows * m.cols)
           dest.mark_device_dirty!
           return dest
@@ -320,10 +328,13 @@ module SHAInet
         end
       end
 
-      m.sync_from_device!("ff_gradient_debug")
-      grad.sync_from_device!("ff_gradient_debug")
-      dest.rows.times do |i|
-        dest.cols.times do |j|
+      # CPU fallback - sync matrices to host first
+      m.sync_from_device!("ff_gradient_debug") if m.device_dirty?
+      grad.sync_from_device!("ff_gradient_debug") if grad.device_dirty?
+      dest.copy_from!(grad) unless dest.object_id == grad.object_id
+      # Use unsafe_get for better performance
+      m.rows.times do |i|
+        m.cols.times do |j|
           dest.unsafe_set(i, j, m.unsafe_get(i, j) > 0 ? grad.unsafe_get(i, j) : 0.0)
         end
       end
@@ -331,7 +342,8 @@ module SHAInet
       dest
     end
 
-    private def relu_grad!(dest : SimpleMatrix, m : SimpleMatrix, grad : SimpleMatrix) : SimpleMatrix
+    private def relu_grad(m : SimpleMatrix, grad : SimpleMatrix, dest : SimpleMatrix) : SimpleMatrix
+      raise ArgumentError.new("size mismatch") unless grad.rows == dest.rows && grad.cols == dest.cols
       m.rows.times do |i|
         m.cols.times do |j|
           dest[i, j] = m[i, j] > 0 ? grad[i, j] : 0.0
