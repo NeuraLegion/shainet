@@ -42,6 +42,11 @@ module SHAInet
     @workspace_k_transposed : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
     @workspace_q_transposed : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
 
+    # Workspace matrices for Q, K, V head slices
+    @q_head_ws : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
+    @k_head_ws : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
+    @v_head_ws : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
+
     # Cached workspace matrices for backward pass (per head)
     @d_v_temp_ws : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
     @d_attn_temp_ws : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
@@ -100,6 +105,9 @@ module SHAInet
       @d_scores_temp_ws = [] of (CudaMatrix | Nil)
       @d_q_temp_ws = [] of (CudaMatrix | Nil)
       @d_k_temp_ws = [] of (CudaMatrix | Nil)
+      @q_head_ws = [] of (CudaMatrix | Nil)
+      @k_head_ws = [] of (CudaMatrix | Nil)
+      @v_head_ws = [] of (CudaMatrix | Nil)
       @attn_t_ws = [] of (CudaMatrix | Nil)
       @v_t_ws = [] of (CudaMatrix | Nil)
       @scores_t_ws = [] of (CudaMatrix | Nil)
@@ -141,6 +149,9 @@ module SHAInet
         @workspace_d_x_v = nil
         @workspace_k_transposed = [] of (CudaMatrix | Nil)
         @workspace_q_transposed = [] of (CudaMatrix | Nil)
+        @q_head_ws = [] of (CudaMatrix | Nil)
+        @k_head_ws = [] of (CudaMatrix | Nil)
+        @v_head_ws = [] of (CudaMatrix | Nil)
         @d_v_temp_ws = [] of (CudaMatrix | Nil)
         @d_attn_temp_ws = [] of (CudaMatrix | Nil)
         @d_scores_temp_ws = [] of (CudaMatrix | Nil)
@@ -188,9 +199,13 @@ module SHAInet
 
         # Split into heads and compute attention - all GPU operations
         @num_heads.times do |h|
-          qs = q.slice_cols(h * @head_dim, @head_dim)
-          ks = k.slice_cols(h * @head_dim, @head_dim)
-          vs = v.slice_cols(h * @head_dim, @head_dim)
+          qs = @q_head_ws[h].not_nil!
+          ks = @k_head_ws[h].not_nil!
+          vs = @v_head_ws[h].not_nil!
+
+          q.slice_cols_into!(qs, h * @head_dim, @head_dim)
+          k.slice_cols_into!(ks, h * @head_dim, @head_dim)
+          v.slice_cols_into!(vs, h * @head_dim, @head_dim)
 
           @q_heads << qs
           @k_heads << ks
@@ -700,6 +715,9 @@ module SHAInet
           @d_scores_temp_ws = Array(CudaMatrix | Nil).new(@num_heads, nil)
           @d_q_temp_ws = Array(CudaMatrix | Nil).new(@num_heads, nil)
           @d_k_temp_ws = Array(CudaMatrix | Nil).new(@num_heads, nil)
+          @q_head_ws = Array(CudaMatrix | Nil).new(@num_heads, nil)
+          @k_head_ws = Array(CudaMatrix | Nil).new(@num_heads, nil)
+          @v_head_ws = Array(CudaMatrix | Nil).new(@num_heads, nil)
           @attn_t_ws = Array(CudaMatrix | Nil).new(@num_heads, nil)
           @v_t_ws = Array(CudaMatrix | Nil).new(@num_heads, nil)
           @scores_t_ws = Array(CudaMatrix | Nil).new(@num_heads, nil)
@@ -710,6 +728,9 @@ module SHAInet
             @workspace_attn_output[h] = CudaMatrix.new(batch_size, @head_dim) # attn * vs result
             @workspace_k_transposed[h] = CudaMatrix.new(@head_dim, batch_size)
             @workspace_q_transposed[h] = CudaMatrix.new(@head_dim, batch_size)
+            @q_head_ws[h] = CudaMatrix.new(batch_size, @head_dim)
+            @k_head_ws[h] = CudaMatrix.new(batch_size, @head_dim)
+            @v_head_ws[h] = CudaMatrix.new(batch_size, @head_dim)
             @d_v_temp_ws[h] = CudaMatrix.get_workspace(batch_size, @head_dim, "mha_d_v_temp_ws")
             @d_attn_temp_ws[h] = CudaMatrix.get_workspace(batch_size, batch_size, "mha_d_attn_temp_ws")
             @d_scores_temp_ws[h] = CudaMatrix.get_workspace(batch_size, batch_size, "mha_d_scores_temp_ws")
