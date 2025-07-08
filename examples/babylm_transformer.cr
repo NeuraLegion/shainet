@@ -43,7 +43,7 @@ token_count = tokenizer.vocab.size
 net = SHAInet::Network.new
 net.add_layer(:input, 1, SHAInet.none)
 net.add_layer(:embedding, d_model, SHAInet.none, vocab_size: token_count)
-4.times { net.add_layer(:transformer, d_model) }
+1.times { net.add_layer(:transformer, d_model) }
 net.add_layer(:output, token_count, SHAInet.identity)
 net.fully_connect
 
