@@ -510,12 +510,9 @@ module SHAInet
           # Gradient w.r.t. input - use workspace pool
           d_x = CudaMatrix.get_workspace(x.rows, x.cols, "mha_d_x")
 
-          w_q_t = CudaMatrix.get_workspace(@w_q.as(CudaMatrix).cols, @w_q.as(CudaMatrix).rows, "mha_w_q_t")
-          @w_q.as(CudaMatrix).transpose_into!(w_q_t)
-          w_k_t = CudaMatrix.get_workspace(@w_k.as(CudaMatrix).cols, @w_k.as(CudaMatrix).rows, "mha_w_k_t")
-          @w_k.as(CudaMatrix).transpose_into!(w_k_t)
-          w_v_t = CudaMatrix.get_workspace(@w_v.as(CudaMatrix).cols, @w_v.as(CudaMatrix).rows, "mha_w_v_t")
-          @w_v.as(CudaMatrix).transpose_into!(w_v_t)
+          w_q_t = @w_q_t.as(CudaMatrix)
+          w_k_t = @w_k_t.as(CudaMatrix)
+          w_v_t = @w_v_t.as(CudaMatrix)
 
           d_x_q = @workspace_d_x_q.not_nil!
           d_x_k = @workspace_d_x_k.not_nil!
@@ -532,10 +529,6 @@ module SHAInet
           CudaMatrix.return_workspace(d_x_q)
           CudaMatrix.return_workspace(d_x_k)
           CudaMatrix.return_workspace(d_x_v)
-
-          CudaMatrix.return_workspace(w_q_t)
-          CudaMatrix.return_workspace(w_k_t)
-          CudaMatrix.return_workspace(w_v_t)
 
           d_x
         ensure
