@@ -29,6 +29,8 @@ module SHAInet
     @workspace_d_input : CudaMatrix | Nil = nil
     @workspace_h_t : CudaMatrix | Nil = nil
     @workspace_dh : CudaMatrix | Nil = nil
+    @workspace_h : CudaMatrix | Nil = nil
+    @workspace_out : CudaMatrix | Nil = nil
     @last_batch_size : Int32 = 0
 
     property g_w1 : SimpleMatrix | CudaMatrix
@@ -64,6 +66,8 @@ module SHAInet
       @workspace_d_input = nil
       @workspace_h_t = nil
       @workspace_dh = nil
+      @workspace_h = nil
+      @workspace_out = nil
       @last_batch_size = 0
     end
 
@@ -91,6 +95,8 @@ module SHAInet
         @workspace_d_input = nil
         @workspace_h_t = nil
         @workspace_dh = nil
+        @workspace_h = nil
+        @workspace_out = nil
         @last_batch_size = 0
       end
     end
@@ -105,7 +111,9 @@ module SHAInet
       w2_gpu = @w2.as(CudaMatrix)
       b2_gpu = @b2.as(CudaMatrix)
 
-      @h = x * w1_gpu
+      h_ws = @workspace_h.not_nil!
+      h_ws.gemm!(x, w1_gpu)
+      @h = h_ws
 
       # Use cuDNN for optimized bias addition and ReLU if available
       if CUDNN.available?
@@ -116,7 +124,9 @@ module SHAInet
         @h.as(CudaMatrix).relu!
       end
 
-      @out = @h.as(CudaMatrix) * w2_gpu
+      out_ws = @workspace_out.not_nil!
+      out_ws.gemm!(@h.as(CudaMatrix), w2_gpu)
+      @out = out_ws
 
       # Use cuDNN for bias addition if available
       if CUDNN.available?
@@ -403,6 +413,8 @@ module SHAInet
       if @last_batch_size != batch_size || @workspace_x_t.nil?
         @workspace_x_t = CudaMatrix.new(d_model, batch_size)
         @workspace_h_t = CudaMatrix.new(hidden, batch_size)
+        @workspace_h = CudaMatrix.new(batch_size, hidden)
+        @workspace_out = CudaMatrix.new(batch_size, d_model)
         @workspace_d_input = CudaMatrix.new(batch_size, d_model)
         @workspace_dh = CudaMatrix.new(batch_size, hidden)
         @last_batch_size = batch_size
