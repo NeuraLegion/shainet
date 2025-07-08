@@ -130,14 +130,21 @@ module SHAInet
       self
     end
 
+    # Slice a range of columns into the provided destination matrix.
+    def slice_cols_into!(dest : SimpleMatrix, start_col : Int32, length : Int32)
+      raise ArgumentError.new("size mismatch") unless dest.rows == @rows && dest.cols == length
+      @rows.times do |i|
+        length.times do |j|
+          dest[i, j] = self[i, start_col + j]
+        end
+      end
+      dest
+    end
+
     # Slice a range of columns from the matrix
     def slice_cols(start_col : Int32, length : Int32)
       result = SimpleMatrix.new(@rows, length)
-      @rows.times do |i|
-        length.times do |j|
-          result[i, j] = self[i, start_col + j]
-        end
-      end
+      slice_cols_into!(result, start_col, length)
       result
     end
 
