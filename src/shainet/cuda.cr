@@ -295,6 +295,7 @@ module SHAInet
     @@softmax_backward_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Int32, Void)? = nil
     @@element_log_proc : Proc(Pointer(Float64), Pointer(Float64), Int32, Void)? = nil
     @@cross_entropy_loss_grad_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Int32, Void)? = nil
+    @@softmax_cross_entropy_label_proc : Proc(Pointer(Float64), Pointer(Int32), Pointer(Float64), Pointer(Float64), Int32, Int32, Void)? = nil
 
     def softmax_rows(dst : Pointer(Float64), src : Pointer(Float64), rows : Int32, cols : Int32)
       # Validate inputs
@@ -767,6 +768,36 @@ module SHAInet
         0
       rescue e
         Log.error { "CUDA Error in cross_entropy_loss_gradient: #{e}" }
+        1
+      end
+    end
+
+    def softmax_cross_entropy_label(predicted : Pointer(Float64), labels : Pointer(Int32),
+                                    grad_out : Pointer(Float64), loss_out : Pointer(Float64),
+                                    rows : Int32, cols : Int32) : Int32
+      unless fn = @@softmax_cross_entropy_label_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "softmax_cross_entropy_label")
+          unless sym.null?
+            @@softmax_cross_entropy_label_proc = Proc(Pointer(Float64), Pointer(Int32), Pointer(Float64), Pointer(Float64), Int32, Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@softmax_cross_entropy_label_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+
+      begin
+        loss_device = Pointer(Float64).null
+        CUDA.malloc(pointerof(loss_device).as(Pointer(Pointer(Void))), 8)
+        fn.call(predicted, labels, grad_out, loss_device, rows, cols)
+        CUDA.memcpy(loss_out.as(Pointer(Void)), loss_device.as(Pointer(Void)), 8_u64, MemcpyKind::DeviceToHost)
+        CUDA.free(loss_device.as(Pointer(Void)))
+        0
+      rescue e
+        Log.error { "CUDA Error in softmax_cross_entropy_label: #{e}" }
         1
       end
     end
