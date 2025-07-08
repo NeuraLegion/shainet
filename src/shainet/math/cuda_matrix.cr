@@ -569,24 +569,13 @@ module SHAInet
     # Fill matrix with a constant value in-place.
     def fill!(value : Float64)
       if CUDA.fully_available? && (dptr = device_ptr) && !dptr.null?
-        # Special case for zero - use GPU kernel directly
+        size = @rows * @cols
         if value == 0.0
-          size = @rows * @cols
           CUDA.zero_matrix(dptr, size)
-          mark_device_dirty!
         else
-          # For non-zero values, fall back to CPU approach
-          # But only sync if actually needed
-          sync_from_device!("matrix_fill") if device_dirty?
-
-          @rows.times do |i|
-            @cols.times do |j|
-              unsafe_set(i, j, value)
-            end
-          end
-
-          sync_to_device!("matrix_fill")
+          CUDA.fill_matrix(dptr, value, size)
         end
+        mark_device_dirty!
       else
         # CPU fallback
         @rows.times do |i|
