@@ -405,19 +405,48 @@ module SHAInet
       d_model = @w1.rows
       hidden = @w1.cols
 
-      @workspace_w2_t ||= CudaMatrix.new(@w2.cols, @w2.rows)
-      @workspace_w1_t ||= CudaMatrix.new(@w1.cols, @w1.rows)
-      @workspace_temp_grad_w2 ||= CudaMatrix.new(hidden, d_model)
-      @workspace_temp_grad_w1 ||= CudaMatrix.new(d_model, hidden)
+      @workspace_w2_t ||= CudaMatrix.get_workspace(@w2.cols, @w2.rows, "ff_w2_t")
+      @workspace_w1_t ||= CudaMatrix.get_workspace(@w1.cols, @w1.rows, "ff_w1_t")
+      @workspace_temp_grad_w2 ||= CudaMatrix.get_workspace(hidden, d_model, "ff_temp_grad_w2")
+      @workspace_temp_grad_w1 ||= CudaMatrix.get_workspace(d_model, hidden, "ff_temp_grad_w1")
 
       if @last_batch_size != batch_size || @workspace_x_t.nil?
-        @workspace_x_t = CudaMatrix.new(d_model, batch_size)
-        @workspace_h_t = CudaMatrix.new(hidden, batch_size)
-        @workspace_h = CudaMatrix.new(batch_size, hidden)
-        @workspace_out = CudaMatrix.new(batch_size, d_model)
-        @workspace_d_input = CudaMatrix.new(batch_size, d_model)
-        @workspace_dh = CudaMatrix.new(batch_size, hidden)
+        if ws = @workspace_x_t
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_h_t
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_h
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_out
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_d_input
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_dh
+          CudaMatrix.return_workspace(ws)
+        end
+
+        @workspace_x_t = CudaMatrix.get_workspace(d_model, batch_size, "ff_x_t")
+        @workspace_h_t = CudaMatrix.get_workspace(hidden, batch_size, "ff_h_t")
+        @workspace_h = CudaMatrix.get_workspace(batch_size, hidden, "ff_h")
+        @workspace_out = CudaMatrix.get_workspace(batch_size, d_model, "ff_out")
+        @workspace_d_input = CudaMatrix.get_workspace(batch_size, d_model, "ff_d_input")
+        @workspace_dh = CudaMatrix.get_workspace(batch_size, hidden, "ff_dh")
         @last_batch_size = batch_size
+      end
+    end
+
+    def finalize
+      if CUDA.fully_available?
+        [@workspace_w2_t, @workspace_w1_t, @workspace_temp_grad_w2,
+         @workspace_temp_grad_w1, @workspace_x_t, @workspace_h_t, @workspace_h,
+         @workspace_out, @workspace_d_input, @workspace_dh].each do |ws|
+          CudaMatrix.return_workspace(ws.not_nil!) if ws
+        end
       end
     end
   end
