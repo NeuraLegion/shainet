@@ -14,6 +14,7 @@ module SHAInet
       fun cudaMemcpy(dst : Pointer(Void), src : Pointer(Void), count : LibC::SizeT, kind : Int32) : Int32
       fun cudaMallocHost(ptr : Pointer(Pointer(Void)), size : LibC::SizeT) : Int32
       fun cudaFreeHost(ptr : Pointer(Void)) : Int32
+      fun cudaMemGetInfo(free : Pointer(LibC::SizeT), total : Pointer(LibC::SizeT)) : Int32
     end
 
     @[Link("cublas")]
@@ -178,6 +179,32 @@ module SHAInet
 
     def free_host(ptr : Pointer(Void))
       LibCUDARuntime.cudaFreeHost(ptr)
+    end
+
+    # Returns a hash with free and total memory in bytes for the active CUDA device.
+    def memory_info
+      return nil unless fully_available?
+      free = 0_u64
+      total = 0_u64
+      res = LibCUDARuntime.cudaMemGetInfo(pointerof(free), pointerof(total))
+      if res.zero?
+        {free: free, total: total}
+      else
+        Log.error { "CUDA.memory_info: cudaMemGetInfo failed with result #{res}" }
+        nil
+      end
+    rescue e
+      Log.error { "CUDA.memory_info raised: #{e}" }
+      nil
+    end
+
+    # Convenience method returning the total memory in bytes or nil when unavailable.
+    def total_memory
+      if info = memory_info
+        info[:total]
+      else
+        nil
+      end
     end
 
     # Handle pool to avoid creating/destroying handles frequently

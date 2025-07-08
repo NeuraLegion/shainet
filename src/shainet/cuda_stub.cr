@@ -59,6 +59,14 @@ module SHAInet
     def free_host(*args)
     end
 
+    def memory_info
+      nil
+    end
+
+    def total_memory
+      nil
+    end
+
     def create_handle(*args)
       raise "CUDA disabled"
     end

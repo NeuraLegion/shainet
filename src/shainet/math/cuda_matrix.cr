@@ -21,7 +21,7 @@ module SHAInet
     # Global GPU memory tracking
     @@total_gpu_memory_allocated = 0_u64
     @@active_matrices = 0
-    @@max_gpu_memory = 16_000_000_000_u64 # 16GB limit (use most of available GPU memory)
+    @@max_gpu_memory = (CUDA.total_memory || 16_000_000_000_u64) # Use available GPU memory when possible
     @@allocation_attempts = 0
     @@allocation_failures = 0
 
