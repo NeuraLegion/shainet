@@ -20,6 +20,19 @@ module SHAInet
     # Workspace matrices to avoid repeated allocations
     @workspace_temp_bias : CudaMatrix | Nil = nil
 
+    # Persistent workspaces used during backward pass
+    @workspace_w2_t : CudaMatrix | Nil = nil
+    @workspace_w1_t : CudaMatrix | Nil = nil
+    @workspace_x_t : CudaMatrix | Nil = nil
+    @workspace_temp_grad_w2 : CudaMatrix | Nil = nil
+    @workspace_temp_grad_w1 : CudaMatrix | Nil = nil
+    @workspace_d_input : CudaMatrix | Nil = nil
+    @workspace_h_t : CudaMatrix | Nil = nil
+    @workspace_dh : CudaMatrix | Nil = nil
+    @workspace_h : CudaMatrix | Nil = nil
+    @workspace_out : CudaMatrix | Nil = nil
+    @last_batch_size : Int32 = 0
+
     property g_w1 : SimpleMatrix | CudaMatrix
     property g_w2 : SimpleMatrix | CudaMatrix
     property g_b1 : SimpleMatrix | CudaMatrix
@@ -43,6 +56,19 @@ module SHAInet
       @w1_t = mat_klass.new(hidden_dim, d_model)
       @w2_t = mat_klass.new(d_model, hidden_dim)
       update_transposes
+
+      # Workspace buffers will be allocated on first forward pass
+      @workspace_w2_t = nil
+      @workspace_w1_t = nil
+      @workspace_x_t = nil
+      @workspace_temp_grad_w2 = nil
+      @workspace_temp_grad_w1 = nil
+      @workspace_d_input = nil
+      @workspace_h_t = nil
+      @workspace_dh = nil
+      @workspace_h = nil
+      @workspace_out = nil
+      @last_batch_size = 0
     end
 
     # Convert all internal matrices to GPU
@@ -60,19 +86,34 @@ module SHAInet
         @out = @out.as(SimpleMatrix).to_cuda if @out && !@out.is_a?(CudaMatrix)
         @x = @x.as(SimpleMatrix).to_cuda if @x && !@x.is_a?(CudaMatrix)
         update_transposes
+        # Reset workspaces to allocate on next forward
+        @workspace_w2_t = nil
+        @workspace_w1_t = nil
+        @workspace_x_t = nil
+        @workspace_temp_grad_w2 = nil
+        @workspace_temp_grad_w1 = nil
+        @workspace_d_input = nil
+        @workspace_h_t = nil
+        @workspace_dh = nil
+        @workspace_h = nil
+        @workspace_out = nil
+        @last_batch_size = 0
       end
     end
 
     # GPU path - all CudaMatrix operations with cuDNN optimization
     def forward(x : CudaMatrix) : CudaMatrix
       @x = x
+      ensure_workspace_matrices(x.rows)
       # Weights are already CudaMatrix in GPU path
       w1_gpu = @w1.as(CudaMatrix)
       b1_gpu = @b1.as(CudaMatrix)
       w2_gpu = @w2.as(CudaMatrix)
       b2_gpu = @b2.as(CudaMatrix)
 
-      @h = x * w1_gpu
+      h_ws = @workspace_h.not_nil!
+      h_ws.gemm!(x, w1_gpu)
+      @h = h_ws
 
       # Use cuDNN for optimized bias addition and ReLU if available
       if CUDNN.available?
@@ -83,7 +124,9 @@ module SHAInet
         @h.as(CudaMatrix).relu!
       end
 
-      @out = @h.as(CudaMatrix) * w2_gpu
+      out_ws = @workspace_out.not_nil!
+      out_ws.gemm!(@h.as(CudaMatrix), w2_gpu)
+      @out = out_ws
 
       # Use cuDNN for bias addition if available
       if CUDNN.available?
@@ -114,49 +157,42 @@ module SHAInet
 
     # GPU path backward
     def backward(d_out : CudaMatrix) : CudaMatrix
+      ensure_workspace_matrices(d_out.rows)
+
       w2_gpu = @w2.as(CudaMatrix)
 
-      w2_t = CudaMatrix.get_workspace(w2_gpu.cols, w2_gpu.rows, "pw_w2_t")
+      w2_t = @workspace_w2_t.not_nil!
       w2_gpu.transpose_into!(w2_t)
 
-      dh = CudaMatrix.get_workspace(d_out.rows, w2_gpu.rows, "pw_dh")
-      dh.gemm!(d_out, @w2_t.as(CudaMatrix))
+      dh = @workspace_dh.not_nil!
+      dh.gemm!(d_out, w2_t)
 
-      # Use in-place gradient accumulation to avoid creating new matrices
-      temp_grad_w2 = CudaMatrix.get_workspace(@h.cols, d_out.cols, "pw_grad_w2")
-      h_t = CudaMatrix.get_workspace(@h.as(CudaMatrix).cols, @h.as(CudaMatrix).rows, "pw_h_t")
+      temp_grad_w2 = @workspace_temp_grad_w2.not_nil!
+      h_t = @workspace_h_t.not_nil!
       @h.as(CudaMatrix).transpose_into!(h_t)
       temp_grad_w2.gemm!(h_t, d_out)
       @g_w2.as(CudaMatrix).add!(temp_grad_w2)
-      CudaMatrix.return_workspace(temp_grad_w2)
-      CudaMatrix.return_workspace(h_t)
 
-      # Efficient bias gradient using GPU
-      # Use optimized bias gradient accumulation
       accumulate_bias_gradient(@g_b2, d_out)
 
-      drelu = relu_grad(@h.as(CudaMatrix), dh)
-      CudaMatrix.return_workspace(dh)
+      drelu = relu_grad(@h.as(CudaMatrix), dh, dh)
 
-      # Use in-place gradient accumulation to avoid creating new matrices
-      temp_grad_w1 = CudaMatrix.get_workspace(@x.not_nil!.cols, drelu.cols, "pw_grad_w1")
-      x_t = CudaMatrix.get_workspace(@x.not_nil!.as(CudaMatrix).cols, @x.not_nil!.as(CudaMatrix).rows, "pw_x_t")
+      temp_grad_w1 = @workspace_temp_grad_w1.not_nil!
+      x_t = @workspace_x_t.not_nil!
       @x.not_nil!.as(CudaMatrix).transpose_into!(x_t)
-      temp_grad_w1.gemm!(x_t, drelu)
+      temp_grad_w1.gemm!(x_t, dh)
       @g_w1.as(CudaMatrix).add!(temp_grad_w1)
-      CudaMatrix.return_workspace(temp_grad_w1)
-      CudaMatrix.return_workspace(x_t)
 
-      # Use optimized bias gradient accumulation
-      accumulate_bias_gradient(@g_b1, drelu)
+      accumulate_bias_gradient(@g_b1, dh)
 
       w1_gpu = @w1.as(CudaMatrix)
-
-      w1_t = CudaMatrix.get_workspace(w1_gpu.cols, w1_gpu.rows, "pw_w1_t")
+      w1_t = @workspace_w1_t.not_nil!
       w1_gpu.transpose_into!(w1_t)
 
       d_input = CudaMatrix.get_workspace(drelu.rows, w1_gpu.rows, "pw_d_input")
       d_input.gemm!(drelu, @w1_t.as(CudaMatrix))
+      CudaMatrix.return_workspace(drelu)
+
       d_input
     end
 
@@ -178,7 +214,7 @@ module SHAInet
       end
       @g_b2 = @g_b2.as(SimpleMatrix) + db2
 
-      drelu = relu_grad(@h.as(SimpleMatrix), dh)
+      drelu = relu_grad(@h.as(SimpleMatrix), dh, dh)
 
       # For SimpleMatrix, still need to create temporary (no in-place add for SimpleMatrix yet)
       temp_grad_w1 = @x.not_nil!.as(SimpleMatrix).transpose * drelu
@@ -274,64 +310,63 @@ module SHAInet
       end
     end
 
-    private def relu_grad(m : CudaMatrix, grad : CudaMatrix) : CudaMatrix
+    private def relu_grad(m : CudaMatrix, grad : CudaMatrix, dest : CudaMatrix) : CudaMatrix
+      raise ArgumentError.new("size mismatch") unless grad.rows == dest.rows && grad.cols == dest.cols
+
       # Use cuDNN for optimized ReLU gradient if available
       if CUDNN.available?
         begin
-          result = CudaMatrix.new(grad.rows, grad.cols)
-          CUDNN.relu_backward(m, grad, result)
-          return result
+          CUDNN.relu_backward(m, grad, dest)
+          return dest
         rescue e : Exception
           Log.debug { "cuDNN ReLU backward failed: #{e}, falling back to CUDA kernel" }
         end
       end
 
-      # Use GPU kernel for ReLU gradient if available
       if CUDA.fully_available?
         begin
-          result = grad.clone
+          dest.copy_from!(grad) unless dest.object_id == grad.object_id
           # Use CUDA kernel for ReLU backward pass
-          CUDA.relu_backward(result.device_ptr.not_nil!, m.device_ptr.not_nil!, grad.device_ptr.not_nil!, m.rows * m.cols)
-          result.mark_device_dirty!
-          return result
+          CUDA.relu_backward(dest.device_ptr.not_nil!, m.device_ptr.not_nil!, grad.device_ptr.not_nil!, m.rows * m.cols)
+          dest.mark_device_dirty!
+          return dest
         rescue e : Exception
           # Fall back to CPU computation if CUDA fails
         end
       end
 
       # CPU fallback - sync matrices to host first
-      m.sync_from_device!("ff_gradient_debug")
-      grad.sync_from_device!("ff_gradient_debug")
-      result = grad.clone
+      m.sync_from_device!("ff_gradient_debug") if m.device_dirty?
+      grad.sync_from_device!("ff_gradient_debug") if grad.device_dirty?
+      dest.copy_from!(grad) unless dest.object_id == grad.object_id
       # Use unsafe_get for better performance
       m.rows.times do |i|
         m.cols.times do |j|
-          result.unsafe_set(i, j, m.unsafe_get(i, j) > 0 ? grad.unsafe_get(i, j) : 0.0)
+          dest.unsafe_set(i, j, m.unsafe_get(i, j) > 0 ? grad.unsafe_get(i, j) : 0.0)
         end
       end
-      result.sync_to_device!("ff_backward_result")
-      result
+      dest.sync_to_device!("ff_backward_result")
+      dest
     end
 
-    private def relu_grad(m : SimpleMatrix, grad : SimpleMatrix) : SimpleMatrix
-      out = grad.clone
+    private def relu_grad(m : SimpleMatrix, grad : SimpleMatrix, dest : SimpleMatrix) : SimpleMatrix
+      raise ArgumentError.new("size mismatch") unless grad.rows == dest.rows && grad.cols == dest.cols
       m.rows.times do |i|
         m.cols.times do |j|
-          out[i, j] = m[i, j] > 0 ? grad[i, j] : 0.0
+          dest[i, j] = m[i, j] > 0 ? grad[i, j] : 0.0
         end
       end
-      out
+      dest
     end
 
     # Optimized bias gradient accumulation with minimal CPU-GPU sync
     private def accumulate_bias_gradient(bias_grad : SimpleMatrix | CudaMatrix, d_out : CudaMatrix)
       if CUDA.fully_available? && bias_grad.is_a?(CudaMatrix)
         begin
-          CUDA.row_sum(bias_grad.as(CudaMatrix).device_ptr.not_nil!, d_out.device_ptr.not_nil!, d_out.rows, d_out.cols)
+          CUDA.accumulate_bias_grad(bias_grad.as(CudaMatrix).device_ptr.not_nil!, d_out.device_ptr.not_nil!, d_out.rows, d_out.cols)
           bias_grad.as(CudaMatrix).mark_device_dirty!
           return
         rescue e : Exception
-          # Log GPU failure but continue with CPU fallback
           Log.debug { "GPU bias gradient accumulation failed: #{e.message}" }
         end
       end
@@ -359,6 +394,58 @@ module SHAInet
         # Direct accumulation for SimpleMatrix
         d_out.cols.times do |j|
           d_out.rows.times { |i| bias_grad[0, j] += d_out.unsafe_get(i, j) }
+        end
+      end
+    end
+
+    # Allocate persistent workspaces for the given batch size
+    private def ensure_workspace_matrices(batch_size : Int32)
+      return unless CUDA.fully_available?
+
+      d_model = @w1.rows
+      hidden = @w1.cols
+
+      @workspace_w2_t ||= CudaMatrix.get_workspace(@w2.cols, @w2.rows, "ff_w2_t")
+      @workspace_w1_t ||= CudaMatrix.get_workspace(@w1.cols, @w1.rows, "ff_w1_t")
+      @workspace_temp_grad_w2 ||= CudaMatrix.get_workspace(hidden, d_model, "ff_temp_grad_w2")
+      @workspace_temp_grad_w1 ||= CudaMatrix.get_workspace(d_model, hidden, "ff_temp_grad_w1")
+
+      if @last_batch_size != batch_size || @workspace_x_t.nil?
+        if ws = @workspace_x_t
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_h_t
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_h
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_out
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_d_input
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_dh
+          CudaMatrix.return_workspace(ws)
+        end
+
+        @workspace_x_t = CudaMatrix.get_workspace(d_model, batch_size, "ff_x_t")
+        @workspace_h_t = CudaMatrix.get_workspace(hidden, batch_size, "ff_h_t")
+        @workspace_h = CudaMatrix.get_workspace(batch_size, hidden, "ff_h")
+        @workspace_out = CudaMatrix.get_workspace(batch_size, d_model, "ff_out")
+        @workspace_d_input = CudaMatrix.get_workspace(batch_size, d_model, "ff_d_input")
+        @workspace_dh = CudaMatrix.get_workspace(batch_size, hidden, "ff_dh")
+        @last_batch_size = batch_size
+      end
+    end
+
+    def finalize
+      if CUDA.fully_available?
+        [@workspace_w2_t, @workspace_w1_t, @workspace_temp_grad_w2,
+         @workspace_temp_grad_w1, @workspace_x_t, @workspace_h_t, @workspace_h,
+         @workspace_out, @workspace_d_input, @workspace_dh].each do |ws|
+          CudaMatrix.return_workspace(ws.not_nil!) if ws
         end
       end
     end

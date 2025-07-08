@@ -18,7 +18,7 @@ require "../src/shainet"
 # 5. Predict the next token for a sample input.
 
 # Path to the unzipped training text
-path = "/home/unshadow/Downloads/train_100M/childes.train"
+path = "data_train.txt"
 puts "Reading dataset from #{path}..."
 text = File.read(path)
 puts "Dataset loaded, size: #{text.size} characters."
@@ -29,16 +29,16 @@ puts "Training the tokenizer on the dataset..."
 # Train tokenizer and encode text
 vocab_size = 10000 # Much smaller vocab for faster training
 tokenizer = SHAInet::BPETokenizer.new
-tokenizer.train(text, vocab_size) # Much smaller dataset
-ids = tokenizer.encode(text)
+tokenizer.train(text[0..1_000_000], vocab_size) # Much smaller dataset
+ids = tokenizer.encode(text[0..1_000_000])
 
 puts "Tokenizer trained with #{tokenizer.vocab.size} tokens."
 puts "Dataset size: #{ids.size} tokens"
 
 puts "Building the network..."
 # Build the network with much smaller dimensions for fast debugging
-d_model = 128
-seq_len = 64
+d_model = 264
+seq_len = 128
 token_count = tokenizer.vocab.size
 net = SHAInet::Network.new
 net.add_layer(:input, 1, SHAInet.none)
@@ -68,10 +68,11 @@ def write_pairs(path, ids, seq_len)
     puts "Max token ID in dataset: #{max_id}"
 
     (0...(ids.size - seq_len)).each do |i|
-      seq = ids[i, seq_len]     # Array(Int32)
-      target = ids[i + seq_len] # Int32
-      # Write as {"input": [id, ...], "target": id}
-      f.puts({"input" => seq, "target" => target}.to_json)
+      seq = ids[i, seq_len]
+      target = ids[i + seq_len]
+      # Transformer expects tokens as a column matrix, so store as [[id], ...]
+      inputs = seq.map { |id| [id] }
+      f.puts({"input" => inputs, "target" => target}.to_json)
     end
   end
 end
@@ -95,13 +96,13 @@ train_data = SHAInet::StreamingData.new(train_file, shuffle: true, gpu_batches: 
 val_data = SHAInet::StreamingData.new(val_file, gpu_batches: true)
 
 epochs = 100
-batch = 1000 # Larger batch size for better GPU utilization
-net.learning_rate = 0.001
+batch = 300 # Larger batch size for better GPU utilization
+net.learning_rate = 0.0005
 
 puts "Training the network for #{epochs} epochs with batch size #{batch}..."
 # Train for all epochs at once with proper logging
 net.train(data: train_data,
-  training_type: :adam,
+  training_type: :adamw,
   cost_function: :c_ent_sm,
   epochs: epochs,
   mini_batch_size: batch,
@@ -161,14 +162,7 @@ while (val_batch = val_data.next_batch(val_batch_size)).size > 0
     target = Array(Float64).new(token_count, 0.0)
     target[target_id] = 1.0
 
-    output_vec = net.run(seq).last
-
-    # Ensure output_vec is an Array(Float64) for softmax
-    if output_vec.is_a?(SHAInet::CudaMatrix)
-      output_vec = output_vec.to_flat_array
-    elsif output_vec.is_a?(SHAInet::SimpleMatrix)
-      output_vec = output_vec.to_a.first
-    end
+    output_vec = net.run(seq, return_matrix: true).as(SHAInet::CudaMatrix).to_a.last
 
     # Use native softmax - it's already optimized
     probs = SHAInet.softmax(output_vec)
@@ -184,11 +178,6 @@ puts "Final validation loss: #{val_loss.round(4)}"
 
 # Predict the token following a sequence from the dataset
 test_seq = ids[0, seq_len].map { |id| [id] }
-output = net.run(test_seq).last
-if output.is_a?(SHAInet::CudaMatrix)
-  output = output.to_flat_array
-elsif output.is_a?(SHAInet::SimpleMatrix)
-  output = output.to_a.first
-end
+output = net.run(test_seq, return_matrix: true).as(SHAInet::CudaMatrix).to_a.last
 pred_id = output.index(output.max) || 0
 puts "Prediction -> #{tokenizer.decode([pred_id])}"

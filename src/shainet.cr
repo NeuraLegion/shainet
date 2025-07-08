@@ -27,7 +27,6 @@ require "./shainet/math/gpu_memory"
 require "./shainet/math/random_normal"
 require "./shainet/math/simple_matrix"
 require "./shainet/math/tensor_matrix"
-require "./shainet/math/unified_matrix"
 require "./shainet/pytorch_import"
 require "./shainet/text/bpe_tokenizer"
 require "./shainet/text/embedding_layer"
@@ -55,6 +54,6 @@ module SHAInet
   }
 
   log_level = (ENV["LOG_LEVEL"]? || "info")
-
-  ::Log.setup(lvl[log_level.downcase])
+  iobackend = ::Log::IOBackend.new(io: STDOUT, dispatcher: ::Log::DispatchMode::Sync)
+  ::Log.setup(lvl[log_level.downcase], backend: iobackend)
 end

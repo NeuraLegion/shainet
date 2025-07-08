@@ -130,14 +130,21 @@ module SHAInet
       self
     end
 
+    # Slice a range of columns into the provided destination matrix.
+    def slice_cols_into!(dest : SimpleMatrix, start_col : Int32, length : Int32)
+      raise ArgumentError.new("size mismatch") unless dest.rows == @rows && dest.cols == length
+      @rows.times do |i|
+        length.times do |j|
+          dest[i, j] = self[i, start_col + j]
+        end
+      end
+      dest
+    end
+
     # Slice a range of columns from the matrix
     def slice_cols(start_col : Int32, length : Int32)
       result = SimpleMatrix.new(@rows, length)
-      @rows.times do |i|
-        length.times do |j|
-          result[i, j] = self[i, start_col + j]
-        end
-      end
+      slice_cols_into!(result, start_col, length)
       result
     end
 
@@ -194,6 +201,19 @@ module SHAInet
       self
     end
 
+    # Apply dropout in-place using the given probability in the range 0.0..1.0.
+    def dropout!(prob : Float64)
+      raise ArgumentError.new("prob must be between 0 and 1") unless 0.0 <= prob && prob <= 1.0
+
+      @rows.times do |i|
+        @cols.times do |j|
+          self[i, j] = Random.rand < prob ? 0.0 : self[i, j]
+        end
+      end
+
+      self
+    end
+
     # Multiply each column by the corresponding value in a row vector in-place.
     def mul_row_vector!(vec : SimpleMatrix)
       raise ArgumentError.new("vector size mismatch") unless vec.rows == 1 && vec.cols == @cols
@@ -216,6 +236,26 @@ module SHAInet
       end
       result.sync_to_device!("simple_to_cuda_conversion")
       result
+    end
+
+    # Apply softmax to each row in-place.
+    def softmax_rows!
+      @rows.times do |i|
+        row_max = -Float64::INFINITY
+        @cols.times { |j| row_max = Math.max(row_max, self[i, j]) }
+
+        row_sum = 0.0
+        @cols.times do |j|
+          val = Math.exp(self[i, j] - row_max)
+          self[i, j] = val
+          row_sum += val
+        end
+
+        @cols.times do |j|
+          self[i, j] = self[i, j] / row_sum
+        end
+      end
+      self
     end
   end
 end

@@ -57,12 +57,12 @@ module SHAInet
               end
 
       attn = @mha.forward(input, mask)
-      attn = TransformerDropout.apply(attn, @drop_percent) if @drop_percent > 0
-      attn = attn + input
+      TransformerDropout.apply!(attn, @drop_percent) if @drop_percent > 0
+      attn.add!(input)
       normed = @norm1.forward(attn).as(CudaMatrix)
       ff = @ffn.forward(normed)
-      ff = TransformerDropout.apply(ff, @drop_percent) if @drop_percent > 0
-      ff = ff + normed
+      TransformerDropout.apply!(ff, @drop_percent) if @drop_percent > 0
+      ff.add!(normed)
       @norm2.forward(ff).as(CudaMatrix)
     end
 
@@ -87,12 +87,12 @@ module SHAInet
               end
 
       attn = @mha.forward(input, mask)
-      attn = TransformerDropout.apply(attn, @drop_percent) if @drop_percent > 0
-      attn = attn + input
+      TransformerDropout.apply!(attn, @drop_percent) if @drop_percent > 0
+      attn.add!(input)
       normed = @norm1.forward(attn).as(SimpleMatrix)
       ff = @ffn.forward(normed)
-      ff = TransformerDropout.apply(ff, @drop_percent) if @drop_percent > 0
-      ff = ff + normed
+      TransformerDropout.apply!(ff, @drop_percent) if @drop_percent > 0
+      ff.add!(normed)
       final_result = @norm2.forward(ff)
       final_result.as(SimpleMatrix)
     end

@@ -14,6 +14,7 @@ module SHAInet
       fun cudaMemcpy(dst : Pointer(Void), src : Pointer(Void), count : LibC::SizeT, kind : Int32) : Int32
       fun cudaMallocHost(ptr : Pointer(Pointer(Void)), size : LibC::SizeT) : Int32
       fun cudaFreeHost(ptr : Pointer(Void)) : Int32
+      fun cudaMemGetInfo(free : Pointer(LibC::SizeT), total : Pointer(LibC::SizeT)) : Int32
     end
 
     @[Link("cublas")]
@@ -180,6 +181,32 @@ module SHAInet
       LibCUDARuntime.cudaFreeHost(ptr)
     end
 
+    # Returns a hash with free and total memory in bytes for the active CUDA device.
+    def memory_info
+      return nil unless fully_available?
+      free = 0_u64
+      total = 0_u64
+      res = LibCUDARuntime.cudaMemGetInfo(pointerof(free), pointerof(total))
+      if res.zero?
+        {free: free, total: total}
+      else
+        Log.error { "CUDA.memory_info: cudaMemGetInfo failed with result #{res}" }
+        nil
+      end
+    rescue e
+      Log.error { "CUDA.memory_info raised: #{e}" }
+      nil
+    end
+
+    # Convenience method returning the total memory in bytes or nil when unavailable.
+    def total_memory
+      if info = memory_info
+        info[:total]
+      else
+        nil
+      end
+    end
+
     # Handle pool to avoid creating/destroying handles frequently
     @@handle_pool = [] of LibCUBLAS::Handle
     @@handle_pool_mutex = Mutex.new
@@ -287,13 +314,16 @@ module SHAInet
     @@sigmoid_forward_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Void)? = nil
     @@apply_gradient_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Void)? = nil
     @@accumulate_bias_grad_proc : Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Void)? = nil
+    @@row_sum_proc : Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Void)? = nil
     @@zero_matrix_proc : Proc(Pointer(Float64), Int32, Void)? = nil
+    @@fill_matrix_proc : Proc(Pointer(Float64), Float64, Int32, Void)? = nil
     @@element_div_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Void)? = nil
     @@count_pairs_proc : Proc(Pointer(Int32), Pointer(Int32), Pointer(Int32), Pointer(Int32), Int32, Int32, Void)? = nil
     @@relu_backward_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Void)? = nil
     @@softmax_backward_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Int32, Void)? = nil
     @@element_log_proc : Proc(Pointer(Float64), Pointer(Float64), Int32, Void)? = nil
     @@cross_entropy_loss_grad_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Int32, Void)? = nil
+    @@softmax_cross_entropy_label_proc : Proc(Pointer(Float64), Pointer(Int32), Pointer(Float64), Pointer(Float64), Int32, Int32, Void)? = nil
 
     def softmax_rows(dst : Pointer(Float64), src : Pointer(Float64), rows : Int32, cols : Int32)
       # Validate inputs
@@ -617,6 +647,34 @@ module SHAInet
       end
     end
 
+    def fill_matrix(matrix : Pointer(Float64), value : Float64, size : Int32)
+      if matrix.null? || size <= 0
+        Log.error { "CUDA fill_matrix: invalid parameters - matrix: #{matrix.null? ? "null" : "valid"}, size: #{size}, value: #{value}" }
+        return
+      end
+
+      unless fn = @@fill_matrix_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "fill_matrix")
+          unless sym.null?
+            @@fill_matrix_proc = Proc(Pointer(Float64), Float64, Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@fill_matrix_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+
+      begin
+        fn.call(matrix, value, size)
+      rescue e
+        Log.error { "CUDA Error in fill_matrix: #{e}, matrix=#{matrix.address}, size=#{size}, value=#{value}" }
+        raise e
+      end
+    end
+
     def element_div(dst : Pointer(Float64), a : Pointer(Float64), b : Pointer(Float64), size : Int32)
       if dst.null? || a.null? || b.null? || size <= 0
         Log.error { "CUDA element_div: invalid parameters - dst: #{dst.null? ? "null" : "valid"}, a: #{a.null? ? "null" : "valid"}, b: #{b.null? ? "null" : "valid"}, size: #{size}" }
@@ -684,14 +742,33 @@ module SHAInet
     # row which works regardless of the underlying memory layout and avoids
     # creating temporary matrices.
     def row_sum(dst : Pointer(Float64), src : Pointer(Float64), rows : Int32, cols : Int32)
-      handle = create_handle
+      unless fn = @@row_sum_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "row_sum")
+          unless sym.null?
+            @@row_sum_proc = Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@row_sum_proc
+          end
+        end
+      end
 
-      # dst += row_i for each row of src
+      if fn
+        begin
+          fn.call(dst, src, rows, cols)
+          return
+        rescue e
+          Log.error { "CUDA Error in row_sum: #{e}" }
+        end
+      end
+
+      handle = create_handle
       rows.times do |i|
         row_start = src + (i * cols)
         axpy(handle, 1.0, row_start, dst, cols)
       end
-
       destroy_handle(handle)
     end
 
@@ -747,6 +824,36 @@ module SHAInet
         0
       rescue e
         Log.error { "CUDA Error in cross_entropy_loss_gradient: #{e}" }
+        1
+      end
+    end
+
+    def softmax_cross_entropy_label(predicted : Pointer(Float64), labels : Pointer(Int32),
+                                    grad_out : Pointer(Float64), loss_out : Pointer(Float64),
+                                    rows : Int32, cols : Int32) : Int32
+      unless fn = @@softmax_cross_entropy_label_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "softmax_cross_entropy_label")
+          unless sym.null?
+            @@softmax_cross_entropy_label_proc = Proc(Pointer(Float64), Pointer(Int32), Pointer(Float64), Pointer(Float64), Int32, Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@softmax_cross_entropy_label_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+
+      begin
+        loss_device = Pointer(Float64).null
+        CUDA.malloc(pointerof(loss_device).as(Pointer(Pointer(Void))), 8)
+        fn.call(predicted, labels, grad_out, loss_device, rows, cols)
+        CUDA.memcpy(loss_out.as(Pointer(Void)), loss_device.as(Pointer(Void)), 8_u64, MemcpyKind::DeviceToHost)
+        CUDA.free(loss_device.as(Pointer(Void)))
+        0
+      rescue e
+        Log.error { "CUDA Error in softmax_cross_entropy_label: #{e}" }
         1
       end
     end

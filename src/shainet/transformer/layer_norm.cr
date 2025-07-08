@@ -24,11 +24,17 @@ module SHAInet
     @workspace_mean : CudaMatrix | Nil
     @workspace_var : CudaMatrix | Nil
     @workspace_norm : CudaMatrix | Nil
+    @workspace_result : CudaMatrix | Nil
     @workspace_d_x : CudaMatrix | Nil
     @workspace_d_gamma : CudaMatrix | Nil
     @workspace_d_beta : CudaMatrix | Nil
     @last_batch_size : Int32
     @d_model : Int32
+
+    # Workspaces are allocated on the first forward pass and reused for the
+    # lifetime of the layer. Call `to_gpu!` or `to_cpu!` only when switching
+    # devices. Repeated calls without a device change keep the existing
+    # workspaces to avoid unnecessary allocations.
 
     def initialize(d_model : Int32, epsilon : Float64 = 1e-5)
       # Use CudaMatrix when CUDA is available for better performance
@@ -49,27 +55,70 @@ module SHAInet
       @workspace_mean = nil
       @workspace_var = nil
       @workspace_norm = nil
+      @workspace_result = nil
       @workspace_d_x = nil
       @workspace_d_gamma = nil
       @workspace_d_beta = nil
     end
 
-    # Convert all internal matrices to GPU
+    # Convert all internal matrices to GPU. Workspaces are kept unless the
+    # device actually changes to avoid unnecessary allocations.
     def to_gpu!
-      if CUDA.fully_available?
-        @gamma = @gamma.as(SimpleMatrix).to_cuda unless @gamma.is_a?(CudaMatrix)
-        @beta = @beta.as(SimpleMatrix).to_cuda unless @beta.is_a?(CudaMatrix)
-        @g_gamma = @g_gamma.as(SimpleMatrix).to_cuda unless @g_gamma.is_a?(CudaMatrix)
-        @g_beta = @g_beta.as(SimpleMatrix).to_cuda unless @g_beta.is_a?(CudaMatrix)
-        @mean = @mean.as(SimpleMatrix).to_cuda if @mean && !@mean.is_a?(CudaMatrix)
-        @var = @var.as(SimpleMatrix).to_cuda if @var && !@var.is_a?(CudaMatrix)
-        @norm = @norm.as(SimpleMatrix).to_cuda if @norm && !@norm.is_a?(CudaMatrix)
-        @x = @x.as(SimpleMatrix).to_cuda if @x && !@x.is_a?(CudaMatrix)
+      return unless CUDA.fully_available?
 
-        # Reset workspace matrices so they get allocated as CudaMatrix on next use
+      device_changed = false
+
+      unless @gamma.is_a?(CudaMatrix)
+        @gamma = @gamma.as(SimpleMatrix).to_cuda
+        device_changed = true
+      end
+      unless @beta.is_a?(CudaMatrix)
+        @beta = @beta.as(SimpleMatrix).to_cuda
+        device_changed = true
+      end
+      unless @g_gamma.is_a?(CudaMatrix)
+        @g_gamma = @g_gamma.as(SimpleMatrix).to_cuda
+        device_changed = true
+      end
+      unless @g_beta.is_a?(CudaMatrix)
+        @g_beta = @g_beta.as(SimpleMatrix).to_cuda
+        device_changed = true
+      end
+
+      @mean = @mean.as(SimpleMatrix).to_cuda if @mean && !@mean.is_a?(CudaMatrix)
+      @var = @var.as(SimpleMatrix).to_cuda if @var && !@var.is_a?(CudaMatrix)
+      @norm = @norm.as(SimpleMatrix).to_cuda if @norm && !@norm.is_a?(CudaMatrix)
+      @x = @x.as(SimpleMatrix).to_cuda if @x && !@x.is_a?(CudaMatrix)
+
+      if device_changed
+        # Return workspaces to pool when switching devices so they can be reused
+        if ws = @workspace_mean
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_var
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_norm
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_result
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_d_x
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_d_gamma
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_d_beta
+          CudaMatrix.return_workspace(ws)
+        end
+
+        # Reset workspace references so they allocate on next use
         @workspace_mean = nil
         @workspace_var = nil
         @workspace_norm = nil
+        @workspace_result = nil
         @workspace_d_x = nil
         @workspace_d_gamma = nil
         @workspace_d_beta = nil
@@ -77,19 +126,92 @@ module SHAInet
       end
     end
 
+    # Convert all internal matrices to CPU. Frees GPU workspaces only when the
+    # layer was previously on the GPU.
+    def to_cpu!
+      return unless @gamma.is_a?(CudaMatrix)
+
+      @gamma = @gamma.as(CudaMatrix).to_simple
+      @beta = @beta.as(CudaMatrix).to_simple
+      @g_gamma = @g_gamma.as(CudaMatrix).to_simple
+      @g_beta = @g_beta.as(CudaMatrix).to_simple
+      @mean = @mean.as(CudaMatrix).to_simple if @mean.is_a?(CudaMatrix)
+      @var = @var.as(CudaMatrix).to_simple if @var.is_a?(CudaMatrix)
+      @norm = @norm.as(CudaMatrix).to_simple if @norm.is_a?(CudaMatrix)
+      @x = @x.as(CudaMatrix).to_simple if @x && @x.is_a?(CudaMatrix)
+
+      if ws = @workspace_mean
+        CudaMatrix.return_workspace(ws)
+      end
+      if ws = @workspace_var
+        CudaMatrix.return_workspace(ws)
+      end
+      if ws = @workspace_norm
+        CudaMatrix.return_workspace(ws)
+      end
+      if ws = @workspace_result
+        CudaMatrix.return_workspace(ws)
+      end
+      if ws = @workspace_d_x
+        CudaMatrix.return_workspace(ws)
+      end
+      if ws = @workspace_d_gamma
+        CudaMatrix.return_workspace(ws)
+      end
+      if ws = @workspace_d_beta
+        CudaMatrix.return_workspace(ws)
+      end
+
+      @workspace_mean = nil
+      @workspace_var = nil
+      @workspace_norm = nil
+      @workspace_result = nil
+      @workspace_d_x = nil
+      @workspace_d_gamma = nil
+      @workspace_d_beta = nil
+      @last_batch_size = 0
+    end
+
     # Pre-allocate or reuse workspace matrices based on input dimensions
     private def ensure_workspace_matrices(batch_size : Int32, d_model : Int32)
-      if CUDA.fully_available?
-        # Only reallocate if batch size changed
-        if @last_batch_size != batch_size
-          @workspace_mean = CudaMatrix.new(batch_size, 1)
-          @workspace_var = CudaMatrix.new(batch_size, 1)
-          @workspace_norm = CudaMatrix.new(batch_size, d_model)
-          @workspace_d_x = CudaMatrix.new(batch_size, d_model)
-          @workspace_d_gamma = CudaMatrix.zeros(1, d_model)
-          @workspace_d_beta = CudaMatrix.zeros(1, d_model)
-          @last_batch_size = batch_size
+      return unless CUDA.fully_available?
+
+      # Only reallocate if batch size changed
+      if @last_batch_size != batch_size
+        if ws = @workspace_mean
+          CudaMatrix.return_workspace(ws)
         end
+        if ws = @workspace_var
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_norm
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_result
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_d_x
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_d_gamma
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_d_beta
+          CudaMatrix.return_workspace(ws)
+        end
+
+        @workspace_mean = CudaMatrix.get_workspace(batch_size, 1, "ln_mean")
+        @workspace_var = CudaMatrix.get_workspace(batch_size, 1, "ln_var")
+        @workspace_norm = CudaMatrix.get_workspace(batch_size, d_model, "ln_norm")
+        @workspace_result = CudaMatrix.get_workspace(batch_size, d_model, "ln_result")
+        @workspace_d_x = CudaMatrix.get_workspace(batch_size, d_model, "ln_d_x")
+        @workspace_d_gamma = CudaMatrix.get_workspace(1, d_model, "ln_d_gamma")
+        @workspace_d_beta = CudaMatrix.get_workspace(1, d_model, "ln_d_beta")
+
+        @workspace_d_gamma.not_nil!.zero!
+        @workspace_d_beta.not_nil!.zero!
+
+        @last_batch_size = batch_size
       end
     end
 
@@ -106,6 +228,7 @@ module SHAInet
       cuda_mean = @workspace_mean.not_nil!
       cuda_var = @workspace_var.not_nil!
       cuda_norm = @workspace_norm.not_nil!
+      cuda_result = @workspace_result.not_nil!
 
       begin
         # Try to use CUDA kernels - if they fail, fallback to CPU
@@ -130,7 +253,8 @@ module SHAInet
         @norm = cuda_norm # Keep as CudaMatrix
 
         # Use in-place operations for better performance
-        result = cuda_norm.clone
+        result = cuda_result
+        result.copy_from!(cuda_norm)
         result.mul_row_vector!(@gamma.as(CudaMatrix))
         result.add_bias!(@beta.as(CudaMatrix))
         return result
@@ -246,86 +370,17 @@ module SHAInet
           # Keep gradient accumulation on GPU - avoid expensive CPU syncs
           # Only accumulate to GPU gradient matrices, sync only when applying gradients
           if @g_gamma.is_a?(CudaMatrix) && @g_beta.is_a?(CudaMatrix)
-            # GPU gradient accumulation - use in-place addition
             @g_gamma.as(CudaMatrix).add!(d_gamma)
             @g_beta.as(CudaMatrix).add!(d_beta)
-          else
-            # Fallback to CPU accumulation only if gradients are on CPU
-            d_gamma.sync_from_device!("layer_norm_grad")
-            d_beta.sync_from_device!("layer_norm_grad")
-            # Accumulate gradients to parameters (SimpleMatrix fallback)
-            cols.times do |j|
-              @g_gamma[0, j] += d_gamma[0, j]
-              @g_beta[0, j] += d_beta[0, j]
-            end
           end
 
           return d_x
         rescue e : Exception
-          # Fall back to CPU implementation
+          raise e
         end
       end
 
-      # CPU fallback - sync ALL matrices from device first
-      x.sync_from_device!("layer_norm_backward")
-      d_out.sync_from_device!("layer_norm_backward") # This was missing!
-
-      # Sync gamma if it's on GPU
-      if @gamma.is_a?(CudaMatrix)
-        @gamma.as(CudaMatrix).sync_from_device!("layer_norm_debug")
-      end
-
-      # Use CPU matrices for computation
-      d_gamma = SimpleMatrix.zeros(1, cols)
-      d_beta = SimpleMatrix.zeros(1, cols)
-      d_x = SimpleMatrix.new(rows, cols)
-
-      # Also sync other matrices if they're CUDA
-      if @mean.is_a?(CudaMatrix)
-        @mean.as(CudaMatrix).sync_from_device!("layer_norm_debug")
-      end
-      if @var.is_a?(CudaMatrix)
-        @var.as(CudaMatrix).sync_from_device!("layer_norm_debug")
-      end
-      if @norm.is_a?(CudaMatrix)
-        @norm.as(CudaMatrix).sync_from_device!("layer_norm_debug")
-      end
-
-      rows.times do |i|
-        denom = Math.sqrt(@var[i, 0] + @epsilon)
-        inv = 1.0 / denom
-        col_f = cols.to_f64
-        sum_dout_gamma = 0.0
-        sum_dout_gamma_norm = 0.0
-        cols.times do |j|
-          doutg = d_out[i, j] * @gamma[0, j]
-          sum_dout_gamma += doutg
-          sum_dout_gamma_norm += doutg * (x[i, j] - @mean[i, 0])
-          d_gamma[0, j] += d_out[i, j] * @norm[i, j]
-          d_beta[0, j] += d_out[i, j]
-        end
-        cols.times do |j|
-          xm = x[i, j] - @mean[i, 0]
-          doutg = d_out[i, j] * @gamma[0, j]
-          d_x[i, j] = inv * (doutg - sum_dout_gamma/col_f - xm * inv*inv / col_f * sum_dout_gamma_norm)
-        end
-      end
-
-      # Accumulate gradients to parameters
-      cols.times do |j|
-        @g_gamma[0, j] += d_gamma[0, j]
-        @g_beta[0, j] += d_beta[0, j]
-      end
-
-      # Convert result back to CudaMatrix
-      result = CudaMatrix.new(rows, cols)
-      rows.times do |i|
-        cols.times do |j|
-          result[i, j] = d_x[i, j]
-        end
-      end
-      result.sync_to_device!("layer_norm_gradient_result")
-      result
+      raise "CUDA kernels not available for layer_norm backward"
     end
 
     # CPU path backward - all SimpleMatrix operations
@@ -426,6 +481,40 @@ module SHAInet
         @g_gamma = SimpleMatrix.zeros(@gamma.rows, @gamma.cols)
         @g_beta = SimpleMatrix.zeros(@beta.rows, @beta.cols)
       end
+    end
+
+    def finalize
+      if CUDA.fully_available?
+        if ws = @workspace_mean
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_var
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_norm
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_result
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_d_x
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_d_gamma
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_d_beta
+          CudaMatrix.return_workspace(ws)
+        end
+      end
+
+      @workspace_mean = nil
+      @workspace_var = nil
+      @workspace_norm = nil
+      @workspace_result = nil
+      @workspace_d_x = nil
+      @workspace_d_gamma = nil
+      @workspace_d_beta = nil
     end
   end
 end

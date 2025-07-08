@@ -21,7 +21,7 @@ module SHAInet
     # Global GPU memory tracking
     @@total_gpu_memory_allocated = 0_u64
     @@active_matrices = 0
-    @@max_gpu_memory = 16_000_000_000_u64 # 16GB limit (use most of available GPU memory)
+    @@max_gpu_memory = (CUDA.total_memory || 16_000_000_000_u64) # Use available GPU memory when possible
     @@allocation_attempts = 0
     @@allocation_failures = 0
 
@@ -43,7 +43,7 @@ module SHAInet
     # Disable workspace pool - use in-place operations instead
     @@matrix_pool = Hash(String, Array(CudaMatrix)).new { |h, k| h[k] = [] of CudaMatrix }
     @@pool_enabled = true
-    @@max_pool_size = 5000
+    @@max_pool_size = 30_000
 
     getter rows, cols
 
@@ -78,22 +78,22 @@ module SHAInet
     end
 
     def self.print_detailed_stats
-      Log.info { "GPU Memory Statistics:" }
-      Log.info { "  Total attempts: #{@@allocation_attempts}" }
-      Log.info { "  Failed attempts: #{@@allocation_failures}" }
-      Log.info { "  Success rate: #{@@allocation_attempts > 0 ? (100.0 * (@@allocation_attempts - @@allocation_failures) / @@allocation_attempts).round(2) : 0}%" }
-      Log.info { "  Active matrices: #{@@active_matrices}" }
-      Log.info { "  Total GPU memory: #{@@total_gpu_memory_allocated} bytes (#{(@@total_gpu_memory_allocated / 1024.0 / 1024.0).round(2)} MB)" }
-      Log.info { "  Memory limit: #{@@max_gpu_memory} bytes (#{(@@max_gpu_memory / 1024.0 / 1024.0).round(2)} MB)" }
-      Log.info { "  Usage %: #{(100.0 * @@total_gpu_memory_allocated / @@max_gpu_memory).round(2)}%" }
-      Log.info { "  Average size per matrix: #{@@active_matrices > 0 ? (@@total_gpu_memory_allocated / @@active_matrices).round(2) : 0} bytes" }
-      Log.info { "Allocation sites (top 20): #{SHAInet::CudaMatrix.print_top_allocation_sites(20)} " }
+      Log.debug { "GPU Memory Statistics:" }
+      Log.debug { "  Total attempts: #{@@allocation_attempts}" }
+      Log.debug { "  Failed attempts: #{@@allocation_failures}" }
+      Log.debug { "  Success rate: #{@@allocation_attempts > 0 ? (100.0 * (@@allocation_attempts - @@allocation_failures) / @@allocation_attempts).round(2) : 0}%" }
+      Log.debug { "  Active matrices: #{@@active_matrices}" }
+      Log.debug { "  Total GPU memory: #{@@total_gpu_memory_allocated} bytes (#{(@@total_gpu_memory_allocated / 1024.0 / 1024.0).round(2)} MB)" }
+      Log.debug { "  Memory limit: #{@@max_gpu_memory} bytes (#{(@@max_gpu_memory / 1024.0 / 1024.0).round(2)} MB)" }
+      Log.debug { "  Usage %: #{(100.0 * @@total_gpu_memory_allocated / @@max_gpu_memory).round(2)}%" }
+      Log.debug { "  Average size per matrix: #{@@active_matrices > 0 ? (@@total_gpu_memory_allocated / @@active_matrices).round(2) : 0} bytes" }
+      Log.debug { "Allocation sites (top 20): #{SHAInet::CudaMatrix.print_top_allocation_sites(20)} " }
     end
 
     def self.print_top_allocation_sites(limit = 20)
-      Log.info { "Top CudaMatrix allocation sites:" }
+      Log.debug { "Top CudaMatrix allocation sites:" }
       @@allocation_sites.to_a.sort_by { |(_, v)| v }.reverse.first(limit).each do |site, count|
-        Log.info { "%6d  %s" % {count, site} }
+        Log.debug { "%6d  %s" % {count, site} }
       end
     end
 
@@ -272,7 +272,6 @@ module SHAInet
       return if dptr.null?
 
       begin
-        # Use regular memory for host-device transfer (avoiding pinned memory limits)
         size = @rows * @cols
         bytes = (size * 8).to_u64
 
@@ -281,14 +280,9 @@ module SHAInet
         @@total_sync_bytes_to_device += bytes
         self.class.track_sync("to_device:#{source}")
 
-        # Create a stable buffer that won't be moved by GC
-        buffer = Slice(Float64).new(size) do |i|
-          row = i // @cols
-          col = i % @cols
-          unsafe_get(row, col)
-        end
-
-        copy_result = CUDA.memcpy(dptr.as(Pointer(Void)), buffer.to_unsafe.as(Pointer(Void)), bytes, CUDA::MemcpyKind::HostToDevice)
+        # Directly copy from the matrix's backing array
+        slice = Slice.new(@data.to_unsafe, size)
+        copy_result = CUDA.memcpy(dptr.as(Pointer(Void)), slice.to_unsafe.as(Pointer(Void)), bytes, CUDA::MemcpyKind::HostToDevice)
 
         if copy_result != 0
           Log.error { "CudaMatrix.sync_to_device!: GPU memcpy failed with result #{copy_result} for #{@rows}x#{@cols}" }
@@ -316,16 +310,10 @@ module SHAInet
         @@total_sync_bytes_from_device += bytes
         self.class.track_sync("from_device:#{source}")
 
-        # Use regular memory copy (avoiding pinned memory limits)
-        buffer = Slice(Float64).new(size, 0.0)
-        copy_result = CUDA.memcpy(buffer.to_unsafe.as(Pointer(Void)), dptr.as(Pointer(Void)), bytes, CUDA::MemcpyKind::DeviceToHost)
+        slice = Slice.new(@data.to_unsafe, size)
+        copy_result = CUDA.memcpy(slice.to_unsafe.as(Pointer(Void)), dptr.as(Pointer(Void)), bytes, CUDA::MemcpyKind::DeviceToHost)
 
         if copy_result == 0
-          size.times do |i|
-            row = i // @cols
-            col = i % @cols
-            unsafe_set(row, col, buffer[i])
-          end
           mark_device_clean!
         else
           @device_ptr = Pointer(Float64).null
@@ -335,18 +323,24 @@ module SHAInet
       end
     end
 
-    def slice_cols(start_col : Int32, length : Int32)
-      # Create new matrix directly - slice operations create new views
-      result = CudaMatrix.new(@rows, length)
-      raise RuntimeError.new("GPU slice_cols requires valid device pointers") unless (sptr = self.device_ptr) && (dptr = result.device_ptr) && !sptr.null? && !dptr.null?
+    # Slice a range of columns into an existing destination matrix using the
+    # CUDA `slice_cols` kernel.
+    def slice_cols_into!(dest : CudaMatrix, start_col : Int32, length : Int32)
+      raise ArgumentError.new("size mismatch") unless dest.rows == @rows && dest.cols == length
+      raise RuntimeError.new("GPU slice_cols_into! requires valid device pointers") unless (sptr = self.device_ptr) && (dptr = dest.device_ptr) && !sptr.null? && !dptr.null?
 
-      # Ensure source has up-to-date GPU data
-      self.sync_to_device!("slice_cols") unless device_dirty?
+      # Ensure source data is on the GPU
+      self.sync_to_device!("slice_cols_into") unless device_dirty?
 
       CUDA.slice_cols(dptr, sptr, @rows, @cols, start_col, length)
 
-      # Mark result as having newer GPU data
-      result.mark_device_dirty!
+      dest.mark_device_dirty!
+      dest
+    end
+
+    def slice_cols(start_col : Int32, length : Int32)
+      result = CudaMatrix.new(@rows, length)
+      slice_cols_into!(result, start_col, length)
       result
     end
 
@@ -563,24 +557,13 @@ module SHAInet
     # Fill matrix with a constant value in-place.
     def fill!(value : Float64)
       if CUDA.fully_available? && (dptr = device_ptr) && !dptr.null?
-        # Special case for zero - use GPU kernel directly
+        size = @rows * @cols
         if value == 0.0
-          size = @rows * @cols
           CUDA.zero_matrix(dptr, size)
-          mark_device_dirty!
         else
-          # For non-zero values, fall back to CPU approach
-          # But only sync if actually needed
-          sync_from_device!("matrix_fill") if device_dirty?
-
-          @rows.times do |i|
-            @cols.times do |j|
-              unsafe_set(i, j, value)
-            end
-          end
-
-          sync_to_device!("matrix_fill")
+          CUDA.fill_matrix(dptr, value, size)
         end
+        mark_device_dirty!
       else
         # CPU fallback
         @rows.times do |i|

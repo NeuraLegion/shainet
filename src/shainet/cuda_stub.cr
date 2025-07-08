@@ -59,6 +59,14 @@ module SHAInet
     def free_host(*args)
     end
 
+    def memory_info
+      nil
+    end
+
+    def total_memory
+      nil
+    end
+
     def create_handle(*args)
       raise "CUDA disabled"
     end
@@ -151,6 +159,10 @@ module SHAInet
       raise "CUDA kernels not available"
     end
 
+    def fill_matrix(*args)
+      raise "CUDA kernels not available"
+    end
+
     def element_div(*args)
       raise "CUDA kernels not available"
     end
@@ -172,6 +184,10 @@ module SHAInet
     end
 
     def cross_entropy_loss_gradient(*args) : Int32
+      raise "CUDA kernels not available"
+    end
+
+    def softmax_cross_entropy_label(*args) : Int32
       raise "CUDA kernels not available"
     end
 
@@ -244,6 +260,10 @@ module SHAInet
     end
 
     def softmax_cross_entropy_loss_and_gradient(*args)
+      raise CudnnError.new("cuDNN not available")
+    end
+
+    def softmax_cross_entropy_label_loss_and_gradient(*args)
       raise CudnnError.new("cuDNN not available")
     end
 

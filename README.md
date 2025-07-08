@@ -58,6 +58,13 @@ To build kernels manually:
 ./build_cuda_kernels.sh
 ```
 
+### Device management
+
+Layers such as `LayerNorm` allocate workspace matrices on the first forward pass
+and reuse them across iterations. Call `to_gpu!` or `to_cpu!` only when
+switching devices. Repeated calls without a device change keep the existing
+workspaces to avoid unnecessary allocations.
+
 ---
 
 ## Usage
