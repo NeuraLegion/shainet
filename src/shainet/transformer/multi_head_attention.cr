@@ -31,6 +31,11 @@ module SHAInet
     @workspace_d_k_concat : CudaMatrix | Nil
     @workspace_d_v_concat : CudaMatrix | Nil
 
+    # Workspace matrices for Q, K, V projections
+    @workspace_q : CudaMatrix | Nil
+    @workspace_k : CudaMatrix | Nil
+    @workspace_v : CudaMatrix | Nil
+
     # Workspace matrices for intermediate input gradients
     @workspace_d_x_q : CudaMatrix | Nil
     @workspace_d_x_k : CudaMatrix | Nil
@@ -95,6 +100,9 @@ module SHAInet
       @workspace_d_q_concat = nil
       @workspace_d_k_concat = nil
       @workspace_d_v_concat = nil
+      @workspace_q = nil
+      @workspace_k = nil
+      @workspace_v = nil
       @workspace_d_x_q = nil
       @workspace_d_x_k = nil
       @workspace_d_x_v = nil
@@ -144,6 +152,9 @@ module SHAInet
         @workspace_d_q_concat = nil
         @workspace_d_k_concat = nil
         @workspace_d_v_concat = nil
+        @workspace_q = nil
+        @workspace_k = nil
+        @workspace_v = nil
         @workspace_d_x_q = nil
         @workspace_d_x_k = nil
         @workspace_d_x_v = nil
@@ -180,10 +191,10 @@ module SHAInet
       # Ensure workspace matrices are allocated for this batch size
       ensure_workspace_matrices(x.rows)
 
-      # Use workspace pool for Q, K, V projections to reduce allocations
-      q = CudaMatrix.get_workspace(x.rows, @d_model, "mha_q_projection")
-      k = CudaMatrix.get_workspace(x.rows, @d_model, "mha_k_projection")
-      v = CudaMatrix.get_workspace(x.rows, @d_model, "mha_v_projection")
+      # Use preallocated workspace matrices for Q, K, V projections
+      q = @workspace_q.not_nil!
+      k = @workspace_k.not_nil!
+      v = @workspace_v.not_nil!
 
       begin
         # Compute Q, K, V projections - reuse workspace matrices
@@ -269,10 +280,7 @@ module SHAInet
         @out = concat * @w_o.as(CudaMatrix)
         @out.as(CudaMatrix)
       ensure
-        # Return workspace matrices to pool
-        CudaMatrix.return_workspace(q)
-        CudaMatrix.return_workspace(k)
-        CudaMatrix.return_workspace(v)
+        # No-op for persistent workspace matrices
       end
     end
 
@@ -658,7 +666,7 @@ module SHAInet
     end
 
     # Pre-allocate or reuse workspace matrices based on input dimensions
-    private def ensure_workspace_matrices(batch_size : Int32)
+  private def ensure_workspace_matrices(batch_size : Int32)
       if CUDA.fully_available?
         # Only reallocate if batch size changed
         if @last_batch_size != batch_size
@@ -684,6 +692,15 @@ module SHAInet
           if ws = @workspace_d_x_v
             CudaMatrix.return_workspace(ws)
           end
+          if ws = @workspace_q
+            CudaMatrix.return_workspace(ws)
+          end
+          if ws = @workspace_k
+            CudaMatrix.return_workspace(ws)
+          end
+          if ws = @workspace_v
+            CudaMatrix.return_workspace(ws)
+          end
 
           # Return cached backward workspaces
           @d_v_temp_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @d_v_temp_ws.any?
@@ -704,6 +721,9 @@ module SHAInet
           @workspace_d_x_q = CudaMatrix.get_workspace(batch_size, @d_model, "mha_d_x_q_ws")
           @workspace_d_x_k = CudaMatrix.get_workspace(batch_size, @d_model, "mha_d_x_k_ws")
           @workspace_d_x_v = CudaMatrix.get_workspace(batch_size, @d_model, "mha_d_x_v_ws")
+          @workspace_q = CudaMatrix.get_workspace(batch_size, @d_model, "mha_q_ws")
+          @workspace_k = CudaMatrix.get_workspace(batch_size, @d_model, "mha_k_ws")
+          @workspace_v = CudaMatrix.get_workspace(batch_size, @d_model, "mha_v_ws")
 
           # Allocate workspace matrices for each attention head
           @workspace_scores = Array(CudaMatrix | Nil).new(@num_heads, nil)
@@ -743,6 +763,20 @@ module SHAInet
           end
 
           @last_batch_size = batch_size
+        end
+      end
+    end
+
+    def finalize
+      if CUDA.fully_available?
+        if ws = @workspace_q
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_k
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_v
+          CudaMatrix.return_workspace(ws)
         end
       end
     end
