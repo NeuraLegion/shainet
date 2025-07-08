@@ -31,6 +31,11 @@ module SHAInet
     @last_batch_size : Int32
     @d_model : Int32
 
+    # Workspaces are allocated on the first forward pass and reused for the
+    # lifetime of the layer. Call `to_gpu!` or `to_cpu!` only when switching
+    # devices. Repeated calls without a device change keep the existing
+    # workspaces to avoid unnecessary allocations.
+
     def initialize(d_model : Int32, epsilon : Float64 = 1e-5)
       # Use CudaMatrix when CUDA is available for better performance
       mat_klass = CUDA.fully_available? ? CudaMatrix : SimpleMatrix
@@ -56,19 +61,37 @@ module SHAInet
       @workspace_d_beta = nil
     end
 
-    # Convert all internal matrices to GPU
+    # Convert all internal matrices to GPU. Workspaces are kept unless the
+    # device actually changes to avoid unnecessary allocations.
     def to_gpu!
-      if CUDA.fully_available?
-        @gamma = @gamma.as(SimpleMatrix).to_cuda unless @gamma.is_a?(CudaMatrix)
-        @beta = @beta.as(SimpleMatrix).to_cuda unless @beta.is_a?(CudaMatrix)
-        @g_gamma = @g_gamma.as(SimpleMatrix).to_cuda unless @g_gamma.is_a?(CudaMatrix)
-        @g_beta = @g_beta.as(SimpleMatrix).to_cuda unless @g_beta.is_a?(CudaMatrix)
-        @mean = @mean.as(SimpleMatrix).to_cuda if @mean && !@mean.is_a?(CudaMatrix)
-        @var = @var.as(SimpleMatrix).to_cuda if @var && !@var.is_a?(CudaMatrix)
-        @norm = @norm.as(SimpleMatrix).to_cuda if @norm && !@norm.is_a?(CudaMatrix)
-        @x = @x.as(SimpleMatrix).to_cuda if @x && !@x.is_a?(CudaMatrix)
+      return unless CUDA.fully_available?
 
-        # Return workspaces to pool so they can be reused
+      device_changed = false
+
+      unless @gamma.is_a?(CudaMatrix)
+        @gamma = @gamma.as(SimpleMatrix).to_cuda
+        device_changed = true
+      end
+      unless @beta.is_a?(CudaMatrix)
+        @beta = @beta.as(SimpleMatrix).to_cuda
+        device_changed = true
+      end
+      unless @g_gamma.is_a?(CudaMatrix)
+        @g_gamma = @g_gamma.as(SimpleMatrix).to_cuda
+        device_changed = true
+      end
+      unless @g_beta.is_a?(CudaMatrix)
+        @g_beta = @g_beta.as(SimpleMatrix).to_cuda
+        device_changed = true
+      end
+
+      @mean = @mean.as(SimpleMatrix).to_cuda if @mean && !@mean.is_a?(CudaMatrix)
+      @var = @var.as(SimpleMatrix).to_cuda if @var && !@var.is_a?(CudaMatrix)
+      @norm = @norm.as(SimpleMatrix).to_cuda if @norm && !@norm.is_a?(CudaMatrix)
+      @x = @x.as(SimpleMatrix).to_cuda if @x && !@x.is_a?(CudaMatrix)
+
+      if device_changed
+        # Return workspaces to pool when switching devices so they can be reused
         if ws = @workspace_mean
           CudaMatrix.return_workspace(ws)
         end
@@ -101,6 +124,52 @@ module SHAInet
         @workspace_d_beta = nil
         @last_batch_size = 0
       end
+    end
+
+    # Convert all internal matrices to CPU. Frees GPU workspaces only when the
+    # layer was previously on the GPU.
+    def to_cpu!
+      return unless @gamma.is_a?(CudaMatrix)
+
+      @gamma = @gamma.as(CudaMatrix).to_simple
+      @beta = @beta.as(CudaMatrix).to_simple
+      @g_gamma = @g_gamma.as(CudaMatrix).to_simple
+      @g_beta = @g_beta.as(CudaMatrix).to_simple
+      @mean = @mean.as(CudaMatrix).to_simple if @mean.is_a?(CudaMatrix)
+      @var = @var.as(CudaMatrix).to_simple if @var.is_a?(CudaMatrix)
+      @norm = @norm.as(CudaMatrix).to_simple if @norm.is_a?(CudaMatrix)
+      @x = @x.as(CudaMatrix).to_simple if @x && @x.is_a?(CudaMatrix)
+
+      if ws = @workspace_mean
+        CudaMatrix.return_workspace(ws)
+      end
+      if ws = @workspace_var
+        CudaMatrix.return_workspace(ws)
+      end
+      if ws = @workspace_norm
+        CudaMatrix.return_workspace(ws)
+      end
+      if ws = @workspace_result
+        CudaMatrix.return_workspace(ws)
+      end
+      if ws = @workspace_d_x
+        CudaMatrix.return_workspace(ws)
+      end
+      if ws = @workspace_d_gamma
+        CudaMatrix.return_workspace(ws)
+      end
+      if ws = @workspace_d_beta
+        CudaMatrix.return_workspace(ws)
+      end
+
+      @workspace_mean = nil
+      @workspace_var = nil
+      @workspace_norm = nil
+      @workspace_result = nil
+      @workspace_d_x = nil
+      @workspace_d_gamma = nil
+      @workspace_d_beta = nil
+      @last_batch_size = 0
     end
 
     # Pre-allocate or reuse workspace matrices based on input dimensions
