@@ -68,7 +68,30 @@ module SHAInet
         @norm = @norm.as(SimpleMatrix).to_cuda if @norm && !@norm.is_a?(CudaMatrix)
         @x = @x.as(SimpleMatrix).to_cuda if @x && !@x.is_a?(CudaMatrix)
 
-        # Reset workspace matrices so they get allocated as CudaMatrix on next use
+        # Return workspaces to pool so they can be reused
+        if ws = @workspace_mean
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_var
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_norm
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_result
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_d_x
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_d_gamma
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_d_beta
+          CudaMatrix.return_workspace(ws)
+        end
+
+        # Reset workspace references so they allocate on next use
         @workspace_mean = nil
         @workspace_var = nil
         @workspace_norm = nil
@@ -82,18 +105,44 @@ module SHAInet
 
     # Pre-allocate or reuse workspace matrices based on input dimensions
     private def ensure_workspace_matrices(batch_size : Int32, d_model : Int32)
-      if CUDA.fully_available?
-        # Only reallocate if batch size changed
-        if @last_batch_size != batch_size
-          @workspace_mean = CudaMatrix.new(batch_size, 1)
-          @workspace_var = CudaMatrix.new(batch_size, 1)
-          @workspace_norm = CudaMatrix.new(batch_size, d_model)
-          @workspace_result = CudaMatrix.new(batch_size, d_model)
-          @workspace_d_x = CudaMatrix.new(batch_size, d_model)
-          @workspace_d_gamma = CudaMatrix.zeros(1, d_model)
-          @workspace_d_beta = CudaMatrix.zeros(1, d_model)
-          @last_batch_size = batch_size
+      return unless CUDA.fully_available?
+
+      # Only reallocate if batch size changed
+      if @last_batch_size != batch_size
+        if ws = @workspace_mean
+          CudaMatrix.return_workspace(ws)
         end
+        if ws = @workspace_var
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_norm
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_result
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_d_x
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_d_gamma
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_d_beta
+          CudaMatrix.return_workspace(ws)
+        end
+
+        @workspace_mean = CudaMatrix.get_workspace(batch_size, 1, "ln_mean")
+        @workspace_var = CudaMatrix.get_workspace(batch_size, 1, "ln_var")
+        @workspace_norm = CudaMatrix.get_workspace(batch_size, d_model, "ln_norm")
+        @workspace_result = CudaMatrix.get_workspace(batch_size, d_model, "ln_result")
+        @workspace_d_x = CudaMatrix.get_workspace(batch_size, d_model, "ln_d_x")
+        @workspace_d_gamma = CudaMatrix.get_workspace(1, d_model, "ln_d_gamma")
+        @workspace_d_beta = CudaMatrix.get_workspace(1, d_model, "ln_d_beta")
+
+        @workspace_d_gamma.not_nil!.zero!
+        @workspace_d_beta.not_nil!.zero!
+
+        @last_batch_size = batch_size
       end
     end
 
