@@ -48,6 +48,10 @@ module SHAInet
     @d_scores_temp_ws : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
     @d_q_temp_ws : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
     @d_k_temp_ws : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
+    # Workspace matrices for temporary transposes during backward pass
+    @attn_t_ws : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
+    @v_t_ws : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
+    @scores_t_ws : Array(CudaMatrix | Nil) = [] of (CudaMatrix | Nil)
 
     @last_batch_size : Int32
 
@@ -92,6 +96,9 @@ module SHAInet
       @d_scores_temp_ws = [] of (CudaMatrix | Nil)
       @d_q_temp_ws = [] of (CudaMatrix | Nil)
       @d_k_temp_ws = [] of (CudaMatrix | Nil)
+      @attn_t_ws = [] of (CudaMatrix | Nil)
+      @v_t_ws = [] of (CudaMatrix | Nil)
+      @scores_t_ws = [] of (CudaMatrix | Nil)
       @last_batch_size = 0
 
       # Initialize cached transposes
@@ -133,6 +140,9 @@ module SHAInet
         @d_scores_temp_ws = [] of (CudaMatrix | Nil)
         @d_q_temp_ws = [] of (CudaMatrix | Nil)
         @d_k_temp_ws = [] of (CudaMatrix | Nil)
+        @attn_t_ws = [] of (CudaMatrix | Nil)
+        @v_t_ws = [] of (CudaMatrix | Nil)
+        @scores_t_ws = [] of (CudaMatrix | Nil)
         @last_batch_size = 0
 
         # Convert stored head matrices to GPU
@@ -427,17 +437,15 @@ module SHAInet
             d_k_temp = @d_k_temp_ws[h].not_nil!
 
             # Gradient w.r.t. V
-            attn_t = CudaMatrix.get_workspace(@attn[h].as(CudaMatrix).cols, @attn[h].as(CudaMatrix).rows, "mha_attn_t")
+            attn_t = @attn_t_ws[h].not_nil!
             @attn[h].as(CudaMatrix).transpose_into!(attn_t)
             d_v_temp.gemm!(attn_t, d_out_h)
-            CudaMatrix.return_workspace(attn_t)
             d_v_heads << d_v_temp
 
             # Gradient w.r.t. attention weights
-            v_t = CudaMatrix.get_workspace(@v_heads[h].as(CudaMatrix).cols, @v_heads[h].as(CudaMatrix).rows, "mha_v_t")
+            v_t = @v_t_ws[h].not_nil!
             @v_heads[h].as(CudaMatrix).transpose_into!(v_t)
             d_attn_temp.gemm!(d_out_h, v_t)
-            CudaMatrix.return_workspace(v_t)
 
             # Gradient w.r.t. scores (softmax backward)
             softmax_backward(d_attn_temp, @attn[h].as(CudaMatrix), d_scores_temp)
@@ -447,10 +455,9 @@ module SHAInet
 
             # Gradients w.r.t. Q and K
             d_q_temp.gemm!(d_scores_temp, @k_heads[h].as(CudaMatrix))
-            scores_t = CudaMatrix.get_workspace(d_scores_temp.cols, d_scores_temp.rows, "mha_scores_t")
+            scores_t = @scores_t_ws[h].not_nil!
             d_scores_temp.transpose_into!(scores_t)
             d_k_temp.gemm!(scores_t, @q_heads[h].as(CudaMatrix))
-            CudaMatrix.return_workspace(scores_t)
 
             d_q_heads << d_q_temp
             d_k_heads << d_k_temp
@@ -667,6 +674,9 @@ module SHAInet
           @d_scores_temp_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @d_scores_temp_ws.any?
           @d_q_temp_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @d_q_temp_ws.any?
           @d_k_temp_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @d_k_temp_ws.any?
+          @attn_t_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @attn_t_ws.any?
+          @v_t_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @v_t_ws.any?
+          @scores_t_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @scores_t_ws.any?
 
           # Allocate new workspaces for current batch size
           @workspace_concat = CudaMatrix.get_workspace(batch_size, @d_model, "mha_concat_ws")
@@ -687,6 +697,9 @@ module SHAInet
           @d_scores_temp_ws = Array(CudaMatrix | Nil).new(@num_heads, nil)
           @d_q_temp_ws = Array(CudaMatrix | Nil).new(@num_heads, nil)
           @d_k_temp_ws = Array(CudaMatrix | Nil).new(@num_heads, nil)
+          @attn_t_ws = Array(CudaMatrix | Nil).new(@num_heads, nil)
+          @v_t_ws = Array(CudaMatrix | Nil).new(@num_heads, nil)
+          @scores_t_ws = Array(CudaMatrix | Nil).new(@num_heads, nil)
 
           @num_heads.times do |h|
             @workspace_scores[h] = CudaMatrix.new(batch_size, batch_size)     # scores matrix
@@ -698,6 +711,9 @@ module SHAInet
             @d_scores_temp_ws[h] = CudaMatrix.get_workspace(batch_size, batch_size, "mha_d_scores_temp_ws")
             @d_q_temp_ws[h] = CudaMatrix.get_workspace(batch_size, @head_dim, "mha_d_q_temp_ws")
             @d_k_temp_ws[h] = CudaMatrix.get_workspace(batch_size, @head_dim, "mha_d_k_temp_ws")
+            @attn_t_ws[h] = CudaMatrix.get_workspace(batch_size, batch_size, "mha_attn_t_ws")
+            @v_t_ws[h] = CudaMatrix.get_workspace(@head_dim, batch_size, "mha_v_t_ws")
+            @scores_t_ws[h] = CudaMatrix.get_workspace(batch_size, batch_size, "mha_scores_t_ws")
           end
 
           @last_batch_size = batch_size
