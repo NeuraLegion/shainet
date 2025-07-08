@@ -823,14 +823,17 @@ module SHAInet
       # Determine matrix dimensions from first sample for workspace allocation
       first_input = batch.first[0]
       first_output = batch.first[1]
-      # If the first output is a single label, expand it to a one-hot vector so
-      # that workspace dimensions match the network output layer.
+      # If the first output is a single label, expand to one-hot only when GPU
+      # optimized label cross-entropy is unavailable.
       if first_output.is_a?(Array) && first_output.as(Array).size == 1 &&
          !first_output.as(Array)[0].is_a?(Array) && @output_layers.last.is_a?(MatrixLayer)
-        label = first_output.as(Array).first.as(GenNum).to_i
-        oh = Array(Float64).new(@output_layers.last.as(MatrixLayer).size, 0.0)
-        oh[label] = 1.0 if label >= 0 && label < oh.size
-        first_output = oh
+        if !(CUDA.fully_available? && CUDNN.available? &&
+             @output_layers.last.as(MatrixLayer).size > 1)
+          label = first_output.as(Array).first.as(GenNum).to_i
+          oh = Array(Float64).new(@output_layers.last.as(MatrixLayer).size, 0.0)
+          oh[label] = 1.0 if label >= 0 && label < oh.size
+          first_output = oh
+        end
       end
 
       get_dims = ->(obj : SimpleMatrix | CudaMatrix | Array(Array(Float64)) | Array(Float64)) do
@@ -878,12 +881,17 @@ module SHAInet
       batch.each do |sample|
         input_data = sample[0]
         expected_output = sample[1]
-        # If the expected output is a single label, expand to one-hot vector to match output layer size
-        if expected_output.is_a?(Array) && expected_output.as(Array).size == 1 && !expected_output.as(Array)[0].is_a?(Array) && @output_layers.last.is_a?(MatrixLayer)
-          label = expected_output.as(Array).first.as(GenNum).to_i
-          oh = Array(Float64).new(@output_layers.last.as(MatrixLayer).size, 0.0)
-          oh[label] = 1.0 if label >= 0 && label < oh.size
-          expected_output = oh
+        # If expected output is a single label, expand to one-hot only when GPU
+        # accelerated label cross-entropy cannot be used.
+        if expected_output.is_a?(Array) && expected_output.as(Array).size == 1 &&
+           !expected_output.as(Array)[0].is_a?(Array) && @output_layers.last.is_a?(MatrixLayer)
+          if !(CUDA.fully_available? && CUDNN.available? &&
+               @output_layers.last.as(MatrixLayer).size > 1)
+            label = expected_output.as(Array).first.as(GenNum).to_i
+            oh = Array(Float64).new(@output_layers.last.as(MatrixLayer).size, 0.0)
+            oh[label] = 1.0 if label >= 0 && label < oh.size
+            expected_output = oh
+          end
         end
 
         # Prepare expected output matrix using workspace when on GPU
@@ -951,7 +959,13 @@ module SHAInet
 
         if output_layer.is_a?(MatrixLayer)
           # Determine dimensions for output_grad matrix
-          grad_rows, grad_cols = if expected_output.is_a?(SimpleMatrix)
+          use_label_gpu = actual_matrix.is_a?(CudaMatrix) && expected_matrix.is_a?(CudaMatrix) &&
+                          CUDNN.available? && expected_matrix.as(CudaMatrix).cols == 1 &&
+                          actual_matrix.as(CudaMatrix).cols > 1
+
+          grad_rows, grad_cols = if use_label_gpu
+                                   {actual_matrix.as(CudaMatrix).rows, actual_matrix.as(CudaMatrix).cols}
+                                 elsif expected_output.is_a?(SimpleMatrix)
                                    exp_mat = expected_output.as(SimpleMatrix)
                                    {exp_mat.rows, exp_mat.cols}
                                  elsif expected_output.is_a?(CudaMatrix)
@@ -967,6 +981,7 @@ module SHAInet
           # Reuse preallocated output_grad matrix when available
           if output_grad.nil? || output_grad.not_nil!.rows != grad_rows || output_grad.not_nil!.cols != grad_cols
             output_grad = GPUMemory.like(actual_matrix, grad_rows, grad_cols)
+            @batch_grad_ws = output_grad if CUDA.fully_available? && output_grad.is_a?(CudaMatrix)
           end
 
           existing_grad = output_grad.not_nil!
@@ -982,25 +997,53 @@ module SHAInet
 
           grad_matrix = output_grad.not_nil!
 
-          # Try GPU-accelerated cross-entropy for CudaMatrix (most common case)
+          # Try GPU-accelerated cross-entropy when possible
           if actual_matrix.is_a?(CudaMatrix) && expected_matrix.is_a?(CudaMatrix) && CUDNN.available?
             begin
               loss_value = 0.0
-              CUDNN.softmax_cross_entropy_loss_and_gradient(
-                actual_matrix.as(CudaMatrix),
-                expected_matrix.as(CudaMatrix),
-                pointerof(loss_value),
-                grad_matrix.as(CudaMatrix)
-              )
+              if use_label_gpu
+                CUDNN.softmax_cross_entropy_label_loss_and_gradient(
+                  actual_matrix.as(CudaMatrix),
+                  expected_matrix.as(CudaMatrix),
+                  pointerof(loss_value),
+                  grad_matrix.as(CudaMatrix)
+                )
+              else
+                CUDNN.softmax_cross_entropy_loss_and_gradient(
+                  actual_matrix.as(CudaMatrix),
+                  expected_matrix.as(CudaMatrix),
+                  pointerof(loss_value),
+                  grad_matrix.as(CudaMatrix)
+                )
+              end
               sample_error = loss_value
             rescue e : Exception
-              Log.debug { "GPU cross-entropy failed: #{e}, falling back to CPU computation" }
+              Log.debug { "GPU cross-entropy failed: #{e}, falling back to CPU computation" } unless use_label_gpu
               # Fall back to CPU computation below
-              sample_error = compute_cost_and_gradient_cpu(actual_matrix, expected_matrix, grad_matrix, cost_proc)
+              if use_label_gpu
+                # Convert label indices to one-hot for CPU fallback
+                one_hot = SimpleMatrix.zeros(expected_matrix.rows, actual_matrix.cols)
+                expected_matrix.rows.times do |i|
+                  label = expected_matrix.as(CudaMatrix).unsafe_get(i, 0).to_i
+                  one_hot[i, label] = 1.0 if label >= 0 && label < actual_matrix.cols
+                end
+                sample_error = compute_cost_and_gradient_cpu(actual_matrix, one_hot, grad_matrix, cost_proc)
+              else
+                sample_error = compute_cost_and_gradient_cpu(actual_matrix, expected_matrix, grad_matrix, cost_proc)
+              end
             end
           else
-            # CPU fallback for non-CudaMatrix types or when GPU computation fails
-            sample_error = compute_cost_and_gradient_cpu(actual_matrix, expected_matrix, grad_matrix, cost_proc)
+            # CPU fallback for non-CudaMatrix types or when GPU computation is unavailable
+            if use_label_gpu
+              one_hot = SimpleMatrix.zeros(expected_matrix.rows, actual_matrix.cols)
+              expected_matrix.rows.times do |i|
+                label = expected_matrix.as(CudaMatrix).unsafe_get(i, 0).to_i
+                one_hot[i, label] = 1.0 if label >= 0 && label < actual_matrix.cols
+              end
+              sample_error = compute_cost_and_gradient_cpu(actual_matrix, one_hot, grad_matrix, cost_proc)
+            else
+              sample_error = compute_cost_and_gradient_cpu(actual_matrix, expected_matrix, grad_matrix, cost_proc)
+            end
           end
 
           batch_error += sample_error
