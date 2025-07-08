@@ -151,6 +151,10 @@ module SHAInet
       raise "CUDA kernels not available"
     end
 
+    def fill_matrix(*args)
+      raise "CUDA kernels not available"
+    end
+
     def element_div(*args)
       raise "CUDA kernels not available"
     end

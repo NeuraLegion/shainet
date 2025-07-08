@@ -289,6 +289,7 @@ module SHAInet
     @@accumulate_bias_grad_proc : Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Void)? = nil
     @@row_sum_proc : Proc(Pointer(Float64), Pointer(Float64), Int32, Int32, Void)? = nil
     @@zero_matrix_proc : Proc(Pointer(Float64), Int32, Void)? = nil
+    @@fill_matrix_proc : Proc(Pointer(Float64), Float64, Int32, Void)? = nil
     @@element_div_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Void)? = nil
     @@count_pairs_proc : Proc(Pointer(Int32), Pointer(Int32), Pointer(Int32), Pointer(Int32), Int32, Int32, Void)? = nil
     @@relu_backward_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Void)? = nil
@@ -615,6 +616,34 @@ module SHAInet
         fn.call(matrix, size)
       rescue e
         Log.error { "CUDA Error in zero_matrix: #{e}, matrix=#{matrix.address}, size=#{size}" }
+        raise e
+      end
+    end
+
+    def fill_matrix(matrix : Pointer(Float64), value : Float64, size : Int32)
+      if matrix.null? || size <= 0
+        Log.error { "CUDA fill_matrix: invalid parameters - matrix: #{matrix.null? ? "null" : "valid"}, size: #{size}, value: #{value}" }
+        return
+      end
+
+      unless fn = @@fill_matrix_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "fill_matrix")
+          unless sym.null?
+            @@fill_matrix_proc = Proc(Pointer(Float64), Float64, Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@fill_matrix_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+
+      begin
+        fn.call(matrix, value, size)
+      rescue e
+        Log.error { "CUDA Error in fill_matrix: #{e}, matrix=#{matrix.address}, size=#{size}, value=#{value}" }
         raise e
       end
     end

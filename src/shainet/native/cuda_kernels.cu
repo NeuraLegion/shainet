@@ -394,6 +394,24 @@ void zero_matrix(double* matrix, int size) {
     }
 }
 
+__global__ void fill_matrix_kernel(double* matrix, double value, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= size) return;
+
+    matrix[idx] = value;
+}
+
+void fill_matrix(double* matrix, double value, int size) {
+    int threads_per_block = 256;
+    int blocks = (size + threads_per_block - 1) / threads_per_block;
+
+    fill_matrix_kernel<<<blocks, threads_per_block>>>(matrix, value, size);
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in fill_matrix: %s\n", cudaGetErrorString(err));
+    }
+}
+
 __global__ void element_div_kernel(double* out, const double* a, const double* b, int size){
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if(idx >= size) return;
