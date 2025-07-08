@@ -473,6 +473,44 @@ __global__ void cross_entropy_loss_gradient_kernel(const double* pred, const dou
     atomicAdd(loss, contrib);
 }
 
+__global__ void softmax_cross_entropy_label_kernel(const double* pred, const int* labels,
+                                                    double* grad, double* loss,
+                                                    int rows, int cols) {
+    int row = blockIdx.x;
+    if (row >= rows) return;
+
+    const double* row_pred = pred + row * cols;
+    double* row_grad = grad + row * cols;
+
+    // Find maximum value in the row for numerical stability
+    double max_val = row_pred[0];
+    for (int j = 1; j < cols; ++j) {
+        double v = row_pred[j];
+        if (v > max_val) max_val = v;
+    }
+
+    // Compute exponentials and their sum
+    double sum = 0.0;
+    for (int j = 0; j < cols; ++j) {
+        double e = exp(row_pred[j] - max_val);
+        row_grad[j] = e;
+        sum += e;
+    }
+
+    // Normalize to obtain probabilities
+    for (int j = 0; j < cols; ++j) {
+        row_grad[j] /= sum;
+    }
+
+    int label = labels[row];
+    if (label >= 0 && label < cols) {
+        double p = row_grad[label];
+        row_grad[label] = p - 1.0;
+        double contrib = -log(max(p, 1e-15));
+        atomicAdd(loss, contrib);
+    }
+}
+
 void cross_entropy_loss_gradient(double* pred, double* target,
                                  double* grad, double* loss,
                                  int rows, int cols) {
@@ -486,6 +524,17 @@ void cross_entropy_loss_gradient(double* pred, double* target,
     if (err != cudaSuccess) {
         printf("CUDA Error in cross_entropy_loss_gradient: %s\n", cudaGetErrorString(err));
 
+    }
+}
+
+void softmax_cross_entropy_label(double* pred, const int* labels,
+                                 double* grad, double* loss,
+                                 int rows, int cols) {
+    cudaMemset(loss, 0, sizeof(double));
+    softmax_cross_entropy_label_kernel<<<rows, 1>>>(pred, labels, grad, loss, rows, cols);
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in softmax_cross_entropy_label: %s\n", cudaGetErrorString(err));
     }
 }
 
