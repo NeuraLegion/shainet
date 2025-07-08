@@ -815,6 +815,15 @@ module SHAInet
       # Determine matrix dimensions from first sample for workspace allocation
       first_input = batch.first[0]
       first_output = batch.first[1]
+      # If the first output is a single label, expand it to a one-hot vector so
+      # that workspace dimensions match the network output layer.
+      if first_output.is_a?(Array) && first_output.as(Array).size == 1 &&
+         !first_output.as(Array)[0].is_a?(Array) && @output_layers.last.is_a?(MatrixLayer)
+        label = first_output.as(Array).first.as(GenNum).to_i
+        oh = Array(Float64).new(@output_layers.last.as(MatrixLayer).size, 0.0)
+        oh[label] = 1.0 if label >= 0 && label < oh.size
+        first_output = oh
+      end
 
       get_dims = ->(obj : SimpleMatrix | CudaMatrix | Array(Array(Float64)) | Array(Float64)) do
         case obj
