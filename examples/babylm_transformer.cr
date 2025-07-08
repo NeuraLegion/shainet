@@ -29,8 +29,8 @@ puts "Training the tokenizer on the dataset..."
 # Train tokenizer and encode text
 vocab_size = 10000 # Much smaller vocab for faster training
 tokenizer = SHAInet::BPETokenizer.new
-tokenizer.train(text, vocab_size) # Much smaller dataset
-ids = tokenizer.encode(text)
+tokenizer.train(text[0..10_000], vocab_size) # Much smaller dataset
+ids = tokenizer.encode(text[0..10_000])
 
 puts "Tokenizer trained with #{tokenizer.vocab.size} tokens."
 puts "Dataset size: #{ids.size} tokens"

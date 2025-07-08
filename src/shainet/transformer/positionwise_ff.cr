@@ -166,8 +166,6 @@ module SHAInet
       accumulate_bias_gradient(@g_b2, d_out)
 
       drelu = relu_grad(@h.as(CudaMatrix), dh, dh)
-      relu_grad!(dh, @h.as(CudaMatrix), dh)
-
 
       temp_grad_w1 = @workspace_temp_grad_w1.not_nil!
       x_t = @workspace_x_t.not_nil!
