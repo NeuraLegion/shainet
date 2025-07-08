@@ -482,5 +482,39 @@ module SHAInet
         @g_beta = SimpleMatrix.zeros(@beta.rows, @beta.cols)
       end
     end
+
+    def finalize
+      if CUDA.fully_available?
+        if ws = @workspace_mean
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_var
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_norm
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_result
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_d_x
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_d_gamma
+          CudaMatrix.return_workspace(ws)
+        end
+        if ws = @workspace_d_beta
+          CudaMatrix.return_workspace(ws)
+        end
+      end
+
+      @workspace_mean = nil
+      @workspace_var = nil
+      @workspace_norm = nil
+      @workspace_result = nil
+      @workspace_d_x = nil
+      @workspace_d_gamma = nil
+      @workspace_d_beta = nil
+    end
   end
 end
