@@ -87,7 +87,7 @@ clean:
 
 # GPU benchmark target (optional)
 benchmark: $(CUDA_LIB)
-        @echo "Running transformer training benchmark..."
-        @LD_LIBRARY_PATH=.:$$LD_LIBRARY_PATH crystal run benchmarks/transformer_training_benchmark.cr
+	@echo "Running transformer training benchmark..."
+	@LD_LIBRARY_PATH=.:$$LD_LIBRARY_PATH crystal run benchmarks/transformer_training_benchmark.cr
 
 .DEFAULT_GOAL := help
