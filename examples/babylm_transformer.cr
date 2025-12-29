@@ -125,13 +125,13 @@ while (val_batch = val_data.next_batch(val_batch_size)).size > 0
                 when Array(Int32)
                   input_raw
                 when Array(Array(Float64))
-                  input_raw.map { |row| row[0].to_i }
+                  input_raw.map(&.[0].to_i)
                 when Array(Float64)
                   input_raw.map(&.to_i)
                 when SHAInet::CudaMatrix
-                  input_raw.to_a.map { |row| row[0].to_i }
+                  input_raw.to_a.map(&.[0].to_i)
                 when SHAInet::SimpleMatrix
-                  input_raw.to_a.map { |row| row[0].to_i }
+                  input_raw.to_a.map(&.[0].to_i)
                 else
                   raise "Unknown input type: #{input_raw.class}"
                 end

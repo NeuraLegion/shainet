@@ -92,7 +92,7 @@ module SHAInet
 
     def self.print_top_allocation_sites(limit = 20)
       Log.debug { "Top CudaMatrix allocation sites:" }
-      @@allocation_sites.to_a.sort_by { |(_, v)| v }.reverse.first(limit).each do |site, count|
+      @@allocation_sites.to_a.sort_by { |(_, v)| v }.reverse!.first(limit).each do |site, count|
         Log.debug { "%6d  %s" % {count, site} }
       end
     end

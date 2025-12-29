@@ -33,7 +33,7 @@ module SHAInet
         "Error input data size: #{input.size} doesn't fit input layer size: #{expected_size}.") unless input.size == expected_size
 
       # Convert to matrix and use core matrix method
-      processed = @mixed_precision ? input.map { |v| v.to_f32.to_f64 } : input.map(&.to_f64)
+      processed = @mixed_precision ? input.map(&.to_f32.to_f64) : input.map(&.to_f64)
       matrix = GPUMemory.to_gpu(SimpleMatrix.from_a([processed]))
       result_matrix = run(matrix, stealth: stealth)
 
@@ -60,7 +60,7 @@ module SHAInet
       raise NeuralNetRunError.new(
         "Error input data size: #{input.size} doesn't fit input layer size: #{expected_size}.") unless input.size == expected_size
 
-      processed = @mixed_precision ? input.map { |v| v.to_f32.to_f64 } : input.map(&.to_f64)
+      processed = @mixed_precision ? input.map(&.to_f32.to_f64) : input.map(&.to_f64)
       matrix = GPUMemory.to_gpu(SimpleMatrix.from_a([processed]))
       result_matrix = run(matrix, stealth: stealth)
 
@@ -87,7 +87,7 @@ module SHAInet
 
       matrix = input
 
-      if @hidden_layers.any? &.is_a?(TransformerLayer)
+      if @hidden_layers.any?(TransformerLayer)
         @hidden_layers.each do |l|
           case l
           when EmbeddingLayer
@@ -179,7 +179,7 @@ module SHAInet
 
       matrix = input
 
-      if @hidden_layers.any? &.is_a?(TransformerLayer)
+      if @hidden_layers.any?(TransformerLayer)
         @hidden_layers.each do |l|
           case l
           when EmbeddingLayer
@@ -288,7 +288,7 @@ module SHAInet
 
       # Convert to matrix and use core matrix method
       processed = input.map do |x|
-        @mixed_precision ? x.map { |v| v.to_f32.to_f64 } : x.map(&.to_f64)
+        @mixed_precision ? x.map(&.to_f32.to_f64) : x.map(&.to_f64)
       end
       matrix = GPUMemory.to_gpu(SimpleMatrix.from_a(processed))
       result_matrix = run(matrix, stealth: stealth)
@@ -312,7 +312,7 @@ module SHAInet
       end
 
       processed = input.map do |x|
-        @mixed_precision ? x.map { |v| v.to_f32.to_f64 } : x.map(&.to_f64)
+        @mixed_precision ? x.map(&.to_f32.to_f64) : x.map(&.to_f64)
       end
       matrix = GPUMemory.to_gpu(SimpleMatrix.from_a(processed))
       result_matrix = run(matrix, stealth: stealth)
@@ -336,7 +336,7 @@ module SHAInet
     def evaluate(input_data : Array(GenNum),
                  expected_output : Array(GenNum),
                  cost_function : CostFunction = SHAInet.quadratic_cost)
-      processed = @mixed_precision ? input_data.map { |v| v.to_f32.to_f64 } : input_data.map(&.to_f64)
+      processed = @mixed_precision ? input_data.map(&.to_f32.to_f64) : input_data.map(&.to_f64)
       actual_output = run(processed, stealth: true)
 
       # Test for NaNs & exploading gradients
@@ -359,7 +359,7 @@ module SHAInet
       validate_values(@error_signal, "error_signal")
       @total_error = @error_signal.reduce(0.0) { |acc, i| acc + i }
 
-      if @hidden_layers.any? &.is_a?(TransformerLayer)
+      if @hidden_layers.any?(TransformerLayer)
         # Create matrices efficiently using GPU when available
         exp_data = expected_output.map(&.to_f64)
 
@@ -438,7 +438,7 @@ module SHAInet
       @error_signal = [loss_value]
       @total_error = loss_value
 
-      if @hidden_layers.any? &.is_a?(TransformerLayer)
+      if @hidden_layers.any?(TransformerLayer)
         diff = grad
         out_w = @output_layers.last.weights
         w = out_w.is_a?(CudaMatrix) ? out_w.as(CudaMatrix) : GPUMemory.keep_on_gpu(out_w.as(SimpleMatrix)).as(CudaMatrix)
@@ -467,7 +467,7 @@ module SHAInet
                           expected_output : Array(GenNum),
                           cost_function : CostFunction = SHAInet.quadratic_cost)
       seq = input_data.map do |x|
-        @mixed_precision ? x.map { |v| v.to_f32 to_f64 } : x.map(&.to_f64)
+        @mixed_precision ? x.map(&.to_f32(to_f64)) : x.map(&.to_f64)
       end
       outputs = run(seq, stealth: true)
       actual_output = outputs.last
@@ -492,7 +492,7 @@ module SHAInet
       validate_values(@error_signal, "error_signal")
       @total_error = @error_signal.reduce(0.0) { |acc, i| acc + i }
 
-      if @hidden_layers.any? &.is_a?(TransformerLayer)
+      if @hidden_layers.any?(TransformerLayer)
         exp_row = GPUMemory.to_gpu(SimpleMatrix.from_a([expected_output.map(&.to_f64)]))
         act_row = GPUMemory.to_gpu(SimpleMatrix.from_a([actual_output]))
         diff = act_row - exp_row
@@ -550,7 +550,7 @@ module SHAInet
         @error_signal[label] = loss_val
         @total_error = loss_val
 
-        if @hidden_layers.any? &.is_a?(TransformerLayer)
+        if @hidden_layers.any?(TransformerLayer)
           out_w = @output_layers.last.weights
           w = out_w.is_a?(CudaMatrix) ? out_w.as(CudaMatrix) : GPUMemory.keep_on_gpu(out_w.as(SimpleMatrix)).as(CudaMatrix)
           trans = grad * w
@@ -618,7 +618,7 @@ module SHAInet
         @error_signal[label] = loss_val
         @total_error = loss_val
 
-        if @hidden_layers.any? &.is_a?(TransformerLayer)
+        if @hidden_layers.any?(TransformerLayer)
           out_w = @output_layers.last.weights
           w = out_w.is_a?(CudaMatrix) ? out_w.as(CudaMatrix) : GPUMemory.keep_on_gpu(out_w.as(SimpleMatrix)).as(CudaMatrix)
           trans = grad * w
@@ -643,7 +643,7 @@ module SHAInet
         @error_signal = [] of Float64
         @total_error = -Math.log(probs[label].clamp(1e-9, 1.0))
 
-        if @hidden_layers.any? &.is_a?(TransformerLayer)
+        if @hidden_layers.any?(TransformerLayer)
           exp_row = SimpleMatrix.zeros(1, probs.size)
           exp_row[0, label] = 1.0
           act_row = SimpleMatrix.from_a([probs])
@@ -778,7 +778,7 @@ module SHAInet
             sources = SHAInet::CudaMatrix.sync_sources_stats
             if sources.size > 0
               Log.debug { "  Top sync sources:" }
-              sources.to_a.sort_by { |k, v| v }.reverse[0, 5].each do |source, count|
+              sources.to_a.sort_by { |_, v| v }.reverse![0, 5].each do |source, count|
                 Log.debug { "    #{source}: #{count} times" }
               end
             end
@@ -791,7 +791,7 @@ module SHAInet
             pool_stats = CudaMatrix.pool_stats
             Log.debug { "  Matrix pool: #{pool_stats[:total_pooled]} matrices pooled across #{pool_stats[:pools].size} sizes" }
             if pool_stats[:pools].size > 0
-              top_pools = pool_stats[:pools].to_a.sort_by(&.[1]).reverse.first(3)
+              top_pools = pool_stats[:pools].to_a.sort_by(&.[1]).reverse!.first(3)
               Log.debug { "    Top pool sizes: #{top_pools.map { |k, v| "#{k}(#{v})" }.join(", ")}" }
             end
           end
@@ -883,12 +883,15 @@ module SHAInet
         expected_output = sample[1]
         # If expected output is a single label, expand to one-hot only when GPU
         # accelerated label cross-entropy cannot be used.
+        # IMPORTANT: Only convert to one-hot if output layer has multiple neurons (classification).
+        # For regression tasks with a single output neuron, keep the expected value as-is.
+        output_layer_size = @output_layers.last.is_a?(MatrixLayer) ? @output_layers.last.as(MatrixLayer).size : 0
         if expected_output.is_a?(Array) && expected_output.as(Array).size == 1 &&
-           !expected_output.as(Array)[0].is_a?(Array) && @output_layers.last.is_a?(MatrixLayer)
-          if !(CUDA.fully_available? && CUDNN.available? &&
-             @output_layers.last.as(MatrixLayer).size > 1)
+           !expected_output.as(Array)[0].is_a?(Array) && @output_layers.last.is_a?(MatrixLayer) &&
+           output_layer_size > 1 # Only for classification with multiple outputs
+          if !(CUDA.fully_available? && CUDNN.available?)
             label = expected_output.as(Array).first.as(GenNum).to_i
-            oh = Array(Float64).new(@output_layers.last.as(MatrixLayer).size, 0.0)
+            oh = Array(Float64).new(output_layer_size, 0.0)
             oh[label] = 1.0 if label >= 0 && label < oh.size
             expected_output = oh
           end
@@ -1138,14 +1141,24 @@ module SHAInet
 
       @hidden_layers.each do |layer|
         if layer.is_a?(MatrixLayer)
-          layer.update_weights(learning_rate)
+          layer.update_weights(learning_rate, training_type,
+            momentum: @momentum,
+            beta1: @beta1, beta2: @beta2,
+            epsilon: @epsilon, time_step: @time_step,
+            alpha: @alpha, weight_decay: @weight_decay)
         elsif layer.is_a?(EmbeddingLayer)
           layer.apply_gradients(learning_rate)
         end
       end
 
       @output_layers.each do |layer|
-        layer.update_weights(learning_rate) if layer.is_a?(MatrixLayer)
+        if layer.is_a?(MatrixLayer)
+          layer.update_weights(learning_rate, training_type,
+            momentum: @momentum,
+            beta1: @beta1, beta2: @beta2,
+            epsilon: @epsilon, time_step: @time_step,
+            alpha: @alpha, weight_decay: @weight_decay)
+        end
       end
 
       update_transformer_layers if @transformer_layers.any?
@@ -1281,124 +1294,120 @@ module SHAInet
 
     # GPU path - all CudaMatrix operations
     private def safe_output_transform(matrix : CudaMatrix, weights : CudaMatrix) : CudaMatrix
-      begin
-        # For transformer architectures, use only the last token's representation
-        if @hidden_layers.any? &.is_a?(TransformerLayer)
-          # Extract last token (row) from transformer output for language modeling using GPU kernel
-          last_token = if CUDA.fully_available? && (mptr = matrix.device_ptr) && (wptr = weights.device_ptr) && !mptr.null? && !wptr.null?
-                         begin
-                           # Use more efficient GPU slice operation for last row
-                           result = CudaMatrix.new(1, matrix.cols)
-                           # Copy last row using GPU memory copy
-                           last_row_offset = (matrix.rows - 1) * matrix.cols
-                           CUDA.copy_device_to_device(
-                             result.device_ptr.not_nil!,
-                             mptr + last_row_offset,
-                             (matrix.cols * 8).to_u64
-                           )
-                           result.mark_device_dirty!
-                           result
-                         rescue e
-                           # Fallback to elementwise copy if GPU operation fails
-                           last_token_fallback = CudaMatrix.new(1, matrix.cols)
-                           matrix.cols.times do |j|
-                             last_token_fallback[0, j] = matrix[matrix.rows - 1, j]
-                           end
-                           last_token_fallback.sync_to_device!
-                           last_token_fallback
-                         end
-                       else
-                         # CPU fallback
-                         last_token_cpu = CudaMatrix.new(1, matrix.cols)
+      # For transformer architectures, use only the last token's representation
+      if @hidden_layers.any?(TransformerLayer)
+        # Extract last token (row) from transformer output for language modeling using GPU kernel
+        last_token = if CUDA.fully_available? && (mptr = matrix.device_ptr) && (wptr = weights.device_ptr) && !mptr.null? && !wptr.null?
+                       begin
+                         # Use more efficient GPU slice operation for last row
+                         result = CudaMatrix.new(1, matrix.cols)
+                         # Copy last row using GPU memory copy
+                         last_row_offset = (matrix.rows - 1) * matrix.cols
+                         CUDA.copy_device_to_device(
+                           result.device_ptr.not_nil!,
+                           mptr + last_row_offset,
+                           (matrix.cols * 8).to_u64
+                         )
+                         result.mark_device_dirty!
+                         result
+                       rescue e
+                         # Fallback to elementwise copy if GPU operation fails
+                         last_token_fallback = CudaMatrix.new(1, matrix.cols)
                          matrix.cols.times do |j|
-                           last_token_cpu[0, j] = matrix[matrix.rows - 1, j]
+                           last_token_fallback[0, j] = matrix[matrix.rows - 1, j]
                          end
-                         last_token_cpu.sync_to_device!
-                         last_token_cpu
+                         last_token_fallback.sync_to_device!
+                         last_token_fallback
                        end
+                     else
+                       # CPU fallback
+                       last_token_cpu = CudaMatrix.new(1, matrix.cols)
+                       matrix.cols.times do |j|
+                         last_token_cpu[0, j] = matrix[matrix.rows - 1, j]
+                       end
+                       last_token_cpu.sync_to_device!
+                       last_token_cpu
+                     end
 
-          # Now multiply: last_token (1 x d_model) * weights (d_model x vocab_size)
-          if last_token.cols != weights.rows
-            raise ArgumentError.new("Transformer output dimension mismatch: d_model (#{last_token.cols}) doesn't match weights input size (#{weights.rows})")
-          end
-
-          return last_token * weights
+        # Now multiply: last_token (1 x d_model) * weights (d_model x vocab_size)
+        if last_token.cols != weights.rows
+          raise ArgumentError.new("Transformer output dimension mismatch: d_model (#{last_token.cols}) doesn't match weights input size (#{weights.rows})")
         end
 
-        # For matrix * weights, we need matrix.cols == weights.rows
-        if matrix.cols != weights.rows
-          raise ArgumentError.new("Matrix dimension mismatch: input features (#{matrix.cols}) doesn't match weights input size (#{weights.rows})")
-        end
-
-        matrix * weights
-      rescue ex : Exception
-        # Check for dimension issues and try to reshape if possible
-        if ex.message.to_s.includes?("size mismatch") || ex.message.to_s.includes?("dimension mismatch")
-          # Try reshaping for a single token/sequence case
-          if matrix.rows == 1 && matrix.cols > 0 && weights.rows > 0 && weights.cols > 0
-            Log.info { "Reshaping matrix for single-token transformer operation" }
-            reshaped = CudaMatrix.new(1, weights.cols)
-            weights.cols.times do |j|
-              sum = 0.0
-              matrix.cols.times do |k|
-                sum += matrix[0, k] * weights[j, k]
-              end
-              reshaped[0, j] = sum
-            end
-            reshaped.sync_to_device!
-            return reshaped
-          end
-        end
-
-        raise ex
+        return last_token * weights
       end
+
+      # For matrix * weights, we need matrix.cols == weights.rows
+      if matrix.cols != weights.rows
+        raise ArgumentError.new("Matrix dimension mismatch: input features (#{matrix.cols}) doesn't match weights input size (#{weights.rows})")
+      end
+
+      matrix * weights
+    rescue ex : Exception
+      # Check for dimension issues and try to reshape if possible
+      if ex.message.to_s.includes?("size mismatch") || ex.message.to_s.includes?("dimension mismatch")
+        # Try reshaping for a single token/sequence case
+        if matrix.rows == 1 && matrix.cols > 0 && weights.rows > 0 && weights.cols > 0
+          Log.info { "Reshaping matrix for single-token transformer operation" }
+          reshaped = CudaMatrix.new(1, weights.cols)
+          weights.cols.times do |j|
+            sum = 0.0
+            matrix.cols.times do |k|
+              sum += matrix[0, k] * weights[j, k]
+            end
+            reshaped[0, j] = sum
+          end
+          reshaped.sync_to_device!
+          return reshaped
+        end
+      end
+
+      raise ex
     end
 
     # CPU path - all SimpleMatrix operations
     private def safe_output_transform(matrix : SimpleMatrix, weights : SimpleMatrix) : SimpleMatrix
-      begin
-        # For transformer architectures, use only the last token's representation
-        if @hidden_layers.any? &.is_a?(TransformerLayer)
-          # Extract last token (row) from transformer output for language modeling
-          last_token = SimpleMatrix.new(1, matrix.cols)
-          matrix.cols.times do |j|
-            last_token[0, j] = matrix[matrix.rows - 1, j]
-          end
-
-          # Now multiply: last_token (1 x d_model) * weights (d_model x vocab_size)
-          if last_token.cols != weights.rows
-            raise ArgumentError.new("Transformer output dimension mismatch: d_model (#{last_token.cols}) doesn't match weights input size (#{weights.rows})")
-          end
-
-          return last_token * weights
+      # For transformer architectures, use only the last token's representation
+      if @hidden_layers.any?(TransformerLayer)
+        # Extract last token (row) from transformer output for language modeling
+        last_token = SimpleMatrix.new(1, matrix.cols)
+        matrix.cols.times do |j|
+          last_token[0, j] = matrix[matrix.rows - 1, j]
         end
 
-        # For matrix * weights, we need matrix.cols == weights.rows
-        if matrix.cols != weights.rows
-          raise ArgumentError.new("Matrix dimension mismatch: input features (#{matrix.cols}) doesn't match weights input size (#{weights.rows})")
+        # Now multiply: last_token (1 x d_model) * weights (d_model x vocab_size)
+        if last_token.cols != weights.rows
+          raise ArgumentError.new("Transformer output dimension mismatch: d_model (#{last_token.cols}) doesn't match weights input size (#{weights.rows})")
         end
 
-        matrix * weights
-      rescue ex : Exception
-        # Check for dimension issues and try to reshape if possible
-        if ex.message.to_s.includes?("size mismatch") || ex.message.to_s.includes?("dimension mismatch")
-          # Try reshaping for a single token/sequence case
-          if matrix.rows == 1 && matrix.cols > 0 && weights.rows > 0 && weights.cols > 0
-            Log.info { "Reshaping matrix for single-token transformer operation" }
-            reshaped = SimpleMatrix.new(1, weights.cols)
-            weights.cols.times do |j|
-              sum = 0.0
-              matrix.cols.times do |k|
-                sum += matrix[0, k] * weights[j, k]
-              end
-              reshaped[0, j] = sum
-            end
-            return reshaped
-          end
-        end
-
-        raise ex
+        return last_token * weights
       end
+
+      # For matrix * weights, we need matrix.cols == weights.rows
+      if matrix.cols != weights.rows
+        raise ArgumentError.new("Matrix dimension mismatch: input features (#{matrix.cols}) doesn't match weights input size (#{weights.rows})")
+      end
+
+      matrix * weights
+    rescue ex : Exception
+      # Check for dimension issues and try to reshape if possible
+      if ex.message.to_s.includes?("size mismatch") || ex.message.to_s.includes?("dimension mismatch")
+        # Try reshaping for a single token/sequence case
+        if matrix.rows == 1 && matrix.cols > 0 && weights.rows > 0 && weights.cols > 0
+          Log.info { "Reshaping matrix for single-token transformer operation" }
+          reshaped = SimpleMatrix.new(1, weights.cols)
+          weights.cols.times do |j|
+            sum = 0.0
+            matrix.cols.times do |k|
+              sum += matrix[0, k] * weights[j, k]
+            end
+            reshaped[0, j] = sum
+          end
+          return reshaped
+        end
+      end
+
+      raise ex
     end # Optimized helper to extract tokens from GPU matrix without elementwise access
     # Uses GPU-to-CPU batch transfer instead of per-element sync
     private def extract_tokens_gpu(matrix : CudaMatrix) : Array(Int32)

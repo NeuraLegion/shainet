@@ -20,7 +20,7 @@ describe "CUDA softmax and dropout" do
     mat = SHAInet::GPUMemory.to_gpu(SHAInet::SimpleMatrix.ones(10, 10))
     runs = 200
     total_ratio = 0.0
-    runs.times do |run_idx|
+    runs.times do |_|
       out = SHAInet::TransformerDropout.apply(mat, 30)
       out.sync_from_device! if out.is_a?(SHAInet::CudaMatrix)
 

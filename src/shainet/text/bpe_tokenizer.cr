@@ -243,7 +243,7 @@ module SHAInet
 
     private def sift_down(idx : Int32)
       size = @data.size
-      while true
+      loop do
         left = idx * 2 + 1
         right = left + 1
         largest = idx

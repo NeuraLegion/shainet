@@ -144,7 +144,7 @@ module SHAInet
     end
 
     def zero_grads!
-      @data.each { |t| t.grad = 0.0 }
+      @data.each(&.grad=(0.0))
     end
   end
 end

@@ -18,6 +18,12 @@ module SHAInet
     @forward_workspace : CudaMatrix | Nil
     @grad_workspace : CudaMatrix | Nil
 
+    # Adam optimizer state variables (first and second moment estimates)
+    @m_w : SimpleMatrix | CudaMatrix | Nil # First moment estimate for weights
+    @m_b : SimpleMatrix | CudaMatrix | Nil # First moment estimate for biases
+    @v_w : SimpleMatrix | CudaMatrix | Nil # Second moment estimate for weights
+    @v_b : SimpleMatrix | CudaMatrix | Nil # Second moment estimate for biases
+
     def initialize(in_size : Int32, @size : Int32)
       @l_size = @size
       @activation_function = SHAInet.sigmoid
@@ -299,31 +305,232 @@ module SHAInet
       local_grad * @weights.as(SimpleMatrix).transpose
     end
 
-    # Update weights using accumulated gradients - device-specific versions
-    def update_weights(learning_rate : Float64)
-      # Check device type and call appropriate method
-      if @weights.is_a?(CudaMatrix)
-        update_weights_gpu(learning_rate)
+    # Update weights using accumulated gradients - supports multiple optimizers
+    def update_weights(learning_rate : Float64, training_type : Symbol | String = :sgdm,
+                       momentum : Float64 = 0.0,
+                       beta1 : Float64 = 0.9, beta2 : Float64 = 0.999,
+                       epsilon : Float64 = 1e-8, time_step : Int32 = 1,
+                       alpha : Float64 = 0.001, weight_decay : Float64 = 0.0)
+      case training_type.to_s
+      when "sgdm"
+        update_weights_sgd(learning_rate, momentum)
+      when "adam", "adamw"
+        update_weights_adam(alpha, beta1, beta2, epsilon, time_step, weight_decay, training_type.to_s == "adamw")
+      when "rprop"
+        # Rprop not yet implemented for matrix layers, fall back to SGD
+        update_weights_sgd(learning_rate, momentum)
       else
-        update_weights_cpu(learning_rate)
+        update_weights_sgd(learning_rate, momentum)
       end
     end
 
-    # GPU path weight update - all CudaMatrix operations with in-place updates
-    private def update_weights_gpu(learning_rate : Float64)
-      # W := W - lr * ∂L/∂W (in-place using optimized AXPY)
-      # b := b - lr * ∂L/∂b (in-place using optimized AXPY)
-
-      @weights.as(CudaMatrix).weight_update!(@g_w.as(CudaMatrix), learning_rate)
-      @biases.as(CudaMatrix).weight_update!(@g_b.as(CudaMatrix), learning_rate)
+    # SGD with momentum weight update
+    private def update_weights_sgd(learning_rate : Float64, momentum : Float64 = 0.0)
+      if @weights.is_a?(CudaMatrix)
+        # GPU path: W := W - lr * ∂L/∂W
+        @weights.as(CudaMatrix).weight_update!(@g_w.as(CudaMatrix), learning_rate)
+        @biases.as(CudaMatrix).weight_update!(@g_b.as(CudaMatrix), learning_rate)
+      else
+        # CPU path: W := W - lr * ∂L/∂W
+        @weights = @weights.as(SimpleMatrix) - @g_w.as(SimpleMatrix) * learning_rate
+        @biases = @biases.as(SimpleMatrix) - @g_b.as(SimpleMatrix) * learning_rate
+      end
     end
 
-    # CPU path weight update - all SimpleMatrix operations
-    private def update_weights_cpu(learning_rate : Float64)
-      # W := W - lr * ∂L/∂W
-      # b := b - lr * ∂L/∂b
-      @weights = @weights.as(SimpleMatrix) - @g_w.as(SimpleMatrix) * learning_rate
-      @biases = @biases.as(SimpleMatrix) - @g_b.as(SimpleMatrix) * learning_rate
+    # Adam optimizer weight update
+    private def update_weights_adam(alpha : Float64, beta1 : Float64, beta2 : Float64,
+                                    epsilon : Float64, time_step : Int32,
+                                    weight_decay : Float64 = 0.0, use_adamw : Bool = false)
+      # Initialize Adam state if not already done
+      if @m_w.nil?
+        if @weights.is_a?(CudaMatrix)
+          @m_w = CudaMatrix.zeros(@weights.rows, @weights.cols)
+          @m_b = CudaMatrix.zeros(@biases.rows, @biases.cols)
+          @v_w = CudaMatrix.zeros(@weights.rows, @weights.cols)
+          @v_b = CudaMatrix.zeros(@biases.rows, @biases.cols)
+        else
+          @m_w = SimpleMatrix.zeros(@weights.rows, @weights.cols)
+          @m_b = SimpleMatrix.zeros(@biases.rows, @biases.cols)
+          @v_w = SimpleMatrix.zeros(@weights.rows, @weights.cols)
+          @v_b = SimpleMatrix.zeros(@biases.rows, @biases.cols)
+        end
+      end
+
+      # Bias correction terms
+      t = [time_step, 1].max
+      bias_correction1 = 1.0 - beta1 ** t
+      bias_correction2 = 1.0 - beta2 ** t
+
+      if @weights.is_a?(CudaMatrix)
+        update_weights_adam_gpu(alpha, beta1, beta2, epsilon, bias_correction1, bias_correction2, weight_decay, use_adamw)
+      else
+        update_weights_adam_cpu(alpha, beta1, beta2, epsilon, bias_correction1, bias_correction2, weight_decay, use_adamw)
+      end
+    end
+
+    # GPU path Adam update
+    private def update_weights_adam_gpu(alpha : Float64, beta1 : Float64, beta2 : Float64,
+                                        epsilon : Float64, bias_correction1 : Float64,
+                                        bias_correction2 : Float64, weight_decay : Float64, use_adamw : Bool)
+      m_w = @m_w.as(CudaMatrix)
+      m_b = @m_b.as(CudaMatrix)
+      v_w = @v_w.as(CudaMatrix)
+      v_b = @v_b.as(CudaMatrix)
+      g_w = @g_w.as(CudaMatrix)
+      g_b = @g_b.as(CudaMatrix)
+      weights = @weights.as(CudaMatrix)
+      biases = @biases.as(CudaMatrix)
+
+      # Sync all matrices to device
+      g_w.sync_to_device!("adam_update") unless g_w.device_dirty?
+      g_b.sync_to_device!("adam_update") unless g_b.device_dirty?
+      m_w.sync_to_device!("adam_update") unless m_w.device_dirty?
+      m_b.sync_to_device!("adam_update") unless m_b.device_dirty?
+      v_w.sync_to_device!("adam_update") unless v_w.device_dirty?
+      v_b.sync_to_device!("adam_update") unless v_b.device_dirty?
+      weights.sync_to_device!("adam_update") unless weights.device_dirty?
+      biases.sync_to_device!("adam_update") unless biases.device_dirty?
+
+      # CPU fallback for Adam since we don't have a CUDA Adam kernel yet
+      # Sync from device, compute on CPU, sync back
+      g_w.sync_from_device!("adam_cpu_fallback")
+      g_b.sync_from_device!("adam_cpu_fallback")
+      m_w.sync_from_device!("adam_cpu_fallback")
+      m_b.sync_from_device!("adam_cpu_fallback")
+      v_w.sync_from_device!("adam_cpu_fallback")
+      v_b.sync_from_device!("adam_cpu_fallback")
+      weights.sync_from_device!("adam_cpu_fallback")
+      biases.sync_from_device!("adam_cpu_fallback")
+
+      # Update weights using Adam
+      weights.rows.times do |i|
+        weights.cols.times do |j|
+          grad = g_w.unsafe_get(i, j)
+
+          # Update biased first moment estimate
+          m = beta1 * m_w.unsafe_get(i, j) + (1.0 - beta1) * grad
+          m_w.unsafe_set(i, j, m)
+
+          # Update biased second raw moment estimate
+          v = beta2 * v_w.unsafe_get(i, j) + (1.0 - beta2) * grad * grad
+          v_w.unsafe_set(i, j, v)
+
+          # Compute bias-corrected first moment estimate
+          m_hat = m / bias_correction1
+
+          # Compute bias-corrected second raw moment estimate
+          v_hat = v / bias_correction2
+
+          # Update weight
+          w = weights.unsafe_get(i, j)
+          if use_adamw
+            w = w - alpha * (m_hat / (Math.sqrt(v_hat) + epsilon) + weight_decay * w)
+          else
+            w = w - alpha * m_hat / (Math.sqrt(v_hat) + epsilon)
+          end
+          weights.unsafe_set(i, j, w)
+        end
+      end
+
+      # Update biases using Adam
+      biases.rows.times do |i|
+        biases.cols.times do |j|
+          grad = g_b.unsafe_get(i, j)
+
+          m = beta1 * m_b.unsafe_get(i, j) + (1.0 - beta1) * grad
+          m_b.unsafe_set(i, j, m)
+
+          v = beta2 * v_b.unsafe_get(i, j) + (1.0 - beta2) * grad * grad
+          v_b.unsafe_set(i, j, v)
+
+          m_hat = m / bias_correction1
+          v_hat = v / bias_correction2
+
+          b = biases.unsafe_get(i, j)
+          if use_adamw
+            b = b - alpha * (m_hat / (Math.sqrt(v_hat) + epsilon) + weight_decay * b)
+          else
+            b = b - alpha * m_hat / (Math.sqrt(v_hat) + epsilon)
+          end
+          biases.unsafe_set(i, j, b)
+        end
+      end
+
+      # Sync back to device
+      weights.sync_to_device!("adam_update")
+      biases.sync_to_device!("adam_update")
+      m_w.sync_to_device!("adam_update")
+      m_b.sync_to_device!("adam_update")
+      v_w.sync_to_device!("adam_update")
+      v_b.sync_to_device!("adam_update")
+    end
+
+    # CPU path Adam update
+    private def update_weights_adam_cpu(alpha : Float64, beta1 : Float64, beta2 : Float64,
+                                        epsilon : Float64, bias_correction1 : Float64,
+                                        bias_correction2 : Float64, weight_decay : Float64, use_adamw : Bool)
+      m_w = @m_w.as(SimpleMatrix)
+      m_b = @m_b.as(SimpleMatrix)
+      v_w = @v_w.as(SimpleMatrix)
+      v_b = @v_b.as(SimpleMatrix)
+      g_w = @g_w.as(SimpleMatrix)
+      g_b = @g_b.as(SimpleMatrix)
+      weights = @weights.as(SimpleMatrix)
+      biases = @biases.as(SimpleMatrix)
+
+      # Update weights using Adam
+      weights.rows.times do |i|
+        weights.cols.times do |j|
+          grad = g_w[i, j]
+
+          # Update biased first moment estimate
+          m = beta1 * m_w[i, j] + (1.0 - beta1) * grad
+          m_w[i, j] = m
+
+          # Update biased second raw moment estimate
+          v = beta2 * v_w[i, j] + (1.0 - beta2) * grad * grad
+          v_w[i, j] = v
+
+          # Compute bias-corrected first moment estimate
+          m_hat = m / bias_correction1
+
+          # Compute bias-corrected second raw moment estimate
+          v_hat = v / bias_correction2
+
+          # Update weight
+          w = weights[i, j]
+          if use_adamw
+            w = w - alpha * (m_hat / (Math.sqrt(v_hat) + epsilon) + weight_decay * w)
+          else
+            w = w - alpha * m_hat / (Math.sqrt(v_hat) + epsilon)
+          end
+          weights[i, j] = w
+        end
+      end
+
+      # Update biases using Adam
+      biases.rows.times do |i|
+        biases.cols.times do |j|
+          grad = g_b[i, j]
+
+          m = beta1 * m_b[i, j] + (1.0 - beta1) * grad
+          m_b[i, j] = m
+
+          v = beta2 * v_b[i, j] + (1.0 - beta2) * grad * grad
+          v_b[i, j] = v
+
+          m_hat = m / bias_correction1
+          v_hat = v / bias_correction2
+
+          b = biases[i, j]
+          if use_adamw
+            b = b - alpha * (m_hat / (Math.sqrt(v_hat) + epsilon) + weight_decay * b)
+          else
+            b = b - alpha * m_hat / (Math.sqrt(v_hat) + epsilon)
+          end
+          biases[i, j] = b
+        end
+      end
     end
 
     # Reset gradients to zero

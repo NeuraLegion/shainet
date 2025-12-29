@@ -38,7 +38,7 @@ describe SHAInet::MultiHeadAttention do
              else
                SHAInet::SimpleMatrix.ones(2, 2)
              end
-    2000.times do |i|
+    2000.times do |_|
       out = attn.forward(input)
       diff = if SHAInet::CUDA.fully_available?
                out.as(SHAInet::CudaMatrix) - target.as(SHAInet::CudaMatrix)

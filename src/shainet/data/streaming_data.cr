@@ -150,7 +150,7 @@ module SHAInet
       @buffer.clear
       @index = 0
       count = 0
-      while (line = @file.gets)
+      while line = @file.gets
         @buffer << line
         count += 1
         break if count >= @chunk_size
