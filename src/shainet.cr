@@ -8,6 +8,7 @@ require "log"
 {% end %}
 
 require "./shainet/autograd/tensor"
+require "./shainet/autograd/grad_matrix"
 require "./shainet/basic/exceptions"
 require "./shainet/basic/matrix_layer"
 require "./shainet/basic/network_run"

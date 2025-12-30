@@ -7,8 +7,6 @@ authors:
 
 crystal: 1.6.2
 
-dependencies:
-
 development_dependencies:
   ameba:
     github: veelenga/ameba
