@@ -231,7 +231,7 @@ module SHAInet
       strides = [cols, 1, cols, cols] # Row-major ordering
       CUDNN.check_status(LibCUDNN.cudnnSetTensorNdDescriptor(
         desc,
-        LibCUDNN::CudnnDataType::CUDNN_DATA_DOUBLE,
+        LibCUDNN::CudnnDataType::CUDNN_DATA_FLOAT,
         4,
         dims.to_unsafe,
         strides.to_unsafe
@@ -254,11 +254,11 @@ module SHAInet
       CUDNN.check_status(LibCUDNN.cudnnCreateTensorDescriptor(out output_desc))
 
       CUDNN.check_status(LibCUDNN.cudnnSetTensorNdDescriptor(
-        input_desc, LibCUDNN::CudnnDataType::CUDNN_DATA_DOUBLE, 4,
+        input_desc, LibCUDNN::CudnnDataType::CUDNN_DATA_FLOAT, 4,
         dims.to_unsafe, strides.to_unsafe))
 
       CUDNN.check_status(LibCUDNN.cudnnSetTensorNdDescriptor(
-        output_desc, LibCUDNN::CudnnDataType::CUDNN_DATA_DOUBLE, 4,
+        output_desc, LibCUDNN::CudnnDataType::CUDNN_DATA_FLOAT, 4,
         dims.to_unsafe, strides.to_unsafe))
 
       # Create activation descriptor for ReLU
@@ -270,8 +270,8 @@ module SHAInet
         0.0 # coef
       ))
 
-      alpha = 1.0
-      beta = 0.0
+      alpha = 1.0_f32
+      beta = 0.0_f32
 
       input.sync_to_device!("cudnn_relu_input") unless input.device_dirty?
 
@@ -311,11 +311,11 @@ module SHAInet
       CUDNN.check_status(LibCUDNN.cudnnCreateTensorDescriptor(out grad_desc))
 
       CUDNN.check_status(LibCUDNN.cudnnSetTensorNdDescriptor(
-        input_desc, LibCUDNN::CudnnDataType::CUDNN_DATA_DOUBLE, 4,
+        input_desc, LibCUDNN::CudnnDataType::CUDNN_DATA_FLOAT, 4,
         dims.to_unsafe, strides.to_unsafe))
 
       CUDNN.check_status(LibCUDNN.cudnnSetTensorNdDescriptor(
-        grad_desc, LibCUDNN::CudnnDataType::CUDNN_DATA_DOUBLE, 4,
+        grad_desc, LibCUDNN::CudnnDataType::CUDNN_DATA_FLOAT, 4,
         dims.to_unsafe, strides.to_unsafe))
 
       # Create activation descriptor for ReLU
@@ -327,8 +327,8 @@ module SHAInet
         0.0 # coef
       ))
 
-      alpha = 1.0
-      beta = 0.0
+      alpha = 1.0_f32
+      beta = 0.0_f32
 
       input.sync_to_device!("cudnn_relu_backward_input") unless input.device_dirty?
       grad_output.sync_to_device!("cudnn_relu_backward_grad") unless grad_output.device_dirty?
@@ -381,15 +381,15 @@ module SHAInet
       CUDNN.check_status(LibCUDNN.cudnnCreateTensorDescriptor(out bias_desc))
 
       CUDNN.check_status(LibCUDNN.cudnnSetTensorNdDescriptor(
-        matrix_desc, LibCUDNN::CudnnDataType::CUDNN_DATA_DOUBLE, 4,
+        matrix_desc, LibCUDNN::CudnnDataType::CUDNN_DATA_FLOAT, 4,
         matrix_dims.to_unsafe, matrix_strides.to_unsafe))
 
       CUDNN.check_status(LibCUDNN.cudnnSetTensorNdDescriptor(
-        bias_desc, LibCUDNN::CudnnDataType::CUDNN_DATA_DOUBLE, 4,
+        bias_desc, LibCUDNN::CudnnDataType::CUDNN_DATA_FLOAT, 4,
         bias_dims.to_unsafe, bias_strides.to_unsafe))
 
-      alpha = 1.0
-      beta = 1.0 # Add to existing values
+      alpha = 1.0_f32
+      beta = 1.0_f32 # Add to existing values
 
       matrix.sync_to_device!("cudnn_bias_matrix") unless matrix.device_dirty?
       bias.sync_to_device!("cudnn_bias_vector") unless bias.device_dirty?
@@ -429,15 +429,15 @@ module SHAInet
 
       begin
         CUDNN.check_status(LibCUDNN.cudnnSetTensorNdDescriptor(
-          input_desc, LibCUDNN::CudnnDataType::CUDNN_DATA_DOUBLE, 4,
+          input_desc, LibCUDNN::CudnnDataType::CUDNN_DATA_FLOAT, 4,
           dims.to_unsafe, strides.to_unsafe))
 
         CUDNN.check_status(LibCUDNN.cudnnSetTensorNdDescriptor(
-          output_desc, LibCUDNN::CudnnDataType::CUDNN_DATA_DOUBLE, 4,
+          output_desc, LibCUDNN::CudnnDataType::CUDNN_DATA_FLOAT, 4,
           dims.to_unsafe, strides.to_unsafe))
 
-        alpha = 1.0
-        beta = 0.0
+        alpha = 1.0_f32
+        beta = 0.0_f32
 
         input.sync_to_device!("cudnn_softmax_input") unless input.device_dirty?
 
@@ -479,7 +479,7 @@ module SHAInet
       handle = CUDA.create_handle
       begin
         CUDA.geam(handle, a.device_ptr.not_nil!, b.device_ptr.not_nil!,
-          result.device_ptr.not_nil!, a.rows, a.cols, alpha, beta)
+          result.device_ptr.not_nil!, a.rows, a.cols, alpha.to_f32, beta.to_f32)
       ensure
         CUDA.destroy_handle(handle)
       end
@@ -497,16 +497,18 @@ module SHAInet
       softmax_rows(predicted, grad_output)
 
       # Now compute cross-entropy on the probabilities in grad_output
+      loss_f32 = 0.0_f32
       result = CUDA.cross_entropy_loss_gradient(
         grad_output.device_ptr.not_nil!,
         target.device_ptr.not_nil!,
         grad_output.device_ptr.not_nil!,
-        loss,
+        pointerof(loss_f32),
         predicted.rows,
         predicted.cols
       )
 
       raise "CUDA softmax cross-entropy failed" if result != 0
+      loss.value = loss_f32.to_f64
 
       grad_output.mark_device_dirty!
     end
@@ -535,16 +537,18 @@ module SHAInet
         CUDA.memcpy(labels_dev.as(Pointer(Void)), label_ids.to_unsafe.as(Pointer(Void)), bytes, CUDA::MemcpyKind::HostToDevice)
 
         # Compute cross-entropy using CUDA kernel
+        loss_f32 = 0.0_f32
         result = CUDA.softmax_cross_entropy_label(
           grad_output.device_ptr.not_nil!,
           labels_dev,
           grad_output.device_ptr.not_nil!,
-          loss,
+          pointerof(loss_f32),
           predicted.rows,
           predicted.cols
         )
 
         raise "CUDA softmax cross-entropy label failed" if result != 0
+        loss.value = loss_f32.to_f64
       ensure
         CUDA.free(labels_dev.as(Pointer(Void))) unless labels_dev.null?
       end
@@ -565,7 +569,7 @@ module SHAInet
         CUDNN.check_status(LibCUDNN.cudnnSetOpTensorDescriptor(
           op_desc,
           LibCUDNN::CudnnOpTensorOp::CUDNN_OP_TENSOR_MUL,
-          LibCUDNN::CudnnDataType::CUDNN_DATA_DOUBLE,
+          LibCUDNN::CudnnDataType::CUDNN_DATA_FLOAT,
           0 # NaN propagation option
         ))
 
@@ -655,7 +659,7 @@ module SHAInet
         CUDNN.check_status(LibCUDNN.cudnnSetOpTensorDescriptor(
           op_desc,
           LibCUDNN::CudnnOpTensorOp::CUDNN_OP_TENSOR_ADD,
-          LibCUDNN::CudnnDataType::CUDNN_DATA_DOUBLE,
+          LibCUDNN::CudnnDataType::CUDNN_DATA_FLOAT,
           0 # NaN propagation option
         ))
 
@@ -734,8 +738,8 @@ module SHAInet
           input.sync_to_device!("cudnn_activation") unless input.device_dirty?
           output.sync_to_device!("cudnn_activation") unless output.device_dirty?
 
-          alpha = 1.0
-          beta = 0.0 # Get device pointers and ensure they're valid
+          alpha = 1.0_f32
+          beta = 0.0_f32 # Get device pointers and ensure they're valid
           input_ptr = input.device_ptr
           output_ptr = output.device_ptr
           raise "Invalid device pointers" unless input_ptr && output_ptr && !input_ptr.null? && !output_ptr.null?

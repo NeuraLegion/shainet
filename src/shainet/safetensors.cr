@@ -162,24 +162,27 @@ module SHAInet
         info = @tensors[name]? || raise "Tensor '#{name}' not found"
         shape = info.shape
 
-        case shape.size
-        when 1
-          # 1D tensor → row vector (1 x N)
-          data = read_f64(name)
-          m = SimpleMatrix.new(1, shape[0].to_i32)
-          data.each_with_index { |v, i| m[0, i] = v }
-          m
-        when 2
-          # 2D tensor → (rows x cols)
-          rows = shape[0].to_i32
-          cols = shape[1].to_i32
-          data = read_f64(name)
-          m = SimpleMatrix.new(rows, cols)
-          data.each_with_index { |v, i| m[i // cols, i % cols] = v }
-          m
+        rows = shape.size == 1 ? 1 : shape[0].to_i32
+        cols = shape.size == 1 ? shape[0].to_i32 : shape[1].to_i32
+        raise "Cannot read tensor '#{name}' with #{shape.size}D shape as matrix" if shape.size > 2
+
+        m = SimpleMatrix.new(rows, cols)
+        count = rows * cols
+        byte_count = (info.data_offset_end - info.data_offset_start).to_i32
+        @io.seek(@data_offset + info.data_offset_start)
+
+        if info.dtype.f32?
+          # Fast path: raw memcpy (F32 LE on disk → F32 LE in memory)
+          raw = Bytes.new(byte_count)
+          @io.read_fully(raw)
+          raw.to_unsafe.copy_to(m.data.to_unsafe.as(Pointer(UInt8)), byte_count)
         else
-          raise "Cannot read tensor '#{name}' with #{shape.size}D shape as matrix"
+          # Slow path: convert from other dtypes
+          data = read_f32(name)
+          data.size.times { |i| m.data[i] = data[i] }
         end
+        m
+        m
       end
 
       private def f16_to_f32(bits : UInt16) : Float32

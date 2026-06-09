@@ -71,7 +71,7 @@ module SHAInet
     # Retrieve embedding vector for the given token id. If the token id does not
     # exist in the table, it is initialized with random values.
     def lookup(id : Int32) : Array(Float64)
-      Array.new(@l_size) { |i| @embeddings[id, i] }
+      Array.new(@l_size) { |i| @embeddings[id, i].to_f64 }
     end
 
     # GPU path - retrieve embeddings for multiple ids as a CudaMatrix
@@ -161,7 +161,7 @@ module SHAInet
       @activations = mat_klass.new(1, @l_size)
       @l_size.times { |i| @activations.not_nil![0, i] = mat[0, i] }
 
-      arr = Array(Float64).new(@l_size) { |i| mat[0, i] }
+      arr = Array(Float64).new(@l_size) { |i| mat[0, i].to_f64 }
       arr
     end
 

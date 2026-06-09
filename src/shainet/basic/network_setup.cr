@@ -22,6 +22,7 @@ module SHAInet
     getter :input_layers, :output_layers, :hidden_layers, :recurrent_layers, :lstm_layers
     getter :transformer_layers
     getter transformer_error : SimpleMatrix
+    property final_norm : RMSNorm | Nil
     getter error_signal : Array(Float64), total_error : Float64, :mse, w_gradient : Array(Float64), b_gradient : Array(Float64)
 
     # Parameters for SGD + Momentum
@@ -47,7 +48,8 @@ module SHAInet
       @input_layers = Array(MatrixLayer).new
       @output_layers = Array(MatrixLayer).new
       @hidden_layers = Array(MatrixLayer).new
-      @transformer_layers = Array(TransformerLayer).new
+      @transformer_layers = Array(TransformerLayer | LlamaLayer).new
+      @final_norm = nil
       @all_layers = Array(MatrixLayer).new
       @error_signal = Array(Float64).new # Array of errors for each element in the output layers
       @total_error = 1_f64               # Sum of errors from output layer, based on a specific input
@@ -90,7 +92,7 @@ module SHAInet
     # l_type is: :input, :hidden or :output
     # l_size = size of the layer
     # n_type = advanced option for layer types
-    def add_layer(l_type : Symbol | String, l_size : Int32, activation_function : ActivationFunction = SHAInet.sigmoid, num_heads : Int32 = 1, ff_hidden : Int32 = l_size*4, drop_percent : Int32 = 0, blocks : Int32 = 1, *, vocab_size : Int32 = 0)
+    def add_layer(l_type : Symbol | String, l_size : Int32, activation_function : ActivationFunction = SHAInet.sigmoid, num_heads : Int32 = 1, ff_hidden : Int32 = l_size*4, drop_percent : Int32 = 0, blocks : Int32 = 1, *, vocab_size : Int32 = 0, num_kv_heads : Int32 = num_heads, eps : Float64 = 1e-5)
       if l_type.to_s == "transformer" && blocks > 1
         blocks.times do
           add_layer(l_type, l_size, activation_function, num_heads, ff_hidden, drop_percent, 1)
@@ -103,6 +105,8 @@ module SHAInet
                 EmbeddingLayer.new(vocab_size, l_size, activation_function)
               when "transformer"
                 TransformerLayer.new(l_size, num_heads, ff_hidden, drop_percent)
+              when "llama"
+                LlamaBlock.new(l_size, num_heads, ff_hidden, eps, 10000.0, num_kv_heads)
               else
                 # Use MatrixLayer for regular feedforward layers - it has proper GPU support and gradient computation
                 # Note: MatrixLayer will be properly connected with correct input size in connect_ltl
@@ -120,6 +124,9 @@ module SHAInet
       when "transformer"
         @hidden_layers << layer
         @transformer_layers << layer.as(TransformerLayer)
+      when "llama"
+        @hidden_layers << layer
+        @transformer_layers << layer.as(LlamaLayer)
       when "output"
         if @output_layers.empty?
           @output_layers << layer
@@ -299,7 +306,7 @@ module SHAInet
       Log.info { "Network loaded from: #{file_path}" }
     end
 
-    # Load a GPT-2 model from a HuggingFace SafeTensors directory.
+    # Load a model from a HuggingFace SafeTensors directory.
     # The directory must contain `model.safetensors` and `config.json`.
     def self.load_from_hf(model_dir : String) : Network
       HFLoader.load(model_dir)

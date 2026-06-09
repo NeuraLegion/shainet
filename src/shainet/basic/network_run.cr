@@ -87,7 +87,7 @@ module SHAInet
 
       matrix = input
 
-      if @hidden_layers.any?(TransformerLayer)
+      if !@transformer_layers.empty?
         @hidden_layers.each do |l|
           case l
           when EmbeddingLayer
@@ -100,6 +100,9 @@ module SHAInet
             # Ensure transformer layer is on GPU for GPU path
             l.as(TransformerLayer).to_gpu!
             matrix = l.as(TransformerLayer).forward(matrix)
+          when LlamaLayer
+            l.as(LlamaLayer).to_gpu!
+            matrix = l.as(LlamaLayer).forward(matrix)
           else
             # Handle MatrixLayer and other layer types
             l.to_gpu! if l.responds_to?(:to_gpu!)
@@ -111,6 +114,10 @@ module SHAInet
         out_layer.to_gpu!
         w = out_layer.weights.as(CudaMatrix)
         b = out_layer.biases.as(CudaMatrix)
+        if fn = @final_norm
+          fn.to_gpu!
+          matrix = fn.forward(matrix.as(CudaMatrix))
+        end
         matrix = safe_output_transform(matrix.as(CudaMatrix), w)
         matrix.add_bias!(b)
 
@@ -179,7 +186,7 @@ module SHAInet
 
       matrix = input
 
-      if @hidden_layers.any?(TransformerLayer)
+      if !@transformer_layers.empty?
         @hidden_layers.each do |l|
           case l
           when EmbeddingLayer
@@ -188,11 +195,16 @@ module SHAInet
             matrix = l.as(EmbeddingLayer).embed_cpu(tokens)
           when TransformerLayer
             matrix = l.as(TransformerLayer).forward(matrix)
+          when LlamaLayer
+            matrix = l.as(LlamaLayer).forward(matrix)
           end
         end
         out_layer = @output_layers.last
         w = out_layer.weights.as(SimpleMatrix)
         b = out_layer.biases.as(SimpleMatrix)
+        if fn = @final_norm
+          matrix = fn.forward(matrix.as(SimpleMatrix))
+        end
         matrix = safe_output_transform(matrix.as(SimpleMatrix), w)
 
         # CPU bias addition
@@ -359,7 +371,7 @@ module SHAInet
       validate_values(@error_signal, "error_signal")
       @total_error = @error_signal.reduce(0.0) { |acc, i| acc + i }
 
-      if @hidden_layers.any?(TransformerLayer)
+      if !@transformer_layers.empty?
         # Create matrices efficiently using GPU when available
         exp_data = expected_output.map(&.to_f64)
 
@@ -438,7 +450,7 @@ module SHAInet
       @error_signal = [loss_value]
       @total_error = loss_value
 
-      if @hidden_layers.any?(TransformerLayer)
+      if !@transformer_layers.empty?
         diff = grad
         out_w = @output_layers.last.weights
         w = out_w.is_a?(CudaMatrix) ? out_w.as(CudaMatrix) : GPUMemory.keep_on_gpu(out_w.as(SimpleMatrix)).as(CudaMatrix)
@@ -492,7 +504,7 @@ module SHAInet
       validate_values(@error_signal, "error_signal")
       @total_error = @error_signal.reduce(0.0) { |acc, i| acc + i }
 
-      if @hidden_layers.any?(TransformerLayer)
+      if !@transformer_layers.empty?
         exp_row = GPUMemory.to_gpu(SimpleMatrix.from_a([expected_output.map(&.to_f64)]))
         act_row = GPUMemory.to_gpu(SimpleMatrix.from_a([actual_output]))
         diff = act_row - exp_row
@@ -550,7 +562,7 @@ module SHAInet
         @error_signal[label] = loss_val
         @total_error = loss_val
 
-        if @hidden_layers.any?(TransformerLayer)
+        if !@transformer_layers.empty?
           out_w = @output_layers.last.weights
           w = out_w.is_a?(CudaMatrix) ? out_w.as(CudaMatrix) : GPUMemory.keep_on_gpu(out_w.as(SimpleMatrix)).as(CudaMatrix)
           trans = grad * w
@@ -618,7 +630,7 @@ module SHAInet
         @error_signal[label] = loss_val
         @total_error = loss_val
 
-        if @hidden_layers.any?(TransformerLayer)
+        if !@transformer_layers.empty?
           out_w = @output_layers.last.weights
           w = out_w.is_a?(CudaMatrix) ? out_w.as(CudaMatrix) : GPUMemory.keep_on_gpu(out_w.as(SimpleMatrix)).as(CudaMatrix)
           trans = grad * w
@@ -643,7 +655,7 @@ module SHAInet
         @error_signal = [] of Float64
         @total_error = -Math.log(probs[label].clamp(1e-9, 1.0))
 
-        if @hidden_layers.any?(TransformerLayer)
+        if !@transformer_layers.empty?
           exp_row = SimpleMatrix.zeros(1, probs.size)
           exp_row[0, label] = 1.0
           act_row = SimpleMatrix.from_a([probs])
@@ -1195,7 +1207,7 @@ module SHAInet
             mat.mark_device_dirty!
           end
 
-          flat_slice.each_with_index { |v, i| mat.raw_data[i] = v }
+          flat_slice.each_with_index { |v, i| mat.raw_data[i] = v.to_f32 }
 
           mat
         else
@@ -1214,7 +1226,7 @@ module SHAInet
             mat.mark_device_dirty!
           end
 
-          flat_slice.each_with_index { |v, i| mat.raw_data[i] = v }
+          flat_slice.each_with_index { |v, i| mat.raw_data[i] = v.to_f32 }
 
           mat
         end
@@ -1252,7 +1264,10 @@ module SHAInet
     def update_transformer_layers
       lr = current_learning_rate
       @transformer_layers.each do |layer|
-        layer.apply_gradients(lr)
+        case layer
+        when TransformerLayer then layer.apply_gradients(lr)
+        when LlamaLayer       then layer.apply_gradients(lr)
+        end
       end
     end
 
@@ -1295,7 +1310,7 @@ module SHAInet
     # GPU path - all CudaMatrix operations
     private def safe_output_transform(matrix : CudaMatrix, weights : CudaMatrix) : CudaMatrix
       # For transformer architectures, use only the last token's representation
-      if @hidden_layers.any?(TransformerLayer)
+      if !@transformer_layers.empty?
         # Extract last token (row) from transformer output for language modeling using GPU kernel
         last_token = if CUDA.fully_available? && (mptr = matrix.device_ptr) && (wptr = weights.device_ptr) && !mptr.null? && !wptr.null?
                        begin
@@ -1368,7 +1383,7 @@ module SHAInet
     # CPU path - all SimpleMatrix operations
     private def safe_output_transform(matrix : SimpleMatrix, weights : SimpleMatrix) : SimpleMatrix
       # For transformer architectures, use only the last token's representation
-      if @hidden_layers.any?(TransformerLayer)
+      if !@transformer_layers.empty?
         # Extract last token (row) from transformer output for language modeling
         last_token = SimpleMatrix.new(1, matrix.cols)
         matrix.cols.times do |j|
@@ -1409,6 +1424,7 @@ module SHAInet
 
       raise ex
     end # Optimized helper to extract tokens from GPU matrix without elementwise access
+
     # Uses GPU-to-CPU batch transfer instead of per-element sync
     private def extract_tokens_gpu(matrix : CudaMatrix) : Array(Int32)
       # Sync entire matrix from GPU in one operation instead of elementwise access
