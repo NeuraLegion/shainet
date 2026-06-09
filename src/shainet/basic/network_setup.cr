@@ -108,9 +108,7 @@ module SHAInet
               when "llama"
                 LlamaBlock.new(l_size, num_heads, ff_hidden, eps, 10000.0, num_kv_heads)
               else
-                # Use MatrixLayer for regular feedforward layers - it has proper GPU support and gradient computation
-                # Note: MatrixLayer will be properly connected with correct input size in connect_ltl
-                MatrixLayer.new(1, l_size) # Temporary size, will be updated during connection
+                MatrixLayer.new(l_size, activation_function)
               end
 
       # Add layer to appropriate collections
