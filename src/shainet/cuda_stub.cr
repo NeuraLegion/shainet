@@ -251,10 +251,6 @@ module SHAInet
       raise CudnnError.new("cuDNN not available")
     end
 
-    def element_mul!(*args)
-      raise CudnnError.new("cuDNN not available")
-    end
-
     def dropout_forward!(*args)
       raise CudnnError.new("cuDNN not available")
     end
@@ -264,14 +260,6 @@ module SHAInet
     end
 
     def softmax_cross_entropy_label_loss_and_gradient(*args)
-      raise CudnnError.new("cuDNN not available")
-    end
-
-    def cross_entropy_loss_gradient(*args)
-      raise CudnnError.new("cuDNN not available")
-    end
-
-    def cross_entropy_loss_and_gradient(*args)
       raise CudnnError.new("cuDNN not available")
     end
 

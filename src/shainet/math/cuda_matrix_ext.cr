@@ -84,9 +84,20 @@ module SHAInet
       # CPU fallback - ensure we have current data from GPU
       self.sync_from_device!("dropout_fallback") if device_dirty?
 
-      @rows.times do |i|
-        @cols.times do |j|
-          result[i, j] = rand < prob ? 0.0 : self[i, j]
+      if prob >= 1.0
+        # All zeros, result already initialized to 0
+      elsif prob > 0.0
+        scale = 1.0 / (1.0 - prob)
+        @rows.times do |i|
+          @cols.times do |j|
+            result[i, j] = rand < prob ? 0.0 : self[i, j] * scale
+          end
+        end
+      else
+        @rows.times do |i|
+          @cols.times do |j|
+            result[i, j] = self[i, j]
+          end
         end
       end
       result.sync_to_device! if CUDA.fully_available?

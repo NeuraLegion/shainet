@@ -1048,12 +1048,17 @@ module SHAInet
         end
       end
 
-      # CPU fallback
+      # CPU fallback (inverted dropout: scale kept values by 1/(1-p))
       self.sync_from_device!("dropout_fallback") if device_dirty?
-      @rows.times do |i|
-        @cols.times do |j|
-          result_val = Random.rand < prob ? 0.0 : self.unsafe_get(i, j)
-          self.unsafe_set(i, j, result_val)
+      if prob >= 1.0
+        @rows.times { |i| @cols.times { |j| self.unsafe_set(i, j, 0.0) } }
+      elsif prob > 0.0
+        scale = 1.0 / (1.0 - prob)
+        @rows.times do |i|
+          @cols.times do |j|
+            result_val = Random.rand < prob ? 0.0 : self.unsafe_get(i, j) * scale
+            self.unsafe_set(i, j, result_val)
+          end
         end
       end
       self.sync_to_device!("dropout_result")
