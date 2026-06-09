@@ -318,7 +318,7 @@ module SHAInet
     @@zero_matrix_proc : Proc(Pointer(Float64), Int32, Void)? = nil
     @@fill_matrix_proc : Proc(Pointer(Float64), Float64, Int32, Void)? = nil
     @@element_div_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Void)? = nil
-    @@count_pairs_proc : Proc(Pointer(Int32), Pointer(Int32), Pointer(Int32), Pointer(Int32), Int32, Int32, Void)? = nil
+    @@count_pairs_proc : Proc(Pointer(Int32), Pointer(Int32), Pointer(Int32), Int32, Int32, Pointer(Int32), Void)? = nil
     @@relu_backward_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Void)? = nil
     @@softmax_backward_proc : Proc(Pointer(Float64), Pointer(Float64), Pointer(Float64), Int32, Int32, Void)? = nil
     @@element_log_proc : Proc(Pointer(Float64), Pointer(Float64), Int32, Void)? = nil
@@ -773,6 +773,7 @@ module SHAInet
     end
 
     # Count token pairs using a custom CUDA kernel when available.
+    # C signature: count_token_pairs(a, b, freq, pair_count, vocab_size, counts)
     def count_token_pairs(counts : Pointer(Int32), a : Pointer(Int32), b : Pointer(Int32), freqs : Pointer(Int32), pair_count : Int32, vocab : Int32)
       unless fn = @@count_pairs_proc
         if @@kernels_handle.null?
@@ -781,13 +782,13 @@ module SHAInet
         unless @@kernels_handle.null?
           sym = LibC.dlsym(@@kernels_handle, "count_token_pairs")
           unless sym.null?
-            @@count_pairs_proc = Proc(Pointer(Int32), Pointer(Int32), Pointer(Int32), Pointer(Int32), Int32, Int32, Void).new(sym, Pointer(Void).null)
+            @@count_pairs_proc = Proc(Pointer(Int32), Pointer(Int32), Pointer(Int32), Int32, Int32, Pointer(Int32), Void).new(sym, Pointer(Void).null)
             fn = @@count_pairs_proc
           end
         end
       end
       raise "CUDA kernels not available" unless fn
-      fn.call(counts, a, b, freqs, pair_count, vocab)
+      fn.call(a, b, freqs, pair_count, vocab, counts)
     end
 
     # Check if both CUDA runtime and custom kernels are available

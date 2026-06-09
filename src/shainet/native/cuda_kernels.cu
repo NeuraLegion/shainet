@@ -64,13 +64,22 @@ void relu_backward(double* output, const double* input, const double* grad, int 
 __global__ void dropout_kernel(double* out, const double* in, int rows, int cols, double drop_p, unsigned long long seed) {
     int row = blockIdx.x;
     if(row >= rows) return;
-    curandState state;
-    curand_init(seed + row, 0, 0, &state);
     const double *row_in = in + row * cols;
     double *row_out = out + row * cols;
+    if(drop_p >= 1.0) {
+        for(int j=0;j<cols;++j) row_out[j] = 0.0;
+        return;
+    }
+    if(drop_p <= 0.0) {
+        for(int j=0;j<cols;++j) row_out[j] = row_in[j];
+        return;
+    }
+    curandState state;
+    curand_init(seed + row, 0, 0, &state);
+    double scale = 1.0 / (1.0 - drop_p);
     for(int j=0;j<cols;++j){
         double r = curand_uniform_double(&state);
-        row_out[j] = r < drop_p ? 0.0 : row_in[j];
+        row_out[j] = r < drop_p ? 0.0 : row_in[j] * scale;
     }
 }
 
@@ -144,24 +153,30 @@ void apply_layer_norm(double* out, const double* in,
 __global__ void slice_cols_kernel(double* out, const double* in, int rows, int src_cols, int start, int len){
     int row = blockIdx.x;
     int col = threadIdx.x;
-    if(row >= rows || col >= len) return;
-    out[row * len + col] = in[row * src_cols + start + col];
+    if(row >= rows) return;
+    for(; col < len; col += blockDim.x){
+        out[row * len + col] = in[row * src_cols + start + col];
+    }
 }
 
 void slice_cols(double* out, const double* in, int rows, int src_cols, int start, int len){
-    slice_cols_kernel<<<rows, len>>>(out, in, rows, src_cols, start, len);
+    int threads = len < 1024 ? len : 1024;
+    slice_cols_kernel<<<rows, threads>>>(out, in, rows, src_cols, start, len);
     cudaDeviceSynchronize();
 }
 
 __global__ void set_cols_kernel(double* out, const double* in, int rows, int dst_cols, int start, int len){
     int row = blockIdx.x;
     int col = threadIdx.x;
-    if(row >= rows || col >= len) return;
-    out[row * dst_cols + start + col] = in[row * len + col];
+    if(row >= rows) return;
+    for(; col < len; col += blockDim.x){
+        out[row * dst_cols + start + col] = in[row * len + col];
+    }
 }
 
 void set_cols(double* out, const double* in, int rows, int dst_cols, int start, int len){
-    set_cols_kernel<<<rows, len>>>(out, in, rows, dst_cols, start, len);
+    int threads = len < 1024 ? len : 1024;
+    set_cols_kernel<<<rows, threads>>>(out, in, rows, dst_cols, start, len);
     cudaDeviceSynchronize();
 }
 

@@ -204,10 +204,16 @@ module SHAInet
     # Apply dropout in-place using the given probability in the range 0.0..1.0.
     def dropout!(prob : Float64)
       raise ArgumentError.new("prob must be between 0 and 1") unless 0.0 <= prob && prob <= 1.0
+      return self if prob <= 0.0
+      if prob >= 1.0
+        @rows.times { |i| @cols.times { |j| self[i, j] = 0.0 } }
+        return self
+      end
 
+      scale = 1.0 / (1.0 - prob)
       @rows.times do |i|
         @cols.times do |j|
-          self[i, j] = Random.rand < prob ? 0.0 : self[i, j]
+          self[i, j] = Random.rand < prob ? 0.0 : self[i, j] * scale
         end
       end
 
