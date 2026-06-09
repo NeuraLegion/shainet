@@ -158,6 +158,17 @@ module SHAInet
       end
     end
 
+    # Return a sub-matrix containing rows [start_row, start_row + length)
+    def slice_rows(start_row : Int32, length : Int32) : SimpleMatrix
+      result = SimpleMatrix.new(length, @cols)
+      length.times do |i|
+        @cols.times do |j|
+          result[i, j] = self[start_row + i, j]
+        end
+      end
+      result
+    end
+
     def clone
       dup = SimpleMatrix.new(@rows, @cols)
       @rows.times do |i|

@@ -46,8 +46,12 @@ module SHAInet
                 end
 
                 if x.rows <= enc.rows
-                  # Add positional encoding on GPU
-                  x + enc
+                  # Slice PE to match sequence length via device memcpy
+                  pe_slice = CudaMatrix.new(x.rows, enc.cols)
+                  bytes = (x.rows * enc.cols * 8).to_u64
+                  CUDA.copy_device_to_device(pe_slice.device_ptr.not_nil!, enc.device_ptr.not_nil!, bytes)
+                  pe_slice.mark_device_dirty!
+                  x + pe_slice
                 else
                   # Sequence longer than available PE - just use input
                   x
@@ -75,9 +79,9 @@ module SHAInet
                 end
 
                 if x.rows <= enc.rows
-                  # Add positional encoding normally
-                  result = x + enc
-                  result
+                  # Slice PE to match sequence length, then add
+                  pe_slice = enc.slice_rows(0, x.rows)
+                  x + pe_slice
                 else
                   # Sequence longer than available PE - just use input
                   x

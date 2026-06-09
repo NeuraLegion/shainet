@@ -10,7 +10,7 @@ SHAInet (Super Human Artificial Intelligence Network) is a neural network librar
 - Multiple layer types and activation functions
 - Various training algorithms (SGD, Adam, iRprop+, etc.)
 - Streaming data support for large datasets
-- PyTorch and HuggingFace model import
+- HuggingFace model import via SafeTensors (no Python required)
 - Transformer and modern NLP support
 
 ---
@@ -98,6 +98,29 @@ net.train(data: data,
 puts net.run([0, 1])
 ```
 
+### Load a HuggingFace Model (SafeTensors)
+
+Load any GPT-2 compatible model directly from HuggingFace SafeTensors format.
+No Python, no PyTorch — pure Crystal binary parsing.
+
+```crystal
+require "shainet"
+
+# Download model.safetensors and config.json from HuggingFace
+net = SHAInet::HFLoader.load_gpt2("/path/to/model-dir")
+
+# Run inference — input is token IDs as column vector
+input = SHAInet::SimpleMatrix.new(3, 1) # 3 tokens
+input[0, 0] = 15.0  # token id
+input[1, 0] = 42.0
+input[2, 0] = 7.0
+
+output = net.run(input) # => [3, vocab_size] logits
+```
+
+Supported formats: F16, BF16, F32, F64. Works with any GPT-2 architecture
+model on HuggingFace that provides `model.safetensors`.
+
 ### Iris Classification
 
 ```crystal
@@ -125,7 +148,6 @@ puts iris.test(test)
 Efficiently train on large datasets:
 
 ```crystal
-# Buffer at most 1,024 lines and shuffle each chunk
 stream = SHAInet::StreamingData.new(
   "data.txt",
   shuffle: true,
@@ -151,8 +173,24 @@ net.train(
 ## Advanced
 
 - See `examples/babylm_transformer.cr` for a transformer language model.
-- Import PyTorch models with `net.load_from_pt("model.pt")`.
-- Import HuggingFace GPT weights directly from `pytorch_model.bin`.
+- Use `SHAInet::SafeTensors::File` to read any `.safetensors` file directly.
+
+### SafeTensors API
+
+```crystal
+# Low-level tensor access
+sf = SHAInet::SafeTensors::File.new("model.safetensors")
+sf.tensor_names          # => ["transformer.wte.weight", ...]
+info = sf.tensors["transformer.wte.weight"]
+info.dtype               # => F32
+info.shape               # => [50257, 768]
+
+matrix = sf.read_matrix("transformer.wte.weight")  # => SimpleMatrix
+data = sf.read_f64("transformer.h.0.ln_1.weight")  # => Array(Float64)
+sf.close
+```
+
+### Autograd
 
 ```crystal
 a = SHAInet::SimpleMatrix.tensor(1, 2)
@@ -165,15 +203,6 @@ w[1, 0] = SHAInet::Autograd::Tensor.new(5.0)
 
 out = a * w
 out[0, 0].as(SHAInet::Autograd::Tensor).backward
-
-learning_rate = 0.1
-w.rows.times do |i|
-  w.cols.times do |j|
-    t = w[i, j]
-    w[i, j] = SHAInet::Autograd::Tensor.new(t.data - learning_rate * t.grad)
-    t.grad = 0.0
-  end
-end
 ```
 
 ## Contributing
