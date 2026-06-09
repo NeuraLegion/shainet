@@ -48,7 +48,7 @@ module SHAInet
                 if x.rows <= enc.rows
                   # Slice PE to match sequence length via device memcpy
                   pe_slice = CudaMatrix.new(x.rows, enc.cols)
-                  bytes = (x.rows * enc.cols * 8).to_u64
+                  bytes = (x.rows * enc.cols * 4).to_u64
                   CUDA.copy_device_to_device(pe_slice.device_ptr.not_nil!, enc.device_ptr.not_nil!, bytes)
                   pe_slice.mark_device_dirty!
                   x + pe_slice

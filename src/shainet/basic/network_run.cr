@@ -1207,7 +1207,7 @@ module SHAInet
             mat.mark_device_dirty!
           end
 
-          flat_slice.each_with_index { |v, i| mat.raw_data[i] = v }
+          flat_slice.each_with_index { |v, i| mat.raw_data[i] = v.to_f32 }
 
           mat
         else
@@ -1226,7 +1226,7 @@ module SHAInet
             mat.mark_device_dirty!
           end
 
-          flat_slice.each_with_index { |v, i| mat.raw_data[i] = v }
+          flat_slice.each_with_index { |v, i| mat.raw_data[i] = v.to_f32 }
 
           mat
         end
