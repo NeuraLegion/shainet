@@ -12,7 +12,7 @@ describe "HFLoader" do
     net.transformer_layers.size.should eq(5)
 
     # Check first transformer block
-    t0 = net.transformer_layers[0]
+    t0 = net.transformer_layers[0].as(SHAInet::TransformerLayer)
     t0.mha.num_heads.should eq(4)
     t0.mha.d_model.should eq(32)
 

@@ -76,7 +76,7 @@ describe "Transformer Integration" do
 
       # Apply positional encoding only to the first transformer layer
       pos_enc = SHAInet::PositionalEncoding.sinusoidal(seq_len, d_model)
-      net.transformer_layers.first.positional_encoding = pos_enc
+      net.transformer_layers.first.as(SHAInet::TransformerLayer).positional_encoding = pos_enc
 
       # Create training data with proper sequence format
       training_data = [] of Array(Array(Float64) | Array(Array(Float64)))
@@ -121,7 +121,7 @@ describe "Transformer Integration" do
 
       # Apply positional encoding
       pos_enc = SHAInet::PositionalEncoding.sinusoidal(seq_len, d_model)
-      net.transformer_layers.first.positional_encoding = pos_enc
+      net.transformer_layers.first.as(SHAInet::TransformerLayer).positional_encoding = pos_enc
 
       # Test single sequence prediction
       test_seq = ids[0, seq_len].map { |id| [id.to_f64] }

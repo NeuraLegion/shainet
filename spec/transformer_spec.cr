@@ -219,7 +219,7 @@ describe "Network with TransformerLayer" do
       # Use positional encoding with sequence length 1 to match the single
       # token input below
       pe = SHAInet::PositionalEncoding.sinusoidal(1, 2)
-      net.transformer_layers.first.positional_encoding = pe
+      net.transformer_layers.first.as(SHAInet::TransformerLayer).positional_encoding = pe
     end
 
     # Test single token input first
