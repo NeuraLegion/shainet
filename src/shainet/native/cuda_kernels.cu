@@ -5,24 +5,24 @@
 // Simple row-wise softmax kernel. This version runs one thread per row and
 // performs the computation sequentially. It uses the row maximum for numerical
 // stability.
-__global__ void softmax_rows_kernel(double* out, const double* in, int rows, int cols) {
+__global__ void softmax_rows_kernel(float* out, const float* in, int rows, int cols) {
     int row = blockIdx.x;
     if (row >= rows) return;
 
-    const double* row_in = in + row * cols;
-    double* row_out = out + row * cols;
+    const float* row_in = in + row * cols;
+    float* row_out = out + row * cols;
 
     // Find the maximum value for numerical stability
-    double max_val = row_in[0];
+    float max_val = row_in[0];
     for (int j = 1; j < cols; ++j) {
-        double v = row_in[j];
+        float v = row_in[j];
         if (v > max_val) max_val = v;
     }
 
     // Compute exponentials and their sum
-    double sum = 0.0;
+    float sum = 0.0;
     for (int j = 0; j < cols; ++j) {
-        double e = exp(row_in[j] - max_val);
+        float e = expf(row_in[j] - max_val);
         row_out[j] = e;
         sum += e;
     }
@@ -33,7 +33,7 @@ __global__ void softmax_rows_kernel(double* out, const double* in, int rows, int
     }
 }
 
-__global__ void relu_backward_kernel(double* output, const double* input, const double* grad, int size) {
+__global__ void relu_backward_kernel(float* output, const float* input, const float* grad, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= size) return;
     
@@ -42,7 +42,7 @@ __global__ void relu_backward_kernel(double* output, const double* input, const 
 
 // Host wrapper functions
 extern "C" {
-void softmax_rows(double* out, const double* in, int rows, int cols) {
+void softmax_rows(float* out, const float* in, int rows, int cols) {
     softmax_rows_kernel<<<rows, 1>>>(out, in, rows, cols);
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
@@ -50,7 +50,7 @@ void softmax_rows(double* out, const double* in, int rows, int cols) {
     }
 }
 
-void relu_backward(double* output, const double* input, const double* grad, int size) {
+void relu_backward(float* output, const float* input, const float* grad, int size) {
     int threads_per_block = 256;
     int blocks = (size + threads_per_block - 1) / threads_per_block;
     
@@ -61,11 +61,11 @@ void relu_backward(double* output, const double* input, const double* grad, int 
     }
 }
 
-__global__ void dropout_kernel(double* out, const double* in, int rows, int cols, double drop_p, unsigned long long seed) {
+__global__ void dropout_kernel(float* out, const float* in, int rows, int cols, double drop_p, unsigned long long seed) {
     int row = blockIdx.x;
     if(row >= rows) return;
-    const double *row_in = in + row * cols;
-    double *row_out = out + row * cols;
+    const float *row_in = in + row * cols;
+    float *row_out = out + row * cols;
     if(drop_p >= 1.0) {
         for(int j=0;j<cols;++j) row_out[j] = 0.0;
         return;
@@ -76,14 +76,14 @@ __global__ void dropout_kernel(double* out, const double* in, int rows, int cols
     }
     curandState state;
     curand_init(seed + row, 0, 0, &state);
-    double scale = 1.0 / (1.0 - drop_p);
+    float scale = 1.0 / (1.0 - drop_p);
     for(int j=0;j<cols;++j){
-        double r = curand_uniform_double(&state);
+        float r = curand_uniform(&state);
         row_out[j] = r < drop_p ? 0.0 : row_in[j] * scale;
     }
 }
 
-void dropout(double* out, const double* in, int rows, int cols, double drop_p, unsigned long long seed) {
+void dropout(float* out, const float* in, int rows, int cols, double drop_p, unsigned long long seed) {
     dropout_kernel<<<rows, 1>>>(out, in, rows, cols, drop_p, seed);
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
@@ -91,66 +91,66 @@ void dropout(double* out, const double* in, int rows, int cols, double drop_p, u
     }
 }
 
-__global__ void gather_rows_kernel(double* out, const double* in, const int* ids, int rows, int cols) {
+__global__ void gather_rows_kernel(float* out, const float* in, const int* ids, int rows, int cols) {
     int row = blockIdx.x;
     if(row >= rows) return;
     int id = ids[row];
-    const double *row_in = in + id * cols;
-    double *row_out = out + row * cols;
+    const float *row_in = in + id * cols;
+    float *row_out = out + row * cols;
     for(int j=0;j<cols;++j){
         row_out[j] = row_in[j];
     }
 }
 
-void gather_rows(double* out, const double* in, const int* ids, int rows, int cols) {
+void gather_rows(float* out, const float* in, const int* ids, int rows, int cols) {
     gather_rows_kernel<<<rows, 1>>>(out, in, ids, rows, cols);
     cudaDeviceSynchronize();
 }
 
-__global__ void row_mean_var_kernel(const double* in, double* mean, double* var,
+__global__ void row_mean_var_kernel(const float* in, float* mean, float* var,
                                     int rows, int cols) {
     int row = blockIdx.x;
     if(row >= rows) return;
-    const double *row_in = in + row * cols;
-    double sum = 0.0;
-    double sq_sum = 0.0;
+    const float *row_in = in + row * cols;
+    float sum = 0.0;
+    float sq_sum = 0.0;
     for(int j=0;j<cols;++j){
-        double v = row_in[j];
+        float v = row_in[j];
         sum += v;
         sq_sum += v*v;
     }
-    double m = sum / cols;
+    float m = sum / cols;
     mean[row] = m;
     var[row] = sq_sum / cols - m*m;
 }
 
-void row_mean_var(const double* in, double* mean, double* var, int rows, int cols) {
+void row_mean_var(const float* in, float* mean, float* var, int rows, int cols) {
     row_mean_var_kernel<<<rows, 1>>>(in, mean, var, rows, cols);
     cudaDeviceSynchronize();
 }
 
-__global__ void apply_layer_norm_kernel(double* out, const double* in,
-                                        const double* mean, const double* var,
+__global__ void apply_layer_norm_kernel(float* out, const float* in,
+                                        const float* mean, const float* var,
                                         int rows, int cols, double epsilon) {
     int row = blockIdx.x;
     if(row >= rows) return;
-    const double *row_in = in + row * cols;
-    double *row_out = out + row * cols;
-    double m = mean[row];
-    double denom = sqrt(var[row] + epsilon);
+    const float *row_in = in + row * cols;
+    float *row_out = out + row * cols;
+    float m = mean[row];
+    float denom = sqrtf(var[row] + epsilon);
     for(int j=0;j<cols;++j){
         row_out[j] = (row_in[j] - m) / denom;
     }
 }
 
-void apply_layer_norm(double* out, const double* in,
-                      const double* mean, const double* var,
+void apply_layer_norm(float* out, const float* in,
+                      const float* mean, const float* var,
                       int rows, int cols, double epsilon) {
     apply_layer_norm_kernel<<<rows, 1>>>(out, in, mean, var, rows, cols, epsilon);
     cudaDeviceSynchronize();
 }
 
-__global__ void slice_cols_kernel(double* out, const double* in, int rows, int src_cols, int start, int len){
+__global__ void slice_cols_kernel(float* out, const float* in, int rows, int src_cols, int start, int len){
     int row = blockIdx.x;
     int col = threadIdx.x;
     if(row >= rows) return;
@@ -159,13 +159,13 @@ __global__ void slice_cols_kernel(double* out, const double* in, int rows, int s
     }
 }
 
-void slice_cols(double* out, const double* in, int rows, int src_cols, int start, int len){
+void slice_cols(float* out, const float* in, int rows, int src_cols, int start, int len){
     int threads = len < 1024 ? len : 1024;
     slice_cols_kernel<<<rows, threads>>>(out, in, rows, src_cols, start, len);
     cudaDeviceSynchronize();
 }
 
-__global__ void set_cols_kernel(double* out, const double* in, int rows, int dst_cols, int start, int len){
+__global__ void set_cols_kernel(float* out, const float* in, int rows, int dst_cols, int start, int len){
     int row = blockIdx.x;
     int col = threadIdx.x;
     if(row >= rows) return;
@@ -174,7 +174,7 @@ __global__ void set_cols_kernel(double* out, const double* in, int rows, int dst
     }
 }
 
-void set_cols(double* out, const double* in, int rows, int dst_cols, int start, int len){
+void set_cols(float* out, const float* in, int rows, int dst_cols, int start, int len){
     int threads = len < 1024 ? len : 1024;
     set_cols_kernel<<<rows, threads>>>(out, in, rows, dst_cols, start, len);
     cudaDeviceSynchronize();
@@ -195,30 +195,30 @@ void count_token_pairs(const int* a, const int* b, const int* freq,
     cudaDeviceSynchronize();
 }
 
-__global__ void layer_norm_backward_kernel(double* d_x, double* d_gamma, double* d_beta,
-                                           const double* d_out, const double* x,
-                                           const double* gamma, const double* mean,
-                                           const double* var, const double* norm,
+__global__ void layer_norm_backward_kernel(float* d_x, float* d_gamma, float* d_beta,
+                                           const float* d_out, const float* x,
+                                           const float* gamma, const float* mean,
+                                           const float* var, const float* norm,
                                            int rows, int cols, double epsilon) {
     int row = blockIdx.x;
     if(row >= rows) return;
 
-    const double *x_row = x + row * cols;
-    const double *dout_row = d_out + row * cols;
-    const double *norm_row = norm + row * cols;
-    double *dx_row = d_x + row * cols;
+    const float *x_row = x + row * cols;
+    const float *dout_row = d_out + row * cols;
+    const float *norm_row = norm + row * cols;
+    float *dx_row = d_x + row * cols;
 
-    double m = mean[row];
-    double v = var[row];
-    double denom = sqrt(v + epsilon);
-    double inv = 1.0 / denom;
-    double col_f = (double)cols;
+    float m = mean[row];
+    float v = var[row];
+    float denom = sqrtf(v + epsilon);
+    float inv = 1.0 / denom;
+    float col_f = (float)cols;
 
     // Compute sum_dout_gamma and sum_dout_gamma_norm
-    double sum_dout_gamma = 0.0;
-    double sum_dout_gamma_norm = 0.0;
+    float sum_dout_gamma = 0.0;
+    float sum_dout_gamma_norm = 0.0;
     for(int j = 0; j < cols; ++j) {
-        double doutg = dout_row[j] * gamma[j];
+        float doutg = dout_row[j] * gamma[j];
         sum_dout_gamma += doutg;
         sum_dout_gamma_norm += doutg * (x_row[j] - m);
 
@@ -229,16 +229,16 @@ __global__ void layer_norm_backward_kernel(double* d_x, double* d_gamma, double*
 
     // Compute d_x
     for(int j = 0; j < cols; ++j) {
-        double xm = x_row[j] - m;
-        double doutg = dout_row[j] * gamma[j];
+        float xm = x_row[j] - m;
+        float doutg = dout_row[j] * gamma[j];
         dx_row[j] = inv * (doutg - sum_dout_gamma/col_f - xm * inv*inv / col_f * sum_dout_gamma_norm);
     }
 }
 
-void layer_norm_backward(double* d_x, double* d_gamma, double* d_beta,
-                         const double* d_out, const double* x,
-                         const double* gamma, const double* mean,
-                         const double* var, const double* norm,
+void layer_norm_backward(float* d_x, float* d_gamma, float* d_beta,
+                         const float* d_out, const float* x,
+                         const float* gamma, const float* mean,
+                         const float* var, const float* norm,
                          int rows, int cols, double epsilon) {
     layer_norm_backward_kernel<<<rows, 1>>>(d_x, d_gamma, d_beta, d_out, x,
                                             gamma, mean, var, norm,
@@ -246,23 +246,23 @@ void layer_norm_backward(double* d_x, double* d_gamma, double* d_beta,
     cudaDeviceSynchronize();
 }
 
-__global__ void sum_cols_kernel(double* out, const double* in, int rows, int cols) {
+__global__ void sum_cols_kernel(float* out, const float* in, int rows, int cols) {
     int col = blockIdx.x;
     if(col >= cols) return;
 
-    double sum = 0.0;
+    float sum = 0.0;
     for(int i = 0; i < rows; ++i) {
         sum += in[i * cols + col];
     }
     out[col] = sum;
 }
 
-void sum_cols(double* out, const double* in, int rows, int cols) {
+void sum_cols(float* out, const float* in, int rows, int cols) {
     sum_cols_kernel<<<cols, 1>>>(out, in, rows, cols);
     cudaDeviceSynchronize();
 }
 
-__global__ void mul_row_vector_kernel(double* matrix, const double* vec, int rows, int cols) {
+__global__ void mul_row_vector_kernel(float* matrix, const float* vec, int rows, int cols) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= rows * cols) return;
 
@@ -270,7 +270,7 @@ __global__ void mul_row_vector_kernel(double* matrix, const double* vec, int row
     matrix[idx] *= vec[col];
 }
 
-void mul_row_vector(double* matrix, const double* vec, int rows, int cols) {
+void mul_row_vector(float* matrix, const float* vec, int rows, int cols) {
     int threads_per_block = 256;
     int blocks = (rows * cols + threads_per_block - 1) / threads_per_block;
 
@@ -281,7 +281,7 @@ void mul_row_vector(double* matrix, const double* vec, int rows, int cols) {
     }
 }
 
-__global__ void transpose_kernel(double* out, const double* in, int rows, int cols) {
+__global__ void transpose_kernel(float* out, const float* in, int rows, int cols) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= rows * cols) return;
 
@@ -293,7 +293,7 @@ __global__ void transpose_kernel(double* out, const double* in, int rows, int co
     out[col * rows + row] = in[row * cols + col];
 }
 
-void transpose(double* out, const double* in, int rows, int cols) {
+void transpose(float* out, const float* in, int rows, int cols) {
     int threads_per_block = 256;
     int blocks = (rows * cols + threads_per_block - 1) / threads_per_block;
 
@@ -304,21 +304,21 @@ void transpose(double* out, const double* in, int rows, int cols) {
     }
 }
 
-__global__ void sigmoid_forward_kernel(double* activations, double* derivatives, const double* linear, int size) {
+__global__ void sigmoid_forward_kernel(float* activations, float* derivatives, const float* linear, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= size) return;
     
-    double val = linear[idx];
-    // Sigmoid: 1 / (1 + exp(-x))
-    double exp_neg_val = exp(-val);
-    double sigmoid_val = 1.0 / (1.0 + exp_neg_val);
+    float val = linear[idx];
+    // Sigmoid: 1 / (1 + expf(-x))
+    float exp_neg_val = expf(-val);
+    float sigmoid_val = 1.0 / (1.0 + exp_neg_val);
     
     activations[idx] = sigmoid_val;
     // Sigmoid derivative: σ(x) * (1 - σ(x))
     derivatives[idx] = sigmoid_val * (1.0 - sigmoid_val);
 }
 
-void sigmoid_forward(double* activations, double* derivatives, const double* linear, int size) {
+void sigmoid_forward(float* activations, float* derivatives, const float* linear, int size) {
     int threads_per_block = 256;
     int blocks = (size + threads_per_block - 1) / threads_per_block;
     
@@ -329,14 +329,14 @@ void sigmoid_forward(double* activations, double* derivatives, const double* lin
     }
 }
 
-__global__ void apply_gradient_kernel(double* local_grad, const double* grad, const double* derivatives, int size) {
+__global__ void apply_gradient_kernel(float* local_grad, const float* grad, const float* derivatives, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= size) return;
 
     local_grad[idx] = grad[idx] * derivatives[idx];
 }
 
-void apply_gradient(double* local_grad, const double* grad, const double* derivatives, int size) {
+void apply_gradient(float* local_grad, const float* grad, const float* derivatives, int size) {
     int threads_per_block = 256;
     int blocks = (size + threads_per_block - 1) / threads_per_block;
 
@@ -347,18 +347,18 @@ void apply_gradient(double* local_grad, const double* grad, const double* deriva
     }
 }
 
-__global__ void accumulate_bias_grad_kernel(double* bias_grad, const double* local_grad, int rows, int cols) {
+__global__ void accumulate_bias_grad_kernel(float* bias_grad, const float* local_grad, int rows, int cols) {
     int col = blockIdx.x * blockDim.x + threadIdx.x;
     if (col >= cols) return;
 
-    double sum = 0.0;
+    float sum = 0.0;
     for (int row = 0; row < rows; row++) {
         sum += local_grad[row * cols + col];
     }
     atomicAdd(&bias_grad[col], sum);
 }
 
-void accumulate_bias_grad(double* bias_grad, const double* local_grad, int rows, int cols) {
+void accumulate_bias_grad(float* bias_grad, const float* local_grad, int rows, int cols) {
     int threads_per_block = 256;
     int blocks = (cols + threads_per_block - 1) / threads_per_block;
 
@@ -369,18 +369,18 @@ void accumulate_bias_grad(double* bias_grad, const double* local_grad, int rows,
     }
 }
 
-__global__ void row_sum_kernel(double* dst, const double* src, int rows, int cols) {
+__global__ void row_sum_kernel(float* dst, const float* src, int rows, int cols) {
     int col = blockIdx.x * blockDim.x + threadIdx.x;
     if (col >= cols) return;
 
-    double sum = 0.0;
+    float sum = 0.0;
     for (int row = 0; row < rows; ++row) {
         sum += src[row * cols + col];
     }
     atomicAdd(&dst[col], sum);
 }
 
-void row_sum(double* dst, const double* src, int rows, int cols) {
+void row_sum(float* dst, const float* src, int rows, int cols) {
     int threads_per_block = 256;
     int blocks = (cols + threads_per_block - 1) / threads_per_block;
 
@@ -391,14 +391,14 @@ void row_sum(double* dst, const double* src, int rows, int cols) {
     }
 }
 
-__global__ void zero_matrix_kernel(double* matrix, int size) {
+__global__ void zero_matrix_kernel(float* matrix, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= size) return;
 
     matrix[idx] = 0.0;
 }
 
-void zero_matrix(double* matrix, int size) {
+void zero_matrix(float* matrix, int size) {
     int threads_per_block = 256;
     int blocks = (size + threads_per_block - 1) / threads_per_block;
 
@@ -409,14 +409,14 @@ void zero_matrix(double* matrix, int size) {
     }
 }
 
-__global__ void fill_matrix_kernel(double* matrix, double value, int size) {
+__global__ void fill_matrix_kernel(float* matrix, double value, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= size) return;
 
     matrix[idx] = value;
 }
 
-void fill_matrix(double* matrix, double value, int size) {
+void fill_matrix(float* matrix, double value, int size) {
     int threads_per_block = 256;
     int blocks = (size + threads_per_block - 1) / threads_per_block;
 
@@ -427,15 +427,15 @@ void fill_matrix(double* matrix, double value, int size) {
     }
 }
 
-__global__ void element_div_kernel(double* out, const double* a, const double* b, int size){
+__global__ void element_div_kernel(float* out, const float* a, const float* b, int size){
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if(idx >= size) return;
 
-    double denom = b[idx];
+    float denom = b[idx];
     out[idx] = denom == 0.0 ? 0.0 : a[idx] / denom;
 }
 
-void element_div(double* out, const double* a, const double* b, int size){
+void element_div(float* out, const float* a, const float* b, int size){
     int threads_per_block = 256;
     int blocks = (size + threads_per_block - 1) / threads_per_block;
 
@@ -446,16 +446,16 @@ void element_div(double* out, const double* a, const double* b, int size){
     }
 }
 
-__global__ void softmax_backward_kernel(double* output, const double* grad, const double* softmax_out, int rows, int cols) {
+__global__ void softmax_backward_kernel(float* output, const float* grad, const float* softmax_out, int rows, int cols) {
     int row = blockIdx.x;
     if (row >= rows) return;
     
-    const double* grad_row = grad + row * cols;
-    const double* softmax_row = softmax_out + row * cols;
-    double* output_row = output + row * cols;
+    const float* grad_row = grad + row * cols;
+    const float* softmax_row = softmax_out + row * cols;
+    float* output_row = output + row * cols;
     
     // Compute sum of softmax * grad for this row
-    double sum = 0.0;
+    float sum = 0.0;
     for (int j = 0; j < cols; j++) {
         sum += softmax_row[j] * grad_row[j];
     }
@@ -466,7 +466,7 @@ __global__ void softmax_backward_kernel(double* output, const double* grad, cons
     }
 }
 
-void softmax_backward(double* output, const double* grad, const double* softmax_out, int rows, int cols) {
+void softmax_backward(float* output, const float* grad, const float* softmax_out, int rows, int cols) {
     softmax_backward_kernel<<<rows, 1>>>(output, grad, softmax_out, rows, cols);
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
@@ -475,15 +475,15 @@ void softmax_backward(double* output, const double* grad, const double* softmax_
 }
 
 
-__global__ void element_log_kernel(double* out, const double* in, int size) {
+__global__ void element_log_kernel(float* out, const float* in, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= size) return;
 
-    double val = in[idx];
-    out[idx] = log(val);
+    float val = in[idx];
+    out[idx] = logf(val);
 }
 
-void element_log(double* out, const double* in, int size) {
+void element_log(float* out, const float* in, int size) {
     int threads_per_block = 256;
     int blocks = (size + threads_per_block - 1) / threads_per_block;
 
@@ -494,38 +494,38 @@ void element_log(double* out, const double* in, int size) {
     }
 }
 
-__global__ void cross_entropy_loss_gradient_kernel(const double* pred, const double* target, double* grad, double* loss, int total) {
+__global__ void cross_entropy_loss_gradient_kernel(const float* pred, const float* target, float* grad, float* loss, int total) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= total) return;
 
-    double p = pred[idx];
-    double t = target[idx];
+    float p = pred[idx];
+    float t = target[idx];
     grad[idx] = p - t;
 
-    double contrib = -t * log(max(p, 1e-15));
+    float contrib = -t * logf(fmaxf(p, 1e-15f));
     atomicAdd(loss, contrib);
 }
 
-__global__ void softmax_cross_entropy_label_kernel(const double* pred, const int* labels,
-                                                    double* grad, double* loss,
+__global__ void softmax_cross_entropy_label_kernel(const float* pred, const int* labels,
+                                                    float* grad, float* loss,
                                                     int rows, int cols) {
     int row = blockIdx.x;
     if (row >= rows) return;
 
-    const double* row_pred = pred + row * cols;
-    double* row_grad = grad + row * cols;
+    const float* row_pred = pred + row * cols;
+    float* row_grad = grad + row * cols;
 
     // Find maximum value in the row for numerical stability
-    double max_val = row_pred[0];
+    float max_val = row_pred[0];
     for (int j = 1; j < cols; ++j) {
-        double v = row_pred[j];
+        float v = row_pred[j];
         if (v > max_val) max_val = v;
     }
 
     // Compute exponentials and their sum
-    double sum = 0.0;
+    float sum = 0.0;
     for (int j = 0; j < cols; ++j) {
-        double e = exp(row_pred[j] - max_val);
+        float e = expf(row_pred[j] - max_val);
         row_grad[j] = e;
         sum += e;
     }
@@ -537,18 +537,18 @@ __global__ void softmax_cross_entropy_label_kernel(const double* pred, const int
 
     int label = labels[row];
     if (label >= 0 && label < cols) {
-        double p = row_grad[label];
+        float p = row_grad[label];
         row_grad[label] = p - 1.0;
-        double contrib = -log(max(p, 1e-15));
+        float contrib = -logf(fmaxf(p, 1e-15f));
         atomicAdd(loss, contrib);
     }
 }
 
-void cross_entropy_loss_gradient(double* pred, double* target,
-                                 double* grad, double* loss,
+void cross_entropy_loss_gradient(float* pred, float* target,
+                                 float* grad, float* loss,
                                  int rows, int cols) {
     int total = rows * cols;
-    cudaMemset(loss, 0, sizeof(double));
+    cudaMemset(loss, 0, sizeof(float));
     int threads = 256;
     int blocks = (total + threads - 1) / threads;
 
@@ -560,10 +560,10 @@ void cross_entropy_loss_gradient(double* pred, double* target,
     }
 }
 
-void softmax_cross_entropy_label(double* pred, const int* labels,
-                                 double* grad, double* loss,
+void softmax_cross_entropy_label(float* pred, const int* labels,
+                                 float* grad, float* loss,
                                  int rows, int cols) {
-    cudaMemset(loss, 0, sizeof(double));
+    cudaMemset(loss, 0, sizeof(float));
     softmax_cross_entropy_label_kernel<<<rows, 1>>>(pred, labels, grad, loss, rows, cols);
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {

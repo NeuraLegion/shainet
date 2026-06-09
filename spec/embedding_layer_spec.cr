@@ -6,7 +6,7 @@ describe SHAInet::EmbeddingLayer do
     first = layer.embed(1)
     second = layer.embed(1)
     first.should eq(second)
-    activations = Array(Float64).new(layer.l_size) { |i| layer.activations[0, i] }
+    activations = Array(Float64).new(layer.l_size) { |i| layer.activations[0, i].to_f64 }
     activations.should eq(first)
   end
 

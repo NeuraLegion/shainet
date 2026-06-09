@@ -11,11 +11,11 @@ module SHAInet
   # available. This class is standalone and doesn't inherit from SimpleMatrix
   # to avoid method resolution conflicts.
   class CudaMatrix
-    property device_ptr : Pointer(Float64)?
+    property device_ptr : Pointer(Float32)?
     @device_dirty : Bool = false # Track if GPU data is newer than CPU data
     @rows : Int32
     @cols : Int32
-    @data : Array(Float64)
+    @data : Array(Float32)
     @gpu_memory_size : UInt64 = 0_u64 # Track our own GPU memory size
 
     # Global GPU memory tracking
@@ -102,8 +102,8 @@ module SHAInet
     end
 
     def initialize(@rows : Int32, @cols : Int32, init : Float64 = 0.0)
-      @data = Array(Float64).new(@rows * @cols, init)
-      @device_ptr = Pointer(Float64).null
+      @data = Array(Float32).new(@rows * @cols, init.to_f32)
+      @device_ptr = Pointer(Float32).null
 
       # Count matrix creation
       @@matrix_creation_count += 1
@@ -117,7 +117,7 @@ module SHAInet
       raise RuntimeError.new("CudaMatrix requires CUDA to be available") unless CUDA.fully_available?
       # Print the most frequent allocation sites
       size = @rows * @cols
-      bytes = (size * 8).to_u64
+      bytes = (size * 4).to_u64
 
       # Check if we would exceed memory limits or are getting close
       if @@total_gpu_memory_allocated + bytes > @@max_gpu_memory ||
@@ -132,7 +132,7 @@ module SHAInet
 
       @@allocation_attempts += 1
 
-      ptr = Pointer(Float64).null
+      ptr = Pointer(Float32).null
       result = CUDA.malloc(pointerof(ptr).as(Pointer(Pointer(Void))), bytes)
 
       if result == 0 && !ptr.null?
@@ -151,23 +151,23 @@ module SHAInet
     def [](row : Int32, col : Int32)
       # If GPU data is newer, sync it to CPU first
       sync_from_device!("element_access") if device_dirty?
-      @data[row * @cols + col]
+      @data[row * @cols + col].to_f64
     end
 
-    def []=(row : Int32, col : Int32, value : Float64)
-      @data[row * @cols + col] = value
+    def []=(row : Int32, col : Int32, value : Number)
+      @data[row * @cols + col] = value.to_f32
       # CPU data is now newer, need to sync to device before next GPU op
       mark_device_clean!
     end
 
     # Provide a method to access values without syncing (for performance-critical code)
-    def unsafe_get(row : Int32, col : Int32)
-      @data[row * @cols + col]
+    def unsafe_get(row : Int32, col : Int32) : Float64
+      @data[row * @cols + col].to_f64
     end
 
     # Provide a method to set values without affecting sync state
-    def unsafe_set(row : Int32, col : Int32, value : Float64)
-      @data[row * @cols + col] = value
+    def unsafe_set(row : Int32, col : Int32, value : Number)
+      @data[row * @cols + col] = value.to_f32
     end
 
     def self.from_a(array : Array(Array(GenNum)))
@@ -198,7 +198,7 @@ module SHAInet
     def random_fill!(min : Float64 = -0.1, max : Float64 = 0.1)
       @rows.times do |i|
         @cols.times do |j|
-          self[i, j] = Random.rand(min..max)
+          self[i, j] = Random.rand(min..max).to_f32
         end
       end
       sync_to_device!("random_fill")
@@ -213,7 +213,7 @@ module SHAInet
             CUDA.free(dptr.as(Pointer(Void)))
             @@total_gpu_memory_allocated -= @gpu_memory_size
             @@active_matrices -= 1
-            @device_ptr = Pointer(Float64).null
+            @device_ptr = Pointer(Float32).null
             @gpu_memory_size = 0_u64
           rescue ex
             Log.warn { "CudaMatrix.finalize: Failed to free GPU memory for #{@rows}x#{@cols}: #{ex}" }
@@ -273,7 +273,7 @@ module SHAInet
 
       begin
         size = @rows * @cols
-        bytes = (size * 8).to_u64
+        bytes = (size * 4).to_u64
 
         # Track sync operations for performance monitoring
         @@sync_to_device_count += 1
@@ -286,13 +286,13 @@ module SHAInet
 
         if copy_result != 0
           Log.error { "CudaMatrix.sync_to_device!: GPU memcpy failed with result #{copy_result} for #{@rows}x#{@cols}" }
-          @device_ptr = Pointer(Float64).null
+          @device_ptr = Pointer(Float32).null
         else
           mark_device_clean!
         end
       rescue ex : Exception
         Log.error { "CudaMatrix.sync_to_device!: Exception during sync for #{@rows}x#{@cols}: #{ex}" }
-        @device_ptr = Pointer(Float64).null
+        @device_ptr = Pointer(Float32).null
       end
     end
 
@@ -303,7 +303,7 @@ module SHAInet
 
       begin
         size = @rows * @cols
-        bytes = (size * 8).to_u64
+        bytes = (size * 4).to_u64
 
         # Track sync operations for performance monitoring
         @@sync_from_device_count += 1
@@ -316,10 +316,10 @@ module SHAInet
         if copy_result == 0
           mark_device_clean!
         else
-          @device_ptr = Pointer(Float64).null
+          @device_ptr = Pointer(Float32).null
         end
       rescue
-        @device_ptr = Pointer(Float64).null
+        @device_ptr = Pointer(Float32).null
       end
     end
 
@@ -379,7 +379,7 @@ module SHAInet
       src_row_ptr = sptr + (source_row * other.cols)
 
       # Copy the row data (cols * 8 bytes for Float64)
-      bytes = (@cols * 8).to_u64
+      bytes = (@cols * 4).to_u64
       CUDA.copy_device_to_device(dest_row_ptr, src_row_ptr, bytes)
 
       mark_device_dirty!
@@ -442,7 +442,7 @@ module SHAInet
       # Fallback to cuBLAS GEAM
       handle = CUDA.create_handle
       begin
-        CUDA.geam(handle, ptr_a, ptr_b, result.device_ptr.not_nil!, @rows, @cols, 1.0, 1.0)
+        CUDA.geam(handle, ptr_a, ptr_b, result.device_ptr.not_nil!, @rows, @cols, 1.0_f32, 1.0_f32)
       ensure
         CUDA.destroy_handle(handle)
       end
@@ -467,7 +467,7 @@ module SHAInet
       handle = CUDA.create_handle
       begin
         # Use GEAM with alpha=1.0, beta=-1.0 to compute A - B
-        CUDA.geam(handle, ptr_a, ptr_b, result.device_ptr.not_nil!, @rows, @cols, 1.0, -1.0)
+        CUDA.geam(handle, ptr_a, ptr_b, result.device_ptr.not_nil!, @rows, @cols, 1.0_f32, -1.0_f32)
       ensure
         CUDA.destroy_handle(handle)
       end
@@ -484,7 +484,7 @@ module SHAInet
       # If we have GPU data, copy it directly on GPU
       if device_dirty?
         # GPU -> GPU copy
-        bytes = (@rows * @cols * 8).to_u64
+        bytes = (@rows * @cols * 4).to_u64
         result = CUDA.memcpy(dptr.as(Pointer(Void)), sptr.as(Pointer(Void)), bytes, CUDA::MemcpyKind::DeviceToDevice)
         raise RuntimeError.new("GPU-to-GPU memcpy failed") if result != 0
 
@@ -524,7 +524,7 @@ module SHAInet
       # Fallback to cuBLAS GEAM
       handle = CUDA.create_handle
       begin
-        CUDA.geam(handle, ptr_a, ptr_b, ptr_a, @rows, @cols, 1.0, 1.0)
+        CUDA.geam(handle, ptr_a, ptr_b, ptr_a, @rows, @cols, 1.0_f32, 1.0_f32)
       ensure
         CUDA.destroy_handle(handle)
       end
@@ -544,7 +544,7 @@ module SHAInet
 
       handle = CUDA.create_handle
       begin
-        CUDA.geam(handle, ptr_a, ptr_b, ptr_a, @rows, @cols, 1.0, -1.0)
+        CUDA.geam(handle, ptr_a, ptr_b, ptr_a, @rows, @cols, 1.0_f32, -1.0_f32)
       ensure
         CUDA.destroy_handle(handle)
       end
@@ -697,18 +697,17 @@ module SHAInet
       # Ensure CPU data is up to date (single sync instead of per-element)
       sync_from_device!("bulk_to_a") if device_dirty?
 
-      # Use direct data array access to avoid repeated element access syncs
       Array.new(@rows) do |i|
         Array.new(@cols) do |j|
-          @data[i * @cols + j]
+          @data[i * @cols + j].to_f64
         end
       end
     end
 
     # More efficient flat array conversion - avoids nested array creation
-    def to_flat_array
+    def to_flat_array : Array(Float64)
       sync_from_device!("bulk_to_flat_array") if device_dirty?
-      @data.dup
+      @data.map(&.to_f64)
     end
 
     # Force cleanup of GPU memory for this matrix
@@ -718,7 +717,7 @@ module SHAInet
           CUDA.free(dptr.as(Pointer(Void)))
           @@total_gpu_memory_allocated -= @gpu_memory_size
           @@active_matrices -= 1
-          @device_ptr = Pointer(Float64).null
+          @device_ptr = Pointer(Float32).null
           @gpu_memory_size = 0_u64
         end
       end
@@ -740,7 +739,7 @@ module SHAInet
       other.sync_to_device!("copy_from") unless other.device_dirty?
 
       # GPU -> GPU copy
-      bytes = (@rows * @cols * 8).to_u64
+      bytes = (@rows * @cols * 4).to_u64
       result = CUDA.memcpy(dptr.as(Pointer(Void)), sptr.as(Pointer(Void)), bytes, CUDA::MemcpyKind::DeviceToDevice)
       raise RuntimeError.new("GPU-to-GPU memcpy failed") if result != 0
 
@@ -803,7 +802,7 @@ module SHAInet
 
       handle = CUDA.create_handle
       begin
-        CUDA.scal(handle, dptr, (@rows*@cols), scalar)
+        CUDA.scal(handle, dptr, (@rows*@cols), scalar.to_f64)
       ensure
         CUDA.destroy_handle(handle)
       end
@@ -947,7 +946,7 @@ module SHAInet
     end
 
     # In-place matrix multiplication with accumulation: self = alpha * A * B + beta * self
-    def gemm!(a : CudaMatrix, b : CudaMatrix, alpha : Float64 = 1.0, beta : Float64 = 0.0)
+    def gemm!(a : CudaMatrix, b : CudaMatrix, alpha : Float32 = 1.0_f32, beta : Float32 = 0.0_f32)
       raise ArgumentError.new("size mismatch for in-place GEMM") unless a.cols == b.rows && @rows == a.rows && @cols == b.cols
       ptr_a = a.device_ptr
       ptr_b = b.device_ptr

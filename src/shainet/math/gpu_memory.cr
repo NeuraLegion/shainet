@@ -10,7 +10,7 @@ module SHAInet
     extend self
 
     # -- Simple GPU allocator -------------------------------------------------
-    @@pool = Hash(Int32, Array(Pointer(Float64))).new { |h, k| h[k] = [] of Pointer(Float64) }
+    @@pool = Hash(Int32, Array(Pointer(Float32))).new { |h, k| h[k] = [] of Pointer(Float32) }
     @@pool_limit : Int32 = 2 # Very small pool to reduce memory pressure
 
     # Debug counter to track active GPU allocations
@@ -31,8 +31,8 @@ module SHAInet
       return unless CUDA.fully_available?
       size = rows * cols
       count.times do
-        ptr = Pointer(Float64).null
-        bytes = ((size) * 8).to_u64
+        ptr = Pointer(Float32).null
+        bytes = ((size) * 4).to_u64
         res = CUDA.malloc(pointerof(ptr).as(Pointer(Pointer(Void))), bytes)
         next unless res == 0
         @@pool[size] << ptr
@@ -67,11 +67,11 @@ module SHAInet
       raise ArgumentError.new("size mismatch") unless src.rows == dest.rows && src.cols == dest.cols
 
       size = src.rows * src.cols
-      bytes = (size * 8).to_u64
+      bytes = (size * 4).to_u64
 
       # Keep CPU copy in sync
-      dest_slice = Slice(Float64).new(dest.raw_data.to_unsafe, size)
-      src_slice = Slice(Float64).new(src.data.to_unsafe, size)
+      dest_slice = Slice(Float32).new(dest.raw_data.to_unsafe, size)
+      src_slice = Slice(Float32).new(src.data.to_unsafe, size)
       dest_slice.copy_from(src_slice)
 
       if (dptr = dest.device_ptr) && !dptr.null?
@@ -91,14 +91,13 @@ module SHAInet
       raise ArgumentError.new("size mismatch") unless matrix.rows == dest.rows && matrix.cols == dest.cols
 
       size = matrix.rows * matrix.cols
-      bytes = (size * 8).to_u64
+      bytes = (size * 4).to_u64
 
-      dest_slice = Slice(Float64).new(dest.raw_data.to_unsafe, size)
-      src_slice = Slice(Float64).new(matrix.data.to_unsafe, size)
-      dest_slice.copy_from(src_slice)
+      # Direct copy F32 → F32
+      dest.raw_data.to_unsafe.copy_from(matrix.data.to_unsafe, size)
 
       if (dptr = dest.device_ptr) && !dptr.null?
-        result = CUDA.memcpy(dptr.as(Pointer(Void)), src_slice.to_unsafe.as(Pointer(Void)), bytes, CUDA::MemcpyKind::HostToDevice)
+        result = CUDA.memcpy(dptr.as(Pointer(Void)), dest.raw_data.to_unsafe.as(Pointer(Void)), bytes, CUDA::MemcpyKind::HostToDevice)
         Log.error { "GPUMemory.to_gpu!: GPU memcpy failed with result #{result}" } if result != 0
       end
 
@@ -111,13 +110,13 @@ module SHAInet
       return dest unless CUDA.fully_available?
       raise ArgumentError.new("size mismatch") unless dest.rows == 1 && dest.cols == array.size
 
-      slice = Slice(Float64).new(array.size) { |i| array[i].to_f64 }
+      slice = Slice(Float32).new(array.size) { |i| array[i].to_f32 }
 
-      dest_slice = Slice(Float64).new(dest.raw_data.to_unsafe, array.size)
+      dest_slice = Slice(Float32).new(dest.raw_data.to_unsafe, array.size)
       dest_slice.copy_from(slice)
 
       if (dptr = dest.device_ptr) && !dptr.null?
-        bytes = (array.size * 8).to_u64
+        bytes = (array.size * 4).to_u64
         result = CUDA.memcpy(dptr.as(Pointer(Void)), slice.to_unsafe.as(Pointer(Void)), bytes, CUDA::MemcpyKind::HostToDevice)
         Log.error { "GPUMemory.to_gpu!: GPU memcpy failed with result #{result}" } if result != 0
       end
@@ -133,18 +132,18 @@ module SHAInet
       cols = array[0].as(Array).size
       raise ArgumentError.new("size mismatch") unless dest.rows == rows && dest.cols == cols
 
-      flat = Array(Float64).new(rows * cols) do |idx|
+      flat = Array(Float32).new(rows * cols) do |idx|
         i = idx // cols
         j = idx % cols
-        array[i].as(Array)[j].as(GenNum).to_f64
+        array[i].as(Array)[j].as(GenNum).to_f32
       end
 
-      dest_slice = Slice(Float64).new(dest.raw_data.to_unsafe, rows * cols)
-      src_slice = Slice(Float64).new(flat.to_unsafe, flat.size)
+      dest_slice = Slice(Float32).new(dest.raw_data.to_unsafe, rows * cols)
+      src_slice = Slice(Float32).new(flat.to_unsafe, flat.size)
       dest_slice.copy_from(src_slice)
 
       if (dptr = dest.device_ptr) && !dptr.null?
-        bytes = (rows * cols * 8).to_u64
+        bytes = (rows * cols * 4).to_u64
         result = CUDA.memcpy(dptr.as(Pointer(Void)), src_slice.to_unsafe.as(Pointer(Void)), bytes, CUDA::MemcpyKind::HostToDevice)
         Log.error { "GPUMemory.to_gpu!: GPU memcpy failed with result #{result}" } if result != 0
       end
@@ -206,7 +205,7 @@ module SHAInet
           total_elements += matrix.rows.to_i64 * matrix.cols.to_i64
         end
       end
-      total_elements * 8 # 8 bytes per Float64
+      total_elements * 4 # 4 bytes per Float32
     end
   end
 end

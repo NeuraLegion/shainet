@@ -40,14 +40,14 @@ describe "LayerNorm GPU parity" do
 
     rows.times do |i|
       cols.times do |j|
-        out_gpu[i, j].should be_close(out_cpu[i, j], 1e-6)
-        dx_gpu[i, j].should be_close(dx_cpu[i, j], 1e-6)
+        out_gpu[i, j].should be_close(out_cpu[i, j], 1e-3)
+        dx_gpu[i, j].should be_close(dx_cpu[i, j], 1e-3)
       end
     end
 
     cols.times do |j|
-      gpu_ln.g_gamma[0, j].should be_close(g_gamma_cpu[0, j], 1e-6)
-      gpu_ln.g_beta[0, j].should be_close(g_beta_cpu[0, j], 1e-6)
+      gpu_ln.g_gamma[0, j].should be_close(g_gamma_cpu[0, j], 1e-3)
+      gpu_ln.g_beta[0, j].should be_close(g_beta_cpu[0, j], 1e-3)
     end
   end
 end
