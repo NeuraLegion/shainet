@@ -73,7 +73,7 @@ module SHAInet
     end
 
     def inspect
-      Log.info { @n_type }
+      Log.info { "MatrixLayer(#{@size})" }
     end
 
     # Convert layer matrices to GPU
