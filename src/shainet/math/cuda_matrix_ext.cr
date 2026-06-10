@@ -10,27 +10,27 @@ module SHAInet
           self.sync_to_device! unless device_dirty?
 
           # Verify source data
-          test_buf = Array(Float64).new(@rows * @cols, 0.0)
+          test_buf = Array(Float32).new(@rows * @cols, 0.0_f32)
           CUDA.memcpy(test_buf.to_unsafe.as(Pointer(Void)),
             dptr.as(Pointer(Void)),
-            (@rows * @cols * 8).to_u64,
+            (@rows * @cols * 4).to_u64,
             CUDA::MemcpyKind::DeviceToHost)
 
           # Ensure result is zeroed
-          zeroes = Array(Float64).new(@rows * @cols, 0.0)
+          zeroes = Array(Float32).new(@rows * @cols, 0.0_f32)
           CUDA.memcpy(rptr.as(Pointer(Void)),
             zeroes.to_unsafe.as(Pointer(Void)),
-            (@rows * @cols * 8).to_u64,
+            (@rows * @cols * 4).to_u64,
             CUDA::MemcpyKind::HostToDevice)
 
           # Run the kernel
           CUDA.softmax_rows(rptr, dptr, @rows, @cols)
 
           # Check result data
-          test_result = Array(Float64).new(@rows * @cols, 0.0)
+          test_result = Array(Float32).new(@rows * @cols, 0.0_f32)
           CUDA.memcpy(test_result.to_unsafe.as(Pointer(Void)),
             rptr.as(Pointer(Void)),
-            (@rows * @cols * 8).to_u64,
+            (@rows * @cols * 4).to_u64,
             CUDA::MemcpyKind::DeviceToHost)
 
           # Check if all results are zero

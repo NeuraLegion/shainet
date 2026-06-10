@@ -173,6 +173,8 @@ module SHAInet
 
         if info.dtype.f32?
           # Fast path: raw memcpy (F32 LE on disk → F32 LE in memory)
+          expected = count * 4
+          raise "SafeTensors: tensor '#{name}' byte_count #{byte_count} != expected #{expected}" if byte_count != expected
           raw = Bytes.new(byte_count)
           @io.read_fully(raw)
           raw.to_unsafe.copy_to(m.data.to_unsafe.as(Pointer(UInt8)), byte_count)
