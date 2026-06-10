@@ -132,13 +132,14 @@ loop do
 
     break if best_id < 0
     generated_ids << best_id
-    print tokenizer.decode([best_id]).gsub("Ġ", " ")
+    print tokenizer.decode([best_id])
     STDOUT.flush
 
     # Forward just the new token (O(1) with KV cache)
     x_new = SHAInet::SimpleMatrix.new(1, d_model)
     d_model.times { |j| x_new[0, j] = emb.embeddings[best_id, j] }
-    net.transformer_layers.each { |l| x = l.as(SHAInet::LlamaBlock).forward_cached(x_new) }
+    net.transformer_layers.each { |l| x_new = l.as(SHAInet::LlamaBlock).forward_cached(x_new) }
+    x = x_new
   end
   puts ""
   puts ""

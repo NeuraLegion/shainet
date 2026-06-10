@@ -13,6 +13,35 @@ module SHAInet
     property merges_rank : Hash(Tuple(String, String), Int32)
     property hf_mode : Bool = false
 
+    # GPT-2 byte-to-unicode mapping (lazily built). Maps a printable Unicode
+    # codepoint back to the original raw byte it represents in byte-level BPE.
+    @@unicode_to_byte : Hash(Char, UInt8)?
+
+    def self.unicode_to_byte(ch : Char) : UInt8
+      map = (@@unicode_to_byte ||= build_byte_map)
+      map[ch]? || 0_u8
+    end
+
+    private def self.build_byte_map : Hash(Char, UInt8)
+      # Printable byte ranges that map to themselves
+      bs = [] of Int32
+      (('!'.ord)..('~'.ord)).each { |b| bs << b }
+      (('¡'.ord)..('¬'.ord)).each { |b| bs << b }
+      (('®'.ord)..('ÿ'.ord)).each { |b| bs << b }
+      cs = bs.dup
+      n = 0
+      (0..255).each do |b|
+        unless bs.includes?(b)
+          bs << b
+          cs << (256 + n)
+          n += 1
+        end
+      end
+      map = Hash(Char, UInt8).new
+      bs.each_with_index { |b, i| map[cs[i].chr] = b.to_u8 }
+      map
+    end
+
     def initialize
       @vocab = Hash(String, Int32).new
       @inv_vocab = [] of String
@@ -239,7 +268,16 @@ module SHAInet
     # Decode an array of token IDs back into a string.
     def decode(ids : Array(Int32)) : String
       if @hf_mode
-        return ids.map { |id| @inv_vocab[id]? || "" }.join.gsub("Ġ", " ")
+        # Byte-level BPE: each token char maps back to a raw byte (GPT-2
+        # bytes_to_unicode reverse), then the byte stream is UTF-8 decoded.
+        bytes = Array(UInt8).new
+        ids.each do |id|
+          token = @inv_vocab[id]? || ""
+          token.each_char do |ch|
+            bytes << BPETokenizer.unicode_to_byte(ch)
+          end
+        end
+        return String.new(Slice.new(bytes.to_unsafe, bytes.size))
       end
       String.build do |io|
         current = String::Builder.new
