@@ -182,7 +182,8 @@ module SHAInet
       rms_norm_eps : Float64,
       rope_theta : Float64,
       num_key_value_heads : Int32,
-      tie_word_embeddings : Bool
+      tie_word_embeddings : Bool,
+      rope_scaling : JSON::Any?
 
     def self.load_llama_config(path : String) : LlamaConfig
       json = JSON.parse(::File.read(path))
@@ -195,8 +196,44 @@ module SHAInet
         rms_norm_eps: json["rms_norm_eps"].as_f,
         rope_theta: (json["rope_theta"]?.try(&.as_f) || 10000.0),
         num_key_value_heads: (json["num_key_value_heads"]?.try(&.as_i) || json["num_attention_heads"].as_i),
-        tie_word_embeddings: (json["tie_word_embeddings"]?.try(&.as_bool) || false)
+        tie_word_embeddings: (json["tie_word_embeddings"]?.try(&.as_bool) || false),
+        rope_scaling: json["rope_scaling"]?
       )
+    end
+
+    # Compute inverse frequencies (size head_dim/2) for RoPE, applying
+    # LLaMA 3 rope_scaling when present. Returns nil for the default case
+    # (no scaling), letting the block use the plain theta^(-2i/d) formula.
+    def self.compute_rope_freqs(config : LlamaConfig, head_dim : Int32) : Array(Float32)?
+      scaling = config.rope_scaling
+      return nil if scaling.nil? || scaling.raw.nil?
+
+      stype = scaling["rope_type"]?.try(&.as_s) || scaling["type"]?.try(&.as_s)
+      return nil unless stype == "llama3"
+
+      theta = config.rope_theta
+      factor = scaling["factor"].as_f
+      low_freq_factor = scaling["low_freq_factor"].as_f
+      high_freq_factor = scaling["high_freq_factor"].as_f
+      old_ctx = scaling["original_max_position_embeddings"].as_i.to_f64
+
+      low_freq_wavelen = old_ctx / low_freq_factor
+      high_freq_wavelen = old_ctx / high_freq_factor
+
+      half = head_dim // 2
+      Array(Float32).new(half) do |i|
+        inv = 1.0 / (theta ** (2.0 * i / head_dim))
+        wavelen = 2.0 * Math::PI / inv
+        new_inv = if wavelen < high_freq_wavelen
+                    inv
+                  elsif wavelen > low_freq_wavelen
+                    inv / factor
+                  else
+                    smooth = (old_ctx / wavelen - low_freq_factor) / (high_freq_factor - low_freq_factor)
+                    (1.0 - smooth) * inv / factor + smooth * inv
+                  end
+        new_inv.to_f32
+      end
     end
 
     # Load LLaMA/Mistral model from SafeTensors.
@@ -216,6 +253,8 @@ module SHAInet
         n_heads = config.num_attention_heads
         eps = config.rms_norm_eps
         theta = config.rope_theta
+        head_dim = d // n_heads
+        rope_freqs = compute_rope_freqs(config, head_dim)
 
         net = Network.new
         net.add_layer(:input, 1)
@@ -237,6 +276,7 @@ module SHAInet
         config.num_hidden_layers.times do |idx|
           block = net.transformer_layers[idx].as(LlamaBlock)
           block.rope_theta = theta
+          block.rope_freqs = rope_freqs
           prefix = "model.layers.#{idx}"
 
           # Attention weights: HF is [out, in], matmul is x * W so need [in, out]
