@@ -1,15 +1,17 @@
 # No CUDA imports needed - CPU-only implementation
+require "json"
 
 module SHAInet
   # Simple byte-pair encoding tokenizer. It can train a vocabulary
   # from text and encode/decode using the learned merges.
   class BPETokenizer
     Log = ::Log.for(self)
-    getter vocab : Hash(String, Int32)
-    getter inv_vocab : Array(String)
-    getter merges : Array(Tuple(String, String))
-    getter merges_map : Hash(Tuple(String, String), String)
-    getter merges_rank : Hash(Tuple(String, String), Int32)
+    property vocab : Hash(String, Int32)
+    property inv_vocab : Array(String)
+    property merges : Array(Tuple(String, String))
+    property merges_map : Hash(Tuple(String, String), String)
+    property merges_rank : Hash(Tuple(String, String), Int32)
+    property hf_mode : Bool = false
 
     def initialize
       @vocab = Hash(String, Int32).new
@@ -17,6 +19,58 @@ module SHAInet
       @merges = [] of Tuple(String, String)
       @merges_map = Hash(Tuple(String, String), String).new
       @merges_rank = Hash(Tuple(String, String), Int32).new
+    end
+
+    # Load a pre-trained tokenizer from a HuggingFace tokenizer.json file
+    def self.from_hf(path : String) : BPETokenizer
+      tok = new
+      tok.hf_mode = true
+      data = JSON.parse(File.read(path))
+      model = data["model"]
+
+      # Load vocab
+      model["vocab"].as_h.each do |token, id|
+        tok.vocab[token] = id.as_i
+      end
+
+      # Build inverse vocab
+      max_id = tok.vocab.values.max? || 0
+      tok.inv_vocab.concat(Array(String).new(max_id + 1, ""))
+      tok.vocab.each { |token, id| tok.inv_vocab[id] = token }
+
+      # Load merges with rank (handles both "a b" string and ["a","b"] array formats)
+      if merges = model["merges"]?
+        merges.as_a.each_with_index do |m, rank|
+          parts = if m.as_a?
+                    a = m.as_a
+                    next unless a.size == 2
+                    [a[0].as_s, a[1].as_s]
+                  else
+                    m.as_s.split(' ', 2)
+                  end
+          next unless parts.size == 2
+          pair = {parts[0], parts[1]}
+          merged = parts[0] + parts[1]
+          tok.merges << pair
+          tok.merges_map[pair] = merged
+          tok.merges_rank[pair] = rank
+        end
+      end
+
+      # Load added tokens (special tokens)
+      if added = data["added_tokens"]?
+        added.as_a.each do |t|
+          token = t["content"].as_s
+          id = t["id"].as_i
+          tok.vocab[token] = id
+          while tok.inv_vocab.size <= id
+            tok.inv_vocab << ""
+          end
+          tok.inv_vocab[id] = token
+        end
+      end
+
+      tok
     end
 
     # Train the tokenizer vocabulary from the given text using the
@@ -88,6 +142,9 @@ module SHAInet
     # Encode a string into token IDs. Unknown tokens are added to the
     # vocabulary using a greedy BPE merging strategy.
     def encode(text : String) : Array(Int32)
+      if @hf_mode
+        return encode_hf(text)
+      end
       words = text.split(/\s+/)
       ids = Array(Int32).new(words.size)
       words.each do |word|
@@ -95,6 +152,55 @@ module SHAInet
         tokens.each { |t| ids << add_token(t) }
       end
       ids
+    end
+
+    # HF-style encode: split on spaces, prefix with Ġ, apply BPE merges
+    private def encode_hf(text : String) : Array(Int32)
+      ids = Array(Int32).new
+      # Split into words keeping space as Ġ prefix
+      words = text.split(/(?= )| /)
+      words.each_with_index do |word, idx|
+        next if word.empty?
+        # Add Ġ prefix for space-separated words (except first if no leading space)
+        w = if word == " "
+              next # skip standalone spaces, handled by Ġ prefix
+            elsif idx > 0 || text.starts_with?(" ")
+              "Ġ" + word.lstrip
+            else
+              word
+            end
+        tokens = encode_tokens_hf(w)
+        tokens.each do |t|
+          if id = @vocab[t]?
+            ids << id
+          end
+        end
+      end
+      ids
+    end
+
+    private def encode_tokens_hf(word : String) : Array(String)
+      tokens = word.chars.map(&.to_s)
+      return tokens if @merges_rank.empty? || tokens.size <= 1
+
+      pairs = get_pairs(tokens)
+      while !pairs.empty?
+        best_pair = nil
+        best_rank = Int32::MAX
+        pairs.each do |p|
+          if rank = @merges_rank[p]?
+            if rank < best_rank
+              best_rank = rank
+              best_pair = p
+            end
+          end
+        end
+        break unless best_pair
+        merge_tokens!(tokens, best_pair)
+        break if tokens.size <= 1
+        pairs = get_pairs(tokens)
+      end
+      tokens
     end
 
     private def encode_tokens(word : String) : Array(String)
@@ -132,6 +238,9 @@ module SHAInet
 
     # Decode an array of token IDs back into a string.
     def decode(ids : Array(Int32)) : String
+      if @hf_mode
+        return ids.map { |id| @inv_vocab[id]? || "" }.join.gsub("Ġ", " ")
+      end
       String.build do |io|
         current = String::Builder.new
         ids.each do |id|

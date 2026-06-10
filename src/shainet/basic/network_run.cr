@@ -1201,7 +1201,7 @@ module SHAInet
             CUDA.memcpy(
               dptr.as(Pointer(Void)),
               flat_slice.to_unsafe.as(Pointer(Void)),
-              (flat_slice.size * 8).to_u64,
+              (flat_slice.size * 4).to_u64,
               CUDA::MemcpyKind::HostToDevice
             )
             mat.mark_device_dirty!
@@ -1220,7 +1220,7 @@ module SHAInet
             CUDA.memcpy(
               dptr.as(Pointer(Void)),
               flat_slice.to_unsafe.as(Pointer(Void)),
-              (flat_slice.size * 8).to_u64,
+              (flat_slice.size * 4).to_u64,
               CUDA::MemcpyKind::HostToDevice
             )
             mat.mark_device_dirty!
@@ -1321,7 +1321,7 @@ module SHAInet
                          CUDA.copy_device_to_device(
                            result.device_ptr.not_nil!,
                            mptr + last_row_offset,
-                           (matrix.cols * 8).to_u64
+                           (matrix.cols * 4).to_u64
                          )
                          result.mark_device_dirty!
                          result

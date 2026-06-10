@@ -20,8 +20,8 @@ module SHAInet
     end
 
     def forward(x : SimpleMatrix) : SimpleMatrix
-      gate = x * @gate_proj.as(SimpleMatrix)
-      up = x * @up_proj.as(SimpleMatrix)
+      gate = matmul(x, @gate_proj)
+      up = matmul(x, @up_proj)
 
       rows = gate.rows
       cols = gate.cols
@@ -33,7 +33,7 @@ module SHAInet
         end
       end
 
-      hidden * @down_proj.as(SimpleMatrix)
+      matmul(hidden, @down_proj)
     end
 
     def forward(x : CudaMatrix) : CudaMatrix
@@ -56,6 +56,21 @@ module SHAInet
       hidden.sync_to_device!("swiglu_done")
 
       hidden * @down_proj.as(CudaMatrix) # cuBLAS GEMM
+    end
+
+    private def matmul(x : SimpleMatrix, w : SimpleMatrix | CudaMatrix) : SimpleMatrix
+      if w.is_a?(CudaMatrix)
+        x_gpu = CudaMatrix.new(x.rows, x.cols)
+        x.rows.times { |r| x.cols.times { |c| x_gpu[r, c] = x[r, c] } }
+        x_gpu.sync_to_device!("ffn_in")
+        result_gpu = x_gpu * w
+        result_gpu.sync_from_device!("ffn_out") if result_gpu.device_dirty?
+        result = SimpleMatrix.new(result_gpu.rows, result_gpu.cols)
+        result_gpu.rows.times { |r| result_gpu.cols.times { |c| result[r, c] = result_gpu[r, c].to_f32 } }
+        result
+      else
+        x * w
+      end
     end
   end
 end

@@ -102,9 +102,10 @@ module SHAInet
             ids.each_with_index do |id, row|
               src = e_ptr + id*@l_size
               dst = r_ptr + row*@l_size
-              CUDA.memcpy(dst.as(Pointer(Void)), src.as(Pointer(Void)), (@l_size*8).to_u64, CUDA::MemcpyKind::DeviceToDevice)
+              CUDA.memcpy(dst.as(Pointer(Void)), src.as(Pointer(Void)), (@l_size*4).to_u64, CUDA::MemcpyKind::DeviceToDevice)
             end
           end
+          result.mark_device_dirty!
           CUDA.free(ids_dev.as(Pointer(Void)))
           @current_ids.concat(ids)
           return result
@@ -172,31 +173,7 @@ module SHAInet
         if CUDA.fully_available? && @gradients.is_a?(CudaMatrix) && (dptr = @gradients.as(CudaMatrix).device_ptr) && !dptr.null?
           # Create host vector from activation and sigma_prime matrices
           # Check if activations and sigma_primes are available from forward pass
-          if @activations && @sigma_primes
-            host_vec = Array(Float64).new(@l_size) do |i|
-              @activations.not_nil![0, i] * @sigma_primes.not_nil![0, i]
-            end
-          else
-            # Fallback: use identity (no activation derivative applied)
-            host_vec = Array(Float64).new(@l_size, 1.0)
-          end
-
-          bytes = (@l_size * 8).to_u64
-          g_dev = Pointer(Float64).null
-          CUDA.malloc(pointerof(g_dev).as(Pointer(Pointer(Void))), bytes)
-          CUDA.memcpy(g_dev.as(Pointer(Void)), host_vec.to_unsafe.as(Pointer(Void)), bytes, CUDA::MemcpyKind::HostToDevice)
-          one_val = 1.0
-          one_dev = Pointer(Float64).null
-          CUDA.malloc(pointerof(one_dev).as(Pointer(Pointer(Void))), 8_u64)
-          CUDA.memcpy(one_dev.as(Pointer(Void)), pointerof(one_val).as(Pointer(Void)), 8_u64, CUDA::MemcpyKind::HostToDevice)
-          handle = CUDA.create_handle
-          CUDA.ger(handle, one_dev, g_dev, dptr + id*@l_size, @l_size, 1, @l_size)
-          CUDA.destroy_handle(handle)
-          CUDA.free(g_dev.as(Pointer(Void)))
-          CUDA.free(one_dev.as(Pointer(Void)))
-        else
-          # Use matrix-based gradient accumulation
-          # Check if activations and sigma_primes are available from forward pass
+          # CPU gradient accumulation
           if @activations && @sigma_primes
             @l_size.times do |i|
               @gradients[id, i] += @activations.not_nil![0, i] * @sigma_primes.not_nil![0, i]
@@ -225,8 +202,8 @@ module SHAInet
           total = @embeddings.rows * @embeddings.cols
           CUDA.axpy(handle, -lr, g_ptr, e_ptr, total)
           CUDA.destroy_handle(handle)
-          zeros = Array(Float64).new(total, 0.0)
-          CUDA.memcpy(g_ptr.as(Pointer(Void)), zeros.to_unsafe.as(Pointer(Void)), (total * 8).to_u64, CUDA::MemcpyKind::HostToDevice)
+          zeros = Array(Float32).new(total, 0.0_f32)
+          CUDA.memcpy(g_ptr.as(Pointer(Void)), zeros.to_unsafe.as(Pointer(Void)), (total * 4).to_u64, CUDA::MemcpyKind::HostToDevice)
           # Don't sync embeddings from device - keep them on GPU for performance
           @embeddings.as(CudaMatrix).mark_device_dirty!
           @gradients.as(CudaMatrix).mark_device_clean! # gradients were zeroed on GPU

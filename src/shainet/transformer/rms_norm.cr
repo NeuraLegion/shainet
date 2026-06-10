@@ -20,11 +20,17 @@ module SHAInet
       cols = x.cols
       result = SimpleMatrix.new(rows, cols)
 
+      # Read gamma values (might be on GPU)
+      g = @gamma
+      if g.is_a?(CudaMatrix)
+        g.sync_from_device!("rmsnorm_gamma") if g.device_dirty?
+      end
+
       rows.times do |i|
         sq_sum = 0.0
         cols.times { |j| v = x[i, j]; sq_sum += v * v }
         rms = Math.sqrt(sq_sum / cols + @eps)
-        cols.times { |j| result[i, j] = (x[i, j] / rms) * @gamma.as(SimpleMatrix)[0, j] }
+        cols.times { |j| result[i, j] = (x[i, j] / rms) * g[0, j] }
       end
 
       result
