@@ -40,7 +40,7 @@ describe "Inverted dropout scaling" do
 
     10.times do |i|
       10.times do |j|
-        m[i, j].should eq(3.14)
+        m[i, j].should be_close(3.14, 1e-5)
       end
     end
   end

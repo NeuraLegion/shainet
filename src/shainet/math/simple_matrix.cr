@@ -2,10 +2,14 @@ module SHAInet
   class SimpleMatrix
     property rows : Int32
     property cols : Int32
-    getter data : Array(Float64)
+    getter data : Array(Float32)
 
-    def initialize(@rows : Int32, @cols : Int32, init : Float64 = 0.0)
-      @data = Array(Float64).new(@rows * @cols, init)
+    def initialize(@rows : Int32, @cols : Int32, init : Float32 = 0.0_f32)
+      @data = Array(Float32).new(@rows * @cols, init)
+    end
+
+    def initialize(@rows : Int32, @cols : Int32, init : Float64)
+      @data = Array(Float32).new(@rows * @cols, init.to_f32)
     end
 
     def self.zeros(rows : Int32, cols : Int32)
@@ -20,12 +24,16 @@ module SHAInet
       TensorMatrix.new(rows, cols)
     end
 
-    def [](r : Int32, c : Int32)
-      @data[r * @cols + c]
+    def [](r : Int32, c : Int32) : Float64
+      @data[r * @cols + c].to_f64
+    end
+
+    def []=(r : Int32, c : Int32, v : Float32)
+      @data[r * @cols + c] = v
     end
 
     def []=(r : Int32, c : Int32, v : Float64)
-      @data[r * @cols + c] = v
+      @data[r * @cols + c] = v.to_f32
     end
 
     def +(other : SimpleMatrix)
@@ -102,7 +110,7 @@ module SHAInet
     def to_a
       Array.new(@rows) do |i|
         Array.new(@cols) do |j|
-          self[i, j]
+          self[i, j].to_f64
         end
       end
     end
@@ -114,7 +122,7 @@ module SHAInet
       m = SimpleMatrix.new(rows, cols)
       rows.times do |i|
         cols.times do |j|
-          m[i, j] = array[i][j].to_f64
+          m[i, j] = array[i][j].to_f32
         end
       end
       m
