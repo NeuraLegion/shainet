@@ -14,9 +14,9 @@ module SHAInet
 
     def to_gpu!
       return unless CUDA.fully_available?
-      @gate_proj = @gate_proj.as(SimpleMatrix).to_cuda.tap(&.mark_device_dirty!) unless @gate_proj.is_a?(CudaMatrix)
-      @up_proj = @up_proj.as(SimpleMatrix).to_cuda.tap(&.mark_device_dirty!) unless @up_proj.is_a?(CudaMatrix)
-      @down_proj = @down_proj.as(SimpleMatrix).to_cuda.tap(&.mark_device_dirty!) unless @down_proj.is_a?(CudaMatrix)
+      @gate_proj = @gate_proj.as(SimpleMatrix).to_cuda unless @gate_proj.is_a?(CudaMatrix)
+      @up_proj = @up_proj.as(SimpleMatrix).to_cuda unless @up_proj.is_a?(CudaMatrix)
+      @down_proj = @down_proj.as(SimpleMatrix).to_cuda unless @down_proj.is_a?(CudaMatrix)
     end
 
     def forward(x : SimpleMatrix) : SimpleMatrix
@@ -60,14 +60,13 @@ module SHAInet
 
     private def matmul(x : SimpleMatrix, w : SimpleMatrix | CudaMatrix) : SimpleMatrix
       if w.is_a?(CudaMatrix)
-        n = x.rows * x.cols
         x_gpu = CudaMatrix.new(x.rows, x.cols)
-        x_gpu.raw_data.to_unsafe.copy_from(x.data.to_unsafe, n)
+        x.rows.times { |r| x.cols.times { |c| x_gpu[r, c] = x[r, c] } }
         x_gpu.sync_to_device!("ffn_in")
         result_gpu = x_gpu * w
         result_gpu.sync_from_device!("ffn_out") if result_gpu.device_dirty?
         result = SimpleMatrix.new(result_gpu.rows, result_gpu.cols)
-        result.data.to_unsafe.copy_from(result_gpu.raw_data.to_unsafe, result.rows * result.cols)
+        result_gpu.rows.times { |r| result_gpu.cols.times { |c| result[r, c] = result_gpu[r, c].to_f32 } }
         result
       else
         x * w

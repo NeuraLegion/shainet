@@ -135,13 +135,19 @@ loop do
     d_model.times { |j| last[0, j] = x[x.rows - 1, j] }
     normed = fn.forward(last)
     logits = if w.is_a?(SHAInet::CudaMatrix)
-               n_gpu = SHAInet::CudaMatrix.new(normed.rows, normed.cols)
-               n_gpu.raw_data.to_unsafe.copy_from(normed.data.to_unsafe, normed.rows * normed.cols)
+               w_cuda = w.as(SHAInet::CudaMatrix)
+               n_gpu = SHAInet::CudaMatrix.new(1, normed.cols)
+               n_gpu.raw_data.to_unsafe.copy_from(normed.data.to_unsafe, normed.cols)
                n_gpu.sync_to_device!("lm_head")
-               r = n_gpu * w.as(SHAInet::CudaMatrix)
-               r.sync_from_device!("lm_head") if r.device_dirty?
-               out = SHAInet::SimpleMatrix.new(r.rows, r.cols)
-               out.data.to_unsafe.copy_from(r.raw_data.to_unsafe, r.rows * r.cols)
+               r = SHAInet::CudaMatrix.new(1, w_cuda.cols)
+               h = SHAInet::CUDA.create_handle
+               SHAInet::CUDA.gemm(h, w_cuda.device_ptr.not_nil!, n_gpu.device_ptr.not_nil!, r.device_ptr.not_nil!,
+                 w_cuda.cols, 1, w_cuda.rows, w_cuda.cols, normed.cols, w_cuda.cols)
+               SHAInet::CUDA.destroy_handle(h)
+               r.mark_device_dirty!
+               r.sync_from_device!("lm_head")
+               out = SHAInet::SimpleMatrix.new(1, r.cols)
+               out.data.to_unsafe.copy_from(r.raw_data.to_unsafe, r.cols)
                out
              else
                normed * w.as(SHAInet::SimpleMatrix)

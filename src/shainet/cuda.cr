@@ -24,6 +24,7 @@ module SHAInet
 
       fun cublasCreate_v2(handle : Pointer(Handle)) : Int32
       fun cublasDestroy_v2(handle : Handle) : Int32
+      fun cublasSetMathMode(handle : Handle, mode : Int32) : Int32
       fun cublasSgemm_v2(handle : Handle, transa : Int32, transb : Int32,
                          m : Int32, n : Int32, k : Int32,
                          alpha : Pointer(Float32), a : Pointer(Float32), lda : Int32,
@@ -213,6 +214,9 @@ module SHAInet
 
       handle = Pointer(LibCUBLAS::Handle).malloc(1)
       raise "cublasCreate failed" unless LibCUBLAS.cublasCreate_v2(handle) == 0
+      # CUBLAS_MATH_DISALLOW_REDUCED_PRECISION_REDUCTION (16): prevent
+      # non-deterministic reduced-precision accumulation in SGEMM on Ada/Ampere.
+      LibCUBLAS.cublasSetMathMode(handle.value, 16)
       handle.value
     end
 
