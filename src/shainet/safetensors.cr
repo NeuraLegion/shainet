@@ -24,7 +24,7 @@ module SHAInet
         when F16, BF16, I16, U16 then 2
         when F32, I32, U32       then 4
         when F64, I64, U64       then 8
-        when I8, U8, BOOL       then 1
+        when I8, U8, BOOL        then 1
         else                          raise "Unknown dtype byte size"
         end
       end

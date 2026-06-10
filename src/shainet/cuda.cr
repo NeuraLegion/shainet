@@ -15,6 +15,7 @@ module SHAInet
       fun cudaMallocHost(ptr : Pointer(Pointer(Void)), size : LibC::SizeT) : Int32
       fun cudaFreeHost(ptr : Pointer(Void)) : Int32
       fun cudaMemGetInfo(free : Pointer(LibC::SizeT), total : Pointer(LibC::SizeT)) : Int32
+      fun cudaDeviceSynchronize : Int32
     end
 
     @[Link("cublas")]
@@ -149,6 +150,10 @@ module SHAInet
 
     def memcpy(dst : Pointer(Void), src : Pointer(Void), bytes : LibC::SizeT, kind : MemcpyKind)
       LibCUDARuntime.cudaMemcpy(dst, src, bytes, kind.value)
+    end
+
+    def device_synchronize
+      LibCUDARuntime.cudaDeviceSynchronize
     end
 
     def copy_device_to_device(dst : Pointer(Float32), src : Pointer(Float32), bytes : LibC::SizeT)

@@ -61,13 +61,14 @@ STDERR.puts ""
 # --- Cached generation setup ---
 emb = net.hidden_layers.find(&.is_a?(SHAInet::EmbeddingLayer)).as(SHAInet::EmbeddingLayer)
 fn = net.final_norm.not_nil!
-w = net.output_layers.first.weights.as(SHAInet::SimpleMatrix)
+w : SHAInet::SimpleMatrix | SHAInet::CudaMatrix = net.output_layers.first.weights.as(SHAInet::SimpleMatrix)
 d_model = net.transformer_layers.first.as(SHAInet::LlamaBlock).d_model
 
 # Move weights to GPU if available
 if SHAInet::CUDA.fully_available?
   STDERR.puts "Moving to GPU..."
   net.transformer_layers.each { |l| l.as(SHAInet::LlamaBlock).to_gpu! }
+  w = w.as(SHAInet::SimpleMatrix).to_cuda.tap(&.mark_device_dirty!)
   STDERR.puts "GPU ready!"
 end
 
@@ -133,7 +134,18 @@ loop do
     last = SHAInet::SimpleMatrix.new(1, d_model)
     d_model.times { |j| last[0, j] = x[x.rows - 1, j] }
     normed = fn.forward(last)
-    logits = normed * w
+    logits = if w.is_a?(SHAInet::CudaMatrix)
+               n_gpu = SHAInet::CudaMatrix.new(normed.rows, normed.cols)
+               n_gpu.raw_data.to_unsafe.copy_from(normed.data.to_unsafe, normed.rows * normed.cols)
+               n_gpu.sync_to_device!("lm_head")
+               r = n_gpu * w.as(SHAInet::CudaMatrix)
+               r.sync_from_device!("lm_head") if r.device_dirty?
+               out = SHAInet::SimpleMatrix.new(r.rows, r.cols)
+               out.data.to_unsafe.copy_from(r.raw_data.to_unsafe, r.rows * r.cols)
+               out
+             else
+               normed * w.as(SHAInet::SimpleMatrix)
+             end
 
     # Apply repetition penalty to recently generated tokens
     generated_ids.last(20).each do |prev_id|
@@ -145,7 +157,7 @@ loop do
     vocab_size = logits.cols
     scored = Array(Tuple(Int32, Float64)).new(vocab_size)
     vocab_size.times { |j| scored << {j, logits[0, j] / temperature} }
-    scored.sort_by! { |_, v| -v }
+    scored.sort_by! { |_, v| v.nan? ? -Float64::INFINITY : -v }
     top_k = scored.first(40)
 
     # Softmax over top-k
@@ -168,6 +180,7 @@ loop do
 
     # Stop on end-of-turn / end-of-text
     break if best_id == eot_id || best_id == eos_id || best_id < 0
+    break unless logits[0, best_id].finite? # bail on NaN logits
     generated_ids << best_id
     print tokenizer.decode([best_id])
     STDOUT.flush
