@@ -12,6 +12,10 @@ module SHAInet
     getter head_dim : Int32
     getter d_model : Int32
     property rope_theta : Float64
+    # Optional precomputed inverse frequencies (size head_dim/2). When set,
+    # these override the default theta^(-2i/d) computation (used for LLaMA 3
+    # rope_scaling). nil means use the default.
+    property rope_freqs : Array(Float32)? = nil
 
     property w_q : SimpleMatrix | CudaMatrix
     property w_k : SimpleMatrix | CudaMatrix
@@ -19,7 +23,7 @@ module SHAInet
     property w_o : SimpleMatrix | CudaMatrix
 
     # KV cache: stored per kv_head as [seq_len, head_dim] growing matrices
-    @k_cache : Array(Array(Float32))  # [num_kv_heads][seq_len * head_dim]
+    @k_cache : Array(Array(Float32)) # [num_kv_heads][seq_len * head_dim]
     @v_cache : Array(Array(Float32))
     @cache_len : Int32 = 0
 
@@ -106,9 +110,9 @@ module SHAInet
       head_dim = @head_dim
       scale = (1.0 / Math.sqrt(head_dim.to_f64)).to_f32
 
-      q_full = gpu_matmul(x, @w_q)  # [seq, d_model]
-      k_full = gpu_matmul(x, @w_k)  # [seq, kv_dim]
-      v_full = gpu_matmul(x, @w_v)  # [seq, kv_dim]
+      q_full = gpu_matmul(x, @w_q) # [seq, d_model]
+      k_full = gpu_matmul(x, @w_k) # [seq, kv_dim]
+      v_full = gpu_matmul(x, @w_v) # [seq, kv_dim]
 
       output = SimpleMatrix.new(seq_len, @d_model)
       heads_per_kv = @num_heads // @num_kv_heads
@@ -144,21 +148,24 @@ module SHAInet
       k_new = gpu_matmul(x, @w_k)
       v_new = gpu_matmul(x, @w_v)
 
-      # Apply RoPE to new K at insert time, then append to cache
+      # Apply RoPE to new K at insert time (HF half-split), then append to cache.
+      half = head_dim // 2
       @num_kv_heads.times do |kv_h|
         kv_col = kv_h * head_dim
         new_tokens.times do |t|
           pos = start_pos + t
-          (head_dim // 2).times do |i|
-            freq = (1.0 / (@rope_theta ** (2.0 * i / head_dim))).to_f32
+          rotated = Array(Float32).new(head_dim, 0.0_f32)
+          half.times do |i|
+            freq = inv_freq(i)
             angle = (pos * freq).to_f32
             cos_val = Math.cos(angle).to_f32
             sin_val = Math.sin(angle).to_f32
-            x0 = k_new[t, kv_col + 2 * i].to_f32
-            x1 = k_new[t, kv_col + 2 * i + 1].to_f32
-            @k_cache[kv_h] << (x0 * cos_val - x1 * sin_val)
-            @k_cache[kv_h] << (x0 * sin_val + x1 * cos_val)
+            x0 = k_new[t, kv_col + i].to_f32
+            x1 = k_new[t, kv_col + i + half].to_f32
+            rotated[i] = x0 * cos_val - x1 * sin_val
+            rotated[i + half] = x1 * cos_val + x0 * sin_val
           end
+          rotated.each { |val| @k_cache[kv_h] << val }
           head_dim.times { |d| @v_cache[kv_h] << v_new[t, kv_col + d].to_f32 }
         end
       end
@@ -182,12 +189,12 @@ module SHAInet
 
         # Attention: new Q [new_tokens, hd] @ cached K^T [hd, total_len]
         k_t = k_h.transpose
-        scores = q_h * k_t  # [new_tokens, total_len]
+        scores = q_h * k_t # [new_tokens, total_len]
 
         # Causal softmax (each new token can see all cached + itself)
         attn_weights = SimpleMatrix.new(new_tokens, total_len)
         new_tokens.times do |i|
-          visible = start_pos + i + 1  # this token can see positions 0..start_pos+i
+          visible = start_pos + i + 1 # this token can see positions 0..start_pos+i
           max_val = -Float32::INFINITY
           visible.times { |j| sv = scores[i, j].to_f32 * scale; max_val = sv if sv > max_val }
           exp_sum = 0.0_f32
@@ -199,7 +206,7 @@ module SHAInet
           visible.times { |j| attn_weights[i, j] = attn_weights[i, j].to_f32 / exp_sum }
         end
 
-        attn_out = attn_weights * v_h  # [new_tokens, head_dim]
+        attn_out = attn_weights * v_h # [new_tokens, head_dim]
         new_tokens.times do |s|
           head_dim.times { |d| output[s, q_col + d] = attn_out[s, d] }
         end
@@ -215,7 +222,7 @@ module SHAInet
       scale = (1.0 / Math.sqrt(head_dim.to_f64)).to_f32
 
       # Big matmuls on GPU
-      q_full = x * @w_q.as(CudaMatrix)  # cuBLAS SGEMM
+      q_full = x * @w_q.as(CudaMatrix) # cuBLAS SGEMM
       k_full = x * @w_k.as(CudaMatrix)
       v_full = x * @w_v.as(CudaMatrix)
 
@@ -262,19 +269,29 @@ module SHAInet
       m
     end
 
-    # --- Helper: apply RoPE in-place ---
+    # --- Helper: inverse frequency for rotation index i (0..head_dim/2) ---
+    private def inv_freq(i : Int32) : Float32
+      if freqs = @rope_freqs
+        freqs[i]
+      else
+        (1.0 / (@rope_theta ** (2.0 * i / @head_dim))).to_f32
+      end
+    end
+
+    # --- Helper: apply RoPE in-place (HF half-split convention) ---
     private def apply_rope!(m : SimpleMatrix, start_pos : Int32)
+      half = @head_dim // 2
       m.rows.times do |pos|
         actual_pos = pos + start_pos
-        (@head_dim // 2).times do |i|
-          freq = (1.0 / (@rope_theta ** (2.0 * i / @head_dim))).to_f32
+        half.times do |i|
+          freq = inv_freq(i)
           angle = (actual_pos * freq).to_f32
           cos_val = Math.cos(angle).to_f32
           sin_val = Math.sin(angle).to_f32
-          x0 = m[pos, 2 * i].to_f32
-          x1 = m[pos, 2 * i + 1].to_f32
-          m[pos, 2 * i] = x0 * cos_val - x1 * sin_val
-          m[pos, 2 * i + 1] = x0 * sin_val + x1 * cos_val
+          x0 = m[pos, i].to_f32
+          x1 = m[pos, i + half].to_f32
+          m[pos, i] = x0 * cos_val - x1 * sin_val
+          m[pos, i + half] = x1 * cos_val + x0 * sin_val
         end
       end
     end
@@ -316,7 +333,7 @@ module SHAInet
         x_gpu = CudaMatrix.new(x.rows, x.cols)
         x.rows.times { |r| x.cols.times { |c| x_gpu[r, c] = x[r, c] } }
         x_gpu.sync_to_device!("gemm_in")
-        result_gpu = x_gpu * w  # cuBLAS SGEMM
+        result_gpu = x_gpu * w # cuBLAS SGEMM
         result_gpu.sync_from_device!("gemm_out") if result_gpu.device_dirty?
         result = SimpleMatrix.new(result_gpu.rows, result_gpu.cols)
         result_gpu.rows.times { |r| result_gpu.cols.times { |c| result[r, c] = result_gpu[r, c].to_f32 } }

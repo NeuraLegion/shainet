@@ -172,7 +172,9 @@ net.train(
 
 ## Advanced
 
-- See `examples/babylm_transformer.cr` for a transformer language model.
+- Run a real LLaMA model: `crystal run examples/llama_chat.cr -Denable_cuda`
+  (auto-downloads Llama-3.2-1B-Instruct, chats with KV cache + GPU).
+- See `examples/babylm_transformer.cr` for training a transformer language model.
 - Use `SHAInet::SafeTensors::File` to read any `.safetensors` file directly.
 
 ### SafeTensors API
