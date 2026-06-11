@@ -52,6 +52,9 @@ module SHAInet
     def copy_device_to_device(*args)
     end
 
+    def device_synchronize
+    end
+
     def malloc_host(*args)
       raise "CUDA disabled"
     end

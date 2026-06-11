@@ -13,6 +13,7 @@ module SHAInet
   class CudaMatrix
     property device_ptr : Pointer(Float32)?
     @device_dirty : Bool = false # Track if GPU data is newer than CPU data
+    @host_modified : Bool = true # Track if host data changed since last sync_to_device!
     @rows : Int32
     @cols : Int32
     @data : Array(Float32)
@@ -157,6 +158,7 @@ module SHAInet
     def []=(row : Int32, col : Int32, value : Number)
       @data[row * @cols + col] = value.to_f32
       # CPU data is now newer, need to sync to device before next GPU op
+      @host_modified = true
       mark_device_clean!
     end
 
@@ -270,6 +272,7 @@ module SHAInet
     def sync_to_device!(source : String = "unknown")
       return unless dptr = @device_ptr
       return if dptr.null?
+      return unless @host_modified # Skip if host data hasn't changed since last sync
 
       begin
         size = @rows * @cols
@@ -288,6 +291,7 @@ module SHAInet
           Log.error { "CudaMatrix.sync_to_device!: GPU memcpy failed with result #{copy_result} for #{@rows}x#{@cols}" }
           @device_ptr = Pointer(Float32).null
         else
+          @host_modified = false
           mark_device_clean!
         end
       rescue ex : Exception
@@ -410,6 +414,7 @@ module SHAInet
       ensure
         CUDA.destroy_handle(handle)
       end
+      CUDA.device_synchronize
 
       # Mark result as having newer GPU data
       result.mark_device_dirty!
@@ -973,6 +978,7 @@ module SHAInet
       ensure
         CUDA.destroy_handle(handle)
       end
+      CUDA.device_synchronize
 
       # Mark self as having newer GPU data
       mark_device_dirty!
