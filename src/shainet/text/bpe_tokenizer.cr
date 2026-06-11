@@ -197,7 +197,7 @@ module SHAInet
       ids
     end
 
-    # HF-style encode: split on spaces, prefix with Ġ, apply BPE merges
+    # HF-style encode: byte-level BPE with GPT-2 unicode mapping
     private def encode_hf(text : String) : Array(Int32)
       ids = Array(Int32).new
       return ids if text.empty?
@@ -205,16 +205,10 @@ module SHAInet
       unicode_text = String.build do |s|
         text.bytes.each { |b| s << BPETokenizer.byte_to_unicode(b) }
       end
-      # Split on spaces: each space becomes Ġ prefix on the following word
-      # Use regex to split into chunks: spaces attach to the following word
-      parts = unicode_text.scan(/\S+|\s+/)
-      parts.each do |m|
-        word = m[0]
-        tokens = encode_tokens_hf(word)
-        tokens.each do |t|
-          if id = @vocab[t]?
-            ids << id
-          end
+      tokens = encode_tokens_hf(unicode_text)
+      tokens.each do |t|
+        if id = @vocab[t]?
+          ids << id
         end
       end
       ids

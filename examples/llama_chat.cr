@@ -164,7 +164,7 @@ loop do
     vocab_size = logits.cols
     scored = Array(Tuple(Int32, Float64)).new(vocab_size)
     vocab_size.times { |j| scored << {j, logits[0, j] / temperature} }
-    scored.sort_by! { |_, v| v.nan? ? -Float64::INFINITY : -v }
+    scored.sort_by! { |_, v| v.nan? ? Float64::INFINITY : -v }
     top_k = scored.first(40)
 
     # Softmax over top-k

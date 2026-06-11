@@ -216,7 +216,8 @@ module SHAInet
       raise "cublasCreate failed" unless LibCUBLAS.cublasCreate_v2(handle) == 0
       # CUBLAS_MATH_DISALLOW_REDUCED_PRECISION_REDUCTION (16): prevent
       # non-deterministic reduced-precision accumulation in SGEMM on Ada/Ampere.
-      LibCUBLAS.cublasSetMathMode(handle.value, 16)
+      result = LibCUBLAS.cublasSetMathMode(handle.value, 16)
+      Log.warn { "cublasSetMathMode failed (code #{result})" } unless result == 0
       handle.value
     end
 
