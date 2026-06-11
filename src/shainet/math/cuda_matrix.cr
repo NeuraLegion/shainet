@@ -978,6 +978,7 @@ module SHAInet
       ensure
         CUDA.destroy_handle(handle)
       end
+      CUDA.device_synchronize
 
       # Mark self as having newer GPU data
       mark_device_dirty!
