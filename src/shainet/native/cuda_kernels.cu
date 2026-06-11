@@ -594,18 +594,13 @@ __global__ void gemm_q8_f32_kernel(const float* __restrict__ x,
 
     int tid = threadIdx.x;
     int nthreads = blockDim.x;
-    float partial = 0.0f;
 
-    for (int b = tid; b < nblocks; b += nthreads) {
-        float s = srow[b];
-        int base = b * Q8_BLK;
-        int lim = base + Q8_BLK;
-        if (lim > K) lim = K;
-        float acc = 0.0f;
-        for (int k = base; k < lim; ++k) {
-            acc += (float)qrow[k] * xrow[k];
-        }
-        partial += acc * s;
+    // Each thread strides over the full K dimension so all threads do work
+    // (the previous one-thread-per-32-block scheme left most threads idle for
+    // small K). Scale is per-32-element block; srow is tiny and L1/L2 cached.
+    float partial = 0.0f;
+    for (int k = tid; k < K; k += nthreads) {
+        partial += (float)qrow[k] * xrow[k] * srow[k >> 5];
     }
 
     extern __shared__ float sdata[];

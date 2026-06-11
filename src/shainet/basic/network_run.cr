@@ -1488,11 +1488,13 @@ module SHAInet
                matrix
              end
 
-      x_gpu = CudaMatrix.new(last.rows, last.cols)
+      x_gpu = (@lm_head_x ||= CudaMatrix.new(last.rows, last.cols))
       x_gpu.raw_data.to_unsafe.copy_from(last.data.to_unsafe, last.rows * last.cols)
+      x_gpu.mark_host_modified!
       x_gpu.sync_to_device!("lm_head_q_in")
 
-      r_gpu = weights.gemv(x_gpu)
+      r_gpu = (@lm_head_r ||= CudaMatrix.new(last.rows, weights.cols))
+      weights.gemv_into(x_gpu, r_gpu)
       r_gpu.sync_from_device!("lm_head_q_out") if r_gpu.device_dirty?
 
       result = SimpleMatrix.new(r_gpu.rows, r_gpu.cols)

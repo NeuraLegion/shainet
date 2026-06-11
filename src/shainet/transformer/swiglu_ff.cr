@@ -12,6 +12,10 @@ module SHAInet
       @down_proj = SimpleMatrix.new(ff_hidden, d_model)
     end
 
+    # Persistent single-row GEMV workspaces for decode (M=1), keyed by width.
+    @q8_in_bufs = Hash(Int32, CudaMatrix).new
+    @q8_out_bufs = Hash(Int32, CudaMatrix).new
+
     def to_gpu!(quantize : Bool = false)
       return unless CUDA.fully_available?
       if quantize
@@ -76,14 +80,27 @@ module SHAInet
 
     private def matmul(x : SimpleMatrix, w : SimpleMatrix | CudaMatrix | QuantizedCudaMatrix) : SimpleMatrix
       if w.is_a?(QuantizedCudaMatrix)
-        x_gpu = CudaMatrix.new(x.rows, x.cols)
-        x_gpu.raw_data.to_unsafe.copy_from(x.data.to_unsafe, x.rows * x.cols)
-        x_gpu.sync_to_device!("q8_ffn_in")
-        result_gpu = w.gemv(x_gpu)
-        result_gpu.sync_from_device!("q8_ffn_out") if result_gpu.device_dirty?
-        result = SimpleMatrix.new(result_gpu.rows, result_gpu.cols)
-        result.data.to_unsafe.copy_from(result_gpu.raw_data.to_unsafe, result_gpu.rows * result_gpu.cols)
-        result
+        if x.rows == 1
+          xb = (@q8_in_bufs[x.cols] ||= CudaMatrix.new(1, x.cols))
+          xb.raw_data.to_unsafe.copy_from(x.data.to_unsafe, x.cols)
+          xb.mark_host_modified!
+          xb.sync_to_device!("q8_ffn_in")
+          ob = (@q8_out_bufs[w.cols] ||= CudaMatrix.new(1, w.cols))
+          w.gemv_into(xb, ob)
+          ob.sync_from_device!("q8_ffn_out") if ob.device_dirty?
+          result = SimpleMatrix.new(1, w.cols)
+          result.data.to_unsafe.copy_from(ob.raw_data.to_unsafe, w.cols)
+          result
+        else
+          x_gpu = CudaMatrix.new(x.rows, x.cols)
+          x_gpu.raw_data.to_unsafe.copy_from(x.data.to_unsafe, x.rows * x.cols)
+          x_gpu.sync_to_device!("q8_ffn_in")
+          result_gpu = w.gemv(x_gpu)
+          result_gpu.sync_from_device!("q8_ffn_out") if result_gpu.device_dirty?
+          result = SimpleMatrix.new(result_gpu.rows, result_gpu.cols)
+          result.data.to_unsafe.copy_from(result_gpu.raw_data.to_unsafe, result_gpu.rows * result_gpu.cols)
+          result
+        end
       elsif w.is_a?(CudaMatrix)
         x_gpu = CudaMatrix.new(x.rows, x.cols)
         x.rows.times { |r| x.cols.times { |c| x_gpu[r, c] = x[r, c] } }

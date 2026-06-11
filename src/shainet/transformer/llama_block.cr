@@ -46,6 +46,12 @@ module SHAInet
       @v_cache = Array.new(@num_kv_heads) { Array(Float32).new }
     end
 
+    # Persistent single-row GEMV workspaces for decode (M=1), keyed by width.
+    # Reused across tokens to avoid per-call cudaMalloc/cudaFree churn. Never
+    # freed during inference, so they cannot be GC-collected mid-GEMM.
+    @q8_in_bufs = Hash(Int32, CudaMatrix).new
+    @q8_out_bufs = Hash(Int32, CudaMatrix).new
+
     def clear_cache!
       @k_cache.each(&.clear)
       @v_cache.each(&.clear)
@@ -193,40 +199,92 @@ module SHAInet
       output = SimpleMatrix.new(new_tokens, @d_model)
       heads_per_kv = @num_heads // @num_kv_heads
 
+      half = head_dim // 2
+      dm = @d_model
+      qdata = q_full.data
+      odata = output.data
+      # Reusable scratch buffers (avoid per-head/per-token allocations).
+      q_rot = Array(Float32).new(head_dim, 0.0_f32)
+      scores = Array(Float32).new(total_len, 0.0_f32)
+      out = Array(Float32).new(head_dim, 0.0_f32)
+
       @num_heads.times do |h|
         q_col = h * head_dim
         kv_h = h // heads_per_kv
+        kcache = @k_cache[kv_h]
+        vcache = @v_cache[kv_h]
 
-        # Q for new tokens only
-        q_h = extract_head(q_full, new_tokens, q_col, head_dim)
-        apply_rope!(q_h, start_pos)
-
-        # K/V from cache (K already has RoPE applied at insert time)
-        k_h = cache_to_matrix(@k_cache[kv_h], total_len, head_dim)
-        v_h = cache_to_matrix(@v_cache[kv_h], total_len, head_dim)
-
-        # Attention: new Q [new_tokens, hd] @ cached K^T [hd, total_len]
-        k_t = k_h.transpose
-        scores = q_h * k_t # [new_tokens, total_len]
-
-        # Causal softmax (each new token can see all cached + itself)
-        attn_weights = SimpleMatrix.new(new_tokens, total_len)
         new_tokens.times do |i|
-          visible = start_pos + i + 1 # this token can see positions 0..start_pos+i
-          max_val = -Float32::INFINITY
-          visible.times { |j| sv = scores[i, j].to_f32 * scale; max_val = sv if sv > max_val }
-          exp_sum = 0.0_f32
-          visible.times do |j|
-            e = Math.exp((scores[i, j].to_f32 * scale - max_val).to_f64).to_f32
-            attn_weights[i, j] = e
-            exp_sum += e
-          end
-          visible.times { |j| attn_weights[i, j] = attn_weights[i, j].to_f32 / exp_sum }
-        end
+          pos = start_pos + i
+          qrow = i * dm + q_col
 
-        attn_out = attn_weights * v_h # [new_tokens, head_dim]
-        new_tokens.times do |s|
-          head_dim.times { |d| output[s, q_col + d] = attn_out[s, d] }
+          # RoPE-rotate this token's Q head directly into q_rot (HF half-split).
+          idx = 0
+          while idx < half
+            freq = inv_freq(idx)
+            angle = (pos * freq).to_f32
+            c = Math.cos(angle).to_f32
+            s = Math.sin(angle).to_f32
+            x0 = qdata[qrow + idx]
+            x1 = qdata[qrow + idx + half]
+            q_rot[idx] = x0 * c - x1 * s
+            q_rot[idx + half] = x1 * c + x0 * s
+            idx += 1
+          end
+
+          # scores[j] = scale * (q_rot · K_cache[j]); track max for stable softmax.
+          visible = start_pos + i + 1
+          max_val = -Float32::INFINITY
+          j = 0
+          while j < visible
+            kbase = j * head_dim
+            dot = 0.0_f32
+            d = 0
+            while d < head_dim
+              dot += q_rot[d] * kcache[kbase + d]
+              d += 1
+            end
+            sv = dot * scale
+            scores[j] = sv
+            max_val = sv if sv > max_val
+            j += 1
+          end
+
+          # softmax over visible positions
+          exp_sum = 0.0_f32
+          j = 0
+          while j < visible
+            e = Math.exp((scores[j] - max_val).to_f64).to_f32
+            scores[j] = e
+            exp_sum += e
+            j += 1
+          end
+          inv_sum = 1.0_f32 / exp_sum
+
+          # out = sum_j (softmax_j) * V_cache[j]
+          d = 0
+          while d < head_dim
+            out[d] = 0.0_f32
+            d += 1
+          end
+          j = 0
+          while j < visible
+            w = scores[j] * inv_sum
+            vbase = j * head_dim
+            d = 0
+            while d < head_dim
+              out[d] += w * vcache[vbase + d]
+              d += 1
+            end
+            j += 1
+          end
+
+          orow = i * dm + q_col
+          d = 0
+          while d < head_dim
+            odata[orow + d] = out[d]
+            d += 1
+          end
         end
       end
 
@@ -347,15 +405,29 @@ module SHAInet
     # --- Helper: matmul using GPU SGEMM if weights are CudaMatrix ---
     private def gpu_matmul(x : SimpleMatrix, w : SimpleMatrix | CudaMatrix | QuantizedCudaMatrix) : SimpleMatrix
       if w.is_a?(QuantizedCudaMatrix)
-        # Quantized GPU GEMV: bulk upload activations, dequant-in-kernel matmul, bulk download
-        x_gpu = CudaMatrix.new(x.rows, x.cols)
-        x_gpu.raw_data.to_unsafe.copy_from(x.data.to_unsafe, x.rows * x.cols)
-        x_gpu.sync_to_device!("q8_gemm_in")
-        result_gpu = w.gemv(x_gpu)
-        result_gpu.sync_from_device!("q8_gemm_out") if result_gpu.device_dirty?
-        result = SimpleMatrix.new(result_gpu.rows, result_gpu.cols)
-        result.data.to_unsafe.copy_from(result_gpu.raw_data.to_unsafe, result_gpu.rows * result_gpu.cols)
-        result
+        if x.rows == 1
+          # Decode (M=1): reuse persistent device buffers, no per-call alloc/free.
+          xb = (@q8_in_bufs[x.cols] ||= CudaMatrix.new(1, x.cols))
+          xb.raw_data.to_unsafe.copy_from(x.data.to_unsafe, x.cols)
+          xb.mark_host_modified!
+          xb.sync_to_device!("q8_gemm_in")
+          ob = (@q8_out_bufs[w.cols] ||= CudaMatrix.new(1, w.cols))
+          w.gemv_into(xb, ob)
+          ob.sync_from_device!("q8_gemm_out") if ob.device_dirty?
+          result = SimpleMatrix.new(1, w.cols)
+          result.data.to_unsafe.copy_from(ob.raw_data.to_unsafe, w.cols)
+          result
+        else
+          # Prefill / batch (M>1): one-off allocation.
+          x_gpu = CudaMatrix.new(x.rows, x.cols)
+          x_gpu.raw_data.to_unsafe.copy_from(x.data.to_unsafe, x.rows * x.cols)
+          x_gpu.sync_to_device!("q8_gemm_in")
+          result_gpu = w.gemv(x_gpu)
+          result_gpu.sync_from_device!("q8_gemm_out") if result_gpu.device_dirty?
+          result = SimpleMatrix.new(result_gpu.rows, result_gpu.cols)
+          result.data.to_unsafe.copy_from(result_gpu.raw_data.to_unsafe, result_gpu.rows * result_gpu.cols)
+          result
+        end
       elsif w.is_a?(CudaMatrix)
         # Convert input to GPU, GEMM, bring back
         x_gpu = CudaMatrix.new(x.rows, x.cols)
