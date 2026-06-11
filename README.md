@@ -186,6 +186,11 @@ net.train(
 
 - Run a real LLaMA model: `crystal run examples/llama_chat.cr -Denable_cuda`
   (auto-downloads Llama-3.2-1B-Instruct, chats with KV cache + GPU).
+- Quantized inference (Q8_0): call `net.quantize!` after loading to run with
+  int8 weights + per-32-block fp32 scales (dequant-in-kernel GEMV). Cuts weight
+  VRAM ~4x (1B model: ~5GB fp32 → ~1.3GB) and speeds up memory-bound decode.
+  `llama_chat.cr` quantizes by default on GPU; set `SHAINET_FP32=1` to keep fp32.
+  Benchmark/eval both paths with `examples/q8_eval.cr`.
 - See `examples/babylm_transformer.cr` for training a transformer language model.
 - Use `SHAInet::SafeTensors::File` to read any `.safetensors` file directly.
 

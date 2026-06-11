@@ -86,6 +86,10 @@ module SHAInet
     def gemm_accumulate(*args)
     end
 
+    def gemm_q8_f32(*args)
+      raise "CUDA disabled"
+    end
+
     def geam(*args)
     end
 

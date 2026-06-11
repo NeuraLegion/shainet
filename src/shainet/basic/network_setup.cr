@@ -31,6 +31,13 @@ module SHAInet
     # KV cache mode for autoregressive LLM inference
     property use_kv_cache : Bool = false
 
+    # Q8 quantized-weight inference mode (set via quantize!). When true, the
+    # lm_head projection uses the quantized weight stored in @lm_head_q.
+    property quantize_weights : Bool = false
+
+    # Quantized lm_head weight (populated by quantize! when CUDA is available).
+    @lm_head_q : QuantizedCudaMatrix? = nil
+
     # Parameters for Rprop
     property etah_plus : Float64, etah_minus : Float64, delta_max : Float64, delta_min : Float64
     getter prev_mse : Float64
@@ -149,6 +156,35 @@ module SHAInet
       @transformer_layers.each do |l|
         l.as(LlamaBlock).clear_cache! if l.is_a?(LlamaBlock)
       end
+    end
+
+    # Quantize all LLaMA block weights and the lm_head to Q8_0 (int8 + per-32
+    # block fp32 scales) on the GPU. Opt-in; the fp32 path is untouched.
+    # Requires CUDA + custom kernels. After this, run with use_kv_cache = true.
+    def quantize!
+      unless CUDA.fully_available?
+        Log.warn { "quantize!: CUDA kernels unavailable, leaving weights in fp32" }
+        return self
+      end
+
+      @quantize_weights = true
+      @transformer_layers.each do |l|
+        l.as(LlamaBlock).to_gpu!(quantize: true) if l.is_a?(LlamaBlock)
+      end
+
+      # Quantize the output projection (lm_head). Stored separately so the
+      # generic MatrixLayer weight union stays fp32/CudaMatrix only.
+      out_layer = @output_layers.last?
+      if out_layer
+        w = out_layer.weights
+        if w.is_a?(SimpleMatrix)
+          @lm_head_q = QuantizedCudaMatrix.from_simple(w)
+        elsif w.is_a?(CudaMatrix)
+          @lm_head_q = QuantizedCudaMatrix.from_simple(w.to_simple)
+        end
+      end
+
+      self
     end
 
     # Connect all the layers in order (input and output don't connect between themselves): input, hidden, output
