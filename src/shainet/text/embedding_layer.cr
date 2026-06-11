@@ -123,16 +123,25 @@ module SHAInet
     def embed_cpu(ids : Array(Int32)) : SimpleMatrix
       result = SimpleMatrix.zeros(ids.size, @l_size)
 
-      # Use CPU embeddings if available, otherwise sync from GPU
-      embeddings = if @embeddings.is_a?(SimpleMatrix)
-                     @embeddings.as(SimpleMatrix)
-                   else
-                     @embeddings.as(CudaMatrix).to_simple
-                   end
-
-      ids.each_with_index do |id, row|
-        @l_size.times do |col|
-          result[row, col] = embeddings[id, col]
+      emb = @embeddings
+      if emb.is_a?(SimpleMatrix)
+        src = emb.data
+        ids.each_with_index do |id, row|
+          base = id * @l_size
+          dst = row * @l_size
+          @l_size.times { |col| result.data[dst + col] = src[base + col] }
+        end
+      else
+        # CudaMatrix: the embedding values live in the host backing array.
+        # Gather only the requested rows instead of converting the whole
+        # [vocab, l_size] table (which was an O(vocab*l_size) copy per call).
+        cuda = emb.as(CudaMatrix)
+        cuda.sync_from_device!("embed_cpu") if cuda.device_dirty?
+        src = cuda.raw_data
+        ids.each_with_index do |id, row|
+          base = id * @l_size
+          dst = row * @l_size
+          @l_size.times { |col| result.data[dst + col] = src[base + col] }
         end
       end
 
