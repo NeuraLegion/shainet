@@ -624,7 +624,10 @@ void gemm_q8_f32(const float* x, const signed char* q, const float* scales,
     dim3 grid(N, M);
     size_t shmem = threads * sizeof(float);
     gemm_q8_f32_kernel<<<grid, threads, shmem>>>(x, q, scales, y, M, N, K);
-    cudaError_t err = cudaDeviceSynchronize();
+    // Avoid a full device sync on every projection/lm_head call. Callers read
+    // results back via a default-stream D2H memcpy, which is ordered after this
+    // kernel and provides the needed synchronization. Just surface launch errors.
+    cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         printf("CUDA Error in gemm_q8_f32: %s\n", cudaGetErrorString(err));
     }

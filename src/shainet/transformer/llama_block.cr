@@ -55,19 +55,30 @@ module SHAInet
     def to_gpu!(quantize : Bool = false)
       return unless CUDA.fully_available?
       if quantize
-        @w_q = QuantizedCudaMatrix.from_simple(@w_q.as(SimpleMatrix)) if @w_q.is_a?(SimpleMatrix)
-        @w_k = QuantizedCudaMatrix.from_simple(@w_k.as(SimpleMatrix)) if @w_k.is_a?(SimpleMatrix)
-        @w_v = QuantizedCudaMatrix.from_simple(@w_v.as(SimpleMatrix)) if @w_v.is_a?(SimpleMatrix)
-        @w_o = QuantizedCudaMatrix.from_simple(@w_o.as(SimpleMatrix)) if @w_o.is_a?(SimpleMatrix)
+        @w_q = to_q8(@w_q)
+        @w_k = to_q8(@w_k)
+        @w_v = to_q8(@w_v)
+        @w_o = to_q8(@w_o)
       else
-        @w_q = @w_q.as(SimpleMatrix).to_cuda unless @w_q.is_a?(CudaMatrix)
-        @w_k = @w_k.as(SimpleMatrix).to_cuda unless @w_k.is_a?(CudaMatrix)
-        @w_v = @w_v.as(SimpleMatrix).to_cuda unless @w_v.is_a?(CudaMatrix)
-        @w_o = @w_o.as(SimpleMatrix).to_cuda unless @w_o.is_a?(CudaMatrix)
+        # Only promote host weights; leave existing CudaMatrix/QuantizedCudaMatrix as-is.
+        @w_q = @w_q.as(SimpleMatrix).to_cuda if @w_q.is_a?(SimpleMatrix)
+        @w_k = @w_k.as(SimpleMatrix).to_cuda if @w_k.is_a?(SimpleMatrix)
+        @w_v = @w_v.as(SimpleMatrix).to_cuda if @w_v.is_a?(SimpleMatrix)
+        @w_o = @w_o.as(SimpleMatrix).to_cuda if @w_o.is_a?(SimpleMatrix)
       end
       @norm1.to_gpu!
       @norm2.to_gpu!
       @ffn.to_gpu!(quantize)
+    end
+
+    # Quantize a weight to Q8 regardless of its current representation,
+    # avoiding mixed precision/quantization state on repeated to_gpu! calls.
+    private def to_q8(w : SimpleMatrix | CudaMatrix | QuantizedCudaMatrix) : QuantizedCudaMatrix
+      case w
+      when QuantizedCudaMatrix then w
+      when CudaMatrix          then QuantizedCudaMatrix.from_simple(w.to_simple)
+      else                          QuantizedCudaMatrix.from_simple(w.as(SimpleMatrix))
+      end
     end
 
     def apply_gradients(lr : Float64)
@@ -336,14 +347,14 @@ module SHAInet
     # --- Helper: matmul using GPU SGEMM if weights are CudaMatrix ---
     private def gpu_matmul(x : SimpleMatrix, w : SimpleMatrix | CudaMatrix | QuantizedCudaMatrix) : SimpleMatrix
       if w.is_a?(QuantizedCudaMatrix)
-        # Quantized GPU GEMV: upload activations, dequant-in-kernel matmul, bring back
+        # Quantized GPU GEMV: bulk upload activations, dequant-in-kernel matmul, bulk download
         x_gpu = CudaMatrix.new(x.rows, x.cols)
-        x.rows.times { |r| x.cols.times { |c| x_gpu[r, c] = x[r, c] } }
+        x_gpu.raw_data.to_unsafe.copy_from(x.data.to_unsafe, x.rows * x.cols)
         x_gpu.sync_to_device!("q8_gemm_in")
         result_gpu = w.gemv(x_gpu)
         result_gpu.sync_from_device!("q8_gemm_out") if result_gpu.device_dirty?
         result = SimpleMatrix.new(result_gpu.rows, result_gpu.cols)
-        result_gpu.rows.times { |r| result_gpu.cols.times { |c| result[r, c] = result_gpu[r, c].to_f32 } }
+        result.data.to_unsafe.copy_from(result_gpu.raw_data.to_unsafe, result_gpu.rows * result_gpu.cols)
         result
       elsif w.is_a?(CudaMatrix)
         # Convert input to GPU, GEMM, bring back

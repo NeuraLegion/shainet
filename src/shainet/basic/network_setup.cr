@@ -31,8 +31,10 @@ module SHAInet
     # KV cache mode for autoregressive LLM inference
     property use_kv_cache : Bool = false
 
-    # Q8 quantized-weight inference mode (set via quantize!). When true, the
-    # lm_head projection uses the quantized weight stored in @lm_head_q.
+    # Status flag set to true once quantize! has converted weights to Q8.
+    # Informational only — the quantized lm_head dispatch in Network#run keys
+    # off @lm_head_q (and block/FFN weights off their own QuantizedCudaMatrix
+    # type), not off this flag.
     property quantize_weights : Bool = false
 
     # Quantized lm_head weight (populated by quantize! when CUDA is available).

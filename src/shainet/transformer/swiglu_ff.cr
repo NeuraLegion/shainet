@@ -15,13 +15,23 @@ module SHAInet
     def to_gpu!(quantize : Bool = false)
       return unless CUDA.fully_available?
       if quantize
-        @gate_proj = QuantizedCudaMatrix.from_simple(@gate_proj.as(SimpleMatrix)) if @gate_proj.is_a?(SimpleMatrix)
-        @up_proj = QuantizedCudaMatrix.from_simple(@up_proj.as(SimpleMatrix)) if @up_proj.is_a?(SimpleMatrix)
-        @down_proj = QuantizedCudaMatrix.from_simple(@down_proj.as(SimpleMatrix)) if @down_proj.is_a?(SimpleMatrix)
+        @gate_proj = to_q8(@gate_proj)
+        @up_proj = to_q8(@up_proj)
+        @down_proj = to_q8(@down_proj)
       else
-        @gate_proj = @gate_proj.as(SimpleMatrix).to_cuda unless @gate_proj.is_a?(CudaMatrix)
-        @up_proj = @up_proj.as(SimpleMatrix).to_cuda unless @up_proj.is_a?(CudaMatrix)
-        @down_proj = @down_proj.as(SimpleMatrix).to_cuda unless @down_proj.is_a?(CudaMatrix)
+        # Only promote host weights; leave existing CudaMatrix/QuantizedCudaMatrix as-is.
+        @gate_proj = @gate_proj.as(SimpleMatrix).to_cuda if @gate_proj.is_a?(SimpleMatrix)
+        @up_proj = @up_proj.as(SimpleMatrix).to_cuda if @up_proj.is_a?(SimpleMatrix)
+        @down_proj = @down_proj.as(SimpleMatrix).to_cuda if @down_proj.is_a?(SimpleMatrix)
+      end
+    end
+
+    # Quantize a weight to Q8 regardless of its current representation.
+    private def to_q8(w : SimpleMatrix | CudaMatrix | QuantizedCudaMatrix) : QuantizedCudaMatrix
+      case w
+      when QuantizedCudaMatrix then w
+      when CudaMatrix          then QuantizedCudaMatrix.from_simple(w.to_simple)
+      else                          QuantizedCudaMatrix.from_simple(w.as(SimpleMatrix))
       end
     end
 
@@ -67,12 +77,12 @@ module SHAInet
     private def matmul(x : SimpleMatrix, w : SimpleMatrix | CudaMatrix | QuantizedCudaMatrix) : SimpleMatrix
       if w.is_a?(QuantizedCudaMatrix)
         x_gpu = CudaMatrix.new(x.rows, x.cols)
-        x.rows.times { |r| x.cols.times { |c| x_gpu[r, c] = x[r, c] } }
+        x_gpu.raw_data.to_unsafe.copy_from(x.data.to_unsafe, x.rows * x.cols)
         x_gpu.sync_to_device!("q8_ffn_in")
         result_gpu = w.gemv(x_gpu)
         result_gpu.sync_from_device!("q8_ffn_out") if result_gpu.device_dirty?
         result = SimpleMatrix.new(result_gpu.rows, result_gpu.cols)
-        result_gpu.rows.times { |r| result_gpu.cols.times { |c| result[r, c] = result_gpu[r, c].to_f32 } }
+        result.data.to_unsafe.copy_from(result_gpu.raw_data.to_unsafe, result_gpu.rows * result_gpu.cols)
         result
       elsif w.is_a?(CudaMatrix)
         x_gpu = CudaMatrix.new(x.rows, x.cols)
