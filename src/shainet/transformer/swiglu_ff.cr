@@ -2,9 +2,9 @@ module SHAInet
   # SwiGLU Feed-Forward Network as used in LLaMA/Mistral.
   # Formula: output = down_proj(silu(gate_proj(x)) * up_proj(x))
   class SwiGLUFF
-    property gate_proj : SimpleMatrix | CudaMatrix
-    property up_proj : SimpleMatrix | CudaMatrix
-    property down_proj : SimpleMatrix | CudaMatrix
+    property gate_proj : SimpleMatrix | CudaMatrix | QuantizedCudaMatrix
+    property up_proj : SimpleMatrix | CudaMatrix | QuantizedCudaMatrix
+    property down_proj : SimpleMatrix | CudaMatrix | QuantizedCudaMatrix
 
     def initialize(d_model : Int32, ff_hidden : Int32)
       @gate_proj = SimpleMatrix.new(d_model, ff_hidden)
@@ -12,11 +12,27 @@ module SHAInet
       @down_proj = SimpleMatrix.new(ff_hidden, d_model)
     end
 
-    def to_gpu!
+    def to_gpu!(quantize : Bool = false)
       return unless CUDA.fully_available?
-      @gate_proj = @gate_proj.as(SimpleMatrix).to_cuda unless @gate_proj.is_a?(CudaMatrix)
-      @up_proj = @up_proj.as(SimpleMatrix).to_cuda unless @up_proj.is_a?(CudaMatrix)
-      @down_proj = @down_proj.as(SimpleMatrix).to_cuda unless @down_proj.is_a?(CudaMatrix)
+      if quantize
+        @gate_proj = to_q8(@gate_proj)
+        @up_proj = to_q8(@up_proj)
+        @down_proj = to_q8(@down_proj)
+      else
+        # Only promote host weights; leave existing CudaMatrix/QuantizedCudaMatrix as-is.
+        @gate_proj = @gate_proj.as(SimpleMatrix).to_cuda if @gate_proj.is_a?(SimpleMatrix)
+        @up_proj = @up_proj.as(SimpleMatrix).to_cuda if @up_proj.is_a?(SimpleMatrix)
+        @down_proj = @down_proj.as(SimpleMatrix).to_cuda if @down_proj.is_a?(SimpleMatrix)
+      end
+    end
+
+    # Quantize a weight to Q8 regardless of its current representation.
+    private def to_q8(w : SimpleMatrix | CudaMatrix | QuantizedCudaMatrix) : QuantizedCudaMatrix
+      case w
+      when QuantizedCudaMatrix then w
+      when CudaMatrix          then QuantizedCudaMatrix.from_simple(w.to_simple)
+      else                          QuantizedCudaMatrix.from_simple(w.as(SimpleMatrix))
+      end
     end
 
     def forward(x : SimpleMatrix) : SimpleMatrix
@@ -58,8 +74,17 @@ module SHAInet
       hidden * @down_proj.as(CudaMatrix) # cuBLAS GEMM
     end
 
-    private def matmul(x : SimpleMatrix, w : SimpleMatrix | CudaMatrix) : SimpleMatrix
-      if w.is_a?(CudaMatrix)
+    private def matmul(x : SimpleMatrix, w : SimpleMatrix | CudaMatrix | QuantizedCudaMatrix) : SimpleMatrix
+      if w.is_a?(QuantizedCudaMatrix)
+        x_gpu = CudaMatrix.new(x.rows, x.cols)
+        x_gpu.raw_data.to_unsafe.copy_from(x.data.to_unsafe, x.rows * x.cols)
+        x_gpu.sync_to_device!("q8_ffn_in")
+        result_gpu = w.gemv(x_gpu)
+        result_gpu.sync_from_device!("q8_ffn_out") if result_gpu.device_dirty?
+        result = SimpleMatrix.new(result_gpu.rows, result_gpu.cols)
+        result.data.to_unsafe.copy_from(result_gpu.raw_data.to_unsafe, result_gpu.rows * result_gpu.cols)
+        result
+      elsif w.is_a?(CudaMatrix)
         x_gpu = CudaMatrix.new(x.rows, x.cols)
         x.rows.times { |r| x.cols.times { |c| x_gpu[r, c] = x[r, c] } }
         x_gpu.sync_to_device!("ffn_in")

@@ -311,6 +311,7 @@ module SHAInet
     @@element_log_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Void)? = nil
     @@cross_entropy_loss_grad_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Void)? = nil
     @@softmax_cross_entropy_label_proc : Proc(Pointer(Float32), Pointer(Int32), Pointer(Float32), Pointer(Float32), Int32, Int32, Void)? = nil
+    @@gemm_q8_f32_proc : Proc(Pointer(Float32), Pointer(Int8), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Void)? = nil
 
     def softmax_rows(dst : Pointer(Float32), src : Pointer(Float32), rows : Int32, cols : Int32)
       # Validate inputs
@@ -781,6 +782,32 @@ module SHAInet
     # Check if both CUDA runtime and custom kernels are available
     def fully_available?
       available? && kernels_available?
+    end
+
+    # Q8_0-style quantized matmul: y[M,N] = x[M,K] * dequant(W).
+    # q: int8 weights laid out [N, K]; scales: fp32 [N, ceil(K/32)].
+    def gemm_q8_f32(x : Pointer(Float32), q : Pointer(Int8), scales : Pointer(Float32),
+                    y : Pointer(Float32), m : Int32, n : Int32, k : Int32)
+      unless fn = @@gemm_q8_f32_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "gemm_q8_f32")
+          unless sym.null?
+            @@gemm_q8_f32_proc = Proc(Pointer(Float32), Pointer(Int8), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@gemm_q8_f32_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+
+      begin
+        fn.call(x, q, scales, y, m, n, k)
+      rescue e
+        Log.error { "CUDA Error in gemm_q8_f32: #{e}" }
+        raise e
+      end
     end
 
     # Cross-entropy loss and gradient computation kernel

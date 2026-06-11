@@ -571,4 +571,66 @@ void softmax_cross_entropy_label(float* pred, const int* labels,
     }
 }
 
+// ---- Q8_0-style quantized matmul: y[M,N] = x[M,K] * dequant(W) ----
+// W is quantized weights laid out row-major [N, K] (out-major) as int8 (q),
+// with one fp32 scale per BLOCK (=32) contiguous K elements per output column,
+// scales laid out [N, ceil(K/BLOCK)]. This reproduces row-major fp32 GEMM
+// semantics result[m,n] = sum_k x[m,k] * (q[n,k] * scale[n, k/BLOCK]).
+// One CUDA block computes one (m,n) output via threaded reduction over K.
+#define Q8_BLK 32
+__global__ void gemm_q8_f32_kernel(const float* __restrict__ x,
+                                   const signed char* __restrict__ q,
+                                   const float* __restrict__ scales,
+                                   float* __restrict__ y,
+                                   int M, int N, int K) {
+    int n = blockIdx.x; // output column (0..N)
+    int m = blockIdx.y; // activation row (0..M)
+    if (n >= N || m >= M) return;
+
+    int nblocks = (K + Q8_BLK - 1) / Q8_BLK;
+    const float* xrow = x + (long)m * K;
+    const signed char* qrow = q + (long)n * K;
+    const float* srow = scales + (long)n * nblocks;
+
+    int tid = threadIdx.x;
+    int nthreads = blockDim.x;
+    float partial = 0.0f;
+
+    for (int b = tid; b < nblocks; b += nthreads) {
+        float s = srow[b];
+        int base = b * Q8_BLK;
+        int lim = base + Q8_BLK;
+        if (lim > K) lim = K;
+        float acc = 0.0f;
+        for (int k = base; k < lim; ++k) {
+            acc += (float)qrow[k] * xrow[k];
+        }
+        partial += acc * s;
+    }
+
+    extern __shared__ float sdata[];
+    sdata[tid] = partial;
+    __syncthreads();
+    for (int stride = nthreads >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) sdata[tid] += sdata[tid + stride];
+        __syncthreads();
+    }
+    if (tid == 0) y[(long)m * N + n] = sdata[0];
+}
+
+void gemm_q8_f32(const float* x, const signed char* q, const float* scales,
+                 float* y, int M, int N, int K) {
+    int threads = 256;
+    dim3 grid(N, M);
+    size_t shmem = threads * sizeof(float);
+    gemm_q8_f32_kernel<<<grid, threads, shmem>>>(x, q, scales, y, M, N, K);
+    // Avoid a full device sync on every projection/lm_head call. Callers read
+    // results back via a default-stream D2H memcpy, which is ordered after this
+    // kernel and provides the needed synchronization. Just surface launch errors.
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in gemm_q8_f32: %s\n", cudaGetErrorString(err));
+    }
+}
+
 } // extern "C"

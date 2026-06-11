@@ -209,7 +209,9 @@ module SHAInet
         if fn = @final_norm
           matrix = fn.forward(matrix.as(SimpleMatrix))
         end
-        matrix = if w.is_a?(CudaMatrix)
+        matrix = if lq = @lm_head_q
+                   gpu_lm_head_q(matrix.as(SimpleMatrix), lq)
+                 elsif w.is_a?(CudaMatrix)
                    gpu_lm_head(matrix.as(SimpleMatrix), w.as(CudaMatrix))
                  else
                    safe_output_transform(matrix.as(SimpleMatrix), w.as(SimpleMatrix))
@@ -1469,6 +1471,30 @@ module SHAInet
       CUDA.device_synchronize
       r_gpu.mark_device_dirty!
       r_gpu.sync_from_device!("lm_head_out")
+      result = SimpleMatrix.new(r_gpu.rows, r_gpu.cols)
+      result.data.to_unsafe.copy_from(r_gpu.raw_data.to_unsafe, r_gpu.rows * r_gpu.cols)
+      result
+    end
+
+    # Quantized lm_head projection: [1, d_model] × dequant(W[d_model, vocab]).
+    # Uses the Q8 dequant-in-kernel GEMV. Returns [1, vocab] logits.
+    private def gpu_lm_head_q(matrix : SimpleMatrix, weights : QuantizedCudaMatrix) : SimpleMatrix
+      # Extract last token for transformer architectures (language modeling).
+      last = if matrix.rows > 1
+               sm = SimpleMatrix.new(1, matrix.cols)
+               matrix.cols.times { |j| sm[0, j] = matrix[matrix.rows - 1, j] }
+               sm
+             else
+               matrix
+             end
+
+      x_gpu = CudaMatrix.new(last.rows, last.cols)
+      x_gpu.raw_data.to_unsafe.copy_from(last.data.to_unsafe, last.rows * last.cols)
+      x_gpu.sync_to_device!("lm_head_q_in")
+
+      r_gpu = weights.gemv(x_gpu)
+      r_gpu.sync_from_device!("lm_head_q_out") if r_gpu.device_dirty?
+
       result = SimpleMatrix.new(r_gpu.rows, r_gpu.cols)
       result.data.to_unsafe.copy_from(r_gpu.raw_data.to_unsafe, r_gpu.rows * r_gpu.cols)
       result

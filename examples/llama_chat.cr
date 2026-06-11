@@ -55,8 +55,16 @@ STDERR.puts ""
 # --- Enable KV cache + GPU ---
 net.use_kv_cache = true
 if SHAInet::CUDA.fully_available?
-  STDERR.puts "Moving to GPU..."
-  net.transformer_layers.each { |l| l.as(SHAInet::LlamaBlock).to_gpu! }
+  if ENV["SHAINET_FP32"]?
+    STDERR.puts "Moving to GPU (fp32)..."
+    net.transformer_layers.each { |l| l.as(SHAInet::LlamaBlock).to_gpu! }
+  else
+    STDERR.puts "Quantizing weights to Q8 (set SHAINET_FP32=1 to keep fp32)..."
+    net.quantize!
+    if info = SHAInet::CUDA.memory_info
+      STDERR.puts "  VRAM in use: #{((info[:total] - info[:free]) / 1024.0 / 1024.0).round(1)} MB"
+    end
+  end
   STDERR.puts "GPU ready!"
 end
 
