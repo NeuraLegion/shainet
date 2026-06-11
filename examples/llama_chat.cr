@@ -28,7 +28,7 @@ def download_model(model_dir : String, repo : String)
 end
 
 arg = ARGV[0]?
-max_tokens = (ARGV[1]? || "60").to_i
+max_tokens = (ARGV[1]? || "256").to_i
 
 # Resolve the model directory:
 #  - existing local directory       -> use as-is
@@ -48,9 +48,9 @@ model_dir =
 
 # --- Load model ---
 STDERR.puts "Loading model from #{model_dir}..."
-t = Time.monotonic
+t = Time.instant
 net = SHAInet::HFLoader.load_llama(model_dir)
-STDERR.puts "Model loaded in #{(Time.monotonic - t).total_seconds.round(1)}s"
+STDERR.puts "Model loaded in #{(Time.instant - t).total_seconds.round(1)}s"
 STDERR.puts "  Layers: #{net.transformer_layers.size}, d_model: #{net.transformer_layers.first.as(SHAInet::LlamaBlock).d_model}"
 
 # --- Load tokenizer ---

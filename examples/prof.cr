@@ -17,7 +17,7 @@ ids.each_with_index { |id, i| d.times { |j| x[i, j] = emb.embeddings[id, j] } }
 net.transformer_layers.each { |l| x = l.as(SHAInet::LlamaBlock).forward_cached(x) }
 
 n = 10
-t = Time.monotonic
+t = Time.instant
 n.times do
   last = SHAInet::SimpleMatrix.new(1, d)
   d.times { |j| last[0, j] = x[x.rows - 1, j] }
@@ -33,5 +33,5 @@ n.times do
   net.transformer_layers.each { |l| xn = l.as(SHAInet::LlamaBlock).forward_cached(xn) }
   x = xn
 end
-elapsed = (Time.monotonic - t).total_seconds
+elapsed = (Time.instant - t).total_seconds
 puts "#{n} tokens: #{elapsed.round(2)}s -> #{(elapsed / n).round(3)}s/token"
