@@ -196,16 +196,24 @@ module SHAInet
           when TransformerLayer
             matrix = l.as(TransformerLayer).forward(matrix)
           when LlamaLayer
-            matrix = l.as(LlamaLayer).forward(matrix)
+            matrix = if @use_kv_cache
+                       l.as(LlamaLayer).forward_cached(matrix)
+                     else
+                       l.as(LlamaLayer).forward(matrix)
+                     end
           end
         end
         out_layer = @output_layers.last
-        w = out_layer.weights.as(SimpleMatrix)
+        w = out_layer.weights
         b = out_layer.biases.as(SimpleMatrix)
         if fn = @final_norm
           matrix = fn.forward(matrix.as(SimpleMatrix))
         end
-        matrix = safe_output_transform(matrix.as(SimpleMatrix), w)
+        matrix = if w.is_a?(CudaMatrix)
+                   gpu_lm_head(matrix.as(SimpleMatrix), w.as(CudaMatrix))
+                 else
+                   safe_output_transform(matrix.as(SimpleMatrix), w.as(SimpleMatrix))
+                 end
 
         # CPU bias addition
         matrix.rows.times do |i|
@@ -279,15 +287,28 @@ module SHAInet
     end
 
     # Accept integer input for embedding layers
-    # This is a convenience wrapper around the standard run method
+    # Creates a column vector [N, 1] so the embedding layer can look up token IDs.
     def run(input : Array(Int32), stealth : Bool = false) : Array(Float64)
-      float_in = input.map(&.to_f64)
-      run(float_in, stealth: stealth)
+      if @hidden_layers.any?(&.is_a?(EmbeddingLayer))
+        matrix = SimpleMatrix.new(input.size, 1)
+        input.each_with_index { |id, i| matrix[i, 0] = id.to_f64 }
+        result = run(matrix, stealth: stealth)
+        result.to_a.last
+      else
+        run(input.map(&.to_f64), stealth: stealth)
+      end
     end
 
     def run(input : Array(Int32), *, return_matrix : Bool, stealth : Bool = false) : Array(Float64) | CudaMatrix | SimpleMatrix
-      float_in = input.map(&.to_f64)
-      run(float_in, stealth: stealth, return_matrix: return_matrix)
+      if @hidden_layers.any?(&.is_a?(EmbeddingLayer))
+        matrix = SimpleMatrix.new(input.size, 1)
+        input.each_with_index { |id, i| matrix[i, 0] = id.to_f64 }
+        result = run(matrix, stealth: stealth)
+        return_matrix ? result : result.to_a.last
+      else
+        float_in = input.map(&.to_f64)
+        run(float_in, stealth: stealth, return_matrix: return_matrix)
+      end
     end
 
     # Accept sequence input - converts to matrix and calls core matrix method
@@ -1423,7 +1444,37 @@ module SHAInet
       end
 
       raise ex
-    end # Optimized helper to extract tokens from GPU matrix without elementwise access
+    end
+
+    # GPU-accelerated lm_head projection: [1, d_model] × [d_model, vocab_size]
+    # Uses direct cuBLAS GEMM to avoid the 2s CPU matmul for 128K vocab.
+    private def gpu_lm_head(matrix : SimpleMatrix, weights : CudaMatrix) : SimpleMatrix
+      # Extract last token for transformer architectures
+      last = if !@transformer_layers.empty? && matrix.rows > 1
+               sm = SimpleMatrix.new(1, matrix.cols)
+               matrix.cols.times { |j| sm[0, j] = matrix[matrix.rows - 1, j] }
+               sm
+             else
+               matrix.rows > 1 ? (sm = SimpleMatrix.new(1, matrix.cols); matrix.cols.times { |j| sm[0, j] = matrix[matrix.rows - 1, j] }; sm) : matrix
+             end
+      # Upload input, run GEMM, download result
+      x_gpu = CudaMatrix.new(last.rows, last.cols)
+      x_gpu.raw_data.to_unsafe.copy_from(last.data.to_unsafe, last.rows * last.cols)
+      x_gpu.sync_to_device!("lm_head_in")
+      r_gpu = CudaMatrix.new(last.rows, weights.cols)
+      h = CUDA.create_handle
+      CUDA.gemm(h, weights.device_ptr.not_nil!, x_gpu.device_ptr.not_nil!, r_gpu.device_ptr.not_nil!,
+        weights.cols, last.rows, weights.rows, weights.cols, last.cols, weights.cols)
+      CUDA.destroy_handle(h)
+      CUDA.device_synchronize
+      r_gpu.mark_device_dirty!
+      r_gpu.sync_from_device!("lm_head_out")
+      result = SimpleMatrix.new(r_gpu.rows, r_gpu.cols)
+      result.data.to_unsafe.copy_from(r_gpu.raw_data.to_unsafe, r_gpu.rows * r_gpu.cols)
+      result
+    end
+
+    # Optimized helper to extract tokens from GPU matrix without elementwise access
 
     # Uses GPU-to-CPU batch transfer instead of per-element sync
     private def extract_tokens_gpu(matrix : CudaMatrix) : Array(Int32)
