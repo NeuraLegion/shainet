@@ -128,6 +128,7 @@ loop do
   generated_ids = Array(Int32).new
   temperature = 0.6_f64
   repetition_penalty = 1.2_f64
+  gen_start = Time.instant
 
   max_tokens.times do
     # Get logits from last position
@@ -197,6 +198,9 @@ loop do
     net.transformer_layers.each { |l| x_new = l.as(SHAInet::LlamaBlock).forward_cached(x_new) }
     x = x_new
   end
-  puts ""
+  gen_elapsed = (Time.instant - gen_start).total_seconds
+  if generated_ids.size > 0
+    STDERR.puts "(#{generated_ids.size} tokens, #{(generated_ids.size / gen_elapsed).round(1)} tok/s)"
+  end
   puts ""
 end
