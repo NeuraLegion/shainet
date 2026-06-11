@@ -15,6 +15,7 @@ module SHAInet
       fun cudaMallocHost(ptr : Pointer(Pointer(Void)), size : LibC::SizeT) : Int32
       fun cudaFreeHost(ptr : Pointer(Void)) : Int32
       fun cudaMemGetInfo(free : Pointer(LibC::SizeT), total : Pointer(LibC::SizeT)) : Int32
+      fun cudaDeviceSynchronize : Int32
     end
 
     @[Link("cublas")]
@@ -23,6 +24,7 @@ module SHAInet
 
       fun cublasCreate_v2(handle : Pointer(Handle)) : Int32
       fun cublasDestroy_v2(handle : Handle) : Int32
+      fun cublasSetMathMode(handle : Handle, mode : Int32) : Int32
       fun cublasSgemm_v2(handle : Handle, transa : Int32, transb : Int32,
                          m : Int32, n : Int32, k : Int32,
                          alpha : Pointer(Float32), a : Pointer(Float32), lda : Int32,
@@ -151,6 +153,10 @@ module SHAInet
       LibCUDARuntime.cudaMemcpy(dst, src, bytes, kind.value)
     end
 
+    def device_synchronize
+      LibCUDARuntime.cudaDeviceSynchronize
+    end
+
     def copy_device_to_device(dst : Pointer(Float32), src : Pointer(Float32), bytes : LibC::SizeT)
       memcpy(dst.as(Pointer(Void)), src.as(Pointer(Void)), bytes, MemcpyKind::DeviceToDevice)
     end
@@ -208,6 +214,9 @@ module SHAInet
 
       handle = Pointer(LibCUBLAS::Handle).malloc(1)
       raise "cublasCreate failed" unless LibCUBLAS.cublasCreate_v2(handle) == 0
+      # CUBLAS_MATH_DISALLOW_REDUCED_PRECISION_REDUCTION (16): prevent
+      # non-deterministic reduced-precision accumulation in SGEMM on Ada/Ampere.
+      LibCUBLAS.cublasSetMathMode(handle.value, 16)
       handle.value
     end
 

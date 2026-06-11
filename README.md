@@ -58,6 +58,18 @@ To build kernels manually:
 ./build_cuda_kernels.sh
 ```
 
+#### RTX 30/40 Series (Ampere/Ada) Note
+
+These GPUs use TF32 tensor cores by default for FP32 matrix multiply, which
+reduces mantissa precision from 23 to 10 bits. For LLM inference this can cause
+non-deterministic token generation. SHAInet sets
+`CUBLAS_MATH_DISALLOW_REDUCED_PRECISION_REDUCTION` automatically, but for full
+FP32 precision also set:
+
+```bash
+export NVIDIA_TF32_OVERRIDE=0
+```
+
 ### Device management
 
 Layers such as `LayerNorm` allocate workspace matrices on the first forward pass
