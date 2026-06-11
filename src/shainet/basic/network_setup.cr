@@ -39,6 +39,9 @@ module SHAInet
 
     # Quantized lm_head weight (populated by quantize! when CUDA is available).
     @lm_head_q : QuantizedCudaMatrix? = nil
+    # Persistent decode buffers for the quantized lm_head GEMV (reused per token).
+    @lm_head_x : CudaMatrix? = nil
+    @lm_head_r : CudaMatrix? = nil
 
     # Parameters for Rprop
     property etah_plus : Float64, etah_minus : Float64, delta_max : Float64, delta_min : Float64

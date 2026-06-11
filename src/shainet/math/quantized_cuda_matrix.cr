@@ -123,5 +123,19 @@ module SHAInet
       result.mark_device_dirty!
       result
     end
+
+    # Same as gemv but writes into a caller-provided result buffer, avoiding a
+    # per-call device allocation. result must be [x.rows, cols].
+    def gemv_into(x : CudaMatrix, result : CudaMatrix) : CudaMatrix
+      raise ArgumentError.new("dimension mismatch: x.cols=#{x.cols} vs K=#{@rows}") unless x.cols == @rows
+      raise ArgumentError.new("result shape mismatch") unless result.rows == x.rows && result.cols == @cols
+      raise RuntimeError.new("Q8 gemv requires valid device pointers") if @q_ptr.null? || @scale_ptr.null?
+
+      x.sync_to_device!("q8_gemv_in") unless x.device_dirty?
+      CUDA.gemm_q8_f32(x.device_ptr.not_nil!, @q_ptr, @scale_ptr,
+        result.device_ptr.not_nil!, x.rows, @cols, @rows)
+      result.mark_device_dirty!
+      result
+    end
   end
 end

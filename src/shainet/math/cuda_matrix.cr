@@ -704,6 +704,14 @@ module SHAInet
       @device_dirty = false
     end
 
+    # Mark host data as modified since the last device sync. Needed when callers
+    # mutate the backing array via raw_data/unsafe_set and then expect
+    # sync_to_device! to re-upload (otherwise the @host_modified skip from #113
+    # would treat the buffer as already in sync).
+    def mark_host_modified!
+      @host_modified = true
+    end
+
     def to_a
       # Ensure CPU data is up to date (single sync instead of per-element)
       sync_from_device!("bulk_to_a") if device_dirty?
