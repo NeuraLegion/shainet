@@ -28,7 +28,7 @@ def download_model(model_dir : String, repo : String)
 end
 
 arg = ARGV[0]?
-max_tokens = (ARGV[1]? || "60").to_i
+max_tokens = (ARGV[1]? || "256").to_i
 
 # Resolve the model directory:
 #  - existing local directory       -> use as-is
@@ -48,9 +48,9 @@ model_dir =
 
 # --- Load model ---
 STDERR.puts "Loading model from #{model_dir}..."
-t = Time.monotonic
+t = Time.instant
 net = SHAInet::HFLoader.load_llama(model_dir)
-STDERR.puts "Model loaded in #{(Time.monotonic - t).total_seconds.round(1)}s"
+STDERR.puts "Model loaded in #{(Time.instant - t).total_seconds.round(1)}s"
 STDERR.puts "  Layers: #{net.transformer_layers.size}, d_model: #{net.transformer_layers.first.as(SHAInet::LlamaBlock).d_model}"
 
 # --- Load tokenizer ---
@@ -61,13 +61,14 @@ STDERR.puts ""
 # --- Cached generation setup ---
 emb = net.hidden_layers.find(&.is_a?(SHAInet::EmbeddingLayer)).as(SHAInet::EmbeddingLayer)
 fn = net.final_norm.not_nil!
-w = net.output_layers.first.weights.as(SHAInet::SimpleMatrix)
+w : SHAInet::SimpleMatrix | SHAInet::CudaMatrix = net.output_layers.first.weights.as(SHAInet::SimpleMatrix)
 d_model = net.transformer_layers.first.as(SHAInet::LlamaBlock).d_model
 
 # Move weights to GPU if available
 if SHAInet::CUDA.fully_available?
   STDERR.puts "Moving to GPU..."
   net.transformer_layers.each { |l| l.as(SHAInet::LlamaBlock).to_gpu! }
+  w = w.as(SHAInet::SimpleMatrix).to_cuda.tap(&.mark_device_dirty!)
   STDERR.puts "GPU ready!"
 end
 
@@ -127,13 +128,31 @@ loop do
   generated_ids = Array(Int32).new
   temperature = 0.6_f64
   repetition_penalty = 1.2_f64
+  gen_start = Time.instant
 
   max_tokens.times do
     # Get logits from last position
     last = SHAInet::SimpleMatrix.new(1, d_model)
     d_model.times { |j| last[0, j] = x[x.rows - 1, j] }
     normed = fn.forward(last)
-    logits = normed * w
+    logits = if w.is_a?(SHAInet::CudaMatrix)
+               w_cuda = w.as(SHAInet::CudaMatrix)
+               n_gpu = SHAInet::CudaMatrix.new(1, normed.cols)
+               n_gpu.raw_data.to_unsafe.copy_from(normed.data.to_unsafe, normed.cols)
+               n_gpu.sync_to_device!("lm_head")
+               r = SHAInet::CudaMatrix.new(1, w_cuda.cols)
+               h = SHAInet::CUDA.create_handle
+               SHAInet::CUDA.gemm(h, w_cuda.device_ptr.not_nil!, n_gpu.device_ptr.not_nil!, r.device_ptr.not_nil!,
+                 w_cuda.cols, 1, w_cuda.rows, w_cuda.cols, normed.cols, w_cuda.cols)
+               SHAInet::CUDA.destroy_handle(h)
+               r.mark_device_dirty!
+               r.sync_from_device!("lm_head")
+               out = SHAInet::SimpleMatrix.new(1, r.cols)
+               out.data.to_unsafe.copy_from(r.raw_data.to_unsafe, r.cols)
+               out
+             else
+               normed * w.as(SHAInet::SimpleMatrix)
+             end
 
     # Apply repetition penalty to recently generated tokens
     generated_ids.last(20).each do |prev_id|
@@ -145,7 +164,7 @@ loop do
     vocab_size = logits.cols
     scored = Array(Tuple(Int32, Float64)).new(vocab_size)
     vocab_size.times { |j| scored << {j, logits[0, j] / temperature} }
-    scored.sort_by! { |_, v| -v }
+    scored.sort_by! { |_, v| v.nan? ? Float64::INFINITY : -v }
     top_k = scored.first(40)
 
     # Softmax over top-k
@@ -168,6 +187,7 @@ loop do
 
     # Stop on end-of-turn / end-of-text
     break if best_id == eot_id || best_id == eos_id || best_id < 0
+    break unless logits[0, best_id].finite? # bail on NaN logits
     generated_ids << best_id
     print tokenizer.decode([best_id])
     STDOUT.flush
@@ -178,6 +198,9 @@ loop do
     net.transformer_layers.each { |l| x_new = l.as(SHAInet::LlamaBlock).forward_cached(x_new) }
     x = x_new
   end
-  puts ""
+  gen_elapsed = (Time.instant - gen_start).total_seconds
+  if generated_ids.size > 0
+    STDERR.puts "(#{generated_ids.size} tokens, #{(generated_ids.size / gen_elapsed).round(1)} tok/s)"
+  end
   puts ""
 end

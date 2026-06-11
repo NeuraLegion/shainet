@@ -16,10 +16,24 @@ module SHAInet
     # GPT-2 byte-to-unicode mapping (lazily built). Maps a printable Unicode
     # codepoint back to the original raw byte it represents in byte-level BPE.
     @@unicode_to_byte : Hash(Char, UInt8)?
+    @@byte_to_unicode : Hash(UInt8, Char)?
 
     def self.unicode_to_byte(ch : Char) : UInt8
       map = (@@unicode_to_byte ||= build_byte_map)
       map[ch]? || 0_u8
+    end
+
+    def self.byte_to_unicode(b : UInt8) : Char
+      map = (@@byte_to_unicode ||= build_byte_to_unicode_map)
+      map[b]
+    end
+
+    private def self.build_byte_to_unicode_map : Hash(UInt8, Char)
+      # Inverse of build_byte_map
+      byte_map = (@@unicode_to_byte ||= build_byte_map)
+      inv = Hash(UInt8, Char).new
+      byte_map.each { |ch, b| inv[b] = ch }
+      inv
     end
 
     private def self.build_byte_map : Hash(Char, UInt8)
@@ -183,26 +197,18 @@ module SHAInet
       ids
     end
 
-    # HF-style encode: split on spaces, prefix with Ġ, apply BPE merges
+    # HF-style encode: byte-level BPE with GPT-2 unicode mapping
     private def encode_hf(text : String) : Array(Int32)
       ids = Array(Int32).new
-      # Split into words keeping space as Ġ prefix
-      words = text.split(/(?= )| /)
-      words.each_with_index do |word, idx|
-        next if word.empty?
-        # Add Ġ prefix for space-separated words (except first if no leading space)
-        w = if word == " "
-              next # skip standalone spaces, handled by Ġ prefix
-            elsif idx > 0 || text.starts_with?(" ")
-              "Ġ" + word.lstrip
-            else
-              word
-            end
-        tokens = encode_tokens_hf(w)
-        tokens.each do |t|
-          if id = @vocab[t]?
-            ids << id
-          end
+      return ids if text.empty?
+      # Convert raw bytes to GPT-2 unicode representation
+      unicode_text = String.build do |s|
+        text.bytes.each { |b| s << BPETokenizer.byte_to_unicode(b) }
+      end
+      tokens = encode_tokens_hf(unicode_text)
+      tokens.each do |t|
+        if id = @vocab[t]?
+          ids << id
         end
       end
       ids
