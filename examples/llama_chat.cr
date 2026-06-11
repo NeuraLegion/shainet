@@ -1,15 +1,12 @@
 require "../src/shainet"
 require "json"
 
-# LLaMA chat demo — runs a HuggingFace LLaMA model with KV cache.
+# LLaMA chat demo using Network#run with KV cache.
 #
 # Usage:
-#   crystal run examples/llama_chat.cr -Denable_cuda            # default: Llama-3.2-1B (auto-download)
-#   crystal run examples/llama_chat.cr -- unsloth/Llama-3.2-1B  # specific HF repo
-#   crystal run examples/llama_chat.cr -- /path/to/model-dir    # local model directory
-#
-# Models are cached under the system temp dir. Build with -Denable_cuda and
-# set LD_LIBRARY_PATH to the kernels for GPU acceleration.
+#   crystal run examples/llama_chat.cr -Denable_cuda
+#   crystal run examples/llama_chat.cr -- /path/to/model-dir
+#   crystal run examples/llama_chat.cr -- unsloth/Llama-3.2-1B-Instruct 512
 
 DEFAULT_REPO = "unsloth/Llama-3.2-1B-Instruct"
 MODEL_FILES  = {"config.json", "model.safetensors", "tokenizer.json"}
@@ -30,9 +27,6 @@ end
 arg = ARGV[0]?
 max_tokens = (ARGV[1]? || "256").to_i
 
-# Resolve the model directory:
-#  - existing local directory       -> use as-is
-#  - HF repo ("org/name") or nil     -> download into temp cache
 model_dir =
   if arg && Dir.exists?(arg)
     arg
@@ -58,17 +52,11 @@ tokenizer = SHAInet::BPETokenizer.from_hf(File.join(model_dir, "tokenizer.json")
 STDERR.puts "Tokenizer loaded (vocab: #{tokenizer.vocab.size})"
 STDERR.puts ""
 
-# --- Cached generation setup ---
-emb = net.hidden_layers.find(&.is_a?(SHAInet::EmbeddingLayer)).as(SHAInet::EmbeddingLayer)
-fn = net.final_norm.not_nil!
-w : SHAInet::SimpleMatrix | SHAInet::CudaMatrix = net.output_layers.first.weights.as(SHAInet::SimpleMatrix)
-d_model = net.transformer_layers.first.as(SHAInet::LlamaBlock).d_model
-
-# Move weights to GPU if available
+# --- Enable KV cache + GPU ---
+net.use_kv_cache = true
 if SHAInet::CUDA.fully_available?
   STDERR.puts "Moving to GPU..."
   net.transformer_layers.each { |l| l.as(SHAInet::LlamaBlock).to_gpu! }
-  w = w.as(SHAInet::SimpleMatrix).to_cuda.tap(&.mark_device_dirty!)
   STDERR.puts "GPU ready!"
 end
 
@@ -78,11 +66,9 @@ loop do
   user_input = gets
   break if user_input.nil? || user_input.strip.empty?
 
-  # Clear KV cache for new conversation
-  net.transformer_layers.each { |l| l.as(SHAInet::LlamaBlock).clear_cache! }
+  net.clear_cache!
 
-  # Build prompt using the LLaMA 3 chat template. Special tokens delimit the
-  # user turn and open the assistant turn so the instruct model responds.
+  # Build prompt with LLaMA 3 chat template
   sp = ->(name : String) { tokenizer.vocab[name]? }
   bos = sp.call("<|begin_of_text|>")
   start_hdr = sp.call("<|start_header_id|>")
@@ -92,19 +78,16 @@ loop do
   prompt_ids = [] of Int32
   if bos && start_hdr && end_hdr && eot
     nl = tokenizer.encode("\n\n")
-    prompt_ids << bos
-    prompt_ids << start_hdr
+    prompt_ids << bos << start_hdr
     prompt_ids.concat(tokenizer.encode("user"))
     prompt_ids << end_hdr
     prompt_ids.concat(nl)
     prompt_ids.concat(tokenizer.encode(user_input.strip))
-    prompt_ids << eot
-    prompt_ids << start_hdr
+    prompt_ids << eot << start_hdr
     prompt_ids.concat(tokenizer.encode("assistant"))
     prompt_ids << end_hdr
     prompt_ids.concat(nl)
   else
-    # Base model fallback: just BOS + text
     prompt_ids << (bos || 0)
     prompt_ids.concat(tokenizer.encode(user_input.strip))
   end
@@ -113,57 +96,32 @@ loop do
   STDERR.print "LLaMA: (thinking...) "
   STDERR.flush
 
-  # Prefill: process all prompt tokens at once
-  x = SHAInet::SimpleMatrix.new(prompt_ids.size, d_model)
-  prompt_ids.each_with_index { |id, i| d_model.times { |j| x[i, j] = emb.embeddings[id, j] } }
-  net.transformer_layers.each { |l| x = l.as(SHAInet::LlamaBlock).forward_cached(x) }
+  # Prefill via net.run
+  logits = net.run(prompt_ids, stealth: true, return_matrix: true).as(SHAInet::SimpleMatrix)
+
   STDERR.print "\r" + " " * 40 + "\r"
   print "LLaMA: "
 
-  # Generate tokens one at a time using cache.
-  # Stop on end-of-turn (<|eot_id|>) or end-of-text.
   eot_id = tokenizer.vocab["<|eot_id|>"]? || -1
-  eos_id = tokenizer.vocab["<|end_of_text|>"]? || tokenizer.vocab["<|endoftext|>"]? || tokenizer.vocab["</s>"]? || -1
-
+  eos_id = tokenizer.vocab["<|end_of_text|>"]? || -1
   generated_ids = Array(Int32).new
   temperature = 0.6_f64
   repetition_penalty = 1.2_f64
   gen_start = Time.instant
 
   max_tokens.times do
-    # Get logits from last position
-    last = SHAInet::SimpleMatrix.new(1, d_model)
-    d_model.times { |j| last[0, j] = x[x.rows - 1, j] }
-    normed = fn.forward(last)
-    logits = if w.is_a?(SHAInet::CudaMatrix)
-               w_cuda = w.as(SHAInet::CudaMatrix)
-               n_gpu = SHAInet::CudaMatrix.new(1, normed.cols)
-               n_gpu.raw_data.to_unsafe.copy_from(normed.data.to_unsafe, normed.cols)
-               n_gpu.sync_to_device!("lm_head")
-               r = SHAInet::CudaMatrix.new(1, w_cuda.cols)
-               h = SHAInet::CUDA.create_handle
-               SHAInet::CUDA.gemm(h, w_cuda.device_ptr.not_nil!, n_gpu.device_ptr.not_nil!, r.device_ptr.not_nil!,
-                 w_cuda.cols, 1, w_cuda.rows, w_cuda.cols, normed.cols, w_cuda.cols)
-               SHAInet::CUDA.destroy_handle(h)
-               r.mark_device_dirty!
-               r.sync_from_device!("lm_head")
-               out = SHAInet::SimpleMatrix.new(1, r.cols)
-               out.data.to_unsafe.copy_from(r.raw_data.to_unsafe, r.cols)
-               out
-             else
-               normed * w.as(SHAInet::SimpleMatrix)
-             end
+    vocab_size = logits.cols
+    last_row = logits.rows - 1
 
-    # Apply repetition penalty to recently generated tokens
+    # Repetition penalty
     generated_ids.last(20).each do |prev_id|
-      v = logits[0, prev_id]
-      logits[0, prev_id] = v > 0 ? (v / repetition_penalty).to_f32 : (v * repetition_penalty).to_f32
+      v = logits[last_row, prev_id]
+      logits[last_row, prev_id] = v > 0 ? (v / repetition_penalty).to_f32 : (v * repetition_penalty).to_f32
     end
 
-    # Temperature sampling with top-k (keep stop tokens as candidates)
-    vocab_size = logits.cols
+    # Temperature sampling with top-k
     scored = Array(Tuple(Int32, Float64)).new(vocab_size)
-    vocab_size.times { |j| scored << {j, logits[0, j] / temperature} }
+    vocab_size.times { |j| scored << {j, logits[last_row, j] / temperature} }
     scored.sort_by! { |_, v| v.nan? ? Float64::INFINITY : -v }
     top_k = scored.first(40)
 
@@ -185,19 +143,16 @@ loop do
       end
     end
 
-    # Stop on end-of-turn / end-of-text
     break if best_id == eot_id || best_id == eos_id || best_id < 0
-    break unless logits[0, best_id].finite? # bail on NaN logits
+    break unless logits[last_row, best_id].finite?
     generated_ids << best_id
     print tokenizer.decode([best_id])
     STDOUT.flush
 
-    # Forward just the new token (O(1) with KV cache)
-    x_new = SHAInet::SimpleMatrix.new(1, d_model)
-    d_model.times { |j| x_new[0, j] = emb.embeddings[best_id, j] }
-    net.transformer_layers.each { |l| x_new = l.as(SHAInet::LlamaBlock).forward_cached(x_new) }
-    x = x_new
+    # Decode next token via net.run (KV cache handles incremental state)
+    logits = net.run([best_id], stealth: true, return_matrix: true).as(SHAInet::SimpleMatrix)
   end
+
   gen_elapsed = (Time.instant - gen_start).total_seconds
   if generated_ids.size > 0
     STDERR.puts "(#{generated_ids.size} tokens, #{(generated_ids.size / gen_elapsed).round(1)} tok/s)"

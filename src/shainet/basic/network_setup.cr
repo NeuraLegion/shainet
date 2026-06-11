@@ -28,6 +28,9 @@ module SHAInet
     # Parameters for SGD + Momentum
     property learning_rate : Float64, momentum : Float64
 
+    # KV cache mode for autoregressive LLM inference
+    property use_kv_cache : Bool = false
+
     # Parameters for Rprop
     property etah_plus : Float64, etah_minus : Float64, delta_max : Float64, delta_min : Float64
     getter prev_mse : Float64
@@ -139,6 +142,13 @@ module SHAInet
 
       # Add to all_layers collection
       @all_layers << layer
+    end
+
+    # Clear KV caches on all LLaMA blocks (call between conversations)
+    def clear_cache!
+      @transformer_layers.each do |l|
+        l.as(LlamaBlock).clear_cache! if l.is_a?(LlamaBlock)
+      end
     end
 
     # Connect all the layers in order (input and output don't connect between themselves): input, hidden, output
