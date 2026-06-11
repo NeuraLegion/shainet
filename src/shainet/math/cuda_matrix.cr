@@ -37,6 +37,8 @@ module SHAInet
 
     # Track allocation sites (callers)
     @@allocation_sites = Hash(String, UInt64).new(0_u64)
+    # Opt-in: capturing `caller` per allocation is expensive; off by default.
+    @@track_allocation_sites = !ENV["SHAINET_TRACK_ALLOCS"]?.nil?
 
     # Detailed sync tracking by source
     @@sync_sources = Hash(String, UInt64).new(0_u64)
@@ -109,9 +111,13 @@ module SHAInet
       # Count matrix creation
       @@matrix_creation_count += 1
 
-      # Track allocation site (top non-cuda_matrix.cr frame)
-      if call = caller.find { |c| !c.includes?("cuda_matrix.cr") }
-        @@allocation_sites[call] += 1
+      # Track allocation site (top non-cuda_matrix.cr frame). `caller` captures
+      # and symbolicates the full stack, which is very expensive (~0.25ms) and
+      # runs on every allocation, so it is opt-in via SHAINET_TRACK_ALLOCS.
+      if @@track_allocation_sites
+        if call = caller.find { |c| !c.includes?("cuda_matrix.cr") }
+          @@allocation_sites[call] += 1
+        end
       end
 
       # CudaMatrix requires CUDA to be available
