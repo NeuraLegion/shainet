@@ -94,16 +94,7 @@ out = String::Builder.new
 t0 = Time.instant
 gen_tokens.times do
   last_row = logits.rows - 1
-  best_id = 0
-  best_val = -Float64::INFINITY
-  logits.cols.times do |j|
-    v = logits[last_row, j]
-    next unless v.finite?
-    if v > best_val
-      best_val = v
-      best_id = j
-    end
-  end
+  best_id = SHAInet::Sampler.greedy(logits, last_row)
   break if best_id == eot_id || best_id == eos_id
   generated << best_id
   out << tokenizer.decode([best_id])
