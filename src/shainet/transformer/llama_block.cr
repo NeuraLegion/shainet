@@ -27,6 +27,26 @@ module SHAInet
     @v_cache : Array(Array(Float32))
     @cache_len : Int32 = 0
 
+    # GPU-resident mirror of the KV cache, laid out [num_kv_heads, capacity,
+    # head_dim] per tensor. The CPU cache stays the source of truth: the GPU
+    # copy is appended incrementally each token and fully re-uploaded from the
+    # mirror whenever capacity grows. Only used when CUDA kernels are loaded.
+    @gpu_k_cache : Pointer(Float32) = Pointer(Float32).null
+    @gpu_v_cache : Pointer(Float32) = Pointer(Float32).null
+    @gpu_cache_cap : Int32 = 0
+    # Persistent device buffers for the attention hot path (grow-only, never
+    # freed mid-inference so they cannot be GC-collected during a kernel).
+    @gpu_staging : Pointer(Float32) = Pointer(Float32).null
+    @gpu_staging_cap : Int32 = 0
+    @gpu_attn_out : Pointer(Float32) = Pointer(Float32).null
+    @gpu_attn_out_cap : Int32 = 0
+    @gpu_attn_ws : Pointer(Float32) = Pointer(Float32).null
+    @gpu_attn_ws_cap : Int32 = 0
+    @staging_host : Array(Float32) = Array(Float32).new
+    @gpu_attn_avail : Bool? = nil
+    # Force the CPU attention path even when CUDA is available (tests/fallback).
+    property force_cpu_attention : Bool = false
+
     def initialize(@d_model : Int32, @num_heads : Int32, ff_hidden : Int32,
                    eps : Float64 = 1e-6, @rope_theta : Float64 = 10000.0,
                    @num_kv_heads : Int32 = @num_heads)
@@ -56,6 +76,14 @@ module SHAInet
       @k_cache.each(&.clear)
       @v_cache.each(&.clear)
       @cache_len = 0
+      # Device cache buffers are kept; stale positions are rewritten by the
+      # append kernel before they ever become visible to attention.
+    end
+
+    def finalize
+      {@gpu_k_cache, @gpu_v_cache, @gpu_staging, @gpu_attn_out, @gpu_attn_ws}.each do |p|
+        CUDA.free(p.as(Pointer(Void))) unless p.null?
+      end
     end
 
     def to_gpu!(quantize : Bool = false)
@@ -197,22 +225,42 @@ module SHAInet
       total_len = @cache_len + new_tokens
       @cache_len = total_len
       output = SimpleMatrix.new(new_tokens, @d_model)
+
+      if gpu_attention?
+        attention_heads_gpu(q_full, output, new_tokens, start_pos, total_len, scale)
+      else
+        attention_heads_cpu(q_full, output, new_tokens, start_pos, total_len, scale)
+      end
+
+      gpu_matmul(output, @w_o)
+    end
+
+    # --- CPU head loop: scores -> softmax -> AV, per query head/token ---
+    private def attention_heads_cpu(q_full : SimpleMatrix, output : SimpleMatrix,
+                                    new_tokens : Int32, start_pos : Int32,
+                                    total_len : Int32, scale : Float32)
+      head_dim = @head_dim
       heads_per_kv = @num_heads // @num_kv_heads
 
       half = head_dim // 2
       dm = @d_model
-      qdata = q_full.data
-      odata = output.data
+      qptr = q_full.data.to_unsafe
+      optr = output.data.to_unsafe
       # Reusable scratch buffers (avoid per-head/per-token allocations).
       q_rot = Array(Float32).new(head_dim, 0.0_f32)
       scores = Array(Float32).new(total_len, 0.0_f32)
       out = Array(Float32).new(head_dim, 0.0_f32)
+      # Raw pointers bypass Array bounds-checks in the hot inner loops and let
+      # the compiler vectorize the dot-product / weighted-sum reductions.
+      qrp = q_rot.to_unsafe
+      scp = scores.to_unsafe
+      outp = out.to_unsafe
 
       @num_heads.times do |h|
         q_col = h * head_dim
         kv_h = h // heads_per_kv
-        kcache = @k_cache[kv_h]
-        vcache = @v_cache[kv_h]
+        kptr = @k_cache[kv_h].to_unsafe
+        vptr = @v_cache[kv_h].to_unsafe
 
         new_tokens.times do |i|
           pos = start_pos + i
@@ -225,10 +273,10 @@ module SHAInet
             angle = (pos * freq).to_f32
             c = Math.cos(angle).to_f32
             s = Math.sin(angle).to_f32
-            x0 = qdata[qrow + idx]
-            x1 = qdata[qrow + idx + half]
-            q_rot[idx] = x0 * c - x1 * s
-            q_rot[idx + half] = x1 * c + x0 * s
+            x0 = qptr[qrow + idx]
+            x1 = qptr[qrow + idx + half]
+            qrp[idx] = x0 * c - x1 * s
+            qrp[idx + half] = x1 * c + x0 * s
             idx += 1
           end
 
@@ -241,11 +289,11 @@ module SHAInet
             dot = 0.0_f32
             d = 0
             while d < head_dim
-              dot += q_rot[d] * kcache[kbase + d]
+              dot += qrp[d] * kptr[kbase + d]
               d += 1
             end
             sv = dot * scale
-            scores[j] = sv
+            scp[j] = sv
             max_val = sv if sv > max_val
             j += 1
           end
@@ -254,8 +302,8 @@ module SHAInet
           exp_sum = 0.0_f32
           j = 0
           while j < visible
-            e = Math.exp((scores[j] - max_val).to_f64).to_f32
-            scores[j] = e
+            e = Math.exp((scp[j] - max_val).to_f64).to_f32
+            scp[j] = e
             exp_sum += e
             j += 1
           end
@@ -264,16 +312,16 @@ module SHAInet
           # out = sum_j (softmax_j) * V_cache[j]
           d = 0
           while d < head_dim
-            out[d] = 0.0_f32
+            outp[d] = 0.0_f32
             d += 1
           end
           j = 0
           while j < visible
-            w = scores[j] * inv_sum
+            w = scp[j] * inv_sum
             vbase = j * head_dim
             d = 0
             while d < head_dim
-              out[d] += w * vcache[vbase + d]
+              outp[d] += w * vptr[vbase + d]
               d += 1
             end
             j += 1
@@ -282,13 +330,140 @@ module SHAInet
           orow = i * dm + q_col
           d = 0
           while d < head_dim
-            odata[orow + d] = out[d]
+            optr[orow + d] = outp[d]
             d += 1
           end
         end
       end
+    end
 
-      gpu_matmul(output, @w_o)
+    # --- GPU head loop: fused scores/softmax/AV over the device KV cache ---
+    # One staging upload carries the new K/V rows plus the RoPE'd Q, then two
+    # kernels (cache append + attention) run on-device and only the attention
+    # output [new_tokens, d_model] is copied back.
+    private def attention_heads_gpu(q_full : SimpleMatrix, output : SimpleMatrix,
+                                    new_tokens : Int32, start_pos : Int32,
+                                    total_len : Int32, scale : Float32)
+      head_dim = @head_dim
+      dm = @d_model
+      half = head_dim // 2
+      heads_per_kv = @num_heads // @num_kv_heads
+      chunk = new_tokens * head_dim     # floats per kv_head per tensor
+      kv_floats = @num_kv_heads * chunk # staging size of K (and of V)
+      q_floats = new_tokens * dm
+      staging_floats = 2 * kv_floats + q_floats
+      ws_floats = @num_heads * new_tokens * total_len
+
+      ensure_gpu_cache!(total_len)
+      @gpu_staging, @gpu_staging_cap = grow_dev_buf(@gpu_staging, @gpu_staging_cap, staging_floats)
+      @gpu_attn_out, @gpu_attn_out_cap = grow_dev_buf(@gpu_attn_out, @gpu_attn_out_cap, q_floats)
+      @gpu_attn_ws, @gpu_attn_ws_cap = grow_dev_buf(@gpu_attn_ws, @gpu_attn_ws_cap, ws_floats)
+
+      st = @staging_host
+      if st.size < staging_floats
+        st = Array(Float32).new(staging_floats, 0.0_f32)
+        @staging_host = st
+      end
+      stp = st.to_unsafe
+
+      # New K/V rows: each kv_head's tail is contiguous in the CPU mirror
+      # (RoPE already applied to K at insert).
+      tail = start_pos * head_dim
+      @num_kv_heads.times do |kv_h|
+        (stp + kv_h * chunk).copy_from(@k_cache[kv_h].to_unsafe + tail, chunk)
+        (stp + kv_floats + kv_h * chunk).copy_from(@v_cache[kv_h].to_unsafe + tail, chunk)
+      end
+
+      # RoPE-rotate Q (HF half-split) into the staging blob, token-major.
+      # cos/sin depend only on (pos, rotation index), so compute once per token.
+      qptr = q_full.data.to_unsafe
+      qst = stp + 2 * kv_floats
+      cosv = Array(Float32).new(half, 0.0_f32)
+      sinv = Array(Float32).new(half, 0.0_f32)
+      cp = cosv.to_unsafe
+      sp = sinv.to_unsafe
+      new_tokens.times do |i|
+        pos = start_pos + i
+        half.times do |r|
+          angle = (pos * inv_freq(r)).to_f32
+          cp[r] = Math.cos(angle).to_f32
+          sp[r] = Math.sin(angle).to_f32
+        end
+        row = i * dm
+        @num_heads.times do |h|
+          base = row + h * head_dim
+          r = 0
+          while r < half
+            x0 = qptr[base + r]
+            x1 = qptr[base + r + half]
+            qst[base + r] = x0 * cp[r] - x1 * sp[r]
+            qst[base + r + half] = x1 * cp[r] + x0 * sp[r]
+            r += 1
+          end
+        end
+      end
+
+      CUDA.memcpy(@gpu_staging.as(Pointer(Void)), stp.as(Pointer(Void)),
+        staging_floats.to_u64 * 4_u64, CUDA::MemcpyKind::HostToDevice)
+      CUDA.kv_cache_append_f32(@gpu_staging, @gpu_k_cache, @gpu_v_cache,
+        new_tokens, start_pos, @num_kv_heads, head_dim, @gpu_cache_cap)
+      CUDA.attention_kv_f32(@gpu_staging + 2 * kv_floats, @gpu_k_cache, @gpu_v_cache,
+        @gpu_attn_out, @gpu_attn_ws, new_tokens, start_pos,
+        @num_heads, heads_per_kv, head_dim, @gpu_cache_cap, scale)
+      # Synchronous D2H read-back also orders after both kernels above.
+      CUDA.memcpy(output.data.to_unsafe.as(Pointer(Void)), @gpu_attn_out.as(Pointer(Void)),
+        q_floats.to_u64 * 4_u64, CUDA::MemcpyKind::DeviceToHost)
+    end
+
+    # GPU attention is used whenever the CUDA kernels are loadable and the
+    # caller has not forced the CPU path (property or SHAINET_CPU_ATTENTION=1).
+    # Memoized: fully_available? dlopens.
+    private def gpu_attention? : Bool
+      return false if @force_cpu_attention
+      avail = @gpu_attn_avail
+      if avail.nil?
+        avail = !ENV["SHAINET_CPU_ATTENTION"]? && CUDA.fully_available?
+        @gpu_attn_avail = avail
+      end
+      avail
+    end
+
+    # Ensure the device KV cache holds at least total_len positions per
+    # kv_head. Grows by doubling; on growth the CPU mirror (which already
+    # contains the new tokens) is re-uploaded into the fresh buffers.
+    private def ensure_gpu_cache!(total_len : Int32)
+      return if @gpu_cache_cap >= total_len
+      head_dim = @head_dim
+      new_cap = Math.max(256, Math.max(total_len, @gpu_cache_cap * 2))
+      bytes = @num_kv_heads.to_u64 * new_cap.to_u64 * head_dim.to_u64 * 4_u64
+      CUDA.free(@gpu_k_cache.as(Pointer(Void))) unless @gpu_k_cache.null?
+      CUDA.free(@gpu_v_cache.as(Pointer(Void))) unless @gpu_v_cache.null?
+      kp = Pointer(Float32).null
+      vp = Pointer(Float32).null
+      CUDA.malloc(pointerof(kp).as(Pointer(Pointer(Void))), bytes)
+      CUDA.malloc(pointerof(vp).as(Pointer(Pointer(Void))), bytes)
+      @gpu_k_cache = kp
+      @gpu_v_cache = vp
+      @gpu_cache_cap = new_cap
+      @num_kv_heads.times do |kv_h|
+        used = @k_cache[kv_h].size
+        next if used == 0
+        dst_off = kv_h.to_i64 * new_cap * head_dim
+        CUDA.memcpy((kp + dst_off).as(Pointer(Void)), @k_cache[kv_h].to_unsafe.as(Pointer(Void)),
+          used.to_u64 * 4_u64, CUDA::MemcpyKind::HostToDevice)
+        CUDA.memcpy((vp + dst_off).as(Pointer(Void)), @v_cache[kv_h].to_unsafe.as(Pointer(Void)),
+          used.to_u64 * 4_u64, CUDA::MemcpyKind::HostToDevice)
+      end
+    end
+
+    # Grow-only device buffer; frees and reallocates only when too small.
+    private def grow_dev_buf(ptr : Pointer(Float32), cur_cap : Int32, needed : Int32) : {Pointer(Float32), Int32}
+      return {ptr, cur_cap} if !ptr.null? && cur_cap >= needed
+      CUDA.free(ptr.as(Pointer(Void))) unless ptr.null?
+      new_cap = Math.max(needed, cur_cap * 2)
+      np = Pointer(Float32).null
+      CUDA.malloc(pointerof(np).as(Pointer(Pointer(Void))), new_cap.to_u64 * 4_u64)
+      {np, new_cap}
     end
 
     # --- GPU attention (full sequence, stays on device) ---

@@ -113,43 +113,15 @@ loop do
   eot_id = tokenizer.vocab["<|eot_id|>"]? || -1
   eos_id = tokenizer.vocab["<|end_of_text|>"]? || -1
   generated_ids = Array(Int32).new
-  temperature = 0.6_f64
-  repetition_penalty = 1.2_f64
+  sampler = SHAInet::Sampler.new(temperature: 0.6, top_k: 40, repetition_penalty: 1.2)
   gen_start = Time.instant
 
   max_tokens.times do
-    vocab_size = logits.cols
     last_row = logits.rows - 1
 
-    # Repetition penalty
-    generated_ids.last(20).each do |prev_id|
-      v = logits[last_row, prev_id]
-      logits[last_row, prev_id] = v > 0 ? (v / repetition_penalty).to_f32 : (v * repetition_penalty).to_f32
-    end
-
-    # Temperature sampling with top-k
-    scored = Array(Tuple(Int32, Float64)).new(vocab_size)
-    vocab_size.times { |j| scored << {j, logits[last_row, j] / temperature} }
-    scored.sort_by! { |_, v| v.nan? ? Float64::INFINITY : -v }
-    top_k = scored.first(40)
-
-    # Softmax over top-k
-    max_val = top_k[0][1]
-    exps = top_k.map { |id, v| {id, Math.exp(v - max_val)} }
-    sum = exps.sum { |_, e| e }
-    probs = exps.map { |id, e| {id, e / sum} }
-
-    # Sample
-    r = Random.rand
-    cumulative = 0.0
-    best_id = probs.last[0]
-    probs.each do |id, p|
-      cumulative += p
-      if r <= cumulative
-        best_id = id
-        break
-      end
-    end
+    # Penalize recently emitted tokens, then temperature + top-k sample.
+    sampler.apply_repetition_penalty!(logits, generated_ids, window: 20, row: last_row)
+    best_id = sampler.sample(logits, last_row)
 
     break if best_id == eot_id || best_id == eos_id || best_id < 0
     break unless logits[last_row, best_id].finite?

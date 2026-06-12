@@ -312,6 +312,8 @@ module SHAInet
     @@cross_entropy_loss_grad_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Void)? = nil
     @@softmax_cross_entropy_label_proc : Proc(Pointer(Float32), Pointer(Int32), Pointer(Float32), Pointer(Float32), Int32, Int32, Void)? = nil
     @@gemm_q8_f32_proc : Proc(Pointer(Float32), Pointer(Int8), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Void)? = nil
+    @@kv_cache_append_f32_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Void)? = nil
+    @@attention_kv_f32_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void)? = nil
 
     def softmax_rows(dst : Pointer(Float32), src : Pointer(Float32), rows : Int32, cols : Int32)
       # Validate inputs
@@ -806,6 +808,65 @@ module SHAInet
         fn.call(x, q, scales, y, m, n, k)
       rescue e
         Log.error { "CUDA Error in gemm_q8_f32: #{e}" }
+        raise e
+      end
+    end
+
+    # Scatter newly appended KV rows from a staging buffer into the device
+    # KV cache laid out [num_kv_heads, capacity, head_dim]. The staging buffer
+    # holds K chunks (kv_head-major, each chunk new_tokens*head_dim floats)
+    # followed by V chunks in the same layout.
+    def kv_cache_append_f32(staging : Pointer(Float32), kc : Pointer(Float32), vc : Pointer(Float32),
+                            new_tokens : Int32, start_pos : Int32, num_kv_heads : Int32,
+                            head_dim : Int32, capacity : Int32)
+      unless fn = @@kv_cache_append_f32_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "kv_cache_append_f32")
+          unless sym.null?
+            @@kv_cache_append_f32_proc = Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@kv_cache_append_f32_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+
+      begin
+        fn.call(staging, kc, vc, new_tokens, start_pos, num_kv_heads, head_dim, capacity)
+      rescue e
+        Log.error { "CUDA Error in kv_cache_append_f32: #{e}" }
+        raise e
+      end
+    end
+
+    # Causal attention over the device KV cache (one block per head/token).
+    # q/out: [new_tokens, num_heads*head_dim] row-major, q already RoPE'd.
+    # ws: scratch of at least num_heads*new_tokens*(start_pos+new_tokens) floats.
+    def attention_kv_f32(q : Pointer(Float32), kc : Pointer(Float32), vc : Pointer(Float32),
+                         out_ptr : Pointer(Float32), ws : Pointer(Float32),
+                         new_tokens : Int32, start_pos : Int32, num_heads : Int32,
+                         heads_per_kv : Int32, head_dim : Int32, capacity : Int32,
+                         scale : Float32)
+      unless fn = @@attention_kv_f32_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "attention_kv_f32")
+          unless sym.null?
+            @@attention_kv_f32_proc = Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void).new(sym, Pointer(Void).null)
+            fn = @@attention_kv_f32_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+
+      begin
+        fn.call(q, kc, vc, out_ptr, ws, new_tokens, start_pos, num_heads, heads_per_kv, head_dim, capacity, scale)
+      rescue e
+        Log.error { "CUDA Error in attention_kv_f32: #{e}" }
         raise e
       end
     end
