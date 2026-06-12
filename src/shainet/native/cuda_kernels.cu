@@ -628,4 +628,142 @@ void gemm_q8_f32(const float* x, const signed char* q, const float* scales,
     }
 }
 
+// ---- KV-cache attention (LLaMA decode/prefill) ----
+// Device cache layout: [num_kv_heads, capacity, head_dim] for both K and V.
+// `staging` holds the newly appended rows, already RoPE'd (K) on the host:
+//   [num_kv_heads * new_tokens * head_dim] K chunks (kv_head-major, then
+//   token-major — i.e. each kv_head's tail is contiguous), followed by the
+//   same layout for V. Scatter them into the cache at position start_pos.
+__global__ void kv_cache_append_kernel(const float* __restrict__ staging,
+                                       float* __restrict__ kc,
+                                       float* __restrict__ vc,
+                                       int new_tokens, int start_pos,
+                                       int num_kv_heads, int head_dim,
+                                       int capacity) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int chunk = new_tokens * head_dim;       // floats per kv_head per tensor
+    int total = num_kv_heads * chunk;        // floats per tensor (K or V)
+    if (idx >= 2 * total) return;
+    int is_v = idx >= total;
+    int r = is_v ? idx - total : idx;
+    int kv_h = r / chunk;
+    int rem = r - kv_h * chunk;              // t * head_dim + d
+    long dst = ((long)kv_h * capacity + start_pos) * head_dim + rem;
+    if (is_v) vc[dst] = staging[idx]; else kc[dst] = staging[idx];
+}
+
+void kv_cache_append_f32(const float* staging, float* kc, float* vc,
+                         int new_tokens, int start_pos, int num_kv_heads,
+                         int head_dim, int capacity) {
+    int total = 2 * num_kv_heads * new_tokens * head_dim;
+    int threads = 256;
+    int blocks = (total + threads - 1) / threads;
+    kv_cache_append_kernel<<<blocks, threads>>>(staging, kc, vc, new_tokens,
+                                                start_pos, num_kv_heads,
+                                                head_dim, capacity);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in kv_cache_append_f32: %s\n", cudaGetErrorString(err));
+    }
+}
+
+// Causal attention over the device KV cache. One block per (head, token):
+//   scores[j] = scale * (q_h · K[kv_h][j])  for j < visible = start_pos+i+1
+//   p = softmax(scores); out[h][d] = sum_j p[j] * V[kv_h][j][d]
+// q/out are [new_tokens, num_heads*head_dim] row-major (q already RoPE'd).
+// ws is a global scratch of at least num_heads*new_tokens*total_len floats.
+// GQA: query head h reads kv head h / heads_per_kv.
+__global__ void attention_kv_kernel(const float* __restrict__ q,
+                                    const float* __restrict__ kc,
+                                    const float* __restrict__ vc,
+                                    float* __restrict__ out,
+                                    float* __restrict__ ws,
+                                    int new_tokens, int start_pos,
+                                    int num_heads, int heads_per_kv,
+                                    int head_dim, int capacity, float scale) {
+    int h = blockIdx.x;
+    int i = blockIdx.y;
+    if (h >= num_heads || i >= new_tokens) return;
+
+    int kv_h = h / heads_per_kv;
+    int visible = start_pos + i + 1;
+    int total_len = start_pos + new_tokens;
+    int d_model = num_heads * head_dim;
+
+    const float* qv = q + (long)i * d_model + (long)h * head_dim;
+    const float* kh = kc + (long)kv_h * capacity * head_dim;
+    const float* vh = vc + (long)kv_h * capacity * head_dim;
+    float* wsrow = ws + ((long)h * new_tokens + i) * total_len;
+
+    int tid = threadIdx.x;
+    int nt = blockDim.x;
+    extern __shared__ float smem[];
+    float* q_s = smem;            // head_dim
+    float* red = smem + head_dim; // nt
+
+    for (int d = tid; d < head_dim; d += nt) q_s[d] = qv[d];
+    __syncthreads();
+
+    // Pass 1: scores into ws, track max for stable softmax.
+    float lmax = -INFINITY;
+    for (int j = tid; j < visible; j += nt) {
+        const float* krow = kh + (long)j * head_dim;
+        float dot = 0.0f;
+        for (int d = 0; d < head_dim; ++d) dot += q_s[d] * krow[d];
+        dot *= scale;
+        wsrow[j] = dot;
+        if (dot > lmax) lmax = dot;
+    }
+    red[tid] = lmax;
+    __syncthreads();
+    for (int s = nt >> 1; s > 0; s >>= 1) {
+        if (tid < s) red[tid] = fmaxf(red[tid], red[tid + s]);
+        __syncthreads();
+    }
+    float gmax = red[0];
+    __syncthreads();
+
+    // Pass 2: exponentiate + sum.
+    float lsum = 0.0f;
+    for (int j = tid; j < visible; j += nt) {
+        float e = expf(wsrow[j] - gmax);
+        wsrow[j] = e;
+        lsum += e;
+    }
+    red[tid] = lsum;
+    __syncthreads();
+    for (int s = nt >> 1; s > 0; s >>= 1) {
+        if (tid < s) red[tid] += red[tid + s];
+        __syncthreads();
+    }
+    float inv_sum = 1.0f / red[0];
+
+    // Pass 3: weighted sum of V rows. Threads cover head_dim, so adjacent
+    // threads read adjacent V elements (coalesced per j).
+    for (int d = tid; d < head_dim; d += nt) {
+        float acc = 0.0f;
+        for (int j = 0; j < visible; ++j) acc += wsrow[j] * vh[(long)j * head_dim + d];
+        out[(long)i * d_model + (long)h * head_dim + d] = acc * inv_sum;
+    }
+}
+
+void attention_kv_f32(const float* q, const float* kc, const float* vc,
+                      float* out, float* ws, int new_tokens, int start_pos,
+                      int num_heads, int heads_per_kv, int head_dim,
+                      int capacity, float scale) {
+    int threads = 128;
+    dim3 grid(num_heads, new_tokens);
+    size_t shmem = (head_dim + threads) * sizeof(float);
+    attention_kv_kernel<<<grid, threads, shmem>>>(q, kc, vc, out, ws,
+                                                  new_tokens, start_pos,
+                                                  num_heads, heads_per_kv,
+                                                  head_dim, capacity, scale);
+    // No device sync: callers read `out` back via a default-stream D2H memcpy
+    // which is ordered after this kernel. Just surface launch errors.
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in attention_kv_f32: %s\n", cudaGetErrorString(err));
+    }
+}
+
 } // extern "C"
