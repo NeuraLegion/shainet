@@ -127,24 +127,41 @@ loop do
       logits[last_row, prev_id] = v > 0 ? (v / repetition_penalty).to_f32 : (v * repetition_penalty).to_f32
     end
 
-    # Temperature sampling with top-k
-    scored = Array(Tuple(Int32, Float64)).new(vocab_size)
-    vocab_size.times { |j| scored << {j, logits[last_row, j] / temperature} }
-    scored.sort_by! { |_, v| v.nan? ? Float64::INFINITY : -v }
-    top_k = scored.first(40)
+    # Temperature sampling with top-k — partial selection instead of a full
+    # 128K-vocab sort (the sort dominated decode time at ~16ms/token).
+    k = 40
+    top_ids = Array(Int32).new(k)
+    top_vals = Array(Float64).new(k)
+    j = 0
+    while j < vocab_size
+      v = logits[last_row, j] / temperature
+      unless v.nan?
+        if top_vals.size < k
+          pos = top_vals.bsearch_index { |x| x < v } || top_vals.size
+          top_vals.insert(pos, v)
+          top_ids.insert(pos, j)
+        elsif v > top_vals.unsafe_fetch(k - 1)
+          pos = top_vals.bsearch_index { |x| x < v } || top_vals.size
+          top_vals.insert(pos, v)
+          top_ids.insert(pos, j)
+          top_vals.pop
+          top_ids.pop
+        end
+      end
+      j += 1
+    end
 
     # Softmax over top-k
-    max_val = top_k[0][1]
-    exps = top_k.map { |id, v| {id, Math.exp(v - max_val)} }
-    sum = exps.sum { |_, e| e }
-    probs = exps.map { |id, e| {id, e / sum} }
+    max_val = top_vals[0]
+    exps = Array(Float64).new(top_vals.size) { |i| Math.exp(top_vals[i] - max_val) }
+    sum = exps.sum
 
     # Sample
     r = Random.rand
     cumulative = 0.0
-    best_id = probs.last[0]
-    probs.each do |id, p|
-      cumulative += p
+    best_id = top_ids.last
+    top_ids.each_with_index do |id, i|
+      cumulative += exps[i] / sum
       if r <= cumulative
         best_id = id
         break
