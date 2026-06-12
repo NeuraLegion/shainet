@@ -201,18 +201,23 @@ module SHAInet
 
       half = head_dim // 2
       dm = @d_model
-      qdata = q_full.data
-      odata = output.data
+      qptr = q_full.data.to_unsafe
+      optr = output.data.to_unsafe
       # Reusable scratch buffers (avoid per-head/per-token allocations).
       q_rot = Array(Float32).new(head_dim, 0.0_f32)
       scores = Array(Float32).new(total_len, 0.0_f32)
       out = Array(Float32).new(head_dim, 0.0_f32)
+      # Raw pointers bypass Array bounds-checks in the hot inner loops and let
+      # the compiler vectorize the dot-product / weighted-sum reductions.
+      qrp = q_rot.to_unsafe
+      scp = scores.to_unsafe
+      outp = out.to_unsafe
 
       @num_heads.times do |h|
         q_col = h * head_dim
         kv_h = h // heads_per_kv
-        kcache = @k_cache[kv_h]
-        vcache = @v_cache[kv_h]
+        kptr = @k_cache[kv_h].to_unsafe
+        vptr = @v_cache[kv_h].to_unsafe
 
         new_tokens.times do |i|
           pos = start_pos + i
@@ -225,10 +230,10 @@ module SHAInet
             angle = (pos * freq).to_f32
             c = Math.cos(angle).to_f32
             s = Math.sin(angle).to_f32
-            x0 = qdata[qrow + idx]
-            x1 = qdata[qrow + idx + half]
-            q_rot[idx] = x0 * c - x1 * s
-            q_rot[idx + half] = x1 * c + x0 * s
+            x0 = qptr[qrow + idx]
+            x1 = qptr[qrow + idx + half]
+            qrp[idx] = x0 * c - x1 * s
+            qrp[idx + half] = x1 * c + x0 * s
             idx += 1
           end
 
@@ -241,11 +246,11 @@ module SHAInet
             dot = 0.0_f32
             d = 0
             while d < head_dim
-              dot += q_rot[d] * kcache[kbase + d]
+              dot += qrp[d] * kptr[kbase + d]
               d += 1
             end
             sv = dot * scale
-            scores[j] = sv
+            scp[j] = sv
             max_val = sv if sv > max_val
             j += 1
           end
@@ -254,8 +259,8 @@ module SHAInet
           exp_sum = 0.0_f32
           j = 0
           while j < visible
-            e = Math.exp((scores[j] - max_val).to_f64).to_f32
-            scores[j] = e
+            e = Math.exp((scp[j] - max_val).to_f64).to_f32
+            scp[j] = e
             exp_sum += e
             j += 1
           end
@@ -264,16 +269,16 @@ module SHAInet
           # out = sum_j (softmax_j) * V_cache[j]
           d = 0
           while d < head_dim
-            out[d] = 0.0_f32
+            outp[d] = 0.0_f32
             d += 1
           end
           j = 0
           while j < visible
-            w = scores[j] * inv_sum
+            w = scp[j] * inv_sum
             vbase = j * head_dim
             d = 0
             while d < head_dim
-              out[d] += w * vcache[vbase + d]
+              outp[d] += w * vptr[vbase + d]
               d += 1
             end
             j += 1
@@ -282,7 +287,7 @@ module SHAInet
           orow = i * dm + q_col
           d = 0
           while d < head_dim
-            odata[orow + d] = out[d]
+            optr[orow + d] = outp[d]
             d += 1
           end
         end
