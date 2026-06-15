@@ -41,23 +41,20 @@ model_dir =
   end
 
 STDERR.puts "Loading model from #{model_dir} (mode=#{mode})..."
-net = SHAInet::HFLoader.load_llama(model_dir)
+net = SHAInet::HFLoader.load_llama(model_dir, quantize: SHAInet::CUDA.fully_available? && mode == "q8")
 tokenizer = SHAInet::BPETokenizer.from_hf(File.join(model_dir, "tokenizer.json"))
 
 net.use_kv_cache = true
 if SHAInet::CUDA.fully_available?
-  free_before = (SHAInet::CUDA.memory_info.try &.[:free]) || 0_u64
   if mode == "q8"
-    STDERR.puts "Quantizing weights to Q8..."
-    net.quantize!
+    STDERR.puts "Weights stream-quantized to Q8 during load."
   else
     STDERR.puts "Moving to GPU (fp32)..."
     net.transformer_layers.each { |l| l.as(SHAInet::LlamaBlock).to_gpu! }
   end
   if info = SHAInet::CUDA.memory_info
     used = (info[:total] - info[:free]) / 1024.0 / 1024.0
-    weight_vram = (free_before - info[:free]) / 1024.0 / 1024.0
-    STDERR.puts "VRAM total in use: #{used.round(1)} MB | weights allocated by move: #{weight_vram.round(1)} MB"
+    STDERR.puts "VRAM total in use: #{used.round(1)} MB"
   end
 end
 

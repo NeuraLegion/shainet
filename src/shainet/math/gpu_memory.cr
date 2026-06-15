@@ -32,7 +32,7 @@ module SHAInet
       size = rows * cols
       count.times do
         ptr = Pointer(Float32).null
-        bytes = ((size) * 4).to_u64
+        bytes = size.to_u64 * 4_u64
         res = CUDA.malloc(pointerof(ptr).as(Pointer(Pointer(Void))), bytes)
         next unless res == 0
         @@pool[size] << ptr
@@ -67,7 +67,7 @@ module SHAInet
       raise ArgumentError.new("size mismatch") unless src.rows == dest.rows && src.cols == dest.cols
 
       size = src.rows * src.cols
-      bytes = (size * 4).to_u64
+      bytes = size.to_u64 * 4_u64
 
       # Keep CPU copy in sync
       dest_slice = Slice(Float32).new(dest.raw_data.to_unsafe, size)
@@ -91,7 +91,7 @@ module SHAInet
       raise ArgumentError.new("size mismatch") unless matrix.rows == dest.rows && matrix.cols == dest.cols
 
       size = matrix.rows * matrix.cols
-      bytes = (size * 4).to_u64
+      bytes = size.to_u64 * 4_u64
 
       # Direct copy F32 → F32
       dest.raw_data.to_unsafe.copy_from(matrix.data.to_unsafe, size)
@@ -116,7 +116,7 @@ module SHAInet
       dest_slice.copy_from(slice)
 
       if (dptr = dest.device_ptr) && !dptr.null?
-        bytes = (array.size * 4).to_u64
+        bytes = array.size.to_u64 * 4_u64
         result = CUDA.memcpy(dptr.as(Pointer(Void)), slice.to_unsafe.as(Pointer(Void)), bytes, CUDA::MemcpyKind::HostToDevice)
         Log.error { "GPUMemory.to_gpu!: GPU memcpy failed with result #{result}" } if result != 0
       end
@@ -143,7 +143,7 @@ module SHAInet
       dest_slice.copy_from(src_slice)
 
       if (dptr = dest.device_ptr) && !dptr.null?
-        bytes = (rows * cols * 4).to_u64
+        bytes = rows.to_u64 * cols.to_u64 * 4_u64
         result = CUDA.memcpy(dptr.as(Pointer(Void)), src_slice.to_unsafe.as(Pointer(Void)), bytes, CUDA::MemcpyKind::HostToDevice)
         Log.error { "GPUMemory.to_gpu!: GPU memcpy failed with result #{result}" } if result != 0
       end

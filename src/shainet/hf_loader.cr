@@ -7,8 +7,25 @@ module SHAInet
   module HFLoader
     SUPPORTED_MODELS = ["gpt2", "llama", "mistral", "qwen2"]
 
+    # Open a model's weights whether they're a single model.safetensors or
+    # sharded (model.safetensors.index.json + model-0000k-of-0000N.safetensors).
+    # Returns either a SafeTensors::File or ShardedFile — both expose the same
+    # read_matrix / read_f32 / read_f64 / has_tensor? / tensor_names interface
+    # used by the loaders.
+    def self.open_safetensors(model_dir : String) : SafeTensors::File | SafeTensors::ShardedFile
+      single = ::File.join(model_dir, "model.safetensors")
+      index = ::File.join(model_dir, "model.safetensors.index.json")
+      if ::File.exists?(single)
+        SafeTensors::File.new(single)
+      elsif ::File.exists?(index)
+        SafeTensors::ShardedFile.new(model_dir, index)
+      else
+        raise "No model.safetensors or model.safetensors.index.json found in #{model_dir}"
+      end
+    end
+
     # Generic entry point — reads config.json and dispatches to the right loader.
-    def self.load(model_dir : String) : Network
+    def self.load(model_dir : String, quantize : Bool = false) : Network
       config_path = ::File.join(model_dir, "config.json")
       raise "config.json not found in #{model_dir}" unless ::File.exists?(config_path)
 
@@ -19,7 +36,7 @@ module SHAInet
       when "gpt2"
         load_gpt2(model_dir)
       when "llama", "mistral", "qwen2"
-        load_llama(model_dir)
+        load_llama(model_dir, quantize: quantize)
       else
         raise "Unsupported model_type: '#{model_type}'. Supported: #{SUPPORTED_MODELS.join(", ")}"
       end
@@ -236,16 +253,20 @@ module SHAInet
       end
     end
 
-    # Load LLaMA/Mistral model from SafeTensors.
-    def self.load_llama(model_dir : String) : Network
+    # Load LLaMA/Mistral/Qwen2 model from SafeTensors.
+    #
+    # When `quantize` is true (and CUDA is available) each transformer block is
+    # quantized to Q8 *immediately after its weights are read*, so the fp32
+    # copies are freed before the next layer loads. This keeps host memory
+    # bounded (a few GB) instead of materializing the entire fp32 model at once
+    # (~28 GB for a 7B), which lets large models load on modest-RAM machines.
+    def self.load_llama(model_dir : String, quantize : Bool = false) : Network
       config_path = ::File.join(model_dir, "config.json")
-      model_path = ::File.join(model_dir, "model.safetensors")
-
       raise "config.json not found in #{model_dir}" unless ::File.exists?(config_path)
-      raise "model.safetensors not found in #{model_dir}" unless ::File.exists?(model_path)
 
+      do_quant = quantize && CUDA.fully_available?
       config = load_llama_config(config_path)
-      sf = SafeTensors::File.new(model_path)
+      sf = open_safetensors(model_dir)
 
       begin
         d = config.hidden_size
@@ -271,6 +292,9 @@ module SHAInet
         config.vocab_size.times do |i|
           d.times { |j| emb_layer.embeddings[i, j] = embed[i, j] }
         end
+        # Reclaim the embedding read transients before the layer loop begins
+        # (the bf16->f32 conversion buffer is large for big-vocab models).
+        GC.collect if do_quant
 
         # Load transformer blocks
         config.num_hidden_layers.times do |idx|
@@ -305,6 +329,16 @@ module SHAInet
             block.b_k = sf.read_f32("#{prefix}.self_attn.k_proj.bias")
             block.b_v = sf.read_f32("#{prefix}.self_attn.v_proj.bias")
           end
+
+          # Quantize this block now so its fp32 weights can be freed before the
+          # next layer is read (bounds peak host memory for large models). Force
+          # a collection so the just-replaced fp32 SimpleMatrices + read/transpose
+          # transients are reclaimed before the next layer allocates — otherwise
+          # GC lag lets ~28 layers of fp32 garbage pile up and OOM a big model.
+          if do_quant
+            block.to_gpu!(quantize: true)
+            GC.collect
+          end
         end
 
         # Output head
@@ -321,6 +355,11 @@ module SHAInet
           output_layer.weights = sf.read_matrix("lm_head.weight").transpose
         end
         output_layer.biases = SimpleMatrix.new(1, config.vocab_size)
+
+        # Quantize the lm_head (and idempotently re-confirm the already-Q8
+        # blocks) + set the quantized-weights flag. Blocks were quantized inline
+        # above, so this only materializes the lm_head fp32 transiently.
+        net.quantize! if do_quant
 
         net
       ensure

@@ -9,19 +9,43 @@ require "json"
 #   crystal run examples/llama_chat.cr -- unsloth/Llama-3.2-1B-Instruct 512
 
 DEFAULT_REPO = "unsloth/Llama-3.2-1B-Instruct"
-MODEL_FILES  = {"config.json", "model.safetensors", "tokenizer.json"}
 
 def download_model(model_dir : String, repo : String)
   Dir.mkdir_p(model_dir)
   base_url = "https://huggingface.co/#{repo}/resolve/main"
-  MODEL_FILES.each do |file|
+
+  fetch = ->(file : String, required : Bool) : Bool {
     path = File.join(model_dir, file)
-    next if File.exists?(path) && File.size(path) > 0
+    return true if File.exists?(path) && File.size(path) > 0
     STDERR.puts "  Downloading #{file}..."
     status = Process.run("curl", ["-fL", "--progress-bar", "#{base_url}/#{file}", "-o", path],
       output: Process::Redirect::Inherit, error: Process::Redirect::Inherit)
-    raise "Failed to download #{file} from #{repo}" unless status.success?
-  end
+    File.delete(path) if !status.success? && File.exists?(path)
+    raise "Failed to download #{file} from #{repo}" if required && !status.success?
+    status.success?
+  }
+
+  fetch.call("config.json", true)
+  fetch.call("tokenizer.json", true)
+
+  # Weights: single model.safetensors if it exists, otherwise the sharded set
+  # described by model.safetensors.index.json.
+  return if fetch.call("model.safetensors", false)
+  fetch.call("model.safetensors.index.json", true)
+  index = JSON.parse(File.read(File.join(model_dir, "model.safetensors.index.json")))
+  shards = index["weight_map"].as_h.values.map(&.as_s).uniq!
+  STDERR.puts "  Sharded model: #{shards.size} shard(s)"
+  shards.each { |shard| fetch.call(shard, true) }
+end
+
+def model_complete?(dir : String) : Bool
+  single = File.join(dir, "model.safetensors")
+  return true if File.exists?(single) && File.size(single) > 0
+  index = File.join(dir, "model.safetensors.index.json")
+  return false unless File.exists?(index) && File.size(index) > 0
+  # Sharded: every shard named in the index must exist and be non-empty.
+  shards = JSON.parse(File.read(index))["weight_map"].as_h.values.map(&.as_s).uniq!
+  shards.all? { |s| (p = File.join(dir, s)) && File.exists?(p) && File.size(p) > 0 }
 end
 
 arg = ARGV[0]?
@@ -33,7 +57,9 @@ model_dir =
   else
     repo = arg || DEFAULT_REPO
     dir = File.join(Dir.tempdir, "shainet_" + repo.gsub("/", "_"))
-    unless File.exists?(File.join(dir, "model.safetensors"))
+    # download_model is idempotent (it skips already-complete files), so calling
+    # it whenever the model is incomplete self-heals partial/interrupted runs.
+    unless model_complete?(dir)
       STDERR.puts "Downloading #{repo}..."
       download_model(dir, repo)
     end
@@ -43,7 +69,10 @@ model_dir =
 # --- Load model ---
 STDERR.puts "Loading model from #{model_dir}..."
 t = Time.instant
-net = SHAInet::HFLoader.load(model_dir)
+# Stream-quantize to Q8 during load (CUDA only, unless SHAINET_FP32=1) so large
+# models never materialize their full fp32 weights in host RAM at once.
+quantize = SHAInet::CUDA.fully_available? && !ENV["SHAINET_FP32"]?
+net = SHAInet::HFLoader.load(model_dir, quantize: quantize)
 STDERR.puts "Model loaded in #{(Time.instant - t).total_seconds.round(1)}s"
 STDERR.puts "  Layers: #{net.transformer_layers.size}, d_model: #{net.transformer_layers.first.as(SHAInet::LlamaBlock).d_model}"
 
@@ -59,8 +88,7 @@ if SHAInet::CUDA.fully_available?
     STDERR.puts "Moving to GPU (fp32)..."
     net.transformer_layers.each { |l| l.as(SHAInet::LlamaBlock).to_gpu! }
   else
-    STDERR.puts "Quantizing weights to Q8 (set SHAINET_FP32=1 to keep fp32)..."
-    net.quantize!
+    # Weights were already stream-quantized to Q8 during load.
     if info = SHAInet::CUDA.memory_info
       STDERR.puts "  VRAM in use: #{((info[:total] - info[:free]) / 1024.0 / 1024.0).round(1)} MB"
     end
