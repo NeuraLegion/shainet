@@ -536,6 +536,7 @@ module SHAInet
     # --- Helper: add a per-column bias vector to every row, in-place (host) ---
     private def add_bias!(m : SimpleMatrix, b : Array(Float32)?)
       return unless b
+      raise ArgumentError.new("bias size #{b.size} does not match matrix cols #{m.cols}") unless b.size == m.cols
       bp = b.to_unsafe
       data = m.data.to_unsafe
       cols = m.cols
@@ -555,6 +556,7 @@ module SHAInet
     # projection result has been synced back to host for per-head processing.
     private def add_bias!(m : CudaMatrix, b : Array(Float32)?)
       return unless b
+      raise ArgumentError.new("bias size #{b.size} does not match matrix cols #{m.cols}") unless b.size == m.cols
       m.rows.times { |r| m.cols.times { |c| m[r, c] = (m[r, c].to_f32 + b[c]) } }
     end
 

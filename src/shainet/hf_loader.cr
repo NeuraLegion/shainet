@@ -295,11 +295,15 @@ module SHAInet
           block.norm2.gamma = sf.read_matrix("#{prefix}.post_attention_layernorm.weight")
 
           # Optional Q/K/V projection biases — present in Qwen2-style models,
-          # absent in LLaMA/Mistral. Loaded as host-side fp32 vectors.
-          if sf.has_tensor?("#{prefix}.self_attn.q_proj.bias")
-            block.b_q = sf.read_f64("#{prefix}.self_attn.q_proj.bias").map(&.to_f32)
-            block.b_k = sf.read_f64("#{prefix}.self_attn.k_proj.bias").map(&.to_f32)
-            block.b_v = sf.read_f64("#{prefix}.self_attn.v_proj.bias").map(&.to_f32)
+          # absent in LLaMA/Mistral. They always appear as a complete set.
+          has_q = sf.has_tensor?("#{prefix}.self_attn.q_proj.bias")
+          has_k = sf.has_tensor?("#{prefix}.self_attn.k_proj.bias")
+          has_v = sf.has_tensor?("#{prefix}.self_attn.v_proj.bias")
+          if has_q || has_k || has_v
+            raise "Incomplete Q/K/V projection biases for #{prefix} (q=#{has_q} k=#{has_k} v=#{has_v})" unless has_q && has_k && has_v
+            block.b_q = sf.read_f32("#{prefix}.self_attn.q_proj.bias")
+            block.b_k = sf.read_f32("#{prefix}.self_attn.k_proj.bias")
+            block.b_v = sf.read_f32("#{prefix}.self_attn.v_proj.bias")
           end
         end
 

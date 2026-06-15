@@ -126,10 +126,10 @@ loop do
   print "LLaMA: "
 
   # Stop on whichever end-of-turn / end-of-text tokens this model defines.
-  stop_ids = Set(Int32).new
+  stop_ids = [] of Int32
   ["<|eot_id|>", "<|end_of_text|>", "<|im_end|>", "<|endoftext|>"].each do |name|
     if id = tokenizer.vocab[name]?
-      stop_ids << id
+      stop_ids << id unless stop_ids.includes?(id)
     end
   end
   generated_ids = Array(Int32).new
