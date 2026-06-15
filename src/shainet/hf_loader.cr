@@ -26,6 +26,7 @@ module SHAInet
 
     # Generic entry point — reads config.json and dispatches to the right loader.
     def self.load(model_dir : String, quantize : Bool = false, bits : Int32 = 8) : Network
+      raise ArgumentError.new("unsupported quantization bits: #{bits} (expected 8 or 4)") unless bits == 8 || bits == 4
       config_path = ::File.join(model_dir, "config.json")
       raise "config.json not found in #{model_dir}" unless ::File.exists?(config_path)
 
@@ -256,8 +257,9 @@ module SHAInet
     # Load LLaMA/Mistral/Qwen2 model from SafeTensors.
     #
     # When `quantize` is true (and CUDA is available) each transformer block is
-    # quantized to Q8 *immediately after its weights are read*, so the fp32
-    # copies are freed before the next layer loads. This keeps host memory
+    # quantized to the requested width (`bits`: 8 -> Q8, 4 -> Q4) *immediately
+    # after its weights are read*, so the fp32 copies are freed before the next
+    # layer loads. This keeps host memory
     # bounded (a few GB) instead of materializing the entire fp32 model at once
     # (~28 GB for a 7B), which lets large models load on modest-RAM machines.
     def self.load_llama(model_dir : String, quantize : Bool = false, bits : Int32 = 8) : Network

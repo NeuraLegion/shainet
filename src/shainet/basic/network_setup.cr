@@ -163,10 +163,12 @@ module SHAInet
       end
     end
 
-    # Quantize all LLaMA block weights and the lm_head to Q8_0 (int8 + per-32
-    # block fp32 scales) on the GPU. Opt-in; the fp32 path is untouched.
-    # Requires CUDA + custom kernels. After this, run with use_kv_cache = true.
+    # Quantize all LLaMA block weights and the lm_head on the GPU to the given
+    # bit width: bits == 8 -> Q8_0 (int8), bits == 4 -> Q4_0 (4-bit), both with
+    # per-32-block fp32 scales. Opt-in; the fp32 path is untouched. Requires CUDA
+    # + custom kernels. After this, run with use_kv_cache = true.
     def quantize!(bits : Int32 = 8)
+      raise ArgumentError.new("unsupported quantization bits: #{bits} (expected 8 or 4)") unless bits == 8 || bits == 4
       unless CUDA.fully_available?
         Log.warn { "quantize!: CUDA kernels unavailable, leaving weights in fp32" }
         return self

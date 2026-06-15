@@ -1477,7 +1477,8 @@ module SHAInet
     end
 
     # Quantized lm_head projection: [1, d_model] × dequant(W[d_model, vocab]).
-    # Uses the Q8 dequant-in-kernel GEMV. Returns [1, vocab] logits.
+    # Uses the dequant-in-kernel GEMV of the given quantized weight (Q8 or Q4).
+    # Returns [1, vocab] logits.
     private def gpu_lm_head_q(matrix : SimpleMatrix, weights : QuantizedWeight) : SimpleMatrix
       # Extract last token for transformer architectures (language modeling).
       last = if matrix.rows > 1

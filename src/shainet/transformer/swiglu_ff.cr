@@ -30,9 +30,10 @@ module SHAInet
       end
     end
 
-    # Quantize a weight to the requested bit width (8 or 4) regardless of its
-    # current representation.
+    # Quantize a weight to the requested bit width: bits == 4 -> Q4, bits == 8 ->
+    # Q8. Already-quantized weights are returned unchanged.
     private def to_quant(w : SimpleMatrix | CudaMatrix | QuantizedWeight, bits : Int32) : QuantizedWeight
+      raise ArgumentError.new("unsupported quantization bits: #{bits} (expected 8 or 4)") unless bits == 8 || bits == 4
       case w
       when QuantizedWeight then w
       when CudaMatrix

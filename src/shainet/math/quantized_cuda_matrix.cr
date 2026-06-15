@@ -1,4 +1,5 @@
 require "./simple_matrix"
+require "./cuda_matrix" # CudaMatrix is referenced in the QuantizedWeight interface
 {% if flag?(:enable_cuda) %}
   require "../cuda"
 {% else %}

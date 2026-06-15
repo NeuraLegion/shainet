@@ -1,4 +1,5 @@
 require "./simple_matrix"
+require "./quantized_cuda_matrix" # defines QuantizedWeight (included below)
 {% if flag?(:enable_cuda) %}
   require "../cuda"
 {% else %}

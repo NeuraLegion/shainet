@@ -631,7 +631,9 @@ void gemm_q8_f32(const float* x, const signed char* q, const float* scales,
 // ---- Q4_0-style quantized GEMM (4-bit symmetric, block=32) ----
 // Mirrors gemm_q8_f32 but weights are 4-bit. Two nibbles are packed per byte
 // along K: byte q[n, k/2] holds k in the low nibble and k+1 in the high nibble,
-// each stored as (value + 8) in 0..15, so value = nibble - 8 in [-8, 7].
+// each stored as (value + 8), so value = nibble - 8. The host quantizer produces
+// symmetric values in [-7, 7] (stored nibbles 1..15); the kernel decodes the
+// full [-8, 7] nibble range so any unused/padding nibble is handled safely.
 // One fp32 scale per BLOCK(=32) contiguous K elements per output column, scales
 // laid out [N, ceil(K/32)]. Reproduces row-major fp32 GEMM semantics:
 //   result[m,n] = sum_k x[m,k] * (value(n,k) * scale[n, k/32]).
