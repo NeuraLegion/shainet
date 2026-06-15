@@ -4,8 +4,25 @@ module SHAInet
   # Simple embedding lookup table. Maps integer token IDs to vectors of floats.
   class EmbeddingLayer < MatrixLayer
     property embeddings : SimpleMatrix | CudaMatrix
-    property gradients : SimpleMatrix | CudaMatrix
+    # Gradient table is allocated lazily on first access (training only). For
+    # inference via Network#run it is never touched, so we avoid a wasteful
+    # [vocab, l_size] allocation (e.g. ~2.18 GB host + 2.18 GB device for a 7B).
+    @gradients : (SimpleMatrix | CudaMatrix)?
     getter current_ids : Array(Int32)
+
+    # Lazily allocate and return the gradient table, matching the current
+    # storage type of @embeddings (CudaMatrix on GPU, SimpleMatrix on CPU).
+    def gradients : SimpleMatrix | CudaMatrix
+      g = @gradients
+      return g if g
+      ng = @embeddings.is_a?(CudaMatrix) ? CudaMatrix.zeros(@embeddings.rows, @l_size) : SimpleMatrix.zeros(@embeddings.rows, @l_size)
+      @gradients = ng
+      ng
+    end
+
+    def gradients=(g : SimpleMatrix | CudaMatrix)
+      @gradients = g
+    end
 
     # Pre-allocated workspace matrices to avoid allocations during forward pass
     @workspace_result : CudaMatrix | Nil
@@ -21,7 +38,7 @@ module SHAInet
           @embeddings[r, c] = rand(-0.1..0.1)
         end
       end
-      @gradients = mat_klass.zeros(vocab_size, l_size)
+      @gradients = nil # allocated lazily on first training use (see #gradients)
       @current_ids = [] of Int32
 
       # Initialize workspace matrices
@@ -33,7 +50,9 @@ module SHAInet
     def to_gpu!
       if CUDA.fully_available? && !@embeddings.is_a?(CudaMatrix)
         @embeddings = @embeddings.as(SimpleMatrix).to_cuda
-        @gradients = @gradients.as(SimpleMatrix).to_cuda
+        if g = @gradients
+          @gradients = g.as(SimpleMatrix).to_cuda
+        end
 
         # Return existing workspace to pool and reset
         if ws = @workspace_result
@@ -48,7 +67,9 @@ module SHAInet
     def to_cpu!
       if @embeddings.is_a?(CudaMatrix)
         @embeddings = @embeddings.as(CudaMatrix).to_simple
-        @gradients = @gradients.as(CudaMatrix).to_simple
+        if g = @gradients
+          @gradients = g.as(CudaMatrix).to_simple
+        end
         if ws = @workspace_result
           CudaMatrix.return_workspace(ws)
         end
@@ -177,60 +198,65 @@ module SHAInet
 
     # Accumulate gradient for the last embedded ids
     def accumulate_gradient
+      return if @current_ids.empty?
+      grads = gradients # lazily allocates on first training use
       until @current_ids.empty?
         id = @current_ids.shift
-        if CUDA.fully_available? && @gradients.is_a?(CudaMatrix) && (dptr = @gradients.as(CudaMatrix).device_ptr) && !dptr.null?
+        if CUDA.fully_available? && grads.is_a?(CudaMatrix) && (dptr = grads.as(CudaMatrix).device_ptr) && !dptr.null?
           # Create host vector from activation and sigma_prime matrices
           # Check if activations and sigma_primes are available from forward pass
           # CPU gradient accumulation
           if @activations && @sigma_primes
             @l_size.times do |i|
-              @gradients[id, i] += @activations.not_nil![0, i] * @sigma_primes.not_nil![0, i]
+              grads[id, i] += @activations.not_nil![0, i] * @sigma_primes.not_nil![0, i]
             end
           else
             # Fallback: use identity (no activation derivative applied)
             @l_size.times do |i|
-              @gradients[id, i] += 1.0
+              grads[id, i] += 1.0
             end
           end
         end
       end
       # Don't sync gradients from device - keep them on GPU for performance
-      if CUDA.fully_available? && @gradients.is_a?(CudaMatrix)
-        @gradients.as(CudaMatrix).mark_device_dirty!
+      if CUDA.fully_available? && grads.is_a?(CudaMatrix)
+        grads.as(CudaMatrix).mark_device_dirty!
       end
     end
 
     # Update embeddings using stored gradients and clear them
     def apply_gradients(lr : Float64)
-      if CUDA.fully_available? && @embeddings.is_a?(CudaMatrix) && @gradients.is_a?(CudaMatrix)
+      grads = @gradients
+      return if grads.nil? # nothing was accumulated (e.g. inference) — nothing to apply
+
+      if CUDA.fully_available? && @embeddings.is_a?(CudaMatrix) && grads.is_a?(CudaMatrix)
         e_ptr = @embeddings.as(CudaMatrix).device_ptr
-        g_ptr = @gradients.as(CudaMatrix).device_ptr
+        g_ptr = grads.as(CudaMatrix).device_ptr
         if e_ptr && g_ptr && !e_ptr.null? && !g_ptr.null?
           handle = CUDA.create_handle
           total = @embeddings.rows * @embeddings.cols
           CUDA.axpy(handle, -lr, g_ptr, e_ptr, total)
           CUDA.destroy_handle(handle)
           zeros = Array(Float32).new(total, 0.0_f32)
-          CUDA.memcpy(g_ptr.as(Pointer(Void)), zeros.to_unsafe.as(Pointer(Void)), (total * 4).to_u64, CUDA::MemcpyKind::HostToDevice)
+          CUDA.memcpy(g_ptr.as(Pointer(Void)), zeros.to_unsafe.as(Pointer(Void)), total.to_u64 * 4_u64, CUDA::MemcpyKind::HostToDevice)
           # Don't sync embeddings from device - keep them on GPU for performance
           @embeddings.as(CudaMatrix).mark_device_dirty!
-          @gradients.as(CudaMatrix).mark_device_clean! # gradients were zeroed on GPU
+          grads.as(CudaMatrix).mark_device_clean! # gradients were zeroed on GPU
           return
         end
       end
 
-      @gradients.rows.times do |r|
-        @gradients.cols.times do |c|
-          g = @gradients[r, c]
+      grads.rows.times do |r|
+        grads.cols.times do |c|
+          g = grads[r, c]
           next if g == 0.0
           @embeddings[r, c] -= lr * g
-          @gradients[r, c] = 0.0
+          grads[r, c] = 0.0
         end
       end
       if CUDA.fully_available? && @embeddings.is_a?(CudaMatrix)
         @embeddings.as(CudaMatrix).sync_to_device! unless @embeddings.as(CudaMatrix).device_dirty?
-        @gradients.as(CudaMatrix).sync_to_device! unless @gradients.as(CudaMatrix).device_dirty?
+        grads.as(CudaMatrix).sync_to_device! unless grads.as(CudaMatrix).device_dirty?
       end
     end
 
