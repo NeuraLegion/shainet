@@ -124,7 +124,7 @@ module SHAInet
       raise RuntimeError.new("CudaMatrix requires CUDA to be available") unless CUDA.fully_available?
       # Print the most frequent allocation sites
       size = @rows * @cols
-      bytes = (size * 4).to_u64
+      bytes = size.to_u64 * 4_u64
 
       # Check if we would exceed memory limits or are getting close
       if @@total_gpu_memory_allocated + bytes > @@max_gpu_memory ||
@@ -282,7 +282,7 @@ module SHAInet
 
       begin
         size = @rows * @cols
-        bytes = (size * 4).to_u64
+        bytes = size.to_u64 * 4_u64
 
         # Track sync operations for performance monitoring
         @@sync_to_device_count += 1
@@ -313,7 +313,7 @@ module SHAInet
 
       begin
         size = @rows * @cols
-        bytes = (size * 4).to_u64
+        bytes = size.to_u64 * 4_u64
 
         # Track sync operations for performance monitoring
         @@sync_from_device_count += 1
@@ -495,7 +495,7 @@ module SHAInet
       # If we have GPU data, copy it directly on GPU
       if device_dirty?
         # GPU -> GPU copy
-        bytes = (@rows * @cols * 4).to_u64
+        bytes = @rows.to_u64 * @cols.to_u64 * 4_u64
         result = CUDA.memcpy(dptr.as(Pointer(Void)), sptr.as(Pointer(Void)), bytes, CUDA::MemcpyKind::DeviceToDevice)
         raise RuntimeError.new("GPU-to-GPU memcpy failed") if result != 0
 
@@ -758,7 +758,7 @@ module SHAInet
       other.sync_to_device!("copy_from") unless other.device_dirty?
 
       # GPU -> GPU copy
-      bytes = (@rows * @cols * 4).to_u64
+      bytes = @rows.to_u64 * @cols.to_u64 * 4_u64
       result = CUDA.memcpy(dptr.as(Pointer(Void)), sptr.as(Pointer(Void)), bytes, CUDA::MemcpyKind::DeviceToDevice)
       raise RuntimeError.new("GPU-to-GPU memcpy failed") if result != 0
 
