@@ -7,6 +7,22 @@ module SHAInet
   module HFLoader
     SUPPORTED_MODELS = ["gpt2", "llama", "mistral", "qwen2"]
 
+    # Open a model's weights whether they're a single model.safetensors or
+    # sharded (model.safetensors.index.json + model-0000k-of-0000N.safetensors).
+    # Returns either a SafeTensors::File or ShardedFile — both expose the same
+    # read_matrix / read_f64 / has_tensor? interface used by the loaders.
+    def self.open_safetensors(model_dir : String) : SafeTensors::File | SafeTensors::ShardedFile
+      single = ::File.join(model_dir, "model.safetensors")
+      index = ::File.join(model_dir, "model.safetensors.index.json")
+      if ::File.exists?(single)
+        SafeTensors::File.new(single)
+      elsif ::File.exists?(index)
+        SafeTensors::ShardedFile.new(model_dir, index)
+      else
+        raise "No model.safetensors or model.safetensors.index.json found in #{model_dir}"
+      end
+    end
+
     # Generic entry point — reads config.json and dispatches to the right loader.
     def self.load(model_dir : String) : Network
       config_path = ::File.join(model_dir, "config.json")
@@ -239,13 +255,10 @@ module SHAInet
     # Load LLaMA/Mistral model from SafeTensors.
     def self.load_llama(model_dir : String) : Network
       config_path = ::File.join(model_dir, "config.json")
-      model_path = ::File.join(model_dir, "model.safetensors")
-
       raise "config.json not found in #{model_dir}" unless ::File.exists?(config_path)
-      raise "model.safetensors not found in #{model_dir}" unless ::File.exists?(model_path)
 
       config = load_llama_config(config_path)
-      sf = SafeTensors::File.new(model_path)
+      sf = open_safetensors(model_dir)
 
       begin
         d = config.hidden_size

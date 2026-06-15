@@ -9,19 +9,38 @@ require "json"
 #   crystal run examples/llama_chat.cr -- unsloth/Llama-3.2-1B-Instruct 512
 
 DEFAULT_REPO = "unsloth/Llama-3.2-1B-Instruct"
-MODEL_FILES  = {"config.json", "model.safetensors", "tokenizer.json"}
 
 def download_model(model_dir : String, repo : String)
   Dir.mkdir_p(model_dir)
   base_url = "https://huggingface.co/#{repo}/resolve/main"
-  MODEL_FILES.each do |file|
+
+  fetch = ->(file : String, required : Bool) : Bool {
     path = File.join(model_dir, file)
-    next if File.exists?(path) && File.size(path) > 0
+    return true if File.exists?(path) && File.size(path) > 0
     STDERR.puts "  Downloading #{file}..."
     status = Process.run("curl", ["-fL", "--progress-bar", "#{base_url}/#{file}", "-o", path],
       output: Process::Redirect::Inherit, error: Process::Redirect::Inherit)
-    raise "Failed to download #{file} from #{repo}" unless status.success?
-  end
+    File.delete(path) if !status.success? && File.exists?(path)
+    raise "Failed to download #{file} from #{repo}" if required && !status.success?
+    status.success?
+  }
+
+  fetch.call("config.json", true)
+  fetch.call("tokenizer.json", true)
+
+  # Weights: single model.safetensors if it exists, otherwise the sharded set
+  # described by model.safetensors.index.json.
+  return if fetch.call("model.safetensors", false)
+  fetch.call("model.safetensors.index.json", true)
+  index = JSON.parse(File.read(File.join(model_dir, "model.safetensors.index.json")))
+  shards = index["weight_map"].as_h.values.map(&.as_s).uniq!
+  STDERR.puts "  Sharded model: #{shards.size} shard(s)"
+  shards.each { |shard| fetch.call(shard, true) }
+end
+
+def model_present?(dir : String) : Bool
+  File.exists?(File.join(dir, "model.safetensors")) ||
+    File.exists?(File.join(dir, "model.safetensors.index.json"))
 end
 
 arg = ARGV[0]?
@@ -33,7 +52,7 @@ model_dir =
   else
     repo = arg || DEFAULT_REPO
     dir = File.join(Dir.tempdir, "shainet_" + repo.gsub("/", "_"))
-    unless File.exists?(File.join(dir, "model.safetensors"))
+    unless model_present?(dir)
       STDERR.puts "Downloading #{repo}..."
       download_model(dir, repo)
     end
