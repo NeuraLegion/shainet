@@ -38,9 +38,14 @@ def download_model(model_dir : String, repo : String)
   shards.each { |shard| fetch.call(shard, true) }
 end
 
-def model_present?(dir : String) : Bool
-  File.exists?(File.join(dir, "model.safetensors")) ||
-    File.exists?(File.join(dir, "model.safetensors.index.json"))
+def model_complete?(dir : String) : Bool
+  single = File.join(dir, "model.safetensors")
+  return true if File.exists?(single) && File.size(single) > 0
+  index = File.join(dir, "model.safetensors.index.json")
+  return false unless File.exists?(index) && File.size(index) > 0
+  # Sharded: every shard named in the index must exist and be non-empty.
+  shards = JSON.parse(File.read(index))["weight_map"].as_h.values.map(&.as_s).uniq!
+  shards.all? { |s| (p = File.join(dir, s)) && File.exists?(p) && File.size(p) > 0 }
 end
 
 arg = ARGV[0]?
@@ -52,7 +57,9 @@ model_dir =
   else
     repo = arg || DEFAULT_REPO
     dir = File.join(Dir.tempdir, "shainet_" + repo.gsub("/", "_"))
-    unless model_present?(dir)
+    # download_model is idempotent (it skips already-complete files), so calling
+    # it whenever the model is incomplete self-heals partial/interrupted runs.
+    unless model_complete?(dir)
       STDERR.puts "Downloading #{repo}..."
       download_model(dir, repo)
     end

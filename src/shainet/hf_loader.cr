@@ -10,7 +10,8 @@ module SHAInet
     # Open a model's weights whether they're a single model.safetensors or
     # sharded (model.safetensors.index.json + model-0000k-of-0000N.safetensors).
     # Returns either a SafeTensors::File or ShardedFile — both expose the same
-    # read_matrix / read_f64 / has_tensor? interface used by the loaders.
+    # read_matrix / read_f32 / read_f64 / has_tensor? / tensor_names interface
+    # used by the loaders.
     def self.open_safetensors(model_dir : String) : SafeTensors::File | SafeTensors::ShardedFile
       single = ::File.join(model_dir, "model.safetensors")
       index = ::File.join(model_dir, "model.safetensors.index.json")
