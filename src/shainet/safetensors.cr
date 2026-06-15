@@ -223,5 +223,50 @@ module SHAInet
         pointerof(f32_bits).as(Pointer(Float32)).value
       end
     end
+
+    # A model split across multiple .safetensors shards (large models ship as
+    # model-00001-of-0000N.safetensors + a model.safetensors.index.json whose
+    # "weight_map" maps each tensor name to its shard file). Presents the same
+    # read interface as File, routing each tensor read to the owning shard.
+    class ShardedFile
+      @shards : Hash(String, File)        # shard filename -> open File
+      @owner : Hash(String, File)         # tensor name   -> owning shard File
+
+      def initialize(model_dir : String, index_path : String)
+        index = JSON.parse(::File.read(index_path))
+        weight_map = index["weight_map"].as_h
+        @shards = Hash(String, File).new
+        @owner = Hash(String, File).new
+        weight_map.each do |tensor, shard_any|
+          shard = shard_any.as_s
+          f = (@shards[shard] ||= File.new(::File.join(model_dir, shard)))
+          @owner[tensor] = f
+        end
+      end
+
+      def has_tensor?(name : String) : Bool
+        @owner.has_key?(name)
+      end
+
+      def tensor_names : Array(String)
+        @owner.keys
+      end
+
+      def read_f32(name : String) : Array(Float32)
+        (@owner[name]? || raise "Tensor '#{name}' not found in any shard").read_f32(name)
+      end
+
+      def read_f64(name : String) : Array(Float64)
+        (@owner[name]? || raise "Tensor '#{name}' not found in any shard").read_f64(name)
+      end
+
+      def read_matrix(name : String) : SimpleMatrix
+        (@owner[name]? || raise "Tensor '#{name}' not found in any shard").read_matrix(name)
+      end
+
+      def close
+        @shards.each_value(&.close)
+      end
+    end
   end
 end
