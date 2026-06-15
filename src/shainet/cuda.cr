@@ -312,6 +312,7 @@ module SHAInet
     @@cross_entropy_loss_grad_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Void)? = nil
     @@softmax_cross_entropy_label_proc : Proc(Pointer(Float32), Pointer(Int32), Pointer(Float32), Pointer(Float32), Int32, Int32, Void)? = nil
     @@gemm_q8_f32_proc : Proc(Pointer(Float32), Pointer(Int8), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Void)? = nil
+    @@gemm_q4_f32_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Void)? = nil
     @@kv_cache_append_f32_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Void)? = nil
     @@attention_kv_f32_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void)? = nil
 
@@ -808,6 +809,32 @@ module SHAInet
         fn.call(x, q, scales, y, m, n, k)
       rescue e
         Log.error { "CUDA Error in gemm_q8_f32: #{e}" }
+        raise e
+      end
+    end
+
+    # Q4_0-style 4-bit GEMM. q holds two nibbles per byte along K, laid out
+    # [N, ceil(K/2)]; scales are fp32 [N, ceil(K/32)] (one per 32-element block).
+    def gemm_q4_f32(x : Pointer(Float32), q : Pointer(UInt8), scales : Pointer(Float32),
+                    y : Pointer(Float32), m : Int32, n : Int32, k : Int32)
+      unless fn = @@gemm_q4_f32_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "gemm_q4_f32")
+          unless sym.null?
+            @@gemm_q4_f32_proc = Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@gemm_q4_f32_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+
+      begin
+        fn.call(x, q, scales, y, m, n, k)
+      rescue e
+        Log.error { "CUDA Error in gemm_q4_f32: #{e}" }
         raise e
       end
     end

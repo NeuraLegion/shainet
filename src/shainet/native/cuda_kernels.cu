@@ -628,6 +628,62 @@ void gemm_q8_f32(const float* x, const signed char* q, const float* scales,
     }
 }
 
+// ---- Q4_0-style quantized GEMM (4-bit symmetric, block=32) ----
+// Mirrors gemm_q8_f32 but weights are 4-bit. Two nibbles are packed per byte
+// along K: byte q[n, k/2] holds k in the low nibble and k+1 in the high nibble,
+// each stored as (value + 8) in 0..15, so value = nibble - 8 in [-8, 7].
+// One fp32 scale per BLOCK(=32) contiguous K elements per output column, scales
+// laid out [N, ceil(K/32)]. Reproduces row-major fp32 GEMM semantics:
+//   result[m,n] = sum_k x[m,k] * (value(n,k) * scale[n, k/32]).
+#define Q4_BLK 32
+__global__ void gemm_q4_f32_kernel(const float* __restrict__ x,
+                                   const unsigned char* __restrict__ q,
+                                   const float* __restrict__ scales,
+                                   float* __restrict__ y,
+                                   int M, int N, int K) {
+    int n = blockIdx.x; // output column (0..N)
+    int m = blockIdx.y; // activation row (0..M)
+    if (n >= N || m >= M) return;
+
+    int nblocks = (K + Q4_BLK - 1) / Q4_BLK;
+    int kbytes = (K + 1) >> 1; // packed bytes per output column
+    const float* xrow = x + (long)m * K;
+    const unsigned char* qrow = q + (long)n * kbytes;
+    const float* srow = scales + (long)n * nblocks;
+
+    int tid = threadIdx.x;
+    int nthreads = blockDim.x;
+
+    // Each thread strides over the full K dimension, unpacking its nibble.
+    float partial = 0.0f;
+    for (int k = tid; k < K; k += nthreads) {
+        unsigned char byte = qrow[k >> 1];
+        int nib = (k & 1) ? (byte >> 4) : (byte & 0x0F);
+        partial += (float)(nib - 8) * xrow[k] * srow[k >> 5];
+    }
+
+    extern __shared__ float sdata[];
+    sdata[tid] = partial;
+    __syncthreads();
+    for (int stride = nthreads >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) sdata[tid] += sdata[tid + stride];
+        __syncthreads();
+    }
+    if (tid == 0) y[(long)m * N + n] = sdata[0];
+}
+
+void gemm_q4_f32(const float* x, const unsigned char* q, const float* scales,
+                 float* y, int M, int N, int K) {
+    int threads = 256;
+    dim3 grid(N, M);
+    size_t shmem = threads * sizeof(float);
+    gemm_q4_f32_kernel<<<grid, threads, shmem>>>(x, q, scales, y, M, N, K);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in gemm_q4_f32: %s\n", cudaGetErrorString(err));
+    }
+}
+
 // ---- KV-cache attention (LLaMA decode/prefill) ----
 // Device cache layout: [num_kv_heads, capacity, head_dim] for both K and V.
 // `staging` holds the newly appended rows, already RoPE'd (K) on the host:

@@ -90,6 +90,10 @@ module SHAInet
       raise "CUDA disabled"
     end
 
+    def gemm_q4_f32(*args)
+      raise "CUDA disabled"
+    end
+
     def kv_cache_append_f32(*args)
       raise "CUDA disabled"
     end

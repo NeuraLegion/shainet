@@ -38,7 +38,7 @@ module SHAInet
     property quantize_weights : Bool = false
 
     # Quantized lm_head weight (populated by quantize! when CUDA is available).
-    @lm_head_q : QuantizedCudaMatrix? = nil
+    @lm_head_q : QuantizedWeight? = nil
     # Persistent decode buffers for the quantized lm_head GEMV (reused per token).
     @lm_head_x : CudaMatrix? = nil
     @lm_head_r : CudaMatrix? = nil
@@ -166,7 +166,7 @@ module SHAInet
     # Quantize all LLaMA block weights and the lm_head to Q8_0 (int8 + per-32
     # block fp32 scales) on the GPU. Opt-in; the fp32 path is untouched.
     # Requires CUDA + custom kernels. After this, run with use_kv_cache = true.
-    def quantize!
+    def quantize!(bits : Int32 = 8)
       unless CUDA.fully_available?
         Log.warn { "quantize!: CUDA kernels unavailable, leaving weights in fp32" }
         return self
@@ -174,7 +174,7 @@ module SHAInet
 
       @quantize_weights = true
       @transformer_layers.each do |l|
-        l.as(LlamaBlock).to_gpu!(quantize: true) if l.is_a?(LlamaBlock)
+        l.as(LlamaBlock).to_gpu!(quantize: true, bits: bits) if l.is_a?(LlamaBlock)
       end
 
       # Quantize the output projection (lm_head). Stored separately so the
@@ -182,10 +182,9 @@ module SHAInet
       out_layer = @output_layers.last?
       if out_layer
         w = out_layer.weights
-        if w.is_a?(SimpleMatrix)
-          @lm_head_q = QuantizedCudaMatrix.from_simple(w)
-        elsif w.is_a?(CudaMatrix)
-          @lm_head_q = QuantizedCudaMatrix.from_simple(w.to_simple)
+        sm = w.is_a?(SimpleMatrix) ? w : (w.is_a?(CudaMatrix) ? w.to_simple : nil)
+        if sm
+          @lm_head_q = bits == 4 ? Q4CudaMatrix.from_simple(sm) : QuantizedCudaMatrix.from_simple(sm)
         end
       end
 
