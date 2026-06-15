@@ -62,7 +62,10 @@ model_dir =
 # --- Load model ---
 STDERR.puts "Loading model from #{model_dir}..."
 t = Time.instant
-net = SHAInet::HFLoader.load(model_dir)
+# Stream-quantize to Q8 during load (CUDA only, unless SHAINET_FP32=1) so large
+# models never materialize their full fp32 weights in host RAM at once.
+quantize = SHAInet::CUDA.fully_available? && !ENV["SHAINET_FP32"]?
+net = SHAInet::HFLoader.load(model_dir, quantize: quantize)
 STDERR.puts "Model loaded in #{(Time.instant - t).total_seconds.round(1)}s"
 STDERR.puts "  Layers: #{net.transformer_layers.size}, d_model: #{net.transformer_layers.first.as(SHAInet::LlamaBlock).d_model}"
 
@@ -78,8 +81,7 @@ if SHAInet::CUDA.fully_available?
     STDERR.puts "Moving to GPU (fp32)..."
     net.transformer_layers.each { |l| l.as(SHAInet::LlamaBlock).to_gpu! }
   else
-    STDERR.puts "Quantizing weights to Q8 (set SHAINET_FP32=1 to keep fp32)..."
-    net.quantize!
+    # Weights were already stream-quantized to Q8 during load.
     if info = SHAInet::CUDA.memory_info
       STDERR.puts "  VRAM in use: #{((info[:total] - info[:free]) / 1024.0 / 1024.0).round(1)} MB"
     end
