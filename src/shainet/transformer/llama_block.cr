@@ -22,6 +22,16 @@ module SHAInet
     property w_v : SimpleMatrix | CudaMatrix | QuantizedCudaMatrix
     property w_o : SimpleMatrix | CudaMatrix | QuantizedCudaMatrix
 
+    # Optional Q/K/V projection biases. Qwen2-style architectures add a bias to
+    # the query/key/value projections; LLaMA/Mistral do not. Kept as host-side
+    # fp32 vectors and added to the projection output before RoPE, so they work
+    # identically on the fp32, CUDA, and Q8 weight paths. nil means "no bias"
+    # (the LLaMA default — zero overhead, behaviour unchanged). Sizes: b_q is
+    # d_model; b_k/b_v are num_kv_heads * head_dim. o_proj has no bias in Qwen2.
+    property b_q : Array(Float32)? = nil
+    property b_k : Array(Float32)? = nil
+    property b_v : Array(Float32)? = nil
+
     # KV cache: stored per kv_head as [seq_len, head_dim] growing matrices
     @k_cache : Array(Array(Float32)) # [num_kv_heads][seq_len * head_dim]
     @v_cache : Array(Array(Float32))
@@ -165,6 +175,9 @@ module SHAInet
       q_full = gpu_matmul(x, @w_q) # [seq, d_model]
       k_full = gpu_matmul(x, @w_k) # [seq, kv_dim]
       v_full = gpu_matmul(x, @w_v) # [seq, kv_dim]
+      add_bias!(q_full, @b_q)
+      add_bias!(k_full, @b_k)
+      add_bias!(v_full, @b_v)
 
       output = SimpleMatrix.new(seq_len, @d_model)
       heads_per_kv = @num_heads // @num_kv_heads
@@ -199,6 +212,10 @@ module SHAInet
       q_full = gpu_matmul(x, @w_q)
       k_new = gpu_matmul(x, @w_k)
       v_new = gpu_matmul(x, @w_v)
+      # Qwen2-style projection biases (no-op when unset, i.e. LLaMA).
+      add_bias!(q_full, @b_q)
+      add_bias!(k_new, @b_k)
+      add_bias!(v_new, @b_v)
 
       # Apply RoPE to new K at insert time (HF half-split), then append to cache.
       half = head_dim // 2
@@ -481,6 +498,9 @@ module SHAInet
       q_full.sync_from_device!("attn_q") if q_full.device_dirty?
       k_full.sync_from_device!("attn_k") if k_full.device_dirty?
       v_full.sync_from_device!("attn_v") if v_full.device_dirty?
+      add_bias!(q_full, @b_q)
+      add_bias!(k_full, @b_k)
+      add_bias!(v_full, @b_v)
 
       output = SimpleMatrix.new(seq_len, @d_model)
       heads_per_kv = @num_heads // @num_kv_heads
@@ -511,6 +531,31 @@ module SHAInet
       seq_len.times { |i| @d_model.times { |j| result[i, j] = output[i, j] } }
       result.sync_to_device!("attn_concat")
       result * @w_o.as(CudaMatrix)
+    end
+
+    # --- Helper: add a per-column bias vector to every row, in-place (host) ---
+    private def add_bias!(m : SimpleMatrix, b : Array(Float32)?)
+      return unless b
+      bp = b.to_unsafe
+      data = m.data.to_unsafe
+      cols = m.cols
+      r = 0
+      while r < m.rows
+        base = r * cols
+        c = 0
+        while c < cols
+          data[base + c] += bp[c]
+          c += 1
+        end
+        r += 1
+      end
+    end
+
+    # CudaMatrix variant: used by the full-sequence GPU path after the
+    # projection result has been synced back to host for per-head processing.
+    private def add_bias!(m : CudaMatrix, b : Array(Float32)?)
+      return unless b
+      m.rows.times { |r| m.cols.times { |c| m[r, c] = (m[r, c].to_f32 + b[c]) } }
     end
 
     # --- Helper: extract head slice ---
