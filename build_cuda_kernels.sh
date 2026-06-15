@@ -17,13 +17,37 @@ if ! command -v nvcc &> /dev/null; then
     exit 0  # Exit successfully to not break shards install
 fi
 
-# Set CUDA paths (adjust if needed)
-CUDA_PATH=${CUDA_PATH:-/usr/local/cuda}
+# Locate the CUDA toolkit: prefer nvcc's own install prefix, then common paths.
+# Override by exporting CUDA_PATH.
+if [ -z "${CUDA_PATH}" ]; then
+    NVCC_BIN="$(command -v nvcc)"
+    if [ -n "${NVCC_BIN}" ]; then
+        CUDA_PATH="$(dirname "$(dirname "${NVCC_BIN}")")"
+    elif [ -d /opt/cuda ]; then
+        CUDA_PATH=/opt/cuda
+    else
+        CUDA_PATH=/usr/local/cuda
+    fi
+fi
 SRC_DIR="src/shainet/native"
 OUTPUT_LIB="libshainet_cuda_kernels.so"
 
+# Detect the GPU's compute capability and target it (e.g. 8.9 -> sm_89).
+# Override by exporting CUDA_ARCH (e.g. CUDA_ARCH=sm_89).
+if [ -z "${CUDA_ARCH}" ]; then
+    CAP="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d '. ')"
+    if [ -n "${CAP}" ]; then
+        CUDA_ARCH="sm_${CAP}"
+    else
+        CUDA_ARCH="sm_75"  # oldest arch supported by recent CUDA toolkits
+        echo "Note: could not detect GPU; defaulting to ${CUDA_ARCH}. Override with CUDA_ARCH=sm_XX."
+    fi
+fi
+
+echo "Using CUDA toolkit at ${CUDA_PATH}, target architecture ${CUDA_ARCH}"
+
 # Compilation flags
-NVCC_FLAGS="-shared --compiler-options=-fPIC -O3 -arch=sm_60"
+NVCC_FLAGS="-shared --compiler-options=-fPIC -O3 -arch=${CUDA_ARCH}"
 INCLUDE_FLAGS="-I${CUDA_PATH}/include"
 LIBRARY_FLAGS="-L${CUDA_PATH}/lib64 -lcurand"
 
