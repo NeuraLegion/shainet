@@ -43,7 +43,7 @@ model_dir =
 # --- Load model ---
 STDERR.puts "Loading model from #{model_dir}..."
 t = Time.instant
-net = SHAInet::HFLoader.load_llama(model_dir)
+net = SHAInet::HFLoader.load(model_dir)
 STDERR.puts "Model loaded in #{(Time.instant - t).total_seconds.round(1)}s"
 STDERR.puts "  Layers: #{net.transformer_layers.size}, d_model: #{net.transformer_layers.first.as(SHAInet::LlamaBlock).d_model}"
 
@@ -76,15 +76,30 @@ loop do
 
   net.clear_cache!
 
-  # Build prompt with LLaMA 3 chat template
+  # Build prompt using whichever chat template the tokenizer supports.
   sp = ->(name : String) { tokenizer.vocab[name]? }
   bos = sp.call("<|begin_of_text|>")
   start_hdr = sp.call("<|start_header_id|>")
   end_hdr = sp.call("<|end_header_id|>")
   eot = sp.call("<|eot_id|>")
+  im_start = sp.call("<|im_start|>")
+  im_end = sp.call("<|im_end|>")
 
   prompt_ids = [] of Int32
-  if bos && start_hdr && end_hdr && eot
+  if im_start && im_end
+    # Qwen / ChatML: <|im_start|>user\n{msg}<|im_end|>\n<|im_start|>assistant\n
+    nl = tokenizer.encode("\n")
+    prompt_ids << im_start
+    prompt_ids.concat(tokenizer.encode("user"))
+    prompt_ids.concat(nl)
+    prompt_ids.concat(tokenizer.encode(user_input.strip))
+    prompt_ids << im_end
+    prompt_ids.concat(nl)
+    prompt_ids << im_start
+    prompt_ids.concat(tokenizer.encode("assistant"))
+    prompt_ids.concat(nl)
+  elsif bos && start_hdr && end_hdr && eot
+    # LLaMA 3 chat template
     nl = tokenizer.encode("\n\n")
     prompt_ids << bos << start_hdr
     prompt_ids.concat(tokenizer.encode("user"))
@@ -110,8 +125,13 @@ loop do
   STDERR.print "\r" + " " * 40 + "\r"
   print "LLaMA: "
 
-  eot_id = tokenizer.vocab["<|eot_id|>"]? || -1
-  eos_id = tokenizer.vocab["<|end_of_text|>"]? || -1
+  # Stop on whichever end-of-turn / end-of-text tokens this model defines.
+  stop_ids = [] of Int32
+  ["<|eot_id|>", "<|end_of_text|>", "<|im_end|>", "<|endoftext|>"].each do |name|
+    if id = tokenizer.vocab[name]?
+      stop_ids << id unless stop_ids.includes?(id)
+    end
+  end
   generated_ids = Array(Int32).new
   sampler = SHAInet::Sampler.new(temperature: 0.6, top_k: 40, repetition_penalty: 1.2)
   gen_start = Time.instant
@@ -123,7 +143,7 @@ loop do
     sampler.apply_repetition_penalty!(logits, generated_ids, window: 20, row: last_row)
     best_id = sampler.sample(logits, last_row)
 
-    break if best_id == eot_id || best_id == eos_id || best_id < 0
+    break if best_id < 0 || stop_ids.includes?(best_id)
     break unless logits[last_row, best_id].finite?
     generated_ids << best_id
     print tokenizer.decode([best_id])
