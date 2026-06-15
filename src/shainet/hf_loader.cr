@@ -25,7 +25,8 @@ module SHAInet
     end
 
     # Generic entry point — reads config.json and dispatches to the right loader.
-    def self.load(model_dir : String, quantize : Bool = false) : Network
+    def self.load(model_dir : String, quantize : Bool = false, bits : Int32 = 8) : Network
+      raise ArgumentError.new("unsupported quantization bits: #{bits} (expected 8 or 4)") unless bits == 8 || bits == 4
       config_path = ::File.join(model_dir, "config.json")
       raise "config.json not found in #{model_dir}" unless ::File.exists?(config_path)
 
@@ -36,7 +37,7 @@ module SHAInet
       when "gpt2"
         load_gpt2(model_dir)
       when "llama", "mistral", "qwen2"
-        load_llama(model_dir, quantize: quantize)
+        load_llama(model_dir, quantize: quantize, bits: bits)
       else
         raise "Unsupported model_type: '#{model_type}'. Supported: #{SUPPORTED_MODELS.join(", ")}"
       end
@@ -256,11 +257,12 @@ module SHAInet
     # Load LLaMA/Mistral/Qwen2 model from SafeTensors.
     #
     # When `quantize` is true (and CUDA is available) each transformer block is
-    # quantized to Q8 *immediately after its weights are read*, so the fp32
-    # copies are freed before the next layer loads. This keeps host memory
+    # quantized to the requested width (`bits`: 8 -> Q8, 4 -> Q4) *immediately
+    # after its weights are read*, so the fp32 copies are freed before the next
+    # layer loads. This keeps host memory
     # bounded (a few GB) instead of materializing the entire fp32 model at once
     # (~28 GB for a 7B), which lets large models load on modest-RAM machines.
-    def self.load_llama(model_dir : String, quantize : Bool = false) : Network
+    def self.load_llama(model_dir : String, quantize : Bool = false, bits : Int32 = 8) : Network
       config_path = ::File.join(model_dir, "config.json")
       raise "config.json not found in #{model_dir}" unless ::File.exists?(config_path)
 
@@ -336,7 +338,7 @@ module SHAInet
           # transients are reclaimed before the next layer allocates — otherwise
           # GC lag lets ~28 layers of fp32 garbage pile up and OOM a big model.
           if do_quant
-            block.to_gpu!(quantize: true)
+            block.to_gpu!(quantize: true, bits: bits)
             GC.collect
           end
         end
@@ -359,7 +361,7 @@ module SHAInet
         # Quantize the lm_head (and idempotently re-confirm the already-Q8
         # blocks) + set the quantized-weights flag. Blocks were quantized inline
         # above, so this only materializes the lm_head fp32 transiently.
-        net.quantize! if do_quant
+        net.quantize!(bits) if do_quant
 
         net
       ensure

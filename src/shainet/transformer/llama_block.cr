@@ -17,10 +17,10 @@ module SHAInet
     # rope_scaling). nil means use the default.
     property rope_freqs : Array(Float32)? = nil
 
-    property w_q : SimpleMatrix | CudaMatrix | QuantizedCudaMatrix
-    property w_k : SimpleMatrix | CudaMatrix | QuantizedCudaMatrix
-    property w_v : SimpleMatrix | CudaMatrix | QuantizedCudaMatrix
-    property w_o : SimpleMatrix | CudaMatrix | QuantizedCudaMatrix
+    property w_q : SimpleMatrix | CudaMatrix | QuantizedWeight
+    property w_k : SimpleMatrix | CudaMatrix | QuantizedWeight
+    property w_v : SimpleMatrix | CudaMatrix | QuantizedWeight
+    property w_o : SimpleMatrix | CudaMatrix | QuantizedWeight
 
     # Optional Q/K/V projection biases. Qwen2-style architectures add a bias to
     # the query/key/value projections; LLaMA/Mistral do not. Kept as host-side
@@ -96,15 +96,15 @@ module SHAInet
       end
     end
 
-    def to_gpu!(quantize : Bool = false)
+    def to_gpu!(quantize : Bool = false, bits : Int32 = 8)
       return unless CUDA.fully_available?
       if quantize
-        @w_q = to_q8(@w_q)
-        @w_k = to_q8(@w_k)
-        @w_v = to_q8(@w_v)
-        @w_o = to_q8(@w_o)
+        @w_q = to_quant(@w_q, bits)
+        @w_k = to_quant(@w_k, bits)
+        @w_v = to_quant(@w_v, bits)
+        @w_o = to_quant(@w_o, bits)
       else
-        # Only promote host weights; leave existing CudaMatrix/QuantizedCudaMatrix as-is.
+        # Only promote host weights; leave existing CudaMatrix/QuantizedWeight as-is.
         @w_q = @w_q.as(SimpleMatrix).to_cuda if @w_q.is_a?(SimpleMatrix)
         @w_k = @w_k.as(SimpleMatrix).to_cuda if @w_k.is_a?(SimpleMatrix)
         @w_v = @w_v.as(SimpleMatrix).to_cuda if @w_v.is_a?(SimpleMatrix)
@@ -112,16 +112,22 @@ module SHAInet
       end
       @norm1.to_gpu!
       @norm2.to_gpu!
-      @ffn.to_gpu!(quantize)
+      @ffn.to_gpu!(quantize, bits)
     end
 
-    # Quantize a weight to Q8 regardless of its current representation,
-    # avoiding mixed precision/quantization state on repeated to_gpu! calls.
-    private def to_q8(w : SimpleMatrix | CudaMatrix | QuantizedCudaMatrix) : QuantizedCudaMatrix
+    # Quantize a weight to the requested bit width: bits == 4 -> Q4, bits == 8 ->
+    # Q8. Already-quantized weights are returned unchanged (we quantize once
+    # during load, so the format is never switched in place).
+    private def to_quant(w : SimpleMatrix | CudaMatrix | QuantizedWeight, bits : Int32) : QuantizedWeight
+      raise ArgumentError.new("unsupported quantization bits: #{bits} (expected 8 or 4)") unless bits == 8 || bits == 4
       case w
-      when QuantizedCudaMatrix then w
-      when CudaMatrix          then QuantizedCudaMatrix.from_simple(w.to_simple)
-      else                          QuantizedCudaMatrix.from_simple(w.as(SimpleMatrix))
+      when QuantizedWeight then w
+      when CudaMatrix
+        sm = w.to_simple
+        bits == 4 ? Q4CudaMatrix.from_simple(sm) : QuantizedCudaMatrix.from_simple(sm)
+      else
+        sm = w.as(SimpleMatrix)
+        bits == 4 ? Q4CudaMatrix.from_simple(sm) : QuantizedCudaMatrix.from_simple(sm)
       end
     end
 
@@ -625,8 +631,8 @@ module SHAInet
     end
 
     # --- Helper: matmul using GPU SGEMM if weights are CudaMatrix ---
-    private def gpu_matmul(x : SimpleMatrix, w : SimpleMatrix | CudaMatrix | QuantizedCudaMatrix) : SimpleMatrix
-      if w.is_a?(QuantizedCudaMatrix)
+    private def gpu_matmul(x : SimpleMatrix, w : SimpleMatrix | CudaMatrix | QuantizedWeight) : SimpleMatrix
+      if w.is_a?(QuantizedWeight)
         if x.rows == 1
           # Decode (M=1): reuse persistent device buffers, no per-call alloc/free.
           xb = (@q8_in_bufs[x.cols] ||= CudaMatrix.new(1, x.cols))

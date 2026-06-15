@@ -1,5 +1,5 @@
 require "./simple_matrix"
-require "./cuda_matrix" # CudaMatrix is referenced in the QuantizedWeight interface
+require "./quantized_cuda_matrix" # defines QuantizedWeight (included below)
 {% if flag?(:enable_cuda) %}
   require "../cuda"
 {% else %}
@@ -7,50 +7,42 @@ require "./cuda_matrix" # CudaMatrix is referenced in the QuantizedWeight interf
 {% end %}
 
 module SHAInet
-  # Common interface for quantized weight matrices (Q8, Q4) used as drop-in
-  # replacements for an fp32 [K, N] weight in GPU inference. Both store the
-  # logical shape [rows = K, cols = N] and expose a dequant-in-kernel GEMV.
-  module QuantizedWeight
-    abstract def gemv(x : CudaMatrix) : CudaMatrix
-    abstract def gemv_into(x : CudaMatrix, result : CudaMatrix) : CudaMatrix
-    abstract def device_bytes : UInt64
-    abstract def rows : Int32
-    abstract def cols : Int32
-  end
-
-  # Q8_0-style quantized weight matrix for GPU inference.
+  # Q4_0-style 4-bit quantized weight matrix for GPU inference.
   #
   # Logical shape matches the fp32 weight it replaces: [rows = K (in_features),
-  # cols = N (out_features)], so it is used the same way as `x[M,K] * w[K,N]`
-  # producing `y[M,N]`.
+  # cols = N (out_features)], used as `x[M,K] * w[K,N]` producing `y[M,N]`.
   #
   # Storage on device:
-  #   * int8 weights `q` laid out row-major [N, K] (out-major)
+  #   * 4-bit weights packed two-per-byte along K, laid out [N, ceil(K/2)]
+  #     (out-major). Byte (k/2) for column n holds k in the low nibble and k+1
+  #     in the high nibble, each stored as (value + 8) in 0..15.
   #   * fp32 `scales` laid out [N, ceil(K/BLOCK)] — one scale per BLOCK (=32)
   #     contiguous K elements per output column.
   #
-  # Quantization is symmetric per block: scale = max_abs / 127,
-  # q = round(v / scale), clamped to [-127, 127].
-  class QuantizedCudaMatrix
+  # Quantization is symmetric per block: scale = max_abs / 7,
+  # value = round(v / scale) clamped to [-7, 7], stored nibble = value + 8.
+  class Q4CudaMatrix
     include QuantizedWeight
     BLOCK = 32
 
     getter rows : Int32   # K (in_features)
     getter cols : Int32   # N (out_features)
     getter blocks : Int32 # ceil(K / BLOCK)
-    getter q_ptr : Pointer(Int8)
+    getter kbytes : Int32 # ceil(K / 2) packed bytes per output column
+    getter q_ptr : Pointer(UInt8)
     getter scale_ptr : Pointer(Float32)
 
     @q_bytes : UInt64
     @scale_bytes : UInt64
 
     def initialize(@rows : Int32, @cols : Int32)
-      raise RuntimeError.new("QuantizedCudaMatrix requires CUDA to be available") unless CUDA.fully_available?
+      raise RuntimeError.new("Q4CudaMatrix requires CUDA to be available") unless CUDA.fully_available?
       @blocks = (@rows + BLOCK - 1) // BLOCK
-      @q_bytes = @cols.to_u64 * @rows.to_u64
+      @kbytes = (@rows + 1) // 2
+      @q_bytes = @cols.to_u64 * @kbytes.to_u64
       @scale_bytes = @cols.to_u64 * @blocks.to_u64 * 4_u64
 
-      qp = Pointer(Int8).null
+      qp = Pointer(UInt8).null
       CUDA.malloc(pointerof(qp).as(Pointer(Pointer(Void))), @q_bytes)
       @q_ptr = qp
 
@@ -64,20 +56,21 @@ module SHAInet
       CUDA.free(@scale_ptr.as(Pointer(Void))) unless @scale_ptr.null?
     end
 
-    # Approximate device memory footprint in bytes (int8 weights + fp32 scales).
+    # Approximate device memory footprint in bytes (4-bit weights + fp32 scales).
     def device_bytes : UInt64
       @q_bytes + @scale_bytes
     end
 
-    # Quantize a host fp32 weight matrix [K, N] into this Q8 layout and upload.
-    def self.from_simple(w : SimpleMatrix) : QuantizedCudaMatrix
+    # Quantize a host fp32 weight matrix [K, N] into this Q4 layout and upload.
+    def self.from_simple(w : SimpleMatrix) : Q4CudaMatrix
       k = w.rows
       n = w.cols
       qm = new(k, n)
       blocks = qm.blocks
+      kbytes = qm.kbytes
 
       wdata = w.data # row-major [K, N], element [r, c] at r * n + c
-      q_host = Array(Int8).new(n * k, 0_i8)
+      q_host = Array(UInt8).new(n * kbytes, 0_u8)
       s_host = Array(Float32).new(n * blocks, 0.0_f32)
 
       n.times do |col|
@@ -93,17 +86,23 @@ module SHAInet
             kk += 1
           end
 
-          scale = max_abs > 0.0_f32 ? (max_abs / 127.0_f32) : 1.0_f32
+          scale = max_abs > 0.0_f32 ? (max_abs / 7.0_f32) : 1.0_f32
           inv = 1.0_f32 / scale
           s_host[col * blocks + b] = scale
 
-          row_base = col * k
+          row_base = col * kbytes
           kk = base
           while kk < lim
             qv = (wdata[kk * n + col] * inv).round
-            qv = 127.0_f32 if qv > 127.0_f32
-            qv = -127.0_f32 if qv < -127.0_f32 # symmetric range, avoid -128
-            q_host[row_base + kk] = qv.to_i8
+            qv = 7.0_f32 if qv > 7.0_f32
+            qv = -7.0_f32 if qv < -7.0_f32 # symmetric range
+            nib = (qv.to_i + 8) & 0x0F      # store value+8 in 0..15
+            byte_idx = row_base + (kk >> 1)
+            if (kk & 1) == 0
+              q_host[byte_idx] = (q_host[byte_idx] & 0xF0_u8) | nib.to_u8
+            else
+              q_host[byte_idx] = (q_host[byte_idx] & 0x0F_u8) | (nib.to_u8 << 4)
+            end
             kk += 1
           end
         end
@@ -113,8 +112,8 @@ module SHAInet
       qm
     end
 
-    # Copy host int8 weights + fp32 scales to device.
-    def upload(q_host : Array(Int8), s_host : Array(Float32))
+    # Copy host 4-bit weights + fp32 scales to device.
+    def upload(q_host : Array(UInt8), s_host : Array(Float32))
       raise ArgumentError.new("q size mismatch") unless q_host.size.to_u64 == @q_bytes
       raise ArgumentError.new("scale size mismatch") unless (s_host.size.to_u64 * 4_u64) == @scale_bytes
       CUDA.memcpy(@q_ptr.as(Pointer(Void)), q_host.to_unsafe.as(Pointer(Void)), @q_bytes, CUDA::MemcpyKind::HostToDevice)
@@ -125,13 +124,12 @@ module SHAInet
     # y[M,N] = x[M,K] * dequant(self), computed on GPU. Returns a new CudaMatrix.
     def gemv(x : CudaMatrix) : CudaMatrix
       raise ArgumentError.new("dimension mismatch: x.cols=#{x.cols} vs K=#{@rows}") unless x.cols == @rows
-      raise RuntimeError.new("Q8 gemv requires valid device pointers") if @q_ptr.null? || @scale_ptr.null?
+      raise RuntimeError.new("Q4 gemv requires valid device pointers") if @q_ptr.null? || @scale_ptr.null?
 
-      # Ensure activation is resident on device (cheap no-op when already synced).
-      x.sync_to_device!("q8_gemv_in") unless x.device_dirty?
+      x.sync_to_device!("q4_gemv_in") unless x.device_dirty?
 
       result = CudaMatrix.new(x.rows, @cols)
-      CUDA.gemm_q8_f32(x.device_ptr.not_nil!, @q_ptr, @scale_ptr,
+      CUDA.gemm_q4_f32(x.device_ptr.not_nil!, @q_ptr, @scale_ptr,
         result.device_ptr.not_nil!, x.rows, @cols, @rows)
       result.mark_device_dirty!
       result
@@ -142,10 +140,10 @@ module SHAInet
     def gemv_into(x : CudaMatrix, result : CudaMatrix) : CudaMatrix
       raise ArgumentError.new("dimension mismatch: x.cols=#{x.cols} vs K=#{@rows}") unless x.cols == @rows
       raise ArgumentError.new("result shape mismatch") unless result.rows == x.rows && result.cols == @cols
-      raise RuntimeError.new("Q8 gemv requires valid device pointers") if @q_ptr.null? || @scale_ptr.null?
+      raise RuntimeError.new("Q4 gemv requires valid device pointers") if @q_ptr.null? || @scale_ptr.null?
 
-      x.sync_to_device!("q8_gemv_in") unless x.device_dirty?
-      CUDA.gemm_q8_f32(x.device_ptr.not_nil!, @q_ptr, @scale_ptr,
+      x.sync_to_device!("q4_gemv_in") unless x.device_dirty?
+      CUDA.gemm_q4_f32(x.device_ptr.not_nil!, @q_ptr, @scale_ptr,
         result.device_ptr.not_nil!, x.rows, @cols, @rows)
       result.mark_device_dirty!
       result

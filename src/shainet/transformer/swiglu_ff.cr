@@ -2,9 +2,9 @@ module SHAInet
   # SwiGLU Feed-Forward Network as used in LLaMA/Mistral.
   # Formula: output = down_proj(silu(gate_proj(x)) * up_proj(x))
   class SwiGLUFF
-    property gate_proj : SimpleMatrix | CudaMatrix | QuantizedCudaMatrix
-    property up_proj : SimpleMatrix | CudaMatrix | QuantizedCudaMatrix
-    property down_proj : SimpleMatrix | CudaMatrix | QuantizedCudaMatrix
+    property gate_proj : SimpleMatrix | CudaMatrix | QuantizedWeight
+    property up_proj : SimpleMatrix | CudaMatrix | QuantizedWeight
+    property down_proj : SimpleMatrix | CudaMatrix | QuantizedWeight
 
     def initialize(d_model : Int32, ff_hidden : Int32)
       @gate_proj = SimpleMatrix.new(d_model, ff_hidden)
@@ -16,26 +16,32 @@ module SHAInet
     @q8_in_bufs = Hash(Int32, CudaMatrix).new
     @q8_out_bufs = Hash(Int32, CudaMatrix).new
 
-    def to_gpu!(quantize : Bool = false)
+    def to_gpu!(quantize : Bool = false, bits : Int32 = 8)
       return unless CUDA.fully_available?
       if quantize
-        @gate_proj = to_q8(@gate_proj)
-        @up_proj = to_q8(@up_proj)
-        @down_proj = to_q8(@down_proj)
+        @gate_proj = to_quant(@gate_proj, bits)
+        @up_proj = to_quant(@up_proj, bits)
+        @down_proj = to_quant(@down_proj, bits)
       else
-        # Only promote host weights; leave existing CudaMatrix/QuantizedCudaMatrix as-is.
+        # Only promote host weights; leave existing CudaMatrix/QuantizedWeight as-is.
         @gate_proj = @gate_proj.as(SimpleMatrix).to_cuda if @gate_proj.is_a?(SimpleMatrix)
         @up_proj = @up_proj.as(SimpleMatrix).to_cuda if @up_proj.is_a?(SimpleMatrix)
         @down_proj = @down_proj.as(SimpleMatrix).to_cuda if @down_proj.is_a?(SimpleMatrix)
       end
     end
 
-    # Quantize a weight to Q8 regardless of its current representation.
-    private def to_q8(w : SimpleMatrix | CudaMatrix | QuantizedCudaMatrix) : QuantizedCudaMatrix
+    # Quantize a weight to the requested bit width: bits == 4 -> Q4, bits == 8 ->
+    # Q8. Already-quantized weights are returned unchanged.
+    private def to_quant(w : SimpleMatrix | CudaMatrix | QuantizedWeight, bits : Int32) : QuantizedWeight
+      raise ArgumentError.new("unsupported quantization bits: #{bits} (expected 8 or 4)") unless bits == 8 || bits == 4
       case w
-      when QuantizedCudaMatrix then w
-      when CudaMatrix          then QuantizedCudaMatrix.from_simple(w.to_simple)
-      else                          QuantizedCudaMatrix.from_simple(w.as(SimpleMatrix))
+      when QuantizedWeight then w
+      when CudaMatrix
+        sm = w.to_simple
+        bits == 4 ? Q4CudaMatrix.from_simple(sm) : QuantizedCudaMatrix.from_simple(sm)
+      else
+        sm = w.as(SimpleMatrix)
+        bits == 4 ? Q4CudaMatrix.from_simple(sm) : QuantizedCudaMatrix.from_simple(sm)
       end
     end
 
@@ -78,8 +84,8 @@ module SHAInet
       hidden * @down_proj.as(CudaMatrix) # cuBLAS GEMM
     end
 
-    private def matmul(x : SimpleMatrix, w : SimpleMatrix | CudaMatrix | QuantizedCudaMatrix) : SimpleMatrix
-      if w.is_a?(QuantizedCudaMatrix)
+    private def matmul(x : SimpleMatrix, w : SimpleMatrix | CudaMatrix | QuantizedWeight) : SimpleMatrix
+      if w.is_a?(QuantizedWeight)
         if x.rows == 1
           xb = (@q8_in_bufs[x.cols] ||= CudaMatrix.new(1, x.cols))
           xb.raw_data.to_unsafe.copy_from(x.data.to_unsafe, x.cols)
