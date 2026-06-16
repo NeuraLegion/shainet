@@ -5,7 +5,7 @@ module SHAInet
   # Load a GPT-2 model directly from a HuggingFace SafeTensors file.
   # No Python, no PyTorch — pure Crystal.
   module HFLoader
-    SUPPORTED_MODELS = ["gpt2", "llama", "mistral", "qwen2"]
+    SUPPORTED_MODELS = ["gpt2", "llama", "mistral", "qwen2", "qwen3"]
 
     # Open a model's weights whether they're a single model.safetensors or
     # sharded (model.safetensors.index.json + model-0000k-of-0000N.safetensors).
@@ -36,7 +36,7 @@ module SHAInet
       case model_type
       when "gpt2"
         load_gpt2(model_dir)
-      when "llama", "mistral", "qwen2"
+      when "llama", "mistral", "qwen2", "qwen3"
         load_llama(model_dir, quantize: quantize, bits: bits)
       else
         raise "Unsupported model_type: '#{model_type}'. Supported: #{SUPPORTED_MODELS.join(", ")}"
@@ -201,7 +201,8 @@ module SHAInet
       rope_theta : Float64,
       num_key_value_heads : Int32,
       tie_word_embeddings : Bool,
-      rope_scaling : JSON::Any?
+      rope_scaling : JSON::Any?,
+      head_dim : Int32? = nil
 
     def self.load_llama_config(path : String) : LlamaConfig
       json = JSON.parse(::File.read(path))
@@ -215,7 +216,8 @@ module SHAInet
         rope_theta: (json["rope_theta"]?.try(&.as_f) || 10000.0),
         num_key_value_heads: (json["num_key_value_heads"]?.try(&.as_i) || json["num_attention_heads"].as_i),
         tie_word_embeddings: (json["tie_word_embeddings"]?.try(&.as_bool) || false),
-        rope_scaling: json["rope_scaling"]?
+        rope_scaling: json["rope_scaling"]?,
+        head_dim: json["head_dim"]?.try(&.as_i)
       )
     end
 
@@ -276,14 +278,16 @@ module SHAInet
         n_heads = config.num_attention_heads
         eps = config.rms_norm_eps
         theta = config.rope_theta
-        head_dim = d // n_heads
+        # Qwen3 sets head_dim explicitly (e.g. 128), independent of d/n_heads;
+        # LLaMA/Qwen2 derive it as d/n_heads.
+        head_dim = config.head_dim || (d // n_heads)
         rope_freqs = compute_rope_freqs(config, head_dim)
 
         net = Network.new
         net.add_layer(:input, 1)
         net.add_layer(:embedding, d, vocab_size: config.vocab_size)
         config.num_hidden_layers.times do
-          net.add_layer(:llama, d, num_heads: n_heads, ff_hidden: ff, num_kv_heads: config.num_key_value_heads, eps: eps)
+          net.add_layer(:llama, d, num_heads: n_heads, ff_hidden: ff, num_kv_heads: config.num_key_value_heads, eps: eps, head_dim: head_dim)
         end
         net.add_layer(:output, config.vocab_size, activation_function: SHAInet.identity)
         net.fully_connect
@@ -330,6 +334,14 @@ module SHAInet
             block.b_q = sf.read_f32("#{prefix}.self_attn.q_proj.bias")
             block.b_k = sf.read_f32("#{prefix}.self_attn.k_proj.bias")
             block.b_v = sf.read_f32("#{prefix}.self_attn.v_proj.bias")
+          end
+
+          # Optional Qwen3 QK-norm weights (per-head RMSNorm over head_dim),
+          # applied to Q and K before RoPE. Present for qwen3/qwen3_moe, absent
+          # for LLaMA/Qwen2. They appear as a complete pair.
+          if sf.has_tensor?("#{prefix}.self_attn.q_norm.weight")
+            block.q_norm = sf.read_f32("#{prefix}.self_attn.q_norm.weight")
+            block.k_norm = sf.read_f32("#{prefix}.self_attn.k_norm.weight")
           end
 
           # Quantize this block now so its fp32 weights can be freed before the

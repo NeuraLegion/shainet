@@ -11,6 +11,16 @@ module SHAInet
     getter num_kv_heads : Int32
     getter head_dim : Int32
     getter d_model : Int32
+    # Total width of the concatenated query heads = num_heads * head_dim. Equals
+    # d_model for LLaMA/Qwen2, but Qwen3 uses an explicit head_dim so this can be
+    # larger (e.g. 32*128=4096 with d_model=2048). w_q is [d_model, q_dim] and
+    # w_o is [q_dim, d_model]; the per-head attention output has width q_dim.
+    getter q_dim : Int32
+    # Qwen3 QK-norm: per-head RMSNorm applied to Q and K (over head_dim) right
+    # before RoPE. nil = disabled (the LLaMA/Qwen2 default — zero overhead).
+    property q_norm : Array(Float32)? = nil
+    property k_norm : Array(Float32)? = nil
+    @qk_norm_eps : Float64 = 1e-6
     property rope_theta : Float64
     # Optional precomputed inverse frequencies (size head_dim/2). When set,
     # these override the default theta^(-2i/d) computation (used for LLaMA 3
@@ -59,19 +69,27 @@ module SHAInet
 
     def initialize(@d_model : Int32, @num_heads : Int32, ff_hidden : Int32,
                    eps : Float64 = 1e-6, @rope_theta : Float64 = 10000.0,
-                   @num_kv_heads : Int32 = @num_heads)
+                   @num_kv_heads : Int32 = @num_heads, head_dim : Int32? = nil)
       super(@d_model, SHAInet.none)
-      raise ArgumentError.new("d_model must be divisible by num_heads") unless @d_model % @num_heads == 0
       raise ArgumentError.new("num_heads must be divisible by num_kv_heads") unless @num_kv_heads > 0 && @num_heads % @num_kv_heads == 0
-      @head_dim = @d_model // @num_heads
+      # head_dim defaults to d_model/num_heads (LLaMA/Qwen2). Qwen3 passes it
+      # explicitly (e.g. 128), so q_dim = num_heads*head_dim may differ from d_model.
+      if hd = head_dim
+        @head_dim = hd
+      else
+        raise ArgumentError.new("d_model must be divisible by num_heads") unless @d_model % @num_heads == 0
+        @head_dim = @d_model // @num_heads
+      end
+      @q_dim = @num_heads * @head_dim
       kv_dim = @num_kv_heads * @head_dim
+      @qk_norm_eps = eps
       @norm1 = RMSNorm.new(@d_model, eps)
       @norm2 = RMSNorm.new(@d_model, eps)
       @ffn = SwiGLUFF.new(@d_model, ff_hidden)
-      @w_q = SimpleMatrix.new(@d_model, @d_model)
+      @w_q = SimpleMatrix.new(@d_model, @q_dim)
       @w_k = SimpleMatrix.new(@d_model, kv_dim)
       @w_v = SimpleMatrix.new(@d_model, kv_dim)
-      @w_o = SimpleMatrix.new(@d_model, @d_model)
+      @w_o = SimpleMatrix.new(@q_dim, @d_model)
       @k_cache = Array.new(@num_kv_heads) { Array(Float32).new }
       @v_cache = Array.new(@num_kv_heads) { Array(Float32).new }
     end
@@ -184,8 +202,10 @@ module SHAInet
       add_bias!(q_full, @b_q)
       add_bias!(k_full, @b_k)
       add_bias!(v_full, @b_v)
+      apply_head_rmsnorm!(q_full, @num_heads, @q_norm)
+      apply_head_rmsnorm!(k_full, @num_kv_heads, @k_norm)
 
-      output = SimpleMatrix.new(seq_len, @d_model)
+      output = SimpleMatrix.new(seq_len, @q_dim)
       heads_per_kv = @num_heads // @num_kv_heads
 
       @num_heads.times do |h|
@@ -222,6 +242,11 @@ module SHAInet
       add_bias!(q_full, @b_q)
       add_bias!(k_new, @b_k)
       add_bias!(v_new, @b_v)
+      # Qwen3 QK-norm before RoPE (no-op when unset). K is normalized here, then
+      # rotated and appended below; Q is normalized here, then rotated in the
+      # per-head attention loop.
+      apply_head_rmsnorm!(q_full, @num_heads, @q_norm)
+      apply_head_rmsnorm!(k_new, @num_kv_heads, @k_norm)
 
       # Apply RoPE to new K at insert time (HF half-split), then append to cache.
       half = head_dim // 2
@@ -247,7 +272,7 @@ module SHAInet
 
       total_len = @cache_len + new_tokens
       @cache_len = total_len
-      output = SimpleMatrix.new(new_tokens, @d_model)
+      output = SimpleMatrix.new(new_tokens, @q_dim)
 
       if gpu_attention?
         attention_heads_gpu(q_full, output, new_tokens, start_pos, total_len, scale)
@@ -266,7 +291,7 @@ module SHAInet
       heads_per_kv = @num_heads // @num_kv_heads
 
       half = head_dim // 2
-      dm = @d_model
+      dm = @q_dim
       qptr = q_full.data.to_unsafe
       optr = output.data.to_unsafe
       # Reusable scratch buffers (avoid per-head/per-token allocations).
@@ -368,7 +393,7 @@ module SHAInet
                                     new_tokens : Int32, start_pos : Int32,
                                     total_len : Int32, scale : Float32)
       head_dim = @head_dim
-      dm = @d_model
+      dm = @q_dim
       half = head_dim // 2
       heads_per_kv = @num_heads // @num_kv_heads
       chunk = new_tokens * head_dim     # floats per kv_head per tensor
@@ -507,8 +532,10 @@ module SHAInet
       add_bias!(q_full, @b_q)
       add_bias!(k_full, @b_k)
       add_bias!(v_full, @b_v)
+      apply_head_rmsnorm!(q_full, @num_heads, @q_norm)
+      apply_head_rmsnorm!(k_full, @num_kv_heads, @k_norm)
 
-      output = SimpleMatrix.new(seq_len, @d_model)
+      output = SimpleMatrix.new(seq_len, @q_dim)
       heads_per_kv = @num_heads // @num_kv_heads
 
       @num_heads.times do |h|
@@ -533,8 +560,8 @@ module SHAInet
       end
 
       # Output projection on GPU: convert to CudaMatrix, then SGEMM
-      result = CudaMatrix.new(seq_len, @d_model)
-      seq_len.times { |i| @d_model.times { |j| result[i, j] = output[i, j] } }
+      result = CudaMatrix.new(seq_len, @q_dim)
+      seq_len.times { |i| @q_dim.times { |j| result[i, j] = output[i, j] } }
       result.sync_to_device!("attn_concat")
       result * @w_o.as(CudaMatrix)
     end
@@ -564,6 +591,56 @@ module SHAInet
       return unless b
       raise ArgumentError.new("bias size #{b.size} does not match matrix cols #{m.cols}") unless b.size == m.cols
       m.rows.times { |r| m.cols.times { |c| m[r, c] = (m[r, c].to_f32 + b[c]) } }
+    end
+
+    # --- Helper: Qwen3 QK-norm. Per-head RMSNorm over head_dim with a learned
+    # weight, applied in-place to every (row, head) slice of `m`
+    # [rows, nheads*head_dim], before RoPE. No-op when `weight` is nil (the
+    # LLaMA/Qwen2 default), so existing models are byte-identical.
+    private def apply_head_rmsnorm!(m : SimpleMatrix, nheads : Int32, weight : Array(Float32)?)
+      return unless w = weight
+      hd = @head_dim
+      raise ArgumentError.new("qk_norm weight size #{w.size} != head_dim #{hd}") unless w.size == hd
+      eps = @qk_norm_eps
+      wp = w.to_unsafe
+      data = m.data.to_unsafe
+      cols = m.cols
+      m.rows.times do |r|
+        nheads.times do |h|
+          base = r * cols + h * hd
+          ss = 0.0_f32
+          d = 0
+          while d < hd
+            v = data[base + d]
+            ss += v * v
+            d += 1
+          end
+          inv = (1.0 / Math.sqrt(ss / hd + eps)).to_f32
+          d = 0
+          while d < hd
+            data[base + d] = data[base + d] * inv * wp[d]
+            d += 1
+          end
+        end
+      end
+    end
+
+    # CudaMatrix variant (full-sequence GPU path, after the projection has been
+    # synced to host for per-head processing). Operates on the host mirror.
+    private def apply_head_rmsnorm!(m : CudaMatrix, nheads : Int32, weight : Array(Float32)?)
+      return unless w = weight
+      hd = @head_dim
+      raise ArgumentError.new("qk_norm weight size #{w.size} != head_dim #{hd}") unless w.size == hd
+      eps = @qk_norm_eps
+      m.rows.times do |r|
+        nheads.times do |h|
+          col0 = h * hd
+          ss = 0.0_f32
+          hd.times { |d| v = m[r, col0 + d].to_f32; ss += v * v }
+          inv = (1.0 / Math.sqrt(ss / hd + eps)).to_f32
+          hd.times { |d| m[r, col0 + d] = (m[r, col0 + d].to_f32 * inv * w[d]) }
+        end
+      end
     end
 
     # --- Helper: extract head slice ---
