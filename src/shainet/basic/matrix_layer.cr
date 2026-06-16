@@ -12,17 +12,17 @@ module SHAInet
     getter size : Int32
 
     # Stored forward pass data for backpropagation
-    @input : SimpleMatrix | CudaMatrix | Nil
-    @activations : SimpleMatrix | CudaMatrix | Nil
-    @sigma_primes : SimpleMatrix | CudaMatrix | Nil
-    @forward_workspace : CudaMatrix | Nil
-    @grad_workspace : CudaMatrix | Nil
+    @input : SimpleMatrix | CudaMatrix?
+    @activations : SimpleMatrix | CudaMatrix?
+    @sigma_primes : SimpleMatrix | CudaMatrix?
+    @forward_workspace : CudaMatrix?
+    @grad_workspace : CudaMatrix?
 
     # Adam optimizer state variables (first and second moment estimates)
-    @m_w : SimpleMatrix | CudaMatrix | Nil # First moment estimate for weights
-    @m_b : SimpleMatrix | CudaMatrix | Nil # First moment estimate for biases
-    @v_w : SimpleMatrix | CudaMatrix | Nil # Second moment estimate for weights
-    @v_b : SimpleMatrix | CudaMatrix | Nil # Second moment estimate for biases
+    @m_w : SimpleMatrix | CudaMatrix? # First moment estimate for weights
+    @m_b : SimpleMatrix | CudaMatrix? # First moment estimate for biases
+    @v_w : SimpleMatrix | CudaMatrix? # Second moment estimate for weights
+    @v_b : SimpleMatrix | CudaMatrix? # Second moment estimate for biases
 
     def initialize(in_size : Int32, @size : Int32)
       @l_size = @size
@@ -219,7 +219,7 @@ module SHAInet
       sigma_primes = @sigma_primes.as(CudaMatrix)
 
       # Apply activation derivative: grad ⊙ σ'
-      local_grad : CudaMatrix | Nil = nil
+      local_grad : CudaMatrix? = nil
       begin
         local_grad = CudaMatrix.get_workspace(grad.rows, grad.cols, "layer_local_grad")
         local_grad.copy_from!(grad)

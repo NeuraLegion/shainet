@@ -723,7 +723,7 @@ module SHAInet
               mini_batch_size : Int32 = 1,
               log_each : Int32 = 1,
               show_slice : Bool = false,
-              autosave : NamedTuple(freq: Int32, path: String) | Nil = nil)
+              autosave : NamedTuple(freq: Int32, path: String)? = nil)
       verify_net_before_train
 
       stream = data.is_a?(SHAInet::StreamingData) ? data : nil
@@ -890,9 +890,9 @@ module SHAInet
       in_rows, in_cols = get_dims.call(first_input)
       out_rows, out_cols = get_dims.call(first_output)
 
-      input_workspace : CudaMatrix | Nil = nil
-      expected_workspace : CudaMatrix | Nil = nil
-      output_grad : SimpleMatrix | CudaMatrix | Nil = nil
+      input_workspace : CudaMatrix? = nil
+      expected_workspace : CudaMatrix? = nil
+      output_grad : SimpleMatrix | CudaMatrix? = nil
 
       if CUDA.fully_available?
         if !first_input.is_a?(CudaMatrix)

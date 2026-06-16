@@ -9,7 +9,7 @@ module SHAInet
     @g_w2 : SimpleMatrix | CudaMatrix
     @g_b1 : SimpleMatrix | CudaMatrix
     @g_b2 : SimpleMatrix | CudaMatrix
-    @x : SimpleMatrix | CudaMatrix | Nil
+    @x : SimpleMatrix | CudaMatrix?
     @h : SimpleMatrix | CudaMatrix
     @out : SimpleMatrix | CudaMatrix
 
@@ -18,19 +18,19 @@ module SHAInet
     @w2_t : SimpleMatrix | CudaMatrix
 
     # Workspace matrices to avoid repeated allocations
-    @workspace_temp_bias : CudaMatrix | Nil = nil
+    @workspace_temp_bias : CudaMatrix? = nil
 
     # Persistent workspaces used during backward pass
-    @workspace_w2_t : CudaMatrix | Nil = nil
-    @workspace_w1_t : CudaMatrix | Nil = nil
-    @workspace_x_t : CudaMatrix | Nil = nil
-    @workspace_temp_grad_w2 : CudaMatrix | Nil = nil
-    @workspace_temp_grad_w1 : CudaMatrix | Nil = nil
-    @workspace_d_input : CudaMatrix | Nil = nil
-    @workspace_h_t : CudaMatrix | Nil = nil
-    @workspace_dh : CudaMatrix | Nil = nil
-    @workspace_h : CudaMatrix | Nil = nil
-    @workspace_out : CudaMatrix | Nil = nil
+    @workspace_w2_t : CudaMatrix? = nil
+    @workspace_w1_t : CudaMatrix? = nil
+    @workspace_x_t : CudaMatrix? = nil
+    @workspace_temp_grad_w2 : CudaMatrix? = nil
+    @workspace_temp_grad_w1 : CudaMatrix? = nil
+    @workspace_d_input : CudaMatrix? = nil
+    @workspace_h_t : CudaMatrix? = nil
+    @workspace_dh : CudaMatrix? = nil
+    @workspace_h : CudaMatrix? = nil
+    @workspace_out : CudaMatrix? = nil
     @last_batch_size : Int32 = 0
 
     property g_w1 : SimpleMatrix | CudaMatrix

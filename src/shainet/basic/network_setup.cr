@@ -22,7 +22,7 @@ module SHAInet
     getter :input_layers, :output_layers, :hidden_layers, :recurrent_layers, :lstm_layers
     getter :transformer_layers
     getter transformer_error : SimpleMatrix
-    property final_norm : RMSNorm | Nil
+    property final_norm : RMSNorm?
     getter error_signal : Array(Float64), total_error : Float64, :mse, w_gradient : Array(Float64), b_gradient : Array(Float64)
 
     # Parameters for SGD + Momentum
@@ -56,7 +56,7 @@ module SHAInet
     property accumulation_steps : Int32
     property mixed_precision : Bool
 
-    @cached_expanded_grad : SimpleMatrix | CudaMatrix | Nil
+    @cached_expanded_grad : SimpleMatrix | CudaMatrix?
 
     # First creates an empty shell of the entire network
     def initialize

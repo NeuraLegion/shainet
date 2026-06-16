@@ -15,19 +15,19 @@ module SHAInet
     end
 
     @epsilon : Float64
-    @x : SimpleMatrix | CudaMatrix | Nil
+    @x : SimpleMatrix | CudaMatrix?
     @mean : SimpleMatrix | CudaMatrix
     @var : SimpleMatrix | CudaMatrix
     @norm : SimpleMatrix | CudaMatrix
 
     # Pre-allocated workspace matrices to avoid allocations in forward/backward passes
-    @workspace_mean : CudaMatrix | Nil
-    @workspace_var : CudaMatrix | Nil
-    @workspace_norm : CudaMatrix | Nil
-    @workspace_result : CudaMatrix | Nil
-    @workspace_d_x : CudaMatrix | Nil
-    @workspace_d_gamma : CudaMatrix | Nil
-    @workspace_d_beta : CudaMatrix | Nil
+    @workspace_mean : CudaMatrix?
+    @workspace_var : CudaMatrix?
+    @workspace_norm : CudaMatrix?
+    @workspace_result : CudaMatrix?
+    @workspace_d_x : CudaMatrix?
+    @workspace_d_gamma : CudaMatrix?
+    @workspace_d_beta : CudaMatrix?
     @last_batch_size : Int32
     @d_model : Int32
 
