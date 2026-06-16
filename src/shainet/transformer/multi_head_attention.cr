@@ -709,18 +709,18 @@ module SHAInet
           if ws = @workspace_d_x
             CudaMatrix.return_workspace(ws)
           end
-          @workspace_head_out.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @workspace_head_out.any?
+          @workspace_head_out.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @workspace_head_out.present?
 
           # Return cached backward workspaces
-          @d_v_temp_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @d_v_temp_ws.any?
-          @d_attn_temp_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @d_attn_temp_ws.any?
-          @d_scores_temp_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @d_scores_temp_ws.any?
-          @d_q_temp_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @d_q_temp_ws.any?
-          @d_k_temp_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @d_k_temp_ws.any?
-          @attn_t_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @attn_t_ws.any?
-          @v_t_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @v_t_ws.any?
-          @scores_t_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @scores_t_ws.any?
-          @d_concat_slices_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @d_concat_slices_ws.any?
+          @d_v_temp_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @d_v_temp_ws.present?
+          @d_attn_temp_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @d_attn_temp_ws.present?
+          @d_scores_temp_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @d_scores_temp_ws.present?
+          @d_q_temp_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @d_q_temp_ws.present?
+          @d_k_temp_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @d_k_temp_ws.present?
+          @attn_t_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @attn_t_ws.present?
+          @v_t_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @v_t_ws.present?
+          @scores_t_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @scores_t_ws.present?
+          @d_concat_slices_ws.each { |ws| CudaMatrix.return_workspace(ws.not_nil!) } if @d_concat_slices_ws.present?
 
           # Allocate new workspaces for current batch size
           @workspace_concat = CudaMatrix.get_workspace(batch_size, @d_model, "mha_concat_ws")

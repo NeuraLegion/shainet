@@ -1090,7 +1090,7 @@ module SHAInet
           grad = output_layer.backward(grad_matrix)
 
           # Handle transformer layers backward pass with proper gradient reshaping
-          if @transformer_layers.any?
+          if @transformer_layers.present?
             # For transformers, we need to map gradients from output space back to transformer space
             # The gradient from output layer is (1 x vocab_size), but transformer expects (seq_len x d_model)
 
@@ -1196,7 +1196,7 @@ module SHAInet
         end
       end
 
-      update_transformer_layers if @transformer_layers.any?
+      update_transformer_layers if @transformer_layers.present?
 
       batch_error
     end
