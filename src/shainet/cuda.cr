@@ -97,8 +97,6 @@ module SHAInet
       out = 0
       if LibCUDARuntime.cudaRuntimeGetVersion(pointerof(out)) == 0
         out
-      else
-        nil
       end
     rescue
       nil
@@ -195,8 +193,6 @@ module SHAInet
     def total_memory
       if info = memory_info
         info[:total]
-      else
-        nil
       end
     end
 
