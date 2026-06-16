@@ -134,6 +134,7 @@ module SHAInet
       raise "CUDA kernels not available"
     end
 
+    # ameba:disable Naming/AccessorMethodName
     def set_cols(*args)
       raise "CUDA kernels not available"
     end
