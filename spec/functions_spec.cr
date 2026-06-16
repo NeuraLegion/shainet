@@ -4,37 +4,37 @@ describe SHAInet do
   puts "############################################################"
   it "check sigmoid" do
     puts "\n"
-    ((0..1).includes?(SHAInet.sigmoid.call(0.5).first)).should eq(true)
+    ((0..1).includes?(SHAInet.sigmoid.call(0.5).first)).should be_true
   end
 
   puts "############################################################"
   it "check bp_sigmoid" do
     puts "\n"
-    ((-1..1).includes?(SHAInet.bp_sigmoid.call(0.5).first)).should eq(true)
+    ((-1..1).includes?(SHAInet.bp_sigmoid.call(0.5).first)).should be_true
   end
 
   puts "############################################################"
   it "check log_sigmoid" do
     puts "\n"
-    ((0..1).includes?(SHAInet.log_sigmoid.call(0.5).first)).should eq(true)
+    ((0..1).includes?(SHAInet.log_sigmoid.call(0.5).first)).should be_true
   end
 
   puts "############################################################"
   it "check tanh" do
     puts "\n"
-    ((-1..1).includes?(SHAInet.tanh.call(0.5).first)).should eq(true)
+    ((-1..1).includes?(SHAInet.tanh.call(0.5).first)).should be_true
   end
 
   puts "############################################################"
   it "check relu" do
     puts "\n"
-    ((0..Int64::MAX).includes?(SHAInet.relu.call(0.5).first)).should eq(true)
+    ((0..Int64::MAX).includes?(SHAInet.relu.call(0.5).first)).should be_true
   end
 
   puts "############################################################"
   it "check l_relu" do
     puts "\n"
-    ((Int64::MIN..Int64::MAX).includes?(SHAInet.l_relu.call(0.5).first)).should eq(true)
+    ((Int64::MIN..Int64::MAX).includes?(SHAInet.l_relu.call(0.5).first)).should be_true
   end
 
   puts "############################################################"
