@@ -220,8 +220,8 @@ module SHAInet
           connect_ltl(@hidden_layers.last, out_layer, :full)
         end
       end
-    rescue e : Exception
-      raise NeuralNetRunError.new("Error fully connecting network: #{e}")
+    rescue ex : Exception
+      raise NeuralNetRunError.new("Error fully connecting network: #{ex}")
     end
 
     # Connect two specific layers
@@ -253,8 +253,8 @@ module SHAInet
           dest_layer.biases = mat_klass.new(dest_layer.size, 1).random_fill!
         end
       end
-    rescue e : Exception
-      raise NeuralNetRunError.new("Error in connect_ltl: #{e}")
+    rescue ex : Exception
+      raise NeuralNetRunError.new("Error in connect_ltl: #{ex}")
     end
 
     def log_summary(e)

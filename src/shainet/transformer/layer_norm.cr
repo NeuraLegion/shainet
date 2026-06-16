@@ -375,8 +375,8 @@ module SHAInet
           end
 
           return d_x
-        rescue e : Exception
-          raise e
+        rescue ex : Exception
+          raise ex
         end
       end
 

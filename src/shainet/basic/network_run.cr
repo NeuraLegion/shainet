@@ -49,8 +49,8 @@ module SHAInet
         Log.info { "Input => #{input}, network output => #{output}" }
       end
       output
-    rescue e : Exception
-      raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
+    rescue ex : Exception
+      raise NeuralNetRunError.new("Error running on layers: #{ex} #{ex.inspect_with_backtrace}")
     end
 
     # Overload allowing retrieval of the raw matrix
@@ -77,8 +77,8 @@ module SHAInet
         Log.info { "Input => #{input}, network output => #{output}" } unless stealth
         output
       end
-    rescue e : Exception
-      raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
+    rescue ex : Exception
+      raise NeuralNetRunError.new("Error running on layers: #{ex} #{ex.inspect_with_backtrace}")
     end
 
     # GPU path - all CudaMatrix operations
@@ -176,8 +176,8 @@ module SHAInet
         matrix = out_layer.forward(matrix)
         matrix.as(CudaMatrix)
       end
-    rescue e : Exception
-      raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
+    rescue ex : Exception
+      raise NeuralNetRunError.new("Error running on layers: #{ex} #{ex.inspect_with_backtrace}")
     end
 
     # CPU path - all SimpleMatrix operations
@@ -258,8 +258,8 @@ module SHAInet
         matrix = out_layer.forward(matrix)
         matrix.as(SimpleMatrix)
       end
-    rescue e : Exception
-      raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
+    rescue ex : Exception
+      raise NeuralNetRunError.new("Error running on layers: #{ex} #{ex.inspect_with_backtrace}")
     end
 
     # Run a batch of sequences by calling `run` for each sequence
@@ -335,8 +335,8 @@ module SHAInet
       else
         result_matrix.to_a
       end
-    rescue e : Exception
-      raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
+    rescue ex : Exception
+      raise NeuralNetRunError.new("Error running on layers: #{ex} #{ex.inspect_with_backtrace}")
     end
 
     def run(input : Array(Array(GenNum)), *, return_matrix : Bool, stealth : Bool = false) : Array(Array(Float64)) | CudaMatrix | SimpleMatrix
@@ -362,8 +362,8 @@ module SHAInet
           result_matrix.to_a
         end
       end
-    rescue e : Exception
-      raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
+    rescue ex : Exception
+      raise NeuralNetRunError.new("Error running on layers: #{ex} #{ex.inspect_with_backtrace}")
     end
 
     # Quantifies how good the network performed for a single input compared to the expected output
@@ -439,8 +439,8 @@ module SHAInet
       # puts "@total_error: #{@total_error}"
 
 
-    rescue e : Exception
-      raise NeuralNetRunError.new("Error in evaluate: #{e}")
+    rescue ex : Exception
+      raise NeuralNetRunError.new("Error in evaluate: #{ex}")
     end
 
     # Evaluate using matrices already on the desired device
@@ -485,8 +485,8 @@ module SHAInet
                 end
         @transformer_error = trans.is_a?(CudaMatrix) ? trans.to_simple : trans
       end
-    rescue e : Exception
-      raise NeuralNetRunError.new("Error in evaluate: #{e}")
+    rescue ex : Exception
+      raise NeuralNetRunError.new("Error in evaluate: #{ex}")
     end
 
     # Accept integer input for embeddings
@@ -542,8 +542,8 @@ module SHAInet
       # puts "@total_error: #{@total_error}"
 
 
-    rescue e : Exception
-      raise NeuralNetRunError.new("Error in evaluate: #{e}")
+    rescue ex : Exception
+      raise NeuralNetRunError.new("Error in evaluate: #{ex}")
     end
 
     # Convenience wrapper for integer inputs
@@ -1053,8 +1053,8 @@ module SHAInet
                 )
               end
               sample_error = loss_value
-            rescue e : Exception
-              Log.debug { "GPU cross-entropy failed: #{e}, falling back to CPU computation" } unless use_label_gpu
+            rescue ex : Exception
+              Log.debug { "GPU cross-entropy failed: #{ex}, falling back to CPU computation" } unless use_label_gpu
               # Fall back to CPU computation below
               if use_label_gpu
                 # Convert label indices to one-hot for CPU fallback
@@ -1550,16 +1550,16 @@ module SHAInet
         begin
           matrix.sigmoid!
           return true
-        rescue e
-          Log.debug { "GPU sigmoid failed: #{e}, falling back to CPU" }
+        rescue ex
+          Log.debug { "GPU sigmoid failed: #{ex}, falling back to CPU" }
         end
       when SHAInet.relu
         # Use in-place ReLU operation
         begin
           matrix.relu!
           return true
-        rescue e
-          Log.debug { "GPU ReLU failed: #{e}, falling back to CPU" }
+        rescue ex
+          Log.debug { "GPU ReLU failed: #{ex}, falling back to CPU" }
         end
       end
 

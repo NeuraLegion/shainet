@@ -445,8 +445,8 @@ module SHAInet
         begin
           CUDNN.element_add!(result, self, other, 1.0, 1.0)
           return result
-        rescue e : Exception
-          Log.error { "cuDNN element_add failed: #{e}, falling back to cuBLAS" }
+        rescue ex : Exception
+          Log.error { "cuDNN element_add failed: #{ex}, falling back to cuBLAS" }
         end
       end
 
@@ -527,8 +527,8 @@ module SHAInet
         begin
           CUDNN.element_add!(self, self, other, 1.0, 1.0)
           return self
-        rescue e : Exception
-          Log.error { "cuDNN element_add failed: #{e}, falling back to cuBLAS" }
+        rescue ex : Exception
+          Log.error { "cuDNN element_add failed: #{ex}, falling back to cuBLAS" }
         end
       end
 
@@ -619,8 +619,8 @@ module SHAInet
         begin
           CUDNN.add_bias!(self, bias)
           return self
-        rescue e : Exception
-          Log.error { "cuDNN add_bias failed: #{e}, falling back to CUDA kernel" }
+        rescue ex : Exception
+          Log.error { "cuDNN add_bias failed: #{ex}, falling back to CUDA kernel" }
         end
       end
 
@@ -645,8 +645,8 @@ module SHAInet
         begin
           CUDNN.relu_forward(self, self)
           return self
-        rescue e : Exception
-          Log.error { "cuDNN ReLU failed: #{e}, falling back to CUDA kernel" }
+        rescue ex : Exception
+          Log.error { "cuDNN ReLU failed: #{ex}, falling back to CUDA kernel" }
         end
       end
 
@@ -792,8 +792,8 @@ module SHAInet
         begin
           CUDNN.sigmoid_forward!(self, self)
           return self
-        rescue e : Exception
-          Log.error { "cuDNN sigmoid failed: #{e}, falling back to CUDA kernel" }
+        rescue ex : Exception
+          Log.error { "cuDNN sigmoid failed: #{ex}, falling back to CUDA kernel" }
         end
       end
 
@@ -872,8 +872,8 @@ module SHAInet
         begin
           CUDNN.softmax_rows(self, self)
           return self
-        rescue e : Exception
-          Log.error { "cuDNN softmax failed: #{e}, falling back to CUDA kernel" }
+        rescue ex : Exception
+          Log.error { "cuDNN softmax failed: #{ex}, falling back to CUDA kernel" }
         end
       end
 
@@ -884,8 +884,8 @@ module SHAInet
           CUDA.softmax_rows(dptr, dptr, @rows, @cols)
           mark_device_dirty!
           return self
-        rescue e : Exception
-          Log.error { "CUDA softmax kernel failed: #{e}, falling back to CPU" }
+        rescue ex : Exception
+          Log.error { "CUDA softmax kernel failed: #{ex}, falling back to CPU" }
         end
       end
 
@@ -1029,8 +1029,8 @@ module SHAInet
         begin
           CUDNN.element_multiply!(self, self, other, alpha, beta)
           return self
-        rescue e : Exception
-          Log.error { "cuDNN element_mul failed: #{e}, falling back to CPU" }
+        rescue ex : Exception
+          Log.error { "cuDNN element_mul failed: #{ex}, falling back to CPU" }
         end
       end
 
@@ -1062,8 +1062,8 @@ module SHAInet
             mark_device_dirty!
             return self
           end
-        rescue e : Exception
-          Log.error { "CUDA dropout kernel failed: #{e}, falling back to CPU" }
+        rescue ex : Exception
+          Log.error { "CUDA dropout kernel failed: #{ex}, falling back to CPU" }
         end
       end
 
@@ -1092,8 +1092,8 @@ module SHAInet
         begin
           CUDNN.tanh_forward!(self, self)
           return self
-        rescue e : Exception
-          Log.error { "cuDNN tanh failed: #{e}, falling back to CPU" }
+        rescue ex : Exception
+          Log.error { "cuDNN tanh failed: #{ex}, falling back to CPU" }
         end
       end
 

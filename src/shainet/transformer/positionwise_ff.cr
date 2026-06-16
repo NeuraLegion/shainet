@@ -316,8 +316,8 @@ module SHAInet
         begin
           CUDNN.relu_backward(m, grad, dest)
           return dest
-        rescue e : Exception
-          Log.debug { "cuDNN ReLU backward failed: #{e}, falling back to CUDA kernel" }
+        rescue ex : Exception
+          Log.debug { "cuDNN ReLU backward failed: #{ex}, falling back to CUDA kernel" }
         end
       end
 
@@ -364,8 +364,8 @@ module SHAInet
           CUDA.accumulate_bias_grad(bias_grad.as(CudaMatrix).device_ptr.not_nil!, d_out.device_ptr.not_nil!, d_out.rows, d_out.cols)
           bias_grad.as(CudaMatrix).mark_device_dirty!
           return
-        rescue e : Exception
-          Log.debug { "GPU bias gradient accumulation failed: #{e.message}" }
+        rescue ex : Exception
+          Log.debug { "GPU bias gradient accumulation failed: #{ex.message}" }
         end
       end
 
