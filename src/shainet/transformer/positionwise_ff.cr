@@ -328,7 +328,7 @@ module SHAInet
           CUDA.relu_backward(dest.device_ptr.not_nil!, m.device_ptr.not_nil!, grad.device_ptr.not_nil!, m.rows * m.cols)
           dest.mark_device_dirty!
           return dest
-        rescue e : Exception
+        rescue
           # Fall back to CPU computation if CUDA fails
         end
       end

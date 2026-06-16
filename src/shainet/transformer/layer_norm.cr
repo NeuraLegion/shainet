@@ -258,7 +258,7 @@ module SHAInet
         result.mul_row_vector!(@gamma.as(CudaMatrix))
         result.add_bias!(@beta.as(CudaMatrix))
         return result
-      rescue e : Exception
+      rescue
         # Fall through to CPU implementation when kernels fail
       end
 

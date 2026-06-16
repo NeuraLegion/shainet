@@ -462,7 +462,7 @@ module SHAInet
             pointerof(loss_value),
             grad.as(CudaMatrix)
           )
-        rescue e
+        rescue
           loss_value = compute_cost_and_gradient_cpu(actual_matrix, expected_output, grad, cost_function)
         end
       else
@@ -1346,7 +1346,7 @@ module SHAInet
                          )
                          result.mark_device_dirty!
                          result
-                       rescue e
+                       rescue
                          # Fallback to elementwise copy if GPU operation fails
                          last_token_fallback = CudaMatrix.new(1, matrix.cols)
                          matrix.cols.times do |j|
