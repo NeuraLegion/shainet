@@ -4,10 +4,10 @@ module SHAInet
   class CudaMatrix
     def softmax_rows
       result = CudaMatrix.new(@rows, @cols)
-      if CUDA.fully_available? && (dptr = self.device_ptr) && !dptr.null? && (rptr = result.device_ptr) && !rptr.null?
+      if CUDA.fully_available? && (dptr = device_ptr) && !dptr.null? && (rptr = result.device_ptr) && !rptr.null?
         begin
           # Ensure source has up-to-date GPU data
-          self.sync_to_device! unless device_dirty?
+          sync_to_device! unless device_dirty?
 
           # Verify source data
           test_buf = Array(Float32).new(@rows * @cols, 0.0_f32)
@@ -49,7 +49,7 @@ module SHAInet
       end
 
       # CPU fallback - ensure we have current data from GPU
-      self.sync_from_device!("softmax_fallback") if device_dirty?
+      sync_from_device!("softmax_fallback") if device_dirty?
 
       @rows.times do |i|
         sum = 0.0
@@ -64,11 +64,11 @@ module SHAInet
       raise ArgumentError.new("drop_percent must be between 0 and 100") unless 0 <= drop_percent <= 100
       result = CudaMatrix.new(@rows, @cols)
       prob = drop_percent.to_f / 100.0
-      if CUDA.fully_available? && (dptr = self.device_ptr) && !dptr.null? && (rptr = result.device_ptr) && !rptr.null?
+      if CUDA.fully_available? && (dptr = device_ptr) && !dptr.null? && (rptr = result.device_ptr) && !rptr.null?
         seed = Random.rand(UInt64)
         begin
           # Ensure source has up-to-date GPU data
-          self.sync_to_device! unless device_dirty?
+          sync_to_device! unless device_dirty?
 
           CUDA.dropout(rptr, dptr, @rows, @cols, prob, seed)
 
@@ -82,7 +82,7 @@ module SHAInet
       end
 
       # CPU fallback - ensure we have current data from GPU
-      self.sync_from_device!("dropout_fallback") if device_dirty?
+      sync_from_device!("dropout_fallback") if device_dirty?
 
       if prob >= 1.0
         # All zeros, result already initialized to 0
