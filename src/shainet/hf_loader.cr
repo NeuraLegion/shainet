@@ -234,10 +234,10 @@ module SHAInet
     # (no scaling), letting the block use the plain theta^(-2i/d) formula.
     def self.compute_rope_freqs(config : LlamaConfig, head_dim : Int32) : Array(Float32)?
       scaling = config.rope_scaling
-      return nil if scaling.nil? || scaling.raw.nil?
+      return if scaling.nil? || scaling.raw.nil?
 
       stype = scaling["rope_type"]?.try(&.as_s) || scaling["type"]?.try(&.as_s)
-      return nil unless stype == "llama3"
+      return unless stype == "llama3"
 
       theta = config.rope_theta
       factor = scaling["factor"].as_f

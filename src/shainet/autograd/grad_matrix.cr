@@ -994,7 +994,7 @@ module SHAInet
 
       # Get gradient as 2D array
       def grad_to_a : Array(Array(Float64))?
-        return nil unless @grad
+        return unless @grad
         Array.new(@rows) do |i|
           Array.new(@cols) do |j|
             grad_at(i, j)

@@ -372,7 +372,7 @@ module SHAInet
     end
 
     def pop : Node?
-      return nil if @data.empty?
+      return if @data.empty?
       max = @data[0]
       last = @data.pop
       if !@data.empty?

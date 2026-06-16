@@ -93,7 +93,7 @@ module SHAInet
 
     # Returns the CUDA runtime version or nil if CUDA is unavailable.
     def version
-      return nil unless available?
+      return unless available?
       out = 0
       if LibCUDARuntime.cudaRuntimeGetVersion(pointerof(out)) == 0
         out
@@ -176,7 +176,7 @@ module SHAInet
 
     # Returns a hash with free and total memory in bytes for the active CUDA device.
     def memory_info
-      return nil unless fully_available?
+      return unless fully_available?
       free = 0_u64
       total = 0_u64
       res = LibCUDARuntime.cudaMemGetInfo(pointerof(free), pointerof(total))

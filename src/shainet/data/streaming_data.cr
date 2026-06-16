@@ -139,7 +139,7 @@ module SHAInet
     private def next_line : String?
       if @index >= @buffer.size
         read_chunk
-        return nil if @buffer.empty?
+        return if @buffer.empty?
       end
       line = @buffer[@index]
       @index += 1
