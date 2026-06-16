@@ -450,7 +450,6 @@ module SHAInet
                  cost_function : CostFunction = SHAInet.quadratic_cost)
       actual_matrix = run(input_data, stealth: true)
 
-      output_layer = @output_layers.last
       grad = GPUMemory.like(actual_matrix, actual_matrix.rows, actual_matrix.cols)
 
       loss_value = 0.0
@@ -992,7 +991,6 @@ module SHAInet
         actual_matrix = run(input_matrix, stealth: true)
 
         # Optimize: Use GPU-accelerated cost and gradient computation when possible
-        sample_error = 0.0
         output_layer = @output_layers.last
 
         if output_layer.is_a?(MatrixLayer)

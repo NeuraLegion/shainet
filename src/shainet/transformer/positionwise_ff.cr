@@ -198,7 +198,6 @@ module SHAInet
 
     # CPU path backward
     def backward(d_out : SimpleMatrix) : SimpleMatrix
-      w2_cpu = @w2.as(SimpleMatrix)
       dh = d_out * @w2_t.as(SimpleMatrix)
 
       # For SimpleMatrix, still need to create temporary (no in-place add for SimpleMatrix yet)
@@ -229,7 +228,6 @@ module SHAInet
       end
       @g_b1 = @g_b1.as(SimpleMatrix) + db1
 
-      w1_cpu = @w1.as(SimpleMatrix)
       d_input = drelu * @w1_t.as(SimpleMatrix)
       d_input
     end

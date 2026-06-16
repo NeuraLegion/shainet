@@ -66,16 +66,7 @@ module SHAInet
       @@checked = true
 
       rt = LibC.dlopen("libcudart.so", LibC::RTLD_LAZY)
-      if rt.null?
-        err = LibC.dlerror
-        msg = err.null? ? "unknown" : String.new(err)
-      end
-
       blas = LibC.dlopen("libcublas.so", LibC::RTLD_LAZY)
-      if blas.null?
-        err = LibC.dlerror
-        msg = err.null? ? "unknown" : String.new(err)
-      end
 
       if rt.null? || blas.null?
         @@available = false
@@ -106,8 +97,6 @@ module SHAInet
     def cudnn_available?
       handle = LibC.dlopen("libcudnn.so", LibC::RTLD_LAZY)
       if handle.null?
-        err = LibC.dlerror
-        msg = err.null? ? "unknown" : String.new(err)
         false
       else
         LibC.dlclose(handle)
@@ -122,8 +111,6 @@ module SHAInet
     def kernels_available?
       handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
       if handle.null?
-        err = LibC.dlerror
-        msg = err.null? ? "unknown" : String.new(err)
         false
       else
         LibC.dlclose(handle)
