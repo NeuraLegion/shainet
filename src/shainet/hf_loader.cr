@@ -279,7 +279,8 @@ module SHAInet
         eps = config.rms_norm_eps
         theta = config.rope_theta
         # Qwen3 sets head_dim explicitly (e.g. 128), independent of d/n_heads;
-        # LLaMA/Qwen2 derive it as d/n_heads.
+        # LLaMA/Qwen2 leave it nil and the block derives d/n_heads (and validates
+        # divisibility). Use a concrete value only for the local RoPE-freq calc.
         head_dim = config.head_dim || (d // n_heads)
         rope_freqs = compute_rope_freqs(config, head_dim)
 
@@ -287,7 +288,7 @@ module SHAInet
         net.add_layer(:input, 1)
         net.add_layer(:embedding, d, vocab_size: config.vocab_size)
         config.num_hidden_layers.times do
-          net.add_layer(:llama, d, num_heads: n_heads, ff_hidden: ff, num_kv_heads: config.num_key_value_heads, eps: eps, head_dim: head_dim)
+          net.add_layer(:llama, d, num_heads: n_heads, ff_hidden: ff, num_kv_heads: config.num_key_value_heads, eps: eps, head_dim: config.head_dim)
         end
         net.add_layer(:output, config.vocab_size, activation_function: SHAInet.identity)
         net.fully_connect
@@ -338,8 +339,11 @@ module SHAInet
 
           # Optional Qwen3 QK-norm weights (per-head RMSNorm over head_dim),
           # applied to Q and K before RoPE. Present for qwen3/qwen3_moe, absent
-          # for LLaMA/Qwen2. They appear as a complete pair.
-          if sf.has_tensor?("#{prefix}.self_attn.q_norm.weight")
+          # for LLaMA/Qwen2. Always a complete pair.
+          has_qn = sf.has_tensor?("#{prefix}.self_attn.q_norm.weight")
+          has_kn = sf.has_tensor?("#{prefix}.self_attn.k_norm.weight")
+          if has_qn || has_kn
+            raise "Incomplete QK-norm weights for #{prefix} (q_norm=#{has_qn} k_norm=#{has_kn})" unless has_qn && has_kn
             block.q_norm = sf.read_f32("#{prefix}.self_attn.q_norm.weight")
             block.k_norm = sf.read_f32("#{prefix}.self_attn.k_norm.weight")
           end

@@ -75,6 +75,7 @@ module SHAInet
       # head_dim defaults to d_model/num_heads (LLaMA/Qwen2). Qwen3 passes it
       # explicitly (e.g. 128), so q_dim = num_heads*head_dim may differ from d_model.
       if hd = head_dim
+        raise ArgumentError.new("head_dim must be positive") unless hd > 0
         @head_dim = hd
       else
         raise ArgumentError.new("d_model must be divisible by num_heads") unless @d_model % @num_heads == 0
