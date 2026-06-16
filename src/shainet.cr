@@ -46,6 +46,7 @@ require "./shainet/transformer/positionwise_ff"
 require "./shainet/transformer/rms_norm"
 require "./shainet/transformer/rope"
 require "./shainet/transformer/swiglu_ff"
+require "./shainet/transformer/moe_ff"
 require "./shainet/transformer/transformer_block"
 require "./shainet/version"
 
