@@ -309,8 +309,6 @@ module SHAInet
         # Final projection - GPU
         @out = concat * @w_o.as(CudaMatrix)
         @out.as(CudaMatrix)
-      ensure
-        # No-op for persistent workspace matrices
       end
     end
 
