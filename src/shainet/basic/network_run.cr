@@ -694,12 +694,6 @@ module SHAInet
       end
     end
 
-    # Convenience wrapper for integer inputs
-    def evaluate_sequence_label(input_data : Array(Array(Int32)), label : Int32)
-      seq = input_data.map { |x| x.map(&.to_f64) }
-      evaluate_sequence_label(seq, label)
-    end
-
     # Calculate MSE from the error signal of the output layer
     def update_mse
       n = @output_layers.last.size
