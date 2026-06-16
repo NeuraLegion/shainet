@@ -17,20 +17,20 @@ module SHAInet
       property grad : Array(Float64)?
       property rows : Int32
       property cols : Int32
-      property requires_grad : Bool
+      property? requires_grad : Bool
       property parents : Array(GradMatrix)
       property backward_fn : Proc(Nil)?
       property name : String?
 
       # Track if this is a leaf node (created by user, not from computation)
-      getter is_leaf : Bool
+      getter? leaf : Bool
 
       def initialize(@rows : Int32, @cols : Int32, init : Float64 = 0.0, @requires_grad : Bool = false, @name : String? = nil)
         @data = Array(Float64).new(@rows * @cols, init)
         @grad = @requires_grad ? Array(Float64).new(@rows * @cols, 0.0) : nil
         @parents = [] of GradMatrix
         @backward_fn = nil
-        @is_leaf = true
+        @leaf = true
       end
 
       def initialize(@rows : Int32, @cols : Int32, @data : Array(Float64), @requires_grad : Bool = false, @name : String? = nil)
@@ -38,7 +38,7 @@ module SHAInet
         @grad = @requires_grad ? Array(Float64).new(@rows * @cols, 0.0) : nil
         @parents = [] of GradMatrix
         @backward_fn = nil
-        @is_leaf = true
+        @leaf = true
       end
 
       # Create from 2D array
@@ -152,11 +152,11 @@ module SHAInet
           end
         end
 
-        result = GradMatrix.new(@rows, other.cols, result_data, @requires_grad || other.requires_grad)
+        result = GradMatrix.new(@rows, other.cols, result_data, requires_grad? || other.requires_grad?)
         result.parents = [self, other]
         result.set_non_leaf!
 
-        if result.requires_grad
+        if result.requires_grad?
           # Capture values for backward pass
           self_data = @data.dup
           self_rows = @rows
@@ -168,7 +168,7 @@ module SHAInet
           result.backward_fn = -> do
             if out_grad = result.grad
               # dA = dC @ B^T
-              if @requires_grad
+              if requires_grad?
                 da = Array(Float64).new(self_rows * self_cols, 0.0)
                 self_rows.times do |i|
                   self_cols.times do |j|
@@ -183,7 +183,7 @@ module SHAInet
               end
 
               # dB = A^T @ dC
-              if other.requires_grad
+              if other.requires_grad?
                 db = Array(Float64).new(other_rows * other_cols, 0.0)
                 other_rows.times do |i|
                   other_cols.times do |j|
@@ -213,11 +213,11 @@ module SHAInet
           end
         end
 
-        result = GradMatrix.new(@cols, @rows, result_data, @requires_grad)
+        result = GradMatrix.new(@cols, @rows, result_data, requires_grad?)
         result.parents = [self]
         result.set_non_leaf!
 
-        if result.requires_grad
+        if result.requires_grad?
           result_rows = result.rows
           result_cols = result.cols
 
@@ -244,15 +244,15 @@ module SHAInet
         result_data = Array(Float64).new(@rows * @cols)
         @data.each_with_index { |v, i| result_data << v + other.data[i] }
 
-        result = GradMatrix.new(@rows, @cols, result_data, @requires_grad || other.requires_grad)
+        result = GradMatrix.new(@rows, @cols, result_data, requires_grad? || other.requires_grad?)
         result.parents = [self, other]
         result.set_non_leaf!
 
-        if result.requires_grad
+        if result.requires_grad?
           result.backward_fn = -> do
             if out_grad = result.grad
-              accumulate_grad!(out_grad) if @requires_grad
-              other.accumulate_grad!(out_grad) if other.requires_grad
+              accumulate_grad!(out_grad) if requires_grad?
+              other.accumulate_grad!(out_grad) if other.requires_grad?
             end
           end
         end
@@ -267,15 +267,15 @@ module SHAInet
         result_data = Array(Float64).new(@rows * @cols)
         @data.each_with_index { |v, i| result_data << v - other.data[i] }
 
-        result = GradMatrix.new(@rows, @cols, result_data, @requires_grad || other.requires_grad)
+        result = GradMatrix.new(@rows, @cols, result_data, requires_grad? || other.requires_grad?)
         result.parents = [self, other]
         result.set_non_leaf!
 
-        if result.requires_grad
+        if result.requires_grad?
           result.backward_fn = -> do
             if out_grad = result.grad
-              accumulate_grad!(out_grad) if @requires_grad
-              if other.requires_grad
+              accumulate_grad!(out_grad) if requires_grad?
+              if other.requires_grad?
                 neg_grad = out_grad.map { |v| -v }
                 other.accumulate_grad!(neg_grad)
               end
@@ -293,22 +293,22 @@ module SHAInet
         result_data = Array(Float64).new(@rows * @cols)
         @data.each_with_index { |v, i| result_data << v * other.data[i] }
 
-        result = GradMatrix.new(@rows, @cols, result_data, @requires_grad || other.requires_grad)
+        result = GradMatrix.new(@rows, @cols, result_data, requires_grad? || other.requires_grad?)
         result.parents = [self, other]
         result.set_non_leaf!
 
-        if result.requires_grad
+        if result.requires_grad?
           self_data = @data.dup
           other_data = other.data.dup
 
           result.backward_fn = -> do
             if out_grad = result.grad
-              if @requires_grad
+              if requires_grad?
                 da = Array(Float64).new(@rows * @cols)
                 out_grad.each_with_index { |g, i| da << g * other_data[i] }
                 accumulate_grad!(da)
               end
-              if other.requires_grad
+              if other.requires_grad?
                 db = Array(Float64).new(@rows * @cols)
                 out_grad.each_with_index { |g, i| db << g * self_data[i] }
                 other.accumulate_grad!(db)
@@ -324,11 +324,11 @@ module SHAInet
       def *(scalar : Float64) : GradMatrix
         result_data = @data.map { |v| v * scalar }
 
-        result = GradMatrix.new(@rows, @cols, result_data, @requires_grad)
+        result = GradMatrix.new(@rows, @cols, result_data, requires_grad?)
         result.parents = [self]
         result.set_non_leaf!
 
-        if result.requires_grad
+        if result.requires_grad?
           result.backward_fn = -> do
             if out_grad = result.grad
               da = out_grad.map { |g| g * scalar }
@@ -353,11 +353,11 @@ module SHAInet
       # Sum all elements: scalar = sum(A)
       def sum : GradMatrix
         total = @data.sum
-        result = GradMatrix.new(1, 1, [total], @requires_grad)
+        result = GradMatrix.new(1, 1, [total], requires_grad?)
         result.parents = [self]
         result.set_non_leaf!
 
-        if result.requires_grad
+        if result.requires_grad?
           n = @rows * @cols
           result.backward_fn = -> do
             if out_grad = result.grad
@@ -374,11 +374,11 @@ module SHAInet
       # Mean of all elements: scalar = mean(A)
       def mean : GradMatrix
         avg = @data.sum / (@rows * @cols)
-        result = GradMatrix.new(1, 1, [avg], @requires_grad)
+        result = GradMatrix.new(1, 1, [avg], requires_grad?)
         result.parents = [self]
         result.set_non_leaf!
 
-        if result.requires_grad
+        if result.requires_grad?
           n = @rows * @cols
           result.backward_fn = -> do
             if out_grad = result.grad
@@ -401,11 +401,11 @@ module SHAInet
           result_data << sum
         end
 
-        result = GradMatrix.new(@rows, 1, result_data, @requires_grad)
+        result = GradMatrix.new(@rows, 1, result_data, requires_grad?)
         result.parents = [self]
         result.set_non_leaf!
 
-        if result.requires_grad
+        if result.requires_grad?
           cols = @cols
           rows = @rows
           result.backward_fn = -> do
@@ -430,11 +430,11 @@ module SHAInet
           @cols.times { |j| result_data[j] += self[i, j] }
         end
 
-        result = GradMatrix.new(1, @cols, result_data, @requires_grad)
+        result = GradMatrix.new(1, @cols, result_data, requires_grad?)
         result.parents = [self]
         result.set_non_leaf!
 
-        if result.requires_grad
+        if result.requires_grad?
           cols = @cols
           rows = @rows
           result.backward_fn = -> do
@@ -455,11 +455,11 @@ module SHAInet
       def pow(p : Float64) : GradMatrix
         result_data = @data.map { |v| v ** p }
 
-        result = GradMatrix.new(@rows, @cols, result_data, @requires_grad)
+        result = GradMatrix.new(@rows, @cols, result_data, requires_grad?)
         result.parents = [self]
         result.set_non_leaf!
 
-        if result.requires_grad
+        if result.requires_grad?
           self_data = @data.dup
           result.backward_fn = -> do
             if out_grad = result.grad
@@ -479,11 +479,11 @@ module SHAInet
       def sqrt : GradMatrix
         result_data = @data.map { |v| Math.sqrt(v) }
 
-        result = GradMatrix.new(@rows, @cols, result_data, @requires_grad)
+        result = GradMatrix.new(@rows, @cols, result_data, requires_grad?)
         result.parents = [self]
         result.set_non_leaf!
 
-        if result.requires_grad
+        if result.requires_grad?
           result_data_copy = result_data.dup
           result.backward_fn = -> do
             if out_grad = result.grad
@@ -503,11 +503,11 @@ module SHAInet
       def exp : GradMatrix
         result_data = @data.map { |v| Math.exp(v) }
 
-        result = GradMatrix.new(@rows, @cols, result_data, @requires_grad)
+        result = GradMatrix.new(@rows, @cols, result_data, requires_grad?)
         result.parents = [self]
         result.set_non_leaf!
 
-        if result.requires_grad
+        if result.requires_grad?
           result_data_copy = result_data.dup
           result.backward_fn = -> do
             if out_grad = result.grad
@@ -527,11 +527,11 @@ module SHAInet
       def log : GradMatrix
         result_data = @data.map { |v| Math.log(v) }
 
-        result = GradMatrix.new(@rows, @cols, result_data, @requires_grad)
+        result = GradMatrix.new(@rows, @cols, result_data, requires_grad?)
         result.parents = [self]
         result.set_non_leaf!
 
-        if result.requires_grad
+        if result.requires_grad?
           self_data = @data.dup
           result.backward_fn = -> do
             if out_grad = result.grad
@@ -555,11 +555,11 @@ module SHAInet
       def relu : GradMatrix
         result_data = @data.map { |v| v > 0 ? v : 0.0 }
 
-        result = GradMatrix.new(@rows, @cols, result_data, @requires_grad)
+        result = GradMatrix.new(@rows, @cols, result_data, requires_grad?)
         result.parents = [self]
         result.set_non_leaf!
 
-        if result.requires_grad
+        if result.requires_grad?
           self_data = @data.dup
           result.backward_fn = -> do
             if out_grad = result.grad
@@ -579,11 +579,11 @@ module SHAInet
       def leaky_relu(alpha : Float64 = 0.01) : GradMatrix
         result_data = @data.map { |v| v > 0 ? v : alpha * v }
 
-        result = GradMatrix.new(@rows, @cols, result_data, @requires_grad)
+        result = GradMatrix.new(@rows, @cols, result_data, requires_grad?)
         result.parents = [self]
         result.set_non_leaf!
 
-        if result.requires_grad
+        if result.requires_grad?
           self_data = @data.dup
           result.backward_fn = -> do
             if out_grad = result.grad
@@ -603,11 +603,11 @@ module SHAInet
       def sigmoid : GradMatrix
         result_data = @data.map { |v| 1.0 / (1.0 + Math.exp(-v)) }
 
-        result = GradMatrix.new(@rows, @cols, result_data, @requires_grad)
+        result = GradMatrix.new(@rows, @cols, result_data, requires_grad?)
         result.parents = [self]
         result.set_non_leaf!
 
-        if result.requires_grad
+        if result.requires_grad?
           result_data_copy = result_data.dup
           result.backward_fn = -> do
             if out_grad = result.grad
@@ -628,11 +628,11 @@ module SHAInet
       def tanh : GradMatrix
         result_data = @data.map { |v| Math.tanh(v) }
 
-        result = GradMatrix.new(@rows, @cols, result_data, @requires_grad)
+        result = GradMatrix.new(@rows, @cols, result_data, requires_grad?)
         result.parents = [self]
         result.set_non_leaf!
 
-        if result.requires_grad
+        if result.requires_grad?
           result_data_copy = result_data.dup
           result.backward_fn = -> do
             if out_grad = result.grad
@@ -671,11 +671,11 @@ module SHAInet
           row_exp.each { |e| result_data << e / row_sum }
         end
 
-        result = GradMatrix.new(@rows, @cols, result_data, @requires_grad)
+        result = GradMatrix.new(@rows, @cols, result_data, requires_grad?)
         result.parents = [self]
         result.set_non_leaf!
 
-        if result.requires_grad
+        if result.requires_grad?
           result_data_copy = result_data.dup
           rows = @rows
           cols = @cols
@@ -723,11 +723,11 @@ module SHAInet
           0.5 * x * (1.0 + Math.tanh(sqrt_2_over_pi * (x + 0.044715 * x * x * x)))
         end
 
-        result = GradMatrix.new(@rows, @cols, result_data, @requires_grad)
+        result = GradMatrix.new(@rows, @cols, result_data, requires_grad?)
         result.parents = [self]
         result.set_non_leaf!
 
-        if result.requires_grad
+        if result.requires_grad?
           self_data = @data.dup
 
           result.backward_fn = -> do
@@ -773,11 +773,11 @@ module SHAInet
 
         # Add epsilon for numerical stability and take log
         log_pred_data = @data.map { |v| Math.log(v + eps) }
-        log_pred = GradMatrix.new(@rows, @cols, log_pred_data, @requires_grad)
+        log_pred = GradMatrix.new(@rows, @cols, log_pred_data, requires_grad?)
         log_pred.parents = [self]
         log_pred.set_non_leaf!
 
-        if @requires_grad
+        if requires_grad?
           self_data = @data.dup
           log_pred.backward_fn = -> do
             if out_grad = log_pred.grad
@@ -809,11 +809,11 @@ module SHAInet
           loss_sum -= t * Math.log(pred_clipped) + (1.0 - t) * Math.log(1.0 - pred_clipped)
         end
 
-        result = GradMatrix.new(1, 1, [loss_sum / n], @requires_grad)
+        result = GradMatrix.new(1, 1, [loss_sum / n], requires_grad?)
         result.parents = [self]
         result.set_non_leaf!
 
-        if result.requires_grad
+        if result.requires_grad?
           self_data = @data.dup
           target_data = target.data.dup
 
@@ -865,7 +865,7 @@ module SHAInet
       end
 
       protected def set_non_leaf!
-        @is_leaf = false
+        @leaf = false
       end
 
       private def build_topo : Array(GradMatrix)
@@ -897,18 +897,18 @@ module SHAInet
           end
         end
 
-        result = GradMatrix.new(@rows, @cols, result_data, @requires_grad || row_vec.requires_grad)
+        result = GradMatrix.new(@rows, @cols, result_data, requires_grad? || row_vec.requires_grad?)
         result.parents = [self, row_vec]
         result.set_non_leaf!
 
-        if result.requires_grad
+        if result.requires_grad?
           rows = @rows
 
           result.backward_fn = -> do
             if out_grad = result.grad
-              accumulate_grad!(out_grad) if @requires_grad
+              accumulate_grad!(out_grad) if requires_grad?
 
-              if row_vec.requires_grad
+              if row_vec.requires_grad?
                 # Sum gradients along rows
                 db = Array(Float64).new(@cols, 0.0)
                 rows.times do |i|
@@ -934,11 +934,11 @@ module SHAInet
           end
         end
 
-        result = GradMatrix.new(@rows, @cols, result_data, @requires_grad || row_vec.requires_grad)
+        result = GradMatrix.new(@rows, @cols, result_data, requires_grad? || row_vec.requires_grad?)
         result.parents = [self, row_vec]
         result.set_non_leaf!
 
-        if result.requires_grad
+        if result.requires_grad?
           self_data = @data.dup
           row_vec_data = row_vec.data.dup
           rows = @rows
@@ -946,7 +946,7 @@ module SHAInet
 
           result.backward_fn = -> do
             if out_grad = result.grad
-              if @requires_grad
+              if requires_grad?
                 da = Array(Float64).new(rows * cols)
                 rows.times do |i|
                   cols.times { |j| da << out_grad[i * cols + j] * row_vec_data[j] }
@@ -954,7 +954,7 @@ module SHAInet
                 accumulate_grad!(da)
               end
 
-              if row_vec.requires_grad
+              if row_vec.requires_grad?
                 db = Array(Float64).new(cols, 0.0)
                 rows.times do |i|
                   cols.times { |j| db[j] += out_grad[i * cols + j] * self_data[i * cols + j] }
@@ -974,7 +974,7 @@ module SHAInet
 
       def to_s(io : IO)
         io << "GradMatrix(#{@rows}x#{@cols}"
-        io << ", requires_grad=true" if @requires_grad
+        io << ", requires_grad=true" if requires_grad?
         io << ", name=#{@name}" if @name
         io << ")"
       end

@@ -196,7 +196,7 @@ module SHAInet
           when TransformerLayer
             matrix = l.as(TransformerLayer).forward(matrix)
           when LlamaLayer
-            matrix = if @use_kv_cache
+            matrix = if use_kv_cache?
                        l.as(LlamaLayer).forward_cached(matrix)
                      else
                        l.as(LlamaLayer).forward(matrix)

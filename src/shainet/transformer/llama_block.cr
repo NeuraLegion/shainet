@@ -65,7 +65,7 @@ module SHAInet
     @staging_host : Array(Float32) = Array(Float32).new
     @gpu_attn_avail : Bool? = nil
     # Force the CPU attention path even when CUDA is available (tests/fallback).
-    property force_cpu_attention : Bool = false
+    property? force_cpu_attention : Bool = false
 
     def initialize(@d_model : Int32, @num_heads : Int32, ff_hidden : Int32,
                    eps : Float64 = 1e-6, @rope_theta : Float64 = 10000.0,
@@ -476,7 +476,7 @@ module SHAInet
     # caller has not forced the CPU path (property or SHAINET_CPU_ATTENTION=1).
     # Memoized: fully_available? dlopens.
     private def gpu_attention? : Bool
-      return false if @force_cpu_attention
+      return false if force_cpu_attention?
       avail = @gpu_attn_avail
       if avail.nil?
         avail = !ENV["SHAINET_CPU_ATTENTION"]? && CUDA.fully_available?

@@ -11,7 +11,7 @@ module SHAInet
     property merges : Array(Tuple(String, String))
     property merges_map : Hash(Tuple(String, String), String)
     property merges_rank : Hash(Tuple(String, String), Int32)
-    property hf_mode : Bool = false
+    property? hf_mode : Bool = false
 
     # GPT-2 byte-to-unicode mapping (lazily built). Maps a printable Unicode
     # codepoint back to the original raw byte it represents in byte-level BPE.
@@ -185,7 +185,7 @@ module SHAInet
     # Encode a string into token IDs. Unknown tokens are added to the
     # vocabulary using a greedy BPE merging strategy.
     def encode(text : String) : Array(Int32)
-      if @hf_mode
+      if hf_mode?
         return encode_hf(text)
       end
       words = text.split(/\s+/)
@@ -273,7 +273,7 @@ module SHAInet
 
     # Decode an array of token IDs back into a string.
     def decode(ids : Array(Int32)) : String
-      if @hf_mode
+      if hf_mode?
         # Byte-level BPE: each token char maps back to a raw byte (GPT-2
         # bytes_to_unicode reverse), then the byte stream is UTF-8 decoded.
         bytes = Array(UInt8).new

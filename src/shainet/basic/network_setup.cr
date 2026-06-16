@@ -29,13 +29,13 @@ module SHAInet
     property learning_rate : Float64, momentum : Float64
 
     # KV cache mode for autoregressive LLM inference
-    property use_kv_cache : Bool = false
+    property? use_kv_cache : Bool = false
 
     # Status flag set to true once quantize! has converted weights to Q8.
     # Informational only — the quantized lm_head dispatch in Network#run keys
     # off @lm_head_q (and block/FFN weights off their own QuantizedCudaMatrix
     # type), not off this flag.
-    property quantize_weights : Bool = false
+    property? quantize_weights : Bool = false
 
     # Quantized lm_head weight (populated by quantize! when CUDA is available).
     @lm_head_q : QuantizedWeight? = nil
@@ -54,7 +54,7 @@ module SHAInet
     property warmup_steps : Int32
     property weight_decay : Float64
     property accumulation_steps : Int32
-    property mixed_precision : Bool
+    property? mixed_precision : Bool
 
     @cached_expanded_grad : SimpleMatrix | CudaMatrix?
 
