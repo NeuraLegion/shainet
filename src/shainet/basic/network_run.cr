@@ -291,7 +291,7 @@ module SHAInet
     # Accept integer input for embedding layers
     # Creates a column vector [N, 1] so the embedding layer can look up token IDs.
     def run(input : Array(Int32), stealth : Bool = false) : Array(Float64)
-      if @hidden_layers.any?(&.is_a?(EmbeddingLayer))
+      if @hidden_layers.any?(EmbeddingLayer)
         matrix = SimpleMatrix.new(input.size, 1)
         input.each_with_index { |id, i| matrix[i, 0] = id.to_f64 }
         result = run(matrix, stealth: stealth)
@@ -302,7 +302,7 @@ module SHAInet
     end
 
     def run(input : Array(Int32), *, return_matrix : Bool, stealth : Bool = false) : Array(Float64) | CudaMatrix | SimpleMatrix
-      if @hidden_layers.any?(&.is_a?(EmbeddingLayer))
+      if @hidden_layers.any?(EmbeddingLayer)
         matrix = SimpleMatrix.new(input.size, 1)
         input.each_with_index { |id, i| matrix[i, 0] = id.to_f64 }
         result = run(matrix, stealth: stealth)
