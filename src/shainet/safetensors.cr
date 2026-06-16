@@ -229,8 +229,8 @@ module SHAInet
     # "weight_map" maps each tensor name to its shard file). Presents the same
     # read interface as File, routing each tensor read to the owning shard.
     class ShardedFile
-      @shards : Hash(String, File)        # shard filename -> open File
-      @owner : Hash(String, File)         # tensor name   -> owning shard File
+      @shards : Hash(String, File) # shard filename -> open File
+      @owner : Hash(String, File)  # tensor name -> owning shard File
 
       def initialize(model_dir : String, index_path : String)
         index = JSON.parse(::File.read(index_path))
