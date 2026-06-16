@@ -1294,8 +1294,10 @@ module SHAInet
 
     def validate_values(array : Array(Float64), location : String)
       # Detect NaNs in output
-      array.each { |ar| raise NeuralNetRunError.new(
-        "Found a NaN value, run stopped.\n#{location}: #{array}") if ar.nan? }
+      array.each do |ar|
+        raise NeuralNetRunError.new(
+          "Found a NaN value, run stopped.\n#{location}: #{array}") if ar.nan?
+      end
     end
 
     def get_cost_proc(function_name : String) : CostFunction
