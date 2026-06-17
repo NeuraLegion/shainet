@@ -266,7 +266,7 @@ module AgentDemo
     @sampler : SHAInet::Sampler
     getter max_context : Int32
 
-    def initialize(@net : SHAInet::Network, @tokenizer : SHAInet::BPETokenizer, @tools : Array(Tool), @max_context : Int32 = 8192)
+    def initialize(@net : SHAInet::Network, @tokenizer : SHAInet::BPETokenizer, @tools : Array(Tool), @max_context : Int32 = 4096)
       im_start = @tokenizer.vocab["<|im_start|>"]?
       im_end = @tokenizer.vocab["<|im_end|>"]?
       raise "model is not ChatML (<|im_start|>/<|im_end|> missing); this agent targets Qwen3-style models" unless im_start && im_end
@@ -456,7 +456,14 @@ module AgentDemo
 
         STDERR.print "\n#{"Agent".colorize(:light_cyan).bold} ❯ "
         STDERR.flush
-        text = generate(max_tokens) # streams the filtered prose inline
+        begin
+          text = generate(max_tokens) # streams the filtered prose inline
+        rescue ex
+          STDERR.puts "\n  [agent] generation failed: #{ex.message}".colorize(:red)
+          STDERR.puts "  (out of GPU memory? try /clear, a shorter request, or a smaller SHAINET_EXPERT_CACHE_MB)".colorize(:dark_gray)
+          @net.clear_cache!
+          break
+        end
         STDERR.puts ""
         calls = AgentDemo.parse_tool_calls(text)
 
@@ -549,18 +556,18 @@ net.use_kv_cache = true
 tokenizer = SHAInet::BPETokenizer.from_hf(File.join(model_dir, "tokenizer.json"))
 STDERR.puts "Loaded in #{(Time.instant - t0).total_seconds.round(1)}s (vocab #{tokenizer.vocab.size})"
 
-# The expert cache defaults to 70% of free VRAM, which is tuned for short, fixed
-# prompts. An agent re-prefills a growing transcript each step, so leave a larger
-# headroom (6GB) for context + activations to avoid OOM. Override via the env var.
+# Size the expert cache to leave headroom for the model + prefill activations.
+# (cudaMalloc now GC-reclaims dead GPU buffers on pressure, so this only needs a
+# modest reserve.) Override with SHAINET_EXPERT_CACHE_MB (0 disables).
 if offload && !ENV["SHAINET_EXPERT_CACHE_MB"]? && (info = SHAInet::CUDA.memory_info)
   reserve = 6_u64 * 1024 * 1024 * 1024
   free = info[:free]
   budget_mb = free > reserve ? ((free - reserve) // (1024_u64 * 1024_u64)) : 0_u64
   ENV["SHAINET_EXPERT_CACHE_MB"] = budget_mb.to_s
-  STDERR.puts "  Expert cache budget: #{budget_mb} MB (free #{free // (1024*1024)} MB − 6GB reserve)"
+  STDERR.puts "  Expert cache budget: #{budget_mb} MB (free #{free // (1024*1024)} MB − 6GB reserve)".colorize(:dark_gray)
 end
 
-max_context = (ENV["SHAINET_AGENT_CONTEXT"]? || "8192").to_i
+max_context = (ENV["SHAINET_AGENT_CONTEXT"]? || "4096").to_i
 agent = AgentDemo::Agent.new(net, tokenizer, AgentDemo.build_tools, max_context)
 STDERR.puts "Ready · tools: #{AgentDemo.build_tools.map(&.name).join(", ")} · max context #{max_context} tok".colorize(:green)
 STDERR.puts "Commands: /context  /compact  /clear  /help   (Ctrl-D to exit)".colorize(:dark_gray)
