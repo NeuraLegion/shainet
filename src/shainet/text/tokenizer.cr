@@ -10,13 +10,8 @@ module SHAInet
   # Very small tokenizer used for toy examples. It builds a vocabulary of words
   # from given text and encodes/decodes sentences to arrays of token IDs.
   class Tokenizer
-    getter vocab : Hash(String, Int32)
-    getter inv_vocab : Array(String)
-
-    def initialize
-      @vocab = Hash(String, Int32).new
-      @inv_vocab = [] of String
-    end
+    getter vocab = Hash(String, Int32).new
+    getter inv_vocab = [] of String
 
     # Update the vocabulary with all unique words from the given text. Splits the
     # text on whitespace.

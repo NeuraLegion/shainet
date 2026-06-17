@@ -14,8 +14,8 @@ module SHAInet
     property device_ptr : Pointer(Float32)?
     @device_dirty : Bool = false # Track if GPU data is newer than CPU data
     @host_modified : Bool = true # Track if host data changed since last sync_to_device!
-    @rows : Int32
-    @cols : Int32
+    getter rows : Int32
+    getter cols : Int32
     @data : Array(Float32)
     @gpu_memory_size : UInt64 = 0_u64 # Track our own GPU memory size
 
@@ -47,8 +47,6 @@ module SHAInet
     @@matrix_pool = Hash(String, Array(CudaMatrix)).new { |h, k| h[k] = [] of CudaMatrix }
     @@pool_enabled = true
     @@max_pool_size = 30_000
-
-    getter rows, cols
 
     def self.gpu_memory_stats
       {

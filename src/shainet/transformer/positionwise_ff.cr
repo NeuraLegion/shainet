@@ -56,19 +56,6 @@ module SHAInet
       @w1_t = mat_klass.new(hidden_dim, d_model)
       @w2_t = mat_klass.new(d_model, hidden_dim)
       update_transposes
-
-      # Workspace buffers will be allocated on first forward pass
-      @workspace_w2_t = nil
-      @workspace_w1_t = nil
-      @workspace_x_t = nil
-      @workspace_temp_grad_w2 = nil
-      @workspace_temp_grad_w1 = nil
-      @workspace_d_input = nil
-      @workspace_h_t = nil
-      @workspace_dh = nil
-      @workspace_h = nil
-      @workspace_out = nil
-      @last_batch_size = 0
     end
 
     # Convert all internal matrices to GPU

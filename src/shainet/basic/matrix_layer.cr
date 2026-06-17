@@ -4,11 +4,14 @@ require "../math/cuda_matrix"
 module SHAInet
   class MatrixLayer
     # Base layer properties
-    getter :activation_function, :l_size
+    getter activation_function : ActivationFunction
+
     property weights : SimpleMatrix | CudaMatrix
     property biases : SimpleMatrix | CudaMatrix
     property g_w : SimpleMatrix | CudaMatrix
     property g_b : SimpleMatrix | CudaMatrix
+
+    getter l_size : Int32
     getter size : Int32
 
     # Stored forward pass data for backpropagation

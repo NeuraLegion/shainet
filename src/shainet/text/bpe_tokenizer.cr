@@ -6,11 +6,12 @@ module SHAInet
   # from text and encode/decode using the learned merges.
   class BPETokenizer
     Log = ::Log.for(self)
-    property vocab : Hash(String, Int32)
-    property inv_vocab : Array(String)
-    property merges : Array(Tuple(String, String))
-    property merges_map : Hash(Tuple(String, String), String)
-    property merges_rank : Hash(Tuple(String, String), Int32)
+
+    property vocab = Hash(String, Int32).new
+    property inv_vocab = [] of String
+    property merges = [] of Tuple(String, String)
+    property merges_map = Hash(Tuple(String, String), String).new
+    property merges_rank = Hash(Tuple(String, String), Int32).new
     property? hf_mode : Bool = false
 
     # GPT-2 byte-to-unicode mapping (lazily built). Maps a printable Unicode
@@ -54,14 +55,6 @@ module SHAInet
       map = Hash(Char, UInt8).new
       bs.each_with_index { |b, i| map[cs[i].chr] = b.to_u8 }
       map
-    end
-
-    def initialize
-      @vocab = Hash(String, Int32).new
-      @inv_vocab = [] of String
-      @merges = [] of Tuple(String, String)
-      @merges_map = Hash(Tuple(String, String), String).new
-      @merges_rank = Hash(Tuple(String, String), Int32).new
     end
 
     # Load a pre-trained tokenizer from a HuggingFace tokenizer.json file
