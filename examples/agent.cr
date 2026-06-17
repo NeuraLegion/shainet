@@ -93,8 +93,9 @@ module AgentDemo
     @system_block : String
     @messages : Array(Message)
     @sampler : SHAInet::Sampler
+    getter max_context : Int32
 
-    def initialize(@net : SHAInet::Network, @tokenizer : SHAInet::BPETokenizer, @tools : Array(Tool))
+    def initialize(@net : SHAInet::Network, @tokenizer : SHAInet::BPETokenizer, @tools : Array(Tool), @max_context : Int32 = 8192)
       im_start = @tokenizer.vocab["<|im_start|>"]?
       im_end = @tokenizer.vocab["<|im_end|>"]?
       raise "model is not ChatML (<|im_start|>/<|im_end|> missing); this agent targets Qwen3-style models" unless im_start && im_end
@@ -131,6 +132,48 @@ module AgentDemo
       ids
     end
 
+    # Current prompt size in tokens (full transcript + assistant primer).
+    def context_tokens : Int32
+      build_prompt.size
+    end
+
+    def reset
+      @messages.clear
+    end
+
+    # Drop oldest messages (sliding window) until the prompt fits `target`
+    # tokens, leaving a marker so the model knows history was trimmed. Keeps the
+    # most recent messages (and never trims below one). Returns tokens removed.
+    def compact!(target : Int32) : Int32
+      before = context_tokens
+      trimmed = false
+      while context_tokens > target && @messages.size > 1
+        @messages.shift
+        trimmed = true
+      end
+      if trimmed && (@messages.empty? || @messages.first.content != TRUNCATION_MARKER)
+        @messages.unshift(Message.new("user", TRUNCATION_MARKER))
+      end
+      before - context_tokens
+    end
+
+    TRUNCATION_MARKER = "[Earlier conversation was truncated to fit the context window.]"
+
+    # One-line status: context usage, VRAM, expert-cache hit rate.
+    def status : String
+      parts = ["ctx #{context_tokens}/#{@max_context} tok"]
+      if info = SHAInet::CUDA.memory_info
+        used = info[:total] - info[:free]
+        mb = 1024.0 * 1024.0
+        parts << "VRAM #{(used / mb).round}/#{(info[:total] / mb).round} MB (#{(100.0 * used / info[:total]).round}%)"
+      end
+      if ENV.fetch("SHAINET_MOE_OFFLOAD", "0") == "1" && SHAInet::CUDA.fully_available?
+        cs = SHAInet::Q4HostMatrix.cache_stats
+        parts << "cache #{(cs[:hit_rate] * 100).round}% hit"
+      end
+      "[#{parts.join(" · ")}]"
+    end
+
     # Generate one assistant turn from the current transcript. Re-prefills the
     # whole (growing) context each call — simple and correct for a demo.
     private def generate(max_tokens : Int32) : String
@@ -158,6 +201,13 @@ module AgentDemo
         if step > MAX_TOOL_STEPS
           STDERR.puts "[agent] max tool steps reached; stopping"
           break
+        end
+
+        # Keep the prompt within the context budget (compact to 75% to leave room
+        # for the response + any tool round-trips before the next compaction).
+        if context_tokens > @max_context
+          removed = compact!((@max_context * 0.75).to_i)
+          STDERR.puts "  [agent] context compacted (−#{removed} tokens)" if removed > 0
         end
 
         text = generate(max_tokens)
@@ -249,8 +299,10 @@ if offload && !ENV["SHAINET_EXPERT_CACHE_MB"]? && (info = SHAInet::CUDA.memory_i
   STDERR.puts "  Expert cache budget: #{budget_mb} MB (free #{free // (1024*1024)} MB − 6GB reserve)"
 end
 
-agent = AgentDemo::Agent.new(net, tokenizer, AgentDemo.build_tools)
-STDERR.puts "Agent ready. Tools: #{AgentDemo.build_tools.map(&.name).join(", ")}. Ctrl-D to exit."
+max_context = (ENV["SHAINET_AGENT_CONTEXT"]? || "8192").to_i
+agent = AgentDemo::Agent.new(net, tokenizer, AgentDemo.build_tools, max_context)
+STDERR.puts "Agent ready. Tools: #{AgentDemo.build_tools.map(&.name).join(", ")}."
+STDERR.puts "Commands: /context  /compact  /clear  /help  (Ctrl-D to exit). Max context: #{max_context} tok."
 
 loop do
   STDERR.print "\nYou: "
@@ -258,6 +310,28 @@ loop do
   break if input.nil?
   input = input.strip
   next if input.empty?
+
+  case input
+  when "/help"
+    STDERR.puts "  /context  show context size, VRAM and cache usage"
+    STDERR.puts "  /compact  trim the conversation history now"
+    STDERR.puts "  /clear    reset the conversation"
+    STDERR.puts "  /help     this message"
+    next
+  when "/context"
+    STDERR.puts "  #{agent.status}"
+    next
+  when "/compact"
+    removed = agent.compact!((agent.max_context * 0.75).to_i)
+    STDERR.puts "  compacted −#{removed} tokens · #{agent.status}"
+    next
+  when "/clear"
+    agent.reset
+    STDERR.puts "  conversation cleared"
+    next
+  end
+
   agent.chat(input, max_tokens)
+  STDERR.puts "  #{agent.status}"
 end
 STDERR.puts "\nbye"
