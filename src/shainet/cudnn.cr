@@ -166,8 +166,8 @@ module SHAInet
   module CUDNN
     extend self
 
-    @@handle : LibCUDNN::CudnnHandle? = nil
-    @@available : Bool? = nil
+    @@handle : LibCUDNN::CudnnHandle?
+    @@available : Bool?
 
     class CudnnError < Exception
       def initialize(@status : LibCUDNN::CudnnStatus)
