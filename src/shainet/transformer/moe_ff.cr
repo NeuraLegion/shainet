@@ -24,7 +24,9 @@ module SHAInet
       raise ArgumentError.new("num_experts must be positive") unless @num_experts > 0
       raise ArgumentError.new("top_k must be in 1..num_experts") unless 1 <= @top_k <= @num_experts
       @router = SimpleMatrix.new(@d_model, @num_experts)
-      @experts = Array(SwiGLUFF).new(@num_experts) { SwiGLUFF.new(@d_model, ff_hidden) }
+      # Experts start as empty placeholders; the loader assigns real weights and
+      # quantizes them per layer, so we never hold all experts' fp32 at once.
+      @experts = Array(SwiGLUFF).new(@num_experts) { SwiGLUFF.new(@d_model, ff_hidden, allocate: false) }
     end
 
     def to_gpu!(quantize : Bool = false, bits : Int32 = 8)

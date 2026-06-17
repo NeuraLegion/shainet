@@ -5,7 +5,7 @@ module SHAInet
   # Load a GPT-2 model directly from a HuggingFace SafeTensors file.
   # No Python, no PyTorch — pure Crystal.
   module HFLoader
-    SUPPORTED_MODELS = ["gpt2", "llama", "mistral", "qwen2", "qwen3"]
+    SUPPORTED_MODELS = ["gpt2", "llama", "mistral", "qwen2", "qwen3", "qwen3_moe"]
 
     # Open a model's weights whether they're a single model.safetensors or
     # sharded (model.safetensors.index.json + model-0000k-of-0000N.safetensors).
@@ -36,7 +36,7 @@ module SHAInet
       case model_type
       when "gpt2"
         load_gpt2(model_dir)
-      when "llama", "mistral", "qwen2", "qwen3"
+      when "llama", "mistral", "qwen2", "qwen3", "qwen3_moe"
         load_llama(model_dir, quantize: quantize, bits: bits)
       else
         raise "Unsupported model_type: '#{model_type}'. Supported: #{SUPPORTED_MODELS.join(", ")}"
@@ -202,7 +202,11 @@ module SHAInet
       num_key_value_heads : Int32,
       tie_word_embeddings : Bool,
       rope_scaling : JSON::Any?,
-      head_dim : Int32? = nil
+      head_dim : Int32? = nil,
+      num_experts : Int32? = nil,
+      num_experts_per_tok : Int32 = 8,
+      norm_topk_prob : Bool = true,
+      moe_intermediate_size : Int32? = nil
 
     def self.load_llama_config(path : String) : LlamaConfig
       json = JSON.parse(::File.read(path))
@@ -213,11 +217,15 @@ module SHAInet
         num_hidden_layers: json["num_hidden_layers"].as_i,
         intermediate_size: json["intermediate_size"].as_i,
         rms_norm_eps: json["rms_norm_eps"].as_f,
-        rope_theta: (json["rope_theta"]?.try(&.as_f) || 10000.0),
+        rope_theta: (json["rope_theta"]?.try(&.as_f) || json["rope_parameters"]?.try(&.["rope_theta"]?).try(&.as_f) || 10000.0),
         num_key_value_heads: (json["num_key_value_heads"]?.try(&.as_i) || json["num_attention_heads"].as_i),
         tie_word_embeddings: (json["tie_word_embeddings"]?.try(&.as_bool) || false),
         rope_scaling: json["rope_scaling"]?,
-        head_dim: json["head_dim"]?.try(&.as_i)
+        head_dim: json["head_dim"]?.try(&.as_i),
+        num_experts: (json["num_experts"]?.try(&.as_i) || json["num_local_experts"]?.try(&.as_i)),
+        num_experts_per_tok: (json["num_experts_per_tok"]?.try(&.as_i) || 8),
+        norm_topk_prob: ((v = json["norm_topk_prob"]?) ? v.as_bool : true),
+        moe_intermediate_size: json["moe_intermediate_size"]?.try(&.as_i)
       )
     end
 
@@ -288,7 +296,8 @@ module SHAInet
         net.add_layer(:input, 1)
         net.add_layer(:embedding, d, vocab_size: config.vocab_size)
         config.num_hidden_layers.times do
-          net.add_layer(:llama, d, num_heads: n_heads, ff_hidden: ff, num_kv_heads: config.num_key_value_heads, eps: eps, head_dim: config.head_dim)
+          net.add_layer(:llama, d, num_heads: n_heads, ff_hidden: ff, num_kv_heads: config.num_key_value_heads, eps: eps, head_dim: config.head_dim,
+            moe_experts: config.num_experts, moe_top_k: config.num_experts_per_tok, moe_norm_topk: config.norm_topk_prob, moe_ff_hidden: config.moe_intermediate_size)
         end
         net.add_layer(:output, config.vocab_size, activation_function: SHAInet.identity)
         net.fully_connect
@@ -316,10 +325,22 @@ module SHAInet
           block.w_v = sf.read_matrix("#{prefix}.self_attn.v_proj.weight").transpose
           block.w_o = sf.read_matrix("#{prefix}.self_attn.o_proj.weight").transpose
 
-          # FFN
-          block.ffn.gate_proj = sf.read_matrix("#{prefix}.mlp.gate_proj.weight").transpose
-          block.ffn.up_proj = sf.read_matrix("#{prefix}.mlp.up_proj.weight").transpose
-          block.ffn.down_proj = sf.read_matrix("#{prefix}.mlp.down_proj.weight").transpose
+          # FFN — dense SwiGLU or Mixture-of-Experts, matching the block type.
+          case ffn = block.ffn
+          when SwiGLUFF
+            ffn.gate_proj = sf.read_matrix("#{prefix}.mlp.gate_proj.weight").transpose
+            ffn.up_proj = sf.read_matrix("#{prefix}.mlp.up_proj.weight").transpose
+            ffn.down_proj = sf.read_matrix("#{prefix}.mlp.down_proj.weight").transpose
+          when MoEFF
+            # Router: HF [num_experts, hidden] -> [hidden, num_experts].
+            ffn.router = sf.read_matrix("#{prefix}.mlp.gate.weight").transpose
+            ffn.experts.each_with_index do |expert, e|
+              eprefix = "#{prefix}.mlp.experts.#{e}"
+              expert.gate_proj = sf.read_matrix("#{eprefix}.gate_proj.weight").transpose
+              expert.up_proj = sf.read_matrix("#{eprefix}.up_proj.weight").transpose
+              expert.down_proj = sf.read_matrix("#{eprefix}.down_proj.weight").transpose
+            end
+          end
 
           # RMSNorm
           block.norm1.gamma = sf.read_matrix("#{prefix}.input_layernorm.weight")

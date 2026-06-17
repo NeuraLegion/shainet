@@ -107,7 +107,7 @@ module SHAInet
     # l_type is: :input, :hidden or :output
     # l_size = size of the layer
     # n_type = advanced option for layer types
-    def add_layer(l_type : Symbol | String, l_size : Int32, activation_function : ActivationFunction = SHAInet.sigmoid, num_heads : Int32 = 1, ff_hidden : Int32 = l_size*4, drop_percent : Int32 = 0, blocks : Int32 = 1, *, vocab_size : Int32 = 0, num_kv_heads : Int32 = num_heads, eps : Float64 = 1e-5, head_dim : Int32? = nil)
+    def add_layer(l_type : Symbol | String, l_size : Int32, activation_function : ActivationFunction = SHAInet.sigmoid, num_heads : Int32 = 1, ff_hidden : Int32 = l_size*4, drop_percent : Int32 = 0, blocks : Int32 = 1, *, vocab_size : Int32 = 0, num_kv_heads : Int32 = num_heads, eps : Float64 = 1e-5, head_dim : Int32? = nil, moe_experts : Int32? = nil, moe_top_k : Int32 = 8, moe_norm_topk : Bool = true, moe_ff_hidden : Int32? = nil)
       if l_type.to_s == "transformer" && blocks > 1
         blocks.times do
           add_layer(l_type, l_size, activation_function, num_heads, ff_hidden, drop_percent, 1)
@@ -121,7 +121,8 @@ module SHAInet
               when "transformer"
                 TransformerLayer.new(l_size, num_heads, ff_hidden, drop_percent)
               when "llama"
-                LlamaBlock.new(l_size, num_heads, ff_hidden, eps, 10000.0, num_kv_heads, head_dim)
+                LlamaBlock.new(l_size, num_heads, ff_hidden, eps, 10000.0, num_kv_heads, head_dim,
+                  moe_experts, moe_top_k, moe_norm_topk, moe_ff_hidden)
               else
                 MatrixLayer.new(l_size, activation_function)
               end
