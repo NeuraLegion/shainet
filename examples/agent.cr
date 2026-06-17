@@ -485,13 +485,13 @@ module AgentDemo
 
   # ASCII splash banner.
   def self.print_banner(io : IO, subtitle : String)
-    art = <<-'ART'
- ____  _   _    _    ___            _
-/ ___|| | | |  / \  |_ _|_ __   ___| |_
-\___ \| |_| | / _ \  | || '_ \ / _ \ __|
- ___) |  _  |/ ___ \ | || | | |  __/ |_
-|____/|_| |_/_/   \_\___|_| |_|\___|\__|
-ART
+    art = [
+      " ____  _   _    _    ___            _",
+      "/ ___|| | | |  / \\  |_ _|_ __   ___| |_",
+      "\\___ \\| |_| | / _ \\  | || '_ \\ / _ \\ __|",
+      " ___) |  _  |/ ___ \\ | || | | |  __/ |_",
+      "|____/|_| |_/_/   \\_\\___|_| |_|\\___|\\__|",
+    ].join("\n")
     io.puts
     io.puts art.colorize(:light_cyan).bold
     io.puts "  ▸ Agent ".colorize(:cyan).bold.to_s + "· #{subtitle}".colorize(:dark_gray).to_s
