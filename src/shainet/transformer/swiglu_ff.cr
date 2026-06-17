@@ -29,6 +29,12 @@ module SHAInet
 
     def to_gpu!(quantize : Bool = false, bits : Int32 = 8)
       return unless CUDA.fully_available?
+      # Catch placeholder experts (allocate: false) that were never loaded — promoting
+      # or quantizing a 0x0 matrix would otherwise surface as a cryptic CUDA malloc(0)
+      # failure.
+      if (g = @gate_proj).is_a?(SimpleMatrix) && (g.rows == 0 || g.cols == 0)
+        raise "SwiGLUFF weights are uninitialized (0x0); load weights before calling to_gpu!"
+      end
       if quantize
         @gate_proj = to_quant(@gate_proj, bits)
         @up_proj = to_quant(@up_proj, bits)
