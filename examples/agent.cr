@@ -70,6 +70,19 @@ module AgentDemo
     ]
   end
 
+  # Strip reasoning (<think>…</think>) and tool-call XML from text so only the
+  # user-facing prose is shown. Handles trailing *unclosed* tags too, so it is
+  # safe to call incrementally on a growing stream (think content is never shown,
+  # even mid-generation).
+  def self.strip_for_display(text : String) : String
+    s = text
+    s = s.gsub(/<think>.*?<\/think>/m, "")
+    s = s.gsub(/<think>.*\z/m, "")
+    s = s.gsub(/<tool_call>.*?<\/tool_call>/m, "")
+    s = s.gsub(/<tool_call>.*\z/m, "")
+    s
+  end
+
   # Extract <tool_call><function=NAME><parameter=K>V</parameter>...</function></tool_call> blocks.
   def self.parse_tool_calls(text : String) : Array(ToolCall)
     calls = [] of ToolCall
@@ -77,11 +90,13 @@ module AgentDemo
       body = m[1]
       fmatch = body.match(/<function=([^>\s]+)>(.*)/m)
       next unless fmatch
+      name = fmatch[1].strip
+      next if name.empty? || name == "none" # ignore placeholder/hallucinated calls
       args = {} of String => String
       fmatch[2].scan(/<parameter=([^>\s]+)>\n?(.*?)\n?<\/parameter>/m) do |pm|
         args[pm[1].strip] = pm[2]
       end
-      calls << ToolCall.new(fmatch[1].strip, args)
+      calls << ToolCall.new(name, args)
     end
     calls
   end
@@ -231,11 +246,14 @@ module AgentDemo
       "[#{parts.join(" · ")}]"
     end
 
-    # Generate from an explicit prompt; re-prefills it fresh (KV cleared).
-    private def generate_from(prompt : Array(Int32), max_tokens : Int32) : String
+    # Generate from an explicit prompt; re-prefills it fresh (KV cleared). When
+    # echo is set, the user-facing prose is streamed live (with <think> and
+    # tool-call markup filtered out).
+    private def generate_from(prompt : Array(Int32), max_tokens : Int32, echo : Bool = false) : String
       @net.clear_cache!
       logits = @net.run(prompt, stealth: true, return_matrix: true).as(SHAInet::SimpleMatrix)
       generated = [] of Int32
+      printed = 0
       max_tokens.times do
         row = logits.rows - 1
         @sampler.apply_repetition_penalty!(logits, generated, window: 20, row: row)
@@ -243,15 +261,32 @@ module AgentDemo
         break if id < 0 || @stop_ids.includes?(id)
         break unless logits[row, id].finite?
         generated << id
+        if echo
+          visible = AgentDemo.strip_for_display(@tokenizer.decode(generated))
+          if visible.size > printed
+            chunk = visible[printed..]
+            chunk = chunk.lstrip if printed == 0 # tuck the answer against the prompt
+            STDERR.print chunk
+            STDERR.flush
+            printed = visible.size
+          end
+        end
         logits = @net.run([id], stealth: true, return_matrix: true).as(SHAInet::SimpleMatrix)
+      end
+      if echo && printed == 0
+        # The turn produced only reasoning/markup (no closed answer) — show the
+        # reasoning dimmed so the output isn't blank (e.g. ran out of tokens
+        # mid-<think>). Strip just the tags, keep the text.
+        raw = @tokenizer.decode(generated).gsub(/<\/?think>/, "").gsub(/<tool_call>.*?<\/tool_call>/m, "").strip
+        STDERR.print raw.colorize(:dark_gray) unless raw.empty?
       end
       @tokenizer.decode(generated)
     end
 
-    # Generate one assistant turn from the current transcript. Re-prefills the
-    # whole (growing) context each call — simple and correct for a demo.
+    # Generate one assistant turn from the current transcript, streaming the
+    # filtered prose live. Re-prefills the whole (growing) context each call.
     private def generate(max_tokens : Int32) : String
-      generate_from(build_prompt, max_tokens)
+      generate_from(build_prompt, max_tokens, echo: true)
     end
 
     # Handle one user input: run the tool loop until the model answers plainly.
@@ -272,18 +307,16 @@ module AgentDemo
           STDERR.puts "  [agent] context compacted (−#{removed} tokens)" if removed > 0
         end
 
-        text = generate(max_tokens)
+        STDERR.print "\n#{"Agent".colorize(:light_cyan).bold} ❯ "
+        STDERR.flush
+        text = generate(max_tokens) # streams the filtered prose inline
+        STDERR.puts ""
         calls = AgentDemo.parse_tool_calls(text)
 
-        if calls.empty?
-          answer = text.strip
-          @messages << Message.new("assistant", answer)
-          puts "\n#{"Agent".colorize(:light_cyan).bold} ❯ #{answer}"
-          break
-        end
-
-        # Keep the assistant's tool_call markup verbatim in the transcript.
+        # Keep the assistant's output (incl. any tool_call markup) verbatim.
         @messages << Message.new("assistant", text.strip)
+        break if calls.empty?
+
         calls.each do |c|
           STDERR.puts "  #{"⚒ #{c.name}".colorize(:yellow)}(#{c.args.map { |k, v| "#{k}=#{v.inspect}" }.join(", ")})".colorize(:dark_gray)
           tool = @tools.find { |t| t.name == c.name }
