@@ -33,6 +33,11 @@ module SHAInet
     # expert: experts in a layer share weight shapes, so this holds only a couple
     # of small Q4CudaMatrix buffers regardless of expert count.
     @@scratch = Hash(Tuple(Int32, Int32), Q4CudaMatrix).new
+    # The scratch buffer is overwritten by `upload` before each GEMV, so the
+    # upload+GEMV enqueue must be atomic: a concurrent call (e.g. parallel
+    # requests under preview_mt) could otherwise upload a different expert
+    # between this call's upload and its kernel launch and corrupt the result.
+    @@scratch_mutex = Mutex.new
 
     def initialize(@rows : Int32, @cols : Int32, @q_host : Array(UInt8), @s_host : Array(Float32))
     end
@@ -59,16 +64,22 @@ module SHAInet
     end
 
     # Upload this expert's weights into the shared scratch and run the Q4 GEMV.
+    # Upload + GEMV are enqueued under a mutex so the shared scratch can't be
+    # overwritten by a concurrent call between them.
     def gemv(x : CudaMatrix) : CudaMatrix
-      s = scratch
-      s.upload(@q_host, @s_host)
-      s.gemv(x)
+      @@scratch_mutex.synchronize do
+        s = scratch
+        s.upload(@q_host, @s_host)
+        s.gemv(x)
+      end
     end
 
     def gemv_into(x : CudaMatrix, result : CudaMatrix) : CudaMatrix
-      s = scratch
-      s.upload(@q_host, @s_host)
-      s.gemv_into(x, result)
+      @@scratch_mutex.synchronize do
+        s = scratch
+        s.upload(@q_host, @s_host)
+        s.gemv_into(x, result)
+      end
     end
   end
 end

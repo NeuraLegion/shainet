@@ -73,7 +73,20 @@ t = Time.instant
 # models never materialize their full fp32 weights in host RAM at once.
 quantize = SHAInet::CUDA.fully_available? && !ENV["SHAINET_FP32"]?
 bits = ENV["SHAINET_Q4"]? ? 4 : 8
-net = SHAInet::HFLoader.load(model_dir, quantize: quantize, bits: bits)
+offload = ENV.fetch("SHAINET_MOE_OFFLOAD", "0") == "1"
+mode = ENV["SHAINET_FP32"]? ? "fp32" : "Q#{bits}"
+STDERR.puts "  Mode: #{mode}#{offload ? " (MoE experts offloaded to host RAM)" : ""}"
+begin
+  net = SHAInet::HFLoader.load(model_dir, quantize: quantize, bits: bits)
+rescue ex
+  if (ex.message.try(&.downcase.includes?("memory"))) && !offload
+    STDERR.puts ""
+    STDERR.puts "GPU ran out of memory loading this model. If it is a large Mixture-of-Experts"
+    STDERR.puts "model (e.g. Qwen3-MoE), retry with experts offloaded to host RAM:"
+    STDERR.puts "  SHAINET_Q4=1 SHAINET_MOE_OFFLOAD=1 #{PROGRAM_NAME} #{model_dir}"
+  end
+  raise ex
+end
 STDERR.puts "Model loaded in #{(Time.instant - t).total_seconds.round(1)}s"
 STDERR.puts "  Layers: #{net.transformer_layers.size}, d_model: #{net.transformer_layers.first.as(SHAInet::LlamaBlock).d_model}"
 
