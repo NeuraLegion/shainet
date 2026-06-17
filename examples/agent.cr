@@ -70,17 +70,83 @@ module AgentDemo
     ]
   end
 
-  # Strip reasoning (<think>…</think>) and tool-call XML from text so only the
-  # user-facing prose is shown. Handles trailing *unclosed* tags too, so it is
-  # safe to call incrementally on a growing stream (think content is never shown,
-  # even mid-generation).
-  def self.strip_for_display(text : String) : String
-    s = text
-    s = s.gsub(/<think>.*?<\/think>/m, "")
-    s = s.gsub(/<think>.*\z/m, "")
-    s = s.gsub(/<tool_call>.*?<\/tool_call>/m, "")
-    s = s.gsub(/<tool_call>.*\z/m, "")
-    s
+  # Streams assistant output token-by-token, coloring reasoning (<think>…
+  # </think>) dim and the answer normal, while hiding tool-call XML. Buffers a
+  # small tail so tags split across tokens are never shown half-rendered.
+  class StreamRenderer
+    TAGS = {"<think>" => :think_open, "</think>" => :think_close,
+            "<tool_call>" => :tool_open, "</tool_call>" => :tool_close}
+
+    def initialize(@io : IO)
+      @mode = :normal
+      @pending = ""
+      @started = false
+    end
+
+    def feed(text : String)
+      @pending += text
+      loop do
+        idx = nil
+        found = nil
+        TAGS.each_key do |tag|
+          i = @pending.index(tag)
+          if i && (idx.nil? || i < idx.not_nil!)
+            idx, found = i, tag
+          end
+        end
+        if (i = idx) && (tag = found)
+          emit(@pending[0...i])
+          apply(TAGS[tag])
+          @pending = @pending[(i + tag.size)..]
+        else
+          hold = partial_tag_suffix(@pending)
+          emit(@pending[0, @pending.size - hold])
+          @pending = @pending[(@pending.size - hold)..]
+          break
+        end
+      end
+    end
+
+    def finish
+      emit(@pending)
+      @pending = ""
+    end
+
+    private def emit(t : String)
+      return if t.empty?
+      # Trim leading whitespace before the very first visible chars.
+      unless @started
+        t = t.lstrip
+        return if t.empty?
+        @started = true
+      end
+      case @mode
+      when :think  then @io.print t.colorize(:dark_gray)
+      when :normal then @io.print t
+      end # :tool -> hidden
+      @io.flush
+    end
+
+    private def apply(action)
+      case action
+      when :think_open  then @mode = :think
+      when :think_close then @mode = :normal
+      when :tool_open   then @mode = :tool
+      when :tool_close  then @mode = :normal
+      end
+    end
+
+    # Longest suffix of s that is a (shorter) prefix of some tag — held back in
+    # case the tag completes on the next token.
+    private def partial_tag_suffix(s : String) : Int32
+      max = 0
+      TAGS.each_key do |tag|
+        (1...tag.size).each do |k|
+          max = k if k <= s.size && k > max && s[(s.size - k)..] == tag[0, k]
+        end
+      end
+      max
+    end
   end
 
   # Extract <tool_call><function=NAME><parameter=K>V</parameter>...</function></tool_call> blocks.
@@ -253,7 +319,8 @@ module AgentDemo
       @net.clear_cache!
       logits = @net.run(prompt, stealth: true, return_matrix: true).as(SHAInet::SimpleMatrix)
       generated = [] of Int32
-      printed = 0
+      renderer = echo ? AgentDemo::StreamRenderer.new(STDERR) : nil
+      prev = ""
       max_tokens.times do
         row = logits.rows - 1
         @sampler.apply_repetition_penalty!(logits, generated, window: 20, row: row)
@@ -261,25 +328,14 @@ module AgentDemo
         break if id < 0 || @stop_ids.includes?(id)
         break unless logits[row, id].finite?
         generated << id
-        if echo
-          visible = AgentDemo.strip_for_display(@tokenizer.decode(generated))
-          if visible.size > printed
-            chunk = visible[printed..]
-            chunk = chunk.lstrip if printed == 0 # tuck the answer against the prompt
-            STDERR.print chunk
-            STDERR.flush
-            printed = visible.size
-          end
+        if r = renderer
+          full = @tokenizer.decode(generated)
+          r.feed(full[prev.size..]) if full.size > prev.size
+          prev = full
         end
         logits = @net.run([id], stealth: true, return_matrix: true).as(SHAInet::SimpleMatrix)
       end
-      if echo && printed == 0
-        # The turn produced only reasoning/markup (no closed answer) — show the
-        # reasoning dimmed so the output isn't blank (e.g. ran out of tokens
-        # mid-<think>). Strip just the tags, keep the text.
-        raw = @tokenizer.decode(generated).gsub(/<\/?think>/, "").gsub(/<tool_call>.*?<\/tool_call>/m, "").strip
-        STDERR.print raw.colorize(:dark_gray) unless raw.empty?
-      end
+      renderer.try(&.finish)
       @tokenizer.decode(generated)
     end
 
@@ -388,6 +444,7 @@ unless model_dir && Dir.exists?(model_dir)
 end
 
 Colorize.enabled = STDERR.tty?
+STDERR.sync = true # stream tokens as they arrive (no buffering)
 AgentDemo.print_banner(STDERR, "#{File.basename(model_dir)} · local coding agent on Network#run")
 
 STDERR.puts "Loading model from #{model_dir}...".colorize(:dark_gray)
