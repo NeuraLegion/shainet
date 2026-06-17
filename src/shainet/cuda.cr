@@ -124,6 +124,15 @@ module SHAInet
     def malloc(ptr : Pointer(Pointer(Void)), size : LibC::SizeT)
       rslt = LibCUDARuntime.cudaMalloc(ptr, size)
       unless rslt.zero?
+        # Likely out of memory. Dead GPU matrices may not be reclaimed yet: their
+        # Crystal wrappers are tiny, so GC rarely runs during GPU-heavy loops (a
+        # prefill can create hundreds of large device buffers without enough host
+        # pressure to trigger a collection). Force GC to run their finalizers
+        # (which cudaFree), then retry before giving up.
+        GC.collect
+        rslt = LibCUDARuntime.cudaMalloc(ptr, size)
+      end
+      unless rslt.zero?
         Log.error { "CUDA.malloc: cudaMalloc failed with result #{rslt} for size #{size}" }
         raise "CUDA memory allocation failed"
       end
