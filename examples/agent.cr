@@ -39,7 +39,17 @@ module AgentDemo
     end
   end
 
-  # Read-only starter tools. Add more here (write_file, run_command, MCP, ...).
+  # Confirmation gate for mutating/executing tools (skipped with SHAINET_AGENT_YOLO=1).
+  def self.confirm?(desc : String) : Bool
+    return true if ENV.fetch("SHAINET_AGENT_YOLO", "0") == "1"
+    STDERR.print "  #{"⚠ allow".colorize(:yellow)} #{desc}? [y/N] "
+    STDERR.flush
+    ans = gets
+    !!(ans && ans.strip.downcase.starts_with?("y"))
+  end
+
+  # Basic code-agent tools. Read-only ones run freely; write/edit/run ask for
+  # confirmation first (unless SHAINET_AGENT_YOLO=1).
   def self.build_tools : Array(Tool)
     [
       Tool.new(
@@ -66,6 +76,84 @@ module AgentDemo
           c = File.read(path)
           c.bytesize > MAX_READ_BYTES ? "#{c.byte_slice(0, MAX_READ_BYTES)}\n... [truncated]" : c
         end
+      end,
+      Tool.new(
+        "search",
+        "Search files under a directory for a regular-expression pattern (grep-like). Returns file:line matches.",
+        [ToolParam.new("pattern", "string", "Regular expression to search for."),
+         ToolParam.new("path", "string", "Directory or file to search (default: current dir).", false)]
+      ) do |args|
+        pat = args["pattern"]? || ""
+        next "Error: empty pattern" if pat.empty?
+        root = args["path"]? || "."
+        begin
+          re = Regex.new(pat)
+        rescue ex
+          next "Error: invalid regex: #{ex.message}"
+        end
+        files = Dir.exists?(root) ? Dir.glob(File.join(root, "**", "*")) : [root]
+        results = [] of String
+        files.each do |f|
+          break if results.size >= 100
+          next if Dir.exists?(f) || !File.exists?(f) || File.size(f) > 2_000_000
+          begin
+            File.read_lines(f).each_with_index do |line, i|
+              if re.matches?(line)
+                results << "#{f}:#{i + 1}: #{line.strip}"
+                break if results.size >= 100
+              end
+            end
+          rescue
+            # skip unreadable/binary files
+          end
+        end
+        results.empty? ? "No matches." : results.join("\n")
+      end,
+      Tool.new(
+        "write_file",
+        "Create or overwrite a text file with the given content.",
+        [ToolParam.new("path", "string", "File path to write."),
+         ToolParam.new("content", "string", "Full file content.")]
+      ) do |args|
+        path = args["path"]? || ""
+        next "Error: empty path" if path.empty?
+        content = args["content"]? || ""
+        next "Declined by user." unless AgentDemo.confirm?("write #{content.bytesize} bytes to #{path}")
+        File.write(path, content)
+        "Wrote #{content.bytesize} bytes to #{path}"
+      end,
+      Tool.new(
+        "edit_file",
+        "Replace exact text in a file. Replaces all literal occurrences of 'find' with 'replace'.",
+        [ToolParam.new("path", "string", "File path to edit."),
+         ToolParam.new("find", "string", "Exact text to find."),
+         ToolParam.new("replace", "string", "Replacement text.")]
+      ) do |args|
+        path = args["path"]? || ""
+        next "Error: not a file: #{path}" if path.empty? || Dir.exists?(path) || !File.exists?(path)
+        find = args["find"]? || ""
+        next "Error: empty 'find'" if find.empty?
+        replace = args["replace"]? || ""
+        content = File.read(path)
+        count = content.scan(find).size
+        next "No occurrences of the given text in #{path}" if count == 0
+        next "Declined by user." unless AgentDemo.confirm?("replace #{count} occurrence(s) in #{path}")
+        File.write(path, content.gsub(find, replace))
+        "Replaced #{count} occurrence(s) in #{path}"
+      end,
+      Tool.new(
+        "run_command",
+        "Run a shell command and return its combined stdout/stderr and exit code.",
+        [ToolParam.new("command", "string", "The shell command to execute.")]
+      ) do |args|
+        cmd = args["command"]? || ""
+        next "Error: empty command" if cmd.empty?
+        next "Declined by user." unless AgentDemo.confirm?("run: #{cmd}")
+        buf = IO::Memory.new
+        status = Process.run("/bin/sh", ["-c", cmd], output: buf, error: buf)
+        result = buf.to_s
+        result = "#{result.byte_slice(0, MAX_READ_BYTES)}\n... [truncated]" if result.bytesize > MAX_READ_BYTES
+        "exit=#{status.exit_code}\n#{result}"
       end,
     ]
   end
