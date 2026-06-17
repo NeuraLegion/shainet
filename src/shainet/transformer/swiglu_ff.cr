@@ -27,7 +27,7 @@ module SHAInet
     @q8_in_bufs = Hash(Int32, CudaMatrix).new
     @q8_out_bufs = Hash(Int32, CudaMatrix).new
 
-    def to_gpu!(quantize : Bool = false, bits : Int32 = 8)
+    def to_gpu!(quantize : Bool = false, bits : Int32 = 8, offload : Bool = false)
       return unless CUDA.fully_available?
       # Catch placeholder experts (allocate: false) that were never loaded — promoting
       # or quantizing a 0x0 matrix would otherwise surface as a cryptic CUDA malloc(0)
@@ -36,9 +36,9 @@ module SHAInet
         raise "SwiGLUFF weights are uninitialized (0x0); load weights before calling to_gpu!"
       end
       if quantize
-        @gate_proj = to_quant(@gate_proj, bits)
-        @up_proj = to_quant(@up_proj, bits)
-        @down_proj = to_quant(@down_proj, bits)
+        @gate_proj = to_quant(@gate_proj, bits, offload)
+        @up_proj = to_quant(@up_proj, bits, offload)
+        @down_proj = to_quant(@down_proj, bits, offload)
       else
         # Only promote host weights; leave existing CudaMatrix/QuantizedWeight as-is.
         @gate_proj = @gate_proj.as(SimpleMatrix).to_cuda if @gate_proj.is_a?(SimpleMatrix)
@@ -48,17 +48,28 @@ module SHAInet
     end
 
     # Quantize a weight to the requested bit width: bits == 4 -> Q4, bits == 8 ->
-    # Q8. Already-quantized weights are returned unchanged.
-    private def to_quant(w : SimpleMatrix | CudaMatrix | QuantizedWeight, bits : Int32) : QuantizedWeight
+    # Q8. When offload is true the (Q4-only) weights are kept in host RAM as a
+    # Q4HostMatrix and streamed to the GPU on demand. Already-quantized weights
+    # are returned unchanged.
+    private def to_quant(w : SimpleMatrix | CudaMatrix | QuantizedWeight, bits : Int32, offload : Bool = false) : QuantizedWeight
       raise ArgumentError.new("unsupported quantization bits: #{bits} (expected 8 or 4)") unless bits == 8 || bits == 4
+      raise ArgumentError.new("expert offload currently supports 4-bit only (got #{bits}-bit)") if offload && bits != 4
       case w
       when QuantizedWeight then w
       when CudaMatrix
         sm = w.to_simple
-        bits == 4 ? Q4CudaMatrix.from_simple(sm) : QuantizedCudaMatrix.from_simple(sm)
+        if offload
+          Q4HostMatrix.from_simple(sm)
+        else
+          bits == 4 ? Q4CudaMatrix.from_simple(sm) : QuantizedCudaMatrix.from_simple(sm)
+        end
       else
         sm = w.as(SimpleMatrix)
-        bits == 4 ? Q4CudaMatrix.from_simple(sm) : QuantizedCudaMatrix.from_simple(sm)
+        if offload
+          Q4HostMatrix.from_simple(sm)
+        else
+          bits == 4 ? Q4CudaMatrix.from_simple(sm) : QuantizedCudaMatrix.from_simple(sm)
+        end
       end
     end
 

@@ -18,9 +18,14 @@ module SHAInet
     getter top_k : Int32
     getter? norm_topk_prob : Bool
     getter d_model : Int32
+    # When true, experts are quantized to host-resident Q4 (Q4HostMatrix) and
+    # streamed to the GPU on demand, instead of living on the GPU. Lets large
+    # MoE models fit small cards at the cost of PCIe bandwidth. The router stays
+    # on the GPU regardless.
+    property? offload_experts : Bool = false
 
     def initialize(@d_model : Int32, ff_hidden : Int32, @num_experts : Int32,
-                   @top_k : Int32, @norm_topk_prob : Bool = true)
+                   @top_k : Int32, @norm_topk_prob : Bool = true, @offload_experts : Bool = false)
       raise ArgumentError.new("num_experts must be positive") unless @num_experts > 0
       raise ArgumentError.new("top_k must be in 1..num_experts") unless 1 <= @top_k <= @num_experts
       @router = SimpleMatrix.new(@d_model, @num_experts)
@@ -31,9 +36,10 @@ module SHAInet
 
     def to_gpu!(quantize : Bool = false, bits : Int32 = 8)
       return unless CUDA.fully_available?
-      # Router stays full precision (CudaMatrix); only experts are quantized.
+      # Router stays full precision (CudaMatrix); only experts are quantized
+      # (and, when offload_experts is set, kept host-resident).
       @router = @router.as(SimpleMatrix).to_cuda if @router.is_a?(SimpleMatrix)
-      @experts.each(&.to_gpu!(quantize, bits))
+      @experts.each(&.to_gpu!(quantize, bits, @offload_experts))
     end
 
     # Router logits [tokens, num_experts] for the given activations.
