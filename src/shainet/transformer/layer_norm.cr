@@ -1,18 +1,9 @@
 module SHAInet
   class LayerNorm
-    getter gamma : SimpleMatrix | CudaMatrix
-    getter beta : SimpleMatrix | CudaMatrix
+    property gamma : SimpleMatrix | CudaMatrix
+    property beta : SimpleMatrix | CudaMatrix
     property g_gamma : SimpleMatrix | CudaMatrix
     property g_beta : SimpleMatrix | CudaMatrix
-
-    # Allow setting gamma and beta for test compatibility
-    def gamma=(val : SimpleMatrix | CudaMatrix)
-      @gamma = val
-    end
-
-    def beta=(val : SimpleMatrix | CudaMatrix)
-      @beta = val
-    end
 
     @epsilon : Float64
     @x : SimpleMatrix | CudaMatrix?
