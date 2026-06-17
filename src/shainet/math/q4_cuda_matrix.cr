@@ -61,13 +61,15 @@ module SHAInet
       @q_bytes + @scale_bytes
     end
 
-    # Quantize a host fp32 weight matrix [K, N] into this Q4 layout and upload.
-    def self.from_simple(w : SimpleMatrix) : Q4CudaMatrix
+    # Quantize a host fp32 weight matrix [K, N] into the Q4 layout, returning the
+    # packed 4-bit weights (host) and fp32 scales (host) without touching the GPU.
+    # Shared by Q4CudaMatrix#from_simple (which uploads) and Q4HostMatrix (which
+    # keeps the packed bytes resident in host RAM for on-demand offload).
+    def self.pack(w : SimpleMatrix) : Tuple(Array(UInt8), Array(Float32))
       k = w.rows
       n = w.cols
-      qm = new(k, n)
-      blocks = qm.blocks
-      kbytes = qm.kbytes
+      blocks = (k + BLOCK - 1) // BLOCK
+      kbytes = (k + 1) // 2
 
       wdata = w.data # row-major [K, N], element [r, c] at r * n + c
       q_host = Array(UInt8).new(n * kbytes, 0_u8)
@@ -108,6 +110,13 @@ module SHAInet
         end
       end
 
+      {q_host, s_host}
+    end
+
+    # Quantize a host fp32 weight matrix [K, N] into this Q4 layout and upload.
+    def self.from_simple(w : SimpleMatrix) : Q4CudaMatrix
+      qm = new(w.rows, w.cols)
+      q_host, s_host = pack(w)
       qm.upload(q_host, s_host)
       qm
     end

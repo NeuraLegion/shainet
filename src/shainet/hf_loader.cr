@@ -224,7 +224,7 @@ module SHAInet
         head_dim: json["head_dim"]?.try(&.as_i),
         num_experts: (json["num_experts"]?.try(&.as_i) || json["num_local_experts"]?.try(&.as_i)),
         num_experts_per_tok: (json["num_experts_per_tok"]?.try(&.as_i) || 8),
-        norm_topk_prob: ((v = json["norm_topk_prob"]?) ? v.as_bool : true), # ameba:disable Lint/AssignmentInCallArgument
+        norm_topk_prob: (json.as_h.has_key?("norm_topk_prob") ? json["norm_topk_prob"].as_bool : true),
         moe_intermediate_size: json["moe_intermediate_size"]?.try(&.as_i)
       )
     end
@@ -295,9 +295,12 @@ module SHAInet
         net = Network.new
         net.add_layer(:input, 1)
         net.add_layer(:embedding, d, vocab_size: config.vocab_size)
+        # Offload MoE experts to host RAM (streamed to GPU on demand) when
+        # requested — lets large MoE models fit small GPUs. Q4 only.
+        moe_offload = ENV.fetch("SHAINET_MOE_OFFLOAD", "0") == "1"
         config.num_hidden_layers.times do
           net.add_layer(:llama, d, num_heads: n_heads, ff_hidden: ff, num_kv_heads: config.num_key_value_heads, eps: eps, head_dim: config.head_dim,
-            moe_experts: config.num_experts, moe_top_k: config.num_experts_per_tok, moe_norm_topk: config.norm_topk_prob, moe_ff_hidden: config.moe_intermediate_size)
+            moe_experts: config.num_experts, moe_top_k: config.num_experts_per_tok, moe_norm_topk: config.norm_topk_prob, moe_ff_hidden: config.moe_intermediate_size, moe_offload: moe_offload)
         end
         net.add_layer(:output, config.vocab_size, activation_function: SHAInet.identity)
         net.fully_connect

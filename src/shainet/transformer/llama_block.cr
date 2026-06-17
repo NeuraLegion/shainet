@@ -71,7 +71,8 @@ module SHAInet
                    eps : Float64 = 1e-6, @rope_theta : Float64 = 10000.0,
                    @num_kv_heads : Int32 = @num_heads, head_dim : Int32? = nil,
                    moe_experts : Int32? = nil, moe_top_k : Int32 = 8,
-                   moe_norm_topk : Bool = true, moe_ff_hidden : Int32? = nil)
+                   moe_norm_topk : Bool = true, moe_ff_hidden : Int32? = nil,
+                   moe_offload : Bool = false)
       super(@d_model, SHAInet.none)
       raise ArgumentError.new("num_heads must be divisible by num_kv_heads") unless @num_kv_heads > 0 && @num_heads % @num_kv_heads == 0
       # head_dim defaults to d_model/num_heads (LLaMA/Qwen2). Qwen3 passes it
@@ -91,7 +92,7 @@ module SHAInet
       # Mixture-of-Experts FFN (Qwen3-MoE) when moe_experts is given; otherwise a
       # single dense SwiGLU (LLaMA/Mistral/Qwen2/Qwen3-dense).
       @ffn = if ne = moe_experts
-               MoEFF.new(@d_model, moe_ff_hidden || ff_hidden, ne, moe_top_k, moe_norm_topk)
+               MoEFF.new(@d_model, moe_ff_hidden || ff_hidden, ne, moe_top_k, moe_norm_topk, moe_offload)
              else
                SwiGLUFF.new(@d_model, ff_hidden)
              end
