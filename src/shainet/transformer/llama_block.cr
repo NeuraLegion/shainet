@@ -6,7 +6,7 @@ module SHAInet
   class LlamaBlock < MatrixLayer
     getter norm1 : RMSNorm
     getter norm2 : RMSNorm
-    getter ffn : SwiGLUFF
+    getter ffn : SwiGLUFF | MoEFF
     getter num_heads : Int32
     getter num_kv_heads : Int32
     getter head_dim : Int32
@@ -69,7 +69,9 @@ module SHAInet
 
     def initialize(@d_model : Int32, @num_heads : Int32, ff_hidden : Int32,
                    eps : Float64 = 1e-6, @rope_theta : Float64 = 10000.0,
-                   @num_kv_heads : Int32 = @num_heads, head_dim : Int32? = nil)
+                   @num_kv_heads : Int32 = @num_heads, head_dim : Int32? = nil,
+                   moe_experts : Int32? = nil, moe_top_k : Int32 = 8,
+                   moe_norm_topk : Bool = true, moe_ff_hidden : Int32? = nil)
       super(@d_model, SHAInet.none)
       raise ArgumentError.new("num_heads must be divisible by num_kv_heads") unless @num_kv_heads > 0 && @num_heads % @num_kv_heads == 0
       # head_dim defaults to d_model/num_heads (LLaMA/Qwen2). Qwen3 passes it
@@ -86,7 +88,13 @@ module SHAInet
       @qk_norm_eps = eps
       @norm1 = RMSNorm.new(@d_model, eps)
       @norm2 = RMSNorm.new(@d_model, eps)
-      @ffn = SwiGLUFF.new(@d_model, ff_hidden)
+      # Mixture-of-Experts FFN (Qwen3-MoE) when moe_experts is given; otherwise a
+      # single dense SwiGLU (LLaMA/Mistral/Qwen2/Qwen3-dense).
+      @ffn = if ne = moe_experts
+               MoEFF.new(@d_model, moe_ff_hidden || ff_hidden, ne, moe_top_k, moe_norm_topk)
+             else
+               SwiGLUFF.new(@d_model, ff_hidden)
+             end
       @w_q = SimpleMatrix.new(@d_model, @q_dim)
       @w_k = SimpleMatrix.new(@d_model, kv_dim)
       @w_v = SimpleMatrix.new(@d_model, kv_dim)

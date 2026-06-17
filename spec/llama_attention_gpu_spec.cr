@@ -21,9 +21,10 @@ describe "LlamaBlock GPU attention" do
     d_model = 64
     blk = SHAInet::LlamaBlock.new(d_model, 8, 128, num_kv_heads: 4)
     {blk.w_q, blk.w_k, blk.w_v, blk.w_o}.each { |w| fill_random!(w, rng) }
-    fill_random!(blk.ffn.gate_proj, rng)
-    fill_random!(blk.ffn.up_proj, rng)
-    fill_random!(blk.ffn.down_proj, rng)
+    ffn = blk.ffn.as(SHAInet::SwiGLUFF)
+    fill_random!(ffn.gate_proj, rng)
+    fill_random!(ffn.up_proj, rng)
+    fill_random!(ffn.down_proj, rng)
 
     # Prefill of 6 tokens followed by 3 single-token decode steps.
     inputs = [] of SHAInet::SimpleMatrix

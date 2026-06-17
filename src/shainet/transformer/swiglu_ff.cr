@@ -6,10 +6,21 @@ module SHAInet
     property up_proj : SimpleMatrix | CudaMatrix | QuantizedWeight
     property down_proj : SimpleMatrix | CudaMatrix | QuantizedWeight
 
-    def initialize(d_model : Int32, ff_hidden : Int32)
-      @gate_proj = SimpleMatrix.new(d_model, ff_hidden)
-      @up_proj = SimpleMatrix.new(d_model, ff_hidden)
-      @down_proj = SimpleMatrix.new(ff_hidden, d_model)
+    # allocate: when false, weights start as empty 0x0 placeholders instead of
+    # full [d_model, ff_hidden] matrices. Used for MoE experts, which are always
+    # overwritten by the loader — avoids allocating hundreds of fp32 expert
+    # matrices up front (a 48-layer/128-expert model would otherwise need ~100GB
+    # before streaming quantization ever runs).
+    def initialize(d_model : Int32, ff_hidden : Int32, allocate : Bool = true)
+      if allocate
+        @gate_proj = SimpleMatrix.new(d_model, ff_hidden)
+        @up_proj = SimpleMatrix.new(d_model, ff_hidden)
+        @down_proj = SimpleMatrix.new(ff_hidden, d_model)
+      else
+        @gate_proj = SimpleMatrix.new(0, 0)
+        @up_proj = SimpleMatrix.new(0, 0)
+        @down_proj = SimpleMatrix.new(0, 0)
+      end
     end
 
     # Persistent single-row GEMV workspaces for decode (M=1), keyed by width.
