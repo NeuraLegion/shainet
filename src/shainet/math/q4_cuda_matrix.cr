@@ -52,8 +52,24 @@ module SHAInet
     end
 
     def finalize
+      free!
+    end
+
+    # Explicitly free device memory now (used by the expert cache on eviction so
+    # VRAM is reclaimed immediately rather than waiting for GC). Idempotent.
+    def free!
       CUDA.free(@q_ptr.as(Pointer(Void))) unless @q_ptr.null?
       CUDA.free(@scale_ptr.as(Pointer(Void))) unless @scale_ptr.null?
+      @q_ptr = Pointer(UInt8).null
+      @scale_ptr = Pointer(Float32).null
+    end
+
+    # Device bytes a Q4 weight of shape [k, n] would occupy (4-bit weights + fp32
+    # scales), without allocating — used for cache budget accounting.
+    def self.device_bytes_for(k : Int32, n : Int32) : UInt64
+      blocks = (k + BLOCK - 1) // BLOCK
+      kbytes = (k + 1) // 2
+      n.to_u64 * kbytes.to_u64 + n.to_u64 * blocks.to_u64 * 4_u64
     end
 
     # Approximate device memory footprint in bytes (4-bit weights + fp32 scales).

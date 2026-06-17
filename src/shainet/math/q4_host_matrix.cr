@@ -16,11 +16,13 @@ module SHAInet
   # small, shape-keyed GPU scratch buffer shared across all offloaded experts,
   # then the standard Q4 kernel runs.
   #
-  # The host buffers are allocated as **pinned (page-locked)** memory when
-  # possible, which roughly doubles host->device bandwidth (~6 -> ~12 GB/s on a
-  # laptop PCIe4 x8) versus pageable memory and enables async copies. If pinning
-  # fails (e.g. the pinned pool is exhausted), it falls back to a pageable array
-  # for that weight so the load still succeeds.
+  # Two throughput optimizations layer on top, both transparent and lossless:
+  #   * Host buffers are **pinned** (page-locked) when possible (~2x H2D vs
+  #     pageable), falling back to a pageable array if the pinned pool is full.
+  #   * A global **hot-expert cache** keeps frequently-used weights resident on
+  #     the GPU (as Q4CudaMatrix) within a VRAM budget, so the hottest experts
+  #     skip the host->device upload entirely. MoE routing is skewed, so a
+  #     budget well under the full expert set still yields a high hit rate.
   #
   # This lets a large MoE (e.g. Qwen3-Coder-30B-A3B: ~29B params in experts)
   # keep its experts in cheap host RAM while only the few active experts per
@@ -37,20 +39,26 @@ module SHAInet
     @s_ptr : Pointer(Float32)
     @q_bytes : UInt64
     @s_bytes : UInt64
-    # Fallback pageable storage, kept alive only when pinning failed (otherwise
-    # the source arrays are freed after the copy into pinned memory).
     @q_arr : Array(UInt8)?
     @s_arr : Array(Float32)?
 
-    # Shared GPU scratch buffers, keyed by [K, N]. Reused across every offloaded
-    # expert: experts in a layer share weight shapes, so this holds only a couple
-    # of small Q4CudaMatrix buffers regardless of expert count.
+    # Shape-keyed GPU scratch for cold (uncached) experts. Reused across experts.
     @@scratch = Hash(Tuple(Int32, Int32), Q4CudaMatrix).new
-    # The scratch buffer is overwritten by the upload before each GEMV, so the
-    # upload+GEMV enqueue must be atomic: a concurrent call (e.g. parallel
-    # requests under preview_mt) could otherwise upload a different expert
-    # between this call's upload and its kernel launch and corrupt the result.
-    @@scratch_mutex = Mutex.new
+    # One mutex guards all shared GPU state (scratch + cache) so concurrent
+    # gemv calls can't corrupt the shared scratch or the cache bookkeeping.
+    @@gpu_mutex = Mutex.new
+
+    # --- Hot-expert cache (LRU, frequency-gated) -------------------------------
+    # Insertion-ordered map = LRU order (front = least recently used). A weight is
+    # promoted to a resident Q4CudaMatrix only after it has been used
+    # PROMOTE_THRESHOLD times, so one-off cold experts never evict hot ones.
+    @@resident = Hash(Q4HostMatrix, Q4CudaMatrix).new
+    @@freq = Hash(Q4HostMatrix, Int32).new(0)
+    @@used_bytes = 0_u64
+    @@budget_bytes : UInt64? = nil
+    @@hits = 0_u64
+    @@misses = 0_u64
+    PROMOTE_THRESHOLD = 2
 
     def initialize(@rows : Int32, @cols : Int32, q_host : Array(UInt8), s_host : Array(Float32))
       @q_bytes = q_host.size.to_u64
@@ -71,7 +79,6 @@ module SHAInet
           sp.copy_from(s_host.to_unsafe, s_host.size)
           pinned = true
         rescue
-          # Pinned pool exhausted — fall back to pageable for this weight.
           CUDA.free_host(qp.as(Pointer(Void))) unless qp.null?
           qp = Pointer(UInt8).null
           sp = Pointer(Float32).null
@@ -98,7 +105,6 @@ module SHAInet
       end
     end
 
-    # Quantize a host fp32 weight [K, N] into Q4 and keep it resident in host RAM.
     def self.from_simple(w : SimpleMatrix) : Q4HostMatrix
       q_host, s_host = Q4CudaMatrix.pack(w)
       new(w.rows, w.cols, q_host, s_host)
@@ -109,39 +115,97 @@ module SHAInet
       @q_bytes + @s_bytes
     end
 
-    # Resident GPU footprint is ~0 — only the shared scratch (counted once,
-    # not per-weight) ever lives on the device.
+    # Resident GPU footprint per-weight is ~0 unless this weight is currently in
+    # the shared hot cache; the cache is budgeted globally (see cache_stats).
     def device_bytes : UInt64
       0_u64
+    end
+
+    # GPU memory budget for the hot-expert cache. Defaults to 70% of free VRAM
+    # at first use (leaving room for activations / KV cache / scratch), or set
+    # SHAINET_EXPERT_CACHE_MB (0 disables caching).
+    def self.budget_bytes : UInt64
+      @@budget_bytes ||= begin
+        if mb = ENV["SHAINET_EXPERT_CACHE_MB"]?
+          mb.to_u64 * 1024_u64 * 1024_u64
+        elsif info = CUDA.memory_info
+          (info[:free].to_f * 0.70).to_u64
+        else
+          0_u64
+        end
+      end
+    end
+
+    def self.cache_stats : NamedTuple(resident: Int32, used_mb: Float64, budget_mb: Float64, hits: UInt64, misses: UInt64, hit_rate: Float64)
+      total = @@hits + @@misses
+      {
+        resident:  @@resident.size,
+        used_mb:   (@@used_bytes / 1024.0 / 1024.0),
+        budget_mb: (budget_bytes / 1024.0 / 1024.0),
+        hits:      @@hits,
+        misses:    @@misses,
+        hit_rate:  total.zero? ? 0.0 : (@@hits.to_f / total),
+      }
+    end
+
+    private def upload_to(s : Q4CudaMatrix)
+      CUDA.memcpy(s.q_ptr.as(Pointer(Void)), @q_ptr.as(Pointer(Void)), @q_bytes, CUDA::MemcpyKind::HostToDevice)
+      CUDA.memcpy(s.scale_ptr.as(Pointer(Void)), @s_ptr.as(Pointer(Void)), @s_bytes, CUDA::MemcpyKind::HostToDevice)
     end
 
     private def scratch : Q4CudaMatrix
       (@@scratch[{@rows, @cols}] ||= Q4CudaMatrix.new(@rows, @cols))
     end
 
-    # Copy this expert's packed weights into the shared scratch (host->device).
-    private def upload_to(s : Q4CudaMatrix)
-      CUDA.memcpy(s.q_ptr.as(Pointer(Void)), @q_ptr.as(Pointer(Void)), @q_bytes, CUDA::MemcpyKind::HostToDevice)
-      CUDA.memcpy(s.scale_ptr.as(Pointer(Void)), @s_ptr.as(Pointer(Void)), @s_bytes, CUDA::MemcpyKind::HostToDevice)
+    # Resolve the device matrix to run this GEMV on (must hold @@gpu_mutex):
+    #   * cache hit  -> the resident Q4CudaMatrix (no upload), marked MRU
+    #   * cache miss -> upload into the shared scratch; promote to a resident
+    #     copy when the weight is hot enough and the budget allows.
+    private def device_matrix : Q4CudaMatrix
+      if r = @@resident[self]?
+        # LRU touch: reinsert to move to the most-recently-used end.
+        @@resident.delete(self)
+        @@resident[self] = r
+        @@hits += 1
+        return r
+      end
+
+      @@misses += 1
+      @@freq[self] += 1
+      if @@freq[self] >= PROMOTE_THRESHOLD && admit?
+        r = Q4CudaMatrix.new(@rows, @cols)
+        upload_to(r)
+        @@resident[self] = r
+        @@used_bytes += r.device_bytes
+        return r
+      end
+
+      s = scratch
+      upload_to(s)
+      s
     end
 
-    # Upload this expert's weights into the shared scratch and run the Q4 GEMV.
-    # Upload + GEMV are enqueued under a mutex so the shared scratch can't be
-    # overwritten by a concurrent call between them.
-    def gemv(x : CudaMatrix) : CudaMatrix
-      @@scratch_mutex.synchronize do
-        s = scratch
-        upload_to(s)
-        s.gemv(x)
+    # Make room for a resident copy of this weight within budget by evicting the
+    # least-recently-used residents. Returns false if it can never fit.
+    private def admit? : Bool
+      need = Q4CudaMatrix.device_bytes_for(@rows, @cols)
+      budget = Q4HostMatrix.budget_bytes
+      return false if need > budget
+      while @@used_bytes + need > budget && !@@resident.empty?
+        victim_k, victim_v = @@resident.first
+        @@resident.delete(victim_k)
+        @@used_bytes -= victim_v.device_bytes
+        victim_v.free! # reclaim VRAM immediately, don't wait for GC
       end
+      @@used_bytes + need <= budget
+    end
+
+    def gemv(x : CudaMatrix) : CudaMatrix
+      @@gpu_mutex.synchronize { device_matrix.gemv(x) }
     end
 
     def gemv_into(x : CudaMatrix, result : CudaMatrix) : CudaMatrix
-      @@scratch_mutex.synchronize do
-        s = scratch
-        upload_to(s)
-        s.gemv_into(x, result)
-      end
+      @@gpu_mutex.synchronize { device_matrix.gemv_into(x, result) }
     end
   end
 end

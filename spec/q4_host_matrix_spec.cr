@@ -42,6 +42,29 @@ describe SHAInet::Q4HostMatrix do
     host.pinned?.should be_true
   end
 
+  it "stays byte-identical across repeated calls (cold scratch -> promoted cache)" do
+    pending! "CUDA kernels not available" unless SHAInet::CUDA.fully_available?
+
+    rng = Random.new(99)
+    k = 192
+    n = 96
+    w = SHAInet::SimpleMatrix.new(k, n)
+    k.times { |r| n.times { |c| w[r, c] = (rng.rand * 2.0 - 1.0) } }
+    x = SHAInet::SimpleMatrix.new(1, k)
+    k.times { |c| x[0, c] = (rng.rand * 2.0 - 1.0) }
+
+    host = SHAInet::Q4HostMatrix.from_simple(w)
+    ref = SHAInet::Q4CudaMatrix.from_simple(w)
+    expected = ref.gemv(x.to_cuda); expected.sync_from_device!
+
+    # Several calls: first go through the scratch path, later ones may be served
+    # from the promoted resident cache. Every call must match exactly.
+    5.times do
+      y = host.gemv(x.to_cuda); y.sync_from_device!
+      n.times { |c| y[0, c].should eq(expected[0, c]) }
+    end
+  end
+
   it "shares one scratch buffer across many experts of the same shape" do
     pending! "CUDA kernels not available" unless SHAInet::CUDA.fully_available?
 
