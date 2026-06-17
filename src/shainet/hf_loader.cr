@@ -224,7 +224,7 @@ module SHAInet
         head_dim: json["head_dim"]?.try(&.as_i),
         num_experts: (json["num_experts"]?.try(&.as_i) || json["num_local_experts"]?.try(&.as_i)),
         num_experts_per_tok: (json["num_experts_per_tok"]?.try(&.as_i) || 8),
-        norm_topk_prob: ((v = json["norm_topk_prob"]?) ? v.as_bool : true),
+        norm_topk_prob: ((v = json["norm_topk_prob"]?) ? v.as_bool : true), # ameba:disable Lint/AssignmentInCallArgument
         moe_intermediate_size: json["moe_intermediate_size"]?.try(&.as_i)
       )
     end
