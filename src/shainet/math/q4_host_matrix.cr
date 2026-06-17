@@ -68,9 +68,9 @@ module SHAInet
       sp = Pointer(Float32).null
       pinned = false
       if CUDA.fully_available?
+        qpp = Pointer(Void).null
+        spp = Pointer(Void).null
         begin
-          qpp = Pointer(Void).null
-          spp = Pointer(Void).null
           CUDA.malloc_host(pointerof(qpp), @q_bytes)
           CUDA.malloc_host(pointerof(spp), @s_bytes)
           qp = qpp.as(Pointer(UInt8))
@@ -79,7 +79,10 @@ module SHAInet
           sp.copy_from(s_host.to_unsafe, s_host.size)
           pinned = true
         rescue
-          CUDA.free_host(qp.as(Pointer(Void))) unless qp.null?
+          # Free whatever was allocated before the failure (either pointer may be
+          # set independently of qp/sp), then fall back to pageable for this weight.
+          CUDA.free_host(qpp) unless qpp.null?
+          CUDA.free_host(spp) unless spp.null?
           qp = Pointer(UInt8).null
           sp = Pointer(Float32).null
           pinned = false
@@ -137,15 +140,17 @@ module SHAInet
     end
 
     def self.cache_stats : NamedTuple(resident: Int32, used_mb: Float64, budget_mb: Float64, hits: UInt64, misses: UInt64, hit_rate: Float64)
-      total = @@hits + @@misses
-      {
-        resident:  @@resident.size,
-        used_mb:   (@@used_bytes / 1024.0 / 1024.0),
-        budget_mb: (budget_bytes / 1024.0 / 1024.0),
-        hits:      @@hits,
-        misses:    @@misses,
-        hit_rate:  total.zero? ? 0.0 : (@@hits.to_f / total),
-      }
+      @@gpu_mutex.synchronize do
+        total = @@hits + @@misses
+        {
+          resident:  @@resident.size,
+          used_mb:   (@@used_bytes / 1024.0 / 1024.0),
+          budget_mb: (budget_bytes / 1024.0 / 1024.0),
+          hits:      @@hits,
+          misses:    @@misses,
+          hit_rate:  total.zero? ? 0.0 : (@@hits.to_f / total),
+        }
+      end
     end
 
     private def upload_to(s : Q4CudaMatrix)
@@ -161,7 +166,16 @@ module SHAInet
     #   * cache hit  -> the resident Q4CudaMatrix (no upload), marked MRU
     #   * cache miss -> upload into the shared scratch; promote to a resident
     #     copy when the weight is hot enough and the budget allows.
+    # Caching is best-effort and transparent: any failure degrades to the scratch
+    # path rather than crashing inference.
     private def device_matrix : Q4CudaMatrix
+      # Caching disabled (budget 0) -> always use the shared scratch.
+      if Q4HostMatrix.budget_bytes == 0
+        s = scratch
+        upload_to(s)
+        return s
+      end
+
       if r = @@resident[self]?
         # LRU touch: reinsert to move to the most-recently-used end.
         @@resident.delete(self)
@@ -173,16 +187,29 @@ module SHAInet
       @@misses += 1
       @@freq[self] += 1
       if @@freq[self] >= PROMOTE_THRESHOLD && admit?
-        r = Q4CudaMatrix.new(@rows, @cols)
-        upload_to(r)
-        @@resident[self] = r
-        @@used_bytes += r.device_bytes
-        return r
+        if promoted = promote
+          return promoted
+        end
       end
 
       s = scratch
       upload_to(s)
       s
+    end
+
+    # Create a resident GPU copy of this weight and record it. Returns nil (and
+    # leaves the cache untouched) if allocation/upload fails under VRAM pressure,
+    # so the caller falls back to the scratch path.
+    private def promote : Q4CudaMatrix?
+      r = Q4CudaMatrix.new(@rows, @cols)
+      upload_to(r)
+      @@resident[self] = r
+      @@used_bytes += r.device_bytes
+      @@freq.delete(self) # promoted: drop the freq entry (and its strong ref)
+      r
+    rescue
+      r.free! if r
+      nil
     end
 
     # Make room for a resident copy of this weight within budget by evicting the
@@ -194,6 +221,7 @@ module SHAInet
       while @@used_bytes + need > budget && !@@resident.empty?
         victim_k, victim_v = @@resident.first
         @@resident.delete(victim_k)
+        @@freq.delete(victim_k) # don't retain freq (and a strong ref) for evicted weights
         @@used_bytes -= victim_v.device_bytes
         victim_v.free! # reclaim VRAM immediately, don't wait for GC
       end
