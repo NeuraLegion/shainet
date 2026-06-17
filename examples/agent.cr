@@ -141,10 +141,66 @@ module AgentDemo
       @messages.clear
     end
 
-    # Drop oldest messages (sliding window) until the prompt fits `target`
-    # tokens, leaving a marker so the model knows history was trimmed. Keeps the
-    # most recent messages (and never trims below one). Returns tokens removed.
+    # Tokens one message contributes to the prompt.
+    private def message_tokens(m : Message) : Int32
+      if m.role == "tool"
+        render_message("user", "<tool_response>\n#{m.content}\n</tool_response>").size
+      else
+        render_message(m.role, m.content).size
+      end
+    end
+
+    # Summarize a slice of old messages into a single concise note using the
+    # model itself (Claude/Kiro-style compaction) so history is condensed rather
+    # than lost. Falls back to a plain marker if the model returns nothing.
+    private def summarize(msgs : Array(Message)) : String
+      transcript = String.build do |s|
+        msgs.each { |m| s << m.role << ": " << m.content << "\n\n" }
+      end
+      instruction = "Summarize the following conversation between a user and an AI coding " \
+                    "assistant. Preserve key facts, decisions, file paths, tool results, and " \
+                    "any unfinished tasks. Be concise.\n\n#{transcript}"
+      prompt = render_message("system", "You write concise, faithful conversation summaries.")
+      prompt.concat(render_message("user", instruction))
+      prompt << @im_start
+      prompt.concat(@tokenizer.encode("assistant\n"))
+      summary = generate_from(prompt, 384).strip
+      summary.empty? ? TRUNCATION_MARKER : summary
+    end
+
+    # Compact the transcript to fit `target` tokens: keep a recent tail, and
+    # replace the older head with a model-written summary. Hard-trims as a last
+    # resort if it still doesn't fit. Returns tokens removed.
     def compact!(target : Int32) : Int32
+      before = context_tokens
+      return 0 if before <= target || @messages.size <= 1
+
+      # Keep the most recent messages within ~half the target; summarize the rest.
+      keep_budget = target // 2
+      tail = [] of Message
+      tail_tokens = 0
+      @messages.reverse_each do |m|
+        t = message_tokens(m)
+        break if !tail.empty? && tail_tokens + t > keep_budget
+        tail.unshift(m)
+        tail_tokens += t
+      end
+      head = @messages[0, @messages.size - tail.size]
+
+      if head.empty?
+        # Nothing old enough to summarize — fall back to plain truncation.
+        return truncate!(target)
+      end
+
+      summary = summarize(head)
+      @messages = [Message.new("user", "[Summary of earlier conversation]\n#{summary}")] + tail
+      # If the summary + tail still overflow, drop oldest until it fits.
+      truncate!(target)
+      before - context_tokens
+    end
+
+    # Plain sliding-window drop of oldest messages with a marker. Returns tokens removed.
+    private def truncate!(target : Int32) : Int32
       before = context_tokens
       trimmed = false
       while context_tokens > target && @messages.size > 1
@@ -174,11 +230,10 @@ module AgentDemo
       "[#{parts.join(" · ")}]"
     end
 
-    # Generate one assistant turn from the current transcript. Re-prefills the
-    # whole (growing) context each call — simple and correct for a demo.
-    private def generate(max_tokens : Int32) : String
+    # Generate from an explicit prompt; re-prefills it fresh (KV cleared).
+    private def generate_from(prompt : Array(Int32), max_tokens : Int32) : String
       @net.clear_cache!
-      logits = @net.run(build_prompt, stealth: true, return_matrix: true).as(SHAInet::SimpleMatrix)
+      logits = @net.run(prompt, stealth: true, return_matrix: true).as(SHAInet::SimpleMatrix)
       generated = [] of Int32
       max_tokens.times do
         row = logits.rows - 1
@@ -190,6 +245,12 @@ module AgentDemo
         logits = @net.run([id], stealth: true, return_matrix: true).as(SHAInet::SimpleMatrix)
       end
       @tokenizer.decode(generated)
+    end
+
+    # Generate one assistant turn from the current transcript. Re-prefills the
+    # whole (growing) context each call — simple and correct for a demo.
+    private def generate(max_tokens : Int32) : String
+      generate_from(build_prompt, max_tokens)
     end
 
     # Handle one user input: run the tool loop until the model answers plainly.
