@@ -44,33 +44,33 @@ module SHAInet
     @workspace_x_t : CudaMatrix?
 
     # Workspace matrices for attention computation (per head)
-    @workspace_scores : Array(CudaMatrix?) = [] of CudaMatrix?
-    @workspace_attn_output : Array(CudaMatrix?) = [] of CudaMatrix?
-    @workspace_k_transposed : Array(CudaMatrix?) = [] of CudaMatrix?
-    @workspace_q_transposed : Array(CudaMatrix?) = [] of CudaMatrix?
+    @workspace_scores = [] of CudaMatrix?
+    @workspace_attn_output = [] of CudaMatrix?
+    @workspace_k_transposed = [] of CudaMatrix?
+    @workspace_q_transposed = [] of CudaMatrix?
 
     # Workspace matrices for Q, K, V head slices
-    @q_head_ws : Array(CudaMatrix?) = [] of CudaMatrix?
-    @k_head_ws : Array(CudaMatrix?) = [] of CudaMatrix?
-    @v_head_ws : Array(CudaMatrix?) = [] of CudaMatrix?
+    @q_head_ws = [] of CudaMatrix?
+    @k_head_ws = [] of CudaMatrix?
+    @v_head_ws = [] of CudaMatrix?
 
     # Cached workspace matrices for backward pass (per head)
-    @d_v_temp_ws : Array(CudaMatrix?) = [] of CudaMatrix?
-    @d_attn_temp_ws : Array(CudaMatrix?) = [] of CudaMatrix?
-    @d_scores_temp_ws : Array(CudaMatrix?) = [] of CudaMatrix?
-    @d_q_temp_ws : Array(CudaMatrix?) = [] of CudaMatrix?
-    @d_k_temp_ws : Array(CudaMatrix?) = [] of CudaMatrix?
+    @d_v_temp_ws = [] of CudaMatrix?
+    @d_attn_temp_ws = [] of CudaMatrix?
+    @d_scores_temp_ws = [] of CudaMatrix?
+    @d_q_temp_ws = [] of CudaMatrix?
+    @d_k_temp_ws = [] of CudaMatrix?
 
     # Workspace matrices for temporary transposes during backward pass
-    @attn_t_ws : Array(CudaMatrix?) = [] of CudaMatrix?
-    @v_t_ws : Array(CudaMatrix?) = [] of CudaMatrix?
-    @scores_t_ws : Array(CudaMatrix?) = [] of CudaMatrix?
+    @attn_t_ws = [] of CudaMatrix?
+    @v_t_ws = [] of CudaMatrix?
+    @scores_t_ws = [] of CudaMatrix?
 
     # Workspace slices of d_concat for each head
-    @d_concat_slices_ws : Array(CudaMatrix?) = [] of CudaMatrix?
+    @d_concat_slices_ws = [] of CudaMatrix?
 
     # Additional persistent workspaces for backward pass
-    @workspace_head_out : Array(CudaMatrix?) = [] of CudaMatrix?
+    @workspace_head_out = [] of CudaMatrix?
     @workspace_concat_t : CudaMatrix?
     @workspace_w_o_t : CudaMatrix?
     @workspace_temp_grad_o : CudaMatrix?
