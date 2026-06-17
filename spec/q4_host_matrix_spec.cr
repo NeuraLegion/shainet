@@ -34,6 +34,14 @@ describe SHAInet::Q4HostMatrix do
     host.host_bytes.should be > 0_u64
   end
 
+  it "stores weights in pinned host memory when CUDA is available" do
+    pending! "CUDA kernels not available" unless SHAInet::CUDA.fully_available?
+
+    w = SHAInet::SimpleMatrix.new(256, 128)
+    host = SHAInet::Q4HostMatrix.from_simple(w)
+    host.pinned?.should be_true
+  end
+
   it "shares one scratch buffer across many experts of the same shape" do
     pending! "CUDA kernels not available" unless SHAInet::CUDA.fully_available?
 
