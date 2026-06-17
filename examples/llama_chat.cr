@@ -198,6 +198,10 @@ loop do
   gen_elapsed = (Time.instant - gen_start).total_seconds
   if generated_ids.size > 0
     STDERR.puts "(#{generated_ids.size} tokens, #{(generated_ids.size / gen_elapsed).round(1)} tok/s)"
+    if offload && SHAInet::CUDA.fully_available?
+      cs = SHAInet::Q4HostMatrix.cache_stats
+      STDERR.puts "  [expert cache] #{(cs[:hit_rate]*100).round(1)}% hit, #{cs[:resident]} resident, #{cs[:used_mb].round(0)}/#{cs[:budget_mb].round(0)} MB"
+    end
   end
   puts ""
 end
