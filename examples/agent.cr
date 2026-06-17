@@ -1,5 +1,6 @@
 require "../src/shainet"
 require "json"
+require "colorize"
 
 # Agentic chat demo: a multi-turn conversation with a growing context and a
 # tool-calling loop, built entirely on Network#run. Think of it as a very light
@@ -277,14 +278,14 @@ module AgentDemo
         if calls.empty?
           answer = text.strip
           @messages << Message.new("assistant", answer)
-          puts "\nAgent: #{answer}"
+          puts "\n#{"Agent".colorize(:light_cyan).bold} ❯ #{answer}"
           break
         end
 
         # Keep the assistant's tool_call markup verbatim in the transcript.
         @messages << Message.new("assistant", text.strip)
         calls.each do |c|
-          STDERR.puts "  [tool] #{c.name}(#{c.args.map { |k, v| "#{k}=#{v.inspect}" }.join(", ")})"
+          STDERR.puts "  #{"⚒ #{c.name}".colorize(:yellow)}(#{c.args.map { |k, v| "#{k}=#{v.inspect}" }.join(", ")})".colorize(:dark_gray)
           tool = @tools.find { |t| t.name == c.name }
           result =
             if tool
@@ -300,6 +301,21 @@ module AgentDemo
         end
       end
     end
+  end
+
+  # ASCII splash banner.
+  def self.print_banner(io : IO, subtitle : String)
+    art = [
+      %q{   ____  _   _    _    ___            _   },
+      %q{  / ___|| | | |  / \  |_ _|_ __   ___| |_ },
+      %q{  \___ \| |_| | / _ \  | || '_ \ / _ \ __|},
+      %q{   ___) |  _  |/ ___ \ | || | | |  __/ |_ },
+      %q{  |____/|_| |_/_/   \_\___|_| |_|\___|\__|},
+    ].join("\n")
+    io.puts
+    io.puts art.colorize(:light_cyan).bold
+    io.puts "  ▸ Agent ".colorize(:cyan).bold.to_s + "· #{subtitle}".colorize(:dark_gray).to_s
+    io.puts
   end
 
   # System prompt describing the tools in the Qwen3-Coder XML format.
@@ -338,7 +354,10 @@ unless model_dir && Dir.exists?(model_dir)
   exit 1
 end
 
-STDERR.puts "Loading model from #{model_dir}..."
+Colorize.enabled = STDERR.tty?
+AgentDemo.print_banner(STDERR, "#{File.basename(model_dir)} · local coding agent on Network#run")
+
+STDERR.puts "Loading model from #{model_dir}...".colorize(:dark_gray)
 t0 = Time.instant
 quantize = SHAInet::CUDA.fully_available? && !ENV["SHAINET_FP32"]?
 bits = ENV["SHAINET_Q4"]? ? 4 : 8
@@ -362,11 +381,11 @@ end
 
 max_context = (ENV["SHAINET_AGENT_CONTEXT"]? || "8192").to_i
 agent = AgentDemo::Agent.new(net, tokenizer, AgentDemo.build_tools, max_context)
-STDERR.puts "Agent ready. Tools: #{AgentDemo.build_tools.map(&.name).join(", ")}."
-STDERR.puts "Commands: /context  /compact  /clear  /help  (Ctrl-D to exit). Max context: #{max_context} tok."
+STDERR.puts "Ready · tools: #{AgentDemo.build_tools.map(&.name).join(", ")} · max context #{max_context} tok".colorize(:green)
+STDERR.puts "Commands: /context  /compact  /clear  /help   (Ctrl-D to exit)".colorize(:dark_gray)
 
 loop do
-  STDERR.print "\nYou: "
+  STDERR.print "\n#{"You".colorize(:light_green).bold} ❯ "
   input = gets
   break if input.nil?
   input = input.strip
@@ -374,25 +393,25 @@ loop do
 
   case input
   when "/help"
-    STDERR.puts "  /context  show context size, VRAM and cache usage"
-    STDERR.puts "  /compact  trim the conversation history now"
-    STDERR.puts "  /clear    reset the conversation"
-    STDERR.puts "  /help     this message"
+    STDERR.puts "  /context  show context size, VRAM and cache usage".colorize(:dark_gray)
+    STDERR.puts "  /compact  summarize + trim the conversation history now".colorize(:dark_gray)
+    STDERR.puts "  /clear    reset the conversation".colorize(:dark_gray)
+    STDERR.puts "  /help     this message".colorize(:dark_gray)
     next
   when "/context"
-    STDERR.puts "  #{agent.status}"
+    STDERR.puts "  #{agent.status}".colorize(:dark_gray)
     next
   when "/compact"
     removed = agent.compact!((agent.max_context * 0.75).to_i)
-    STDERR.puts "  compacted −#{removed} tokens · #{agent.status}"
+    STDERR.puts "  compacted −#{removed} tokens · #{agent.status}".colorize(:dark_gray)
     next
   when "/clear"
     agent.reset
-    STDERR.puts "  conversation cleared"
+    STDERR.puts "  conversation cleared".colorize(:dark_gray)
     next
   end
 
   agent.chat(input, max_tokens)
-  STDERR.puts "  #{agent.status}"
+  STDERR.puts "  #{agent.status}".colorize(:dark_gray)
 end
-STDERR.puts "\nbye"
+STDERR.puts "\nbye 👋".colorize(:cyan)
