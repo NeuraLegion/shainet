@@ -239,6 +239,7 @@ module AgentDemo
 
   # Extract <tool_call><function=NAME><parameter=K>V</parameter>...</function></tool_call> blocks.
   def self.parse_tool_calls(text : String) : Array(ToolCall)
+    text = text.scrub # never run regex on invalid UTF-8 (broken-model output)
     calls = [] of ToolCall
     text.scan(/<tool_call>(.*?)<\/tool_call>/m) do |m|
       body = m[1]
@@ -417,14 +418,16 @@ module AgentDemo
         break unless logits[row, id].finite?
         generated << id
         if r = renderer
-          full = @tokenizer.decode(generated)
+          full = @tokenizer.decode(generated).scrub
           r.feed(full[prev.size..]) if full.size > prev.size
           prev = full
         end
         logits = @net.run([id], stealth: true, return_matrix: true).as(SHAInet::SimpleMatrix)
       end
       renderer.try(&.finish)
-      @tokenizer.decode(generated)
+      # scrub: a broken model can emit tokens that decode to invalid UTF-8, which
+      # would crash downstream regex/parsing.
+      @tokenizer.decode(generated).scrub
     end
 
     # Generate one assistant turn from the current transcript, streaming the
@@ -482,13 +485,13 @@ module AgentDemo
 
   # ASCII splash banner.
   def self.print_banner(io : IO, subtitle : String)
-    art = [
-      %q{   ____  _   _    _    ___            _   },
-      %q{  / ___|| | | |  / \  |_ _|_ __   ___| |_ },
-      %q{  \___ \| |_| | / _ \  | || '_ \ / _ \ __|},
-      %q{   ___) |  _  |/ ___ \ | || | | |  __/ |_ },
-      %q{  |____/|_| |_/_/   \_\___|_| |_|\___|\__|},
-    ].join("\n")
+    art = <<-'ART'
+ ____  _   _    _    ___            _
+/ ___|| | | |  / \  |_ _|_ __   ___| |_
+\___ \| |_| | / _ \  | || '_ \ / _ \ __|
+ ___) |  _  |/ ___ \ | || | | |  __/ |_
+|____/|_| |_/_/   \_\___|_| |_|\___|\__|
+ART
     io.puts
     io.puts art.colorize(:light_cyan).bold
     io.puts "  ▸ Agent ".colorize(:cyan).bold.to_s + "· #{subtitle}".colorize(:dark_gray).to_s
