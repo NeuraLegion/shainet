@@ -1,0 +1,21 @@
+Lint/VoidOutsideLib:
+  Excluded:
+    - src/shainet/cuda.cr
+
+Lint/NotNil:
+  Enabled: false
+
+Lint/ShadowingOuterLocalVar:
+  Enabled: false
+
+Naming/BlockParameterName:
+  Enabled: false
+
+Naming/BinaryOperatorParameterName:
+  Enabled: false
+
+Metrics/CyclomaticComplexity:
+  Enabled: false
+
+Style/NegatedConditionsInUnless:
+  Enabled: false

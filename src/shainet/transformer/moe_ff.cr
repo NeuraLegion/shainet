@@ -16,7 +16,7 @@ module SHAInet
     property router : SimpleMatrix | CudaMatrix # [d_model, num_experts]
     getter num_experts : Int32
     getter top_k : Int32
-    getter norm_topk_prob : Bool
+    getter? norm_topk_prob : Bool
     getter d_model : Int32
 
     def initialize(@d_model : Int32, ff_hidden : Int32, @num_experts : Int32,
@@ -64,7 +64,7 @@ module SHAInet
 
       idxs = (0...ne).to_a.sort_by! { |e| -probs[e] }[0, @top_k]
       sel = idxs.map { |e| {e, probs[e]} }
-      if @norm_topk_prob
+      if norm_topk_prob?
         wsum = sel.sum { |pair| pair[1] }
         wsum = 1.0 if wsum == 0.0
         sel = sel.map { |pair| {pair[0], pair[1] / wsum} }

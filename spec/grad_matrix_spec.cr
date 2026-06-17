@@ -8,7 +8,7 @@ describe SHAInet::Autograd::GradMatrix do
       m.cols.should eq(3)
       m.shape.should eq({2, 3})
       m.size.should eq(6)
-      m.requires_grad.should be_true
+      m.requires_grad?.should be_true
     end
 
     it "creates from 2D array" do
@@ -533,8 +533,8 @@ describe SHAInet::Autograd::GradMatrix do
       b = a.clone
 
       b[0, 0].should eq(1.0)
-      b.requires_grad.should be_true
-      b.is_leaf.should be_true # Clone is a new leaf
+      b.requires_grad?.should be_true
+      b.leaf?.should be_true # Clone is a new leaf
 
       # Modifying clone doesn't affect original
       b.data[0] = 99.0
@@ -546,7 +546,7 @@ describe SHAInet::Autograd::GradMatrix do
       b = a.detach
 
       b[0, 0].should eq(1.0)
-      b.requires_grad.should be_false
+      b.requires_grad?.should be_false
     end
 
     it "zeros gradients" do

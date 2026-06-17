@@ -189,8 +189,8 @@ module SHAInet
           Log.info { "cuDNN not available: #{String.new(LibCUDNN.cudnnGetErrorString(result))}" }
           false
         end
-      rescue e
-        Log.debug { "cuDNN availability check failed: #{e}" }
+      rescue ex
+        Log.debug { "cuDNN availability check failed: #{ex}" }
         false
       end
     end
@@ -623,8 +623,8 @@ module SHAInet
           CUDA.element_log(out_ptr, in_ptr, size)
           output.mark_device_dirty!
           return
-        rescue e
-          Log.error { "CUDA element_log kernel failed: #{e}" }
+        rescue ex
+          Log.error { "CUDA element_log kernel failed: #{ex}" }
         end
       end
 

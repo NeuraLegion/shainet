@@ -48,7 +48,7 @@ module SHAInet
 
     # Encode multiple texts concurrently using `WaitGroup`.
     def encode_batch(texts : Array(String)) : Array(Array(Int32))
-      results = Array(Array(Int32) | Nil).new(texts.size) { nil }
+      results = Array(Array(Int32)?).new(texts.size) { nil }
 
       WaitGroup.wait do |wg|
         texts.each_with_index do |text, idx|

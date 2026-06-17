@@ -224,7 +224,7 @@ module SHAInet
         head_dim: json["head_dim"]?.try(&.as_i),
         num_experts: (json["num_experts"]?.try(&.as_i) || json["num_local_experts"]?.try(&.as_i)),
         num_experts_per_tok: (json["num_experts_per_tok"]?.try(&.as_i) || 8),
-        norm_topk_prob: ((v = json["norm_topk_prob"]?) ? v.as_bool : true),
+        norm_topk_prob: ((v = json["norm_topk_prob"]?) ? v.as_bool : true), # ameba:disable Lint/AssignmentInCallArgument
         moe_intermediate_size: json["moe_intermediate_size"]?.try(&.as_i)
       )
     end
@@ -234,10 +234,10 @@ module SHAInet
     # (no scaling), letting the block use the plain theta^(-2i/d) formula.
     def self.compute_rope_freqs(config : LlamaConfig, head_dim : Int32) : Array(Float32)?
       scaling = config.rope_scaling
-      return nil if scaling.nil? || scaling.raw.nil?
+      return if scaling.nil? || scaling.raw.nil?
 
       stype = scaling["rope_type"]?.try(&.as_s) || scaling["type"]?.try(&.as_s)
-      return nil unless stype == "llama3"
+      return unless stype == "llama3"
 
       theta = config.rope_theta
       factor = scaling["factor"].as_f

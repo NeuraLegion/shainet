@@ -35,7 +35,7 @@ module SHAInet
       def *(other : Tensor)
         Tensor.new(@data * other.data, [self, other], ->(g : Float64) do
           self.grad += g * other.data
-          other.grad += g * self.data
+          other.grad += g * data
         end)
       end
 
@@ -57,7 +57,7 @@ module SHAInet
       def matmul(other : Tensor)
         Tensor.new(@data * other.data, [self, other], ->(g : Float64) do
           self.grad += g * other.data
-          other.grad += g * self.data
+          other.grad += g * data
         end)
       end
 

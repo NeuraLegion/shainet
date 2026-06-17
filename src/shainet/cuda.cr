@@ -66,16 +66,7 @@ module SHAInet
       @@checked = true
 
       rt = LibC.dlopen("libcudart.so", LibC::RTLD_LAZY)
-      if rt.null?
-        err = LibC.dlerror
-        msg = err.null? ? "unknown" : String.new(err)
-      end
-
       blas = LibC.dlopen("libcublas.so", LibC::RTLD_LAZY)
-      if blas.null?
-        err = LibC.dlerror
-        msg = err.null? ? "unknown" : String.new(err)
-      end
 
       if rt.null? || blas.null?
         @@available = false
@@ -86,19 +77,17 @@ module SHAInet
       end
 
       @@available
-    rescue e
-      Log.error { "CUDA availability check raised: #{e}" }
+    rescue ex
+      Log.error { "CUDA availability check raised: #{ex}" }
       @@available = false
     end
 
     # Returns the CUDA runtime version or nil if CUDA is unavailable.
     def version
-      return nil unless available?
+      return unless available?
       out = 0
       if LibCUDARuntime.cudaRuntimeGetVersion(pointerof(out)) == 0
         out
-      else
-        nil
       end
     rescue
       nil
@@ -108,15 +97,13 @@ module SHAInet
     def cudnn_available?
       handle = LibC.dlopen("libcudnn.so", LibC::RTLD_LAZY)
       if handle.null?
-        err = LibC.dlerror
-        msg = err.null? ? "unknown" : String.new(err)
         false
       else
         LibC.dlclose(handle)
         true
       end
-    rescue e
-      Log.error { "cuDNN availability check raised: #{e}" }
+    rescue ex
+      Log.error { "cuDNN availability check raised: #{ex}" }
       false
     end
 
@@ -124,15 +111,13 @@ module SHAInet
     def kernels_available?
       handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
       if handle.null?
-        err = LibC.dlerror
-        msg = err.null? ? "unknown" : String.new(err)
         false
       else
         LibC.dlclose(handle)
         true
       end
-    rescue e
-      Log.error { "kernel availability check raised: #{e}" }
+    rescue ex
+      Log.error { "kernel availability check raised: #{ex}" }
       false
     end
 
@@ -176,7 +161,7 @@ module SHAInet
 
     # Returns a hash with free and total memory in bytes for the active CUDA device.
     def memory_info
-      return nil unless fully_available?
+      return unless fully_available?
       free = 0_u64
       total = 0_u64
       res = LibCUDARuntime.cudaMemGetInfo(pointerof(free), pointerof(total))
@@ -186,8 +171,8 @@ module SHAInet
         Log.error { "CUDA.memory_info: cudaMemGetInfo failed with result #{res}" }
         nil
       end
-    rescue e
-      Log.error { "CUDA.memory_info raised: #{e}" }
+    rescue ex
+      Log.error { "CUDA.memory_info raised: #{ex}" }
       nil
     end
 
@@ -195,8 +180,6 @@ module SHAInet
     def total_memory
       if info = memory_info
         info[:total]
-      else
-        nil
       end
     end
 
@@ -339,9 +322,9 @@ module SHAInet
 
       begin
         fn.call(dst, src, rows, cols)
-      rescue e
-        Log.error { "CUDA Error in softmax_rows: #{e}" }
-        raise e
+      rescue ex
+        Log.error { "CUDA Error in softmax_rows: #{ex}" }
+        raise ex
       end
     end
 
@@ -402,9 +385,9 @@ module SHAInet
 
       begin
         fn.call(dst, src, rows, src_cols, start_col, len)
-      rescue e
-        Log.error { "CUDA Error in slice_cols: #{e}" }
-        raise e
+      rescue ex
+        Log.error { "CUDA Error in slice_cols: #{ex}" }
+        raise ex
       end
     end
 
@@ -431,9 +414,9 @@ module SHAInet
 
       begin
         fn.call(dst, src, rows, dst_cols, start_col, len)
-      rescue e
-        Log.error { "CUDA Error in set_cols: #{e}" }
-        raise e
+      rescue ex
+        Log.error { "CUDA Error in set_cols: #{ex}" }
+        raise ex
       end
     end
 
@@ -548,11 +531,11 @@ module SHAInet
 
       begin
         fn.call(output, input, rows, cols)
-      rescue e
-        Log.error { "CUDA Error in transpose: #{e}, output=#{output.address}, input=#{input.address}, rows=#{rows}, cols=#{cols}" }
+      rescue ex
+        Log.error { "CUDA Error in transpose: #{ex}, output=#{output.address}, input=#{input.address}, rows=#{rows}, cols=#{cols}" }
         Log.warn { "Falling back to CPU transpose due to GPU error" }
         # GPU operation failed - let the caller handle the fallback
-        raise e
+        raise ex
       end
     end
 
@@ -632,9 +615,9 @@ module SHAInet
 
       begin
         fn.call(matrix, size)
-      rescue e
-        Log.error { "CUDA Error in zero_matrix: #{e}, matrix=#{matrix.address}, size=#{size}" }
-        raise e
+      rescue ex
+        Log.error { "CUDA Error in zero_matrix: #{ex}, matrix=#{matrix.address}, size=#{size}" }
+        raise ex
       end
     end
 
@@ -660,9 +643,9 @@ module SHAInet
 
       begin
         fn.call(matrix, value, size)
-      rescue e
-        Log.error { "CUDA Error in fill_matrix: #{e}, matrix=#{matrix.address}, size=#{size}, value=#{value}" }
-        raise e
+      rescue ex
+        Log.error { "CUDA Error in fill_matrix: #{ex}, matrix=#{matrix.address}, size=#{size}, value=#{value}" }
+        raise ex
       end
     end
 
@@ -688,9 +671,9 @@ module SHAInet
 
       begin
         fn.call(dst, a, b, size)
-      rescue e
-        Log.error { "CUDA Error in element_div: #{e}" }
-        raise e
+      rescue ex
+        Log.error { "CUDA Error in element_div: #{ex}" }
+        raise ex
       end
     end
 
@@ -750,8 +733,8 @@ module SHAInet
         begin
           fn.call(dst, src, rows, cols)
           return
-        rescue e
-          Log.error { "CUDA Error in row_sum: #{e}" }
+        rescue ex
+          Log.error { "CUDA Error in row_sum: #{ex}" }
         end
       end
 
@@ -807,9 +790,9 @@ module SHAInet
 
       begin
         fn.call(x, q, scales, y, m, n, k)
-      rescue e
-        Log.error { "CUDA Error in gemm_q8_f32: #{e}" }
-        raise e
+      rescue ex
+        Log.error { "CUDA Error in gemm_q8_f32: #{ex}" }
+        raise ex
       end
     end
 
@@ -833,9 +816,9 @@ module SHAInet
 
       begin
         fn.call(x, q, scales, y, m, n, k)
-      rescue e
-        Log.error { "CUDA Error in gemm_q4_f32: #{e}" }
-        raise e
+      rescue ex
+        Log.error { "CUDA Error in gemm_q4_f32: #{ex}" }
+        raise ex
       end
     end
 
@@ -862,9 +845,9 @@ module SHAInet
 
       begin
         fn.call(staging, kc, vc, new_tokens, start_pos, num_kv_heads, head_dim, capacity)
-      rescue e
-        Log.error { "CUDA Error in kv_cache_append_f32: #{e}" }
-        raise e
+      rescue ex
+        Log.error { "CUDA Error in kv_cache_append_f32: #{ex}" }
+        raise ex
       end
     end
 
@@ -892,9 +875,9 @@ module SHAInet
 
       begin
         fn.call(q, kc, vc, out_ptr, ws, new_tokens, start_pos, num_heads, heads_per_kv, head_dim, capacity, scale)
-      rescue e
-        Log.error { "CUDA Error in attention_kv_f32: #{e}" }
-        raise e
+      rescue ex
+        Log.error { "CUDA Error in attention_kv_f32: #{ex}" }
+        raise ex
       end
     end
 
@@ -925,8 +908,8 @@ module SHAInet
         CUDA.memcpy(loss_output.as(Pointer(Void)), loss_device.as(Pointer(Void)), 4_u64, MemcpyKind::DeviceToHost)
         CUDA.free(loss_device.as(Pointer(Void)))
         0
-      rescue e
-        Log.error { "CUDA Error in cross_entropy_loss_gradient: #{e}" }
+      rescue ex
+        Log.error { "CUDA Error in cross_entropy_loss_gradient: #{ex}" }
         1
       end
     end
@@ -955,8 +938,8 @@ module SHAInet
         CUDA.memcpy(loss_out.as(Pointer(Void)), loss_device.as(Pointer(Void)), 4_u64, MemcpyKind::DeviceToHost)
         CUDA.free(loss_device.as(Pointer(Void)))
         0
-      rescue e
-        Log.error { "CUDA Error in softmax_cross_entropy_label: #{e}" }
+      rescue ex
+        Log.error { "CUDA Error in softmax_cross_entropy_label: #{ex}" }
         1
       end
     end
@@ -984,8 +967,8 @@ module SHAInet
           fn.call(data, data, size, 1, dropout_prob.to_f64, seed)
           return 0
         end
-      rescue e
-        Log.error { "CUDA dropout kernel failed: #{e}" }
+      rescue ex
+        Log.error { "CUDA dropout kernel failed: #{ex}" }
       end
 
       1
@@ -1014,9 +997,9 @@ module SHAInet
 
       begin
         fn.call(dst, input, grad, size)
-      rescue e
-        Log.error { "CUDA Error in relu_backward: #{e}" }
-        raise e
+      rescue ex
+        Log.error { "CUDA Error in relu_backward: #{ex}" }
+        raise ex
       end
     end
 
@@ -1043,9 +1026,9 @@ module SHAInet
 
       begin
         fn.call(dst, grad, softmax_out, rows, cols)
-      rescue e
-        Log.error { "CUDA Error in softmax_backward: #{e}" }
-        raise e
+      rescue ex
+        Log.error { "CUDA Error in softmax_backward: #{ex}" }
+        raise ex
       end
     end
 
@@ -1071,9 +1054,9 @@ module SHAInet
 
       begin
         fn.call(dst, src, size)
-      rescue e
-        Log.error { "CUDA Error in element_log: #{e}" }
-        raise e
+      rescue ex
+        Log.error { "CUDA Error in element_log: #{ex}" }
+        raise ex
       end
     end
 

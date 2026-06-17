@@ -100,7 +100,7 @@ end
 elapsed = (Time.instant - t0).total_seconds
 
 puts ""
-puts "Output: #{out.to_s}"
+puts "Output: #{out}"
 puts ""
 toks = generated.size
 printf("Decoded %d tokens in %.2fs = %.2f tok/s\n", toks, elapsed, toks / elapsed)

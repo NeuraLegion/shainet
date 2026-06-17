@@ -236,10 +236,10 @@ module SHAInet
       result = CudaMatrix.new(@cols, @rows)
 
       # Use GPU kernel for transpose - fail fast if not available
-      raise RuntimeError.new("GPU transpose requires valid device pointers") unless (src_ptr = self.device_ptr) && (dst_ptr = result.device_ptr) && !src_ptr.null? && !dst_ptr.null?
+      raise RuntimeError.new("GPU transpose requires valid device pointers") unless (src_ptr = device_ptr) && (dst_ptr = result.device_ptr) && !src_ptr.null? && !dst_ptr.null?
 
       # Make sure source data is on GPU
-      self.sync_to_device!("transpose_operation") unless device_dirty?
+      sync_to_device!("transpose_operation") unless device_dirty?
 
       # Use GPU kernel for transpose
       CUDA.transpose(dst_ptr, src_ptr, @rows, @cols)
@@ -253,9 +253,9 @@ module SHAInet
     # Avoids allocating a new matrix when a persistent transpose is needed.
     def transpose_into!(dest : CudaMatrix)
       raise ArgumentError.new("size mismatch") unless dest.rows == @cols && dest.cols == @rows
-      raise RuntimeError.new("GPU transpose requires valid device pointers") unless (src_ptr = self.device_ptr) && (dst_ptr = dest.device_ptr) && !src_ptr.null? && !dst_ptr.null?
+      raise RuntimeError.new("GPU transpose requires valid device pointers") unless (src_ptr = device_ptr) && (dst_ptr = dest.device_ptr) && !src_ptr.null? && !dst_ptr.null?
       # Ensure source data is on the GPU
-      self.sync_to_device!("transpose_into") unless device_dirty?
+      sync_to_device!("transpose_into") unless device_dirty?
 
       # Perform transpose using CUDA kernel
       CUDA.transpose(dst_ptr, src_ptr, @rows, @cols)
@@ -337,10 +337,10 @@ module SHAInet
     # CUDA `slice_cols` kernel.
     def slice_cols_into!(dest : CudaMatrix, start_col : Int32, length : Int32)
       raise ArgumentError.new("size mismatch") unless dest.rows == @rows && dest.cols == length
-      raise RuntimeError.new("GPU slice_cols_into! requires valid device pointers") unless (sptr = self.device_ptr) && (dptr = dest.device_ptr) && !sptr.null? && !dptr.null?
+      raise RuntimeError.new("GPU slice_cols_into! requires valid device pointers") unless (sptr = device_ptr) && (dptr = dest.device_ptr) && !sptr.null? && !dptr.null?
 
       # Ensure source data is on the GPU
-      self.sync_to_device!("slice_cols_into") unless device_dirty?
+      sync_to_device!("slice_cols_into") unless device_dirty?
 
       CUDA.slice_cols(dptr, sptr, @rows, @cols, start_col, length)
 
@@ -356,10 +356,10 @@ module SHAInet
 
     def set_cols!(start_col : Int32, other : CudaMatrix)
       raise ArgumentError.new("row mismatch") unless other.rows == @rows
-      raise RuntimeError.new("GPU set_cols! requires valid device pointers") unless (dptr = self.device_ptr) && (sptr = other.device_ptr) && !dptr.null? && !sptr.null?
+      raise RuntimeError.new("GPU set_cols! requires valid device pointers") unless (dptr = device_ptr) && (sptr = other.device_ptr) && !dptr.null? && !sptr.null?
 
       # Ensure both matrices have up-to-date GPU data
-      self.sync_to_device!("set_cols") unless device_dirty?
+      sync_to_device!("set_cols") unless device_dirty?
       other.sync_to_device!("set_cols") unless other.device_dirty?
 
       CUDA.set_cols(dptr, sptr, @rows, @cols, start_col, other.cols)
@@ -377,10 +377,10 @@ module SHAInet
 
       # For now, use GPU copy operations to copy the row
       # This is more efficient than element-by-element access
-      self.sync_to_device!("set_row") unless device_dirty?
+      sync_to_device!("set_row") unless device_dirty?
       other.sync_to_device!("set_row") unless other.device_dirty?
 
-      dptr = self.device_ptr
+      dptr = device_ptr
       sptr = other.device_ptr
       raise RuntimeError.new("GPU set_row! requires valid device pointers") unless dptr && sptr && !dptr.null? && !sptr.null?
 
@@ -399,10 +399,10 @@ module SHAInet
     # Optimized cuBLAS matrix multiplication
     def *(other : CudaMatrix)
       raise ArgumentError.new("size mismatch for multiplication") unless @cols == other.rows
-      raise RuntimeError.new("GPU multiplication requires valid device pointers") unless (ptr_a = self.device_ptr) && (ptr_b = other.device_ptr) && !ptr_a.null? && !ptr_b.null?
+      raise RuntimeError.new("GPU multiplication requires valid device pointers") unless (ptr_a = device_ptr) && (ptr_b = other.device_ptr) && !ptr_a.null? && !ptr_b.null?
 
       # Ensure both operands have up-to-date GPU data
-      self.sync_to_device!("matrix_multiply") unless device_dirty?
+      sync_to_device!("matrix_multiply") unless device_dirty?
       other.sync_to_device!("matrix_multiply") unless other.device_dirty?
 
       # Create result matrix directly - matrix multiplication creates new data
@@ -430,10 +430,10 @@ module SHAInet
     # Clean CudaMatrix + CudaMatrix addition - optimized with cuDNN and cuBLAS
     def +(other : CudaMatrix) : CudaMatrix
       raise ArgumentError.new("size mismatch") unless @rows == other.rows && @cols == other.cols
-      raise RuntimeError.new("GPU addition requires valid device pointers") unless (ptr_a = self.device_ptr) && (ptr_b = other.device_ptr) && !ptr_a.null? && !ptr_b.null?
+      raise RuntimeError.new("GPU addition requires valid device pointers") unless (ptr_a = device_ptr) && (ptr_b = other.device_ptr) && !ptr_a.null? && !ptr_b.null?
 
       # Ensure both operands have up-to-date GPU data
-      self.sync_to_device!("matrix_addition") unless device_dirty?
+      sync_to_device!("matrix_addition") unless device_dirty?
       other.sync_to_device!("matrix_addition") unless other.device_dirty?
 
       # Create result matrix directly - don't use workspace pool for arithmetic operations
@@ -445,8 +445,8 @@ module SHAInet
         begin
           CUDNN.element_add!(result, self, other, 1.0, 1.0)
           return result
-        rescue e : Exception
-          Log.error { "cuDNN element_add failed: #{e}, falling back to cuBLAS" }
+        rescue ex : Exception
+          Log.error { "cuDNN element_add failed: #{ex}, falling back to cuBLAS" }
         end
       end
 
@@ -465,10 +465,10 @@ module SHAInet
     # Clean CudaMatrix - CudaMatrix subtraction - optimized with cuBLAS and workspace pool
     def -(other : CudaMatrix) : CudaMatrix
       raise ArgumentError.new("size mismatch") unless @rows == other.rows && @cols == other.cols
-      raise RuntimeError.new("GPU subtraction requires valid device pointers") unless (ptr_a = self.device_ptr) && (ptr_b = other.device_ptr) && !ptr_a.null? && !ptr_b.null?
+      raise RuntimeError.new("GPU subtraction requires valid device pointers") unless (ptr_a = device_ptr) && (ptr_b = other.device_ptr) && !ptr_a.null? && !ptr_b.null?
 
       # Ensure both operands have up-to-date GPU data
-      self.sync_to_device!("matrix_subtraction") unless device_dirty?
+      sync_to_device!("matrix_subtraction") unless device_dirty?
       other.sync_to_device!("matrix_subtraction") unless other.device_dirty?
 
       # Create result matrix directly - don't use workspace pool for arithmetic operations
@@ -490,7 +490,7 @@ module SHAInet
 
     def clone
       dup = CudaMatrix.new(@rows, @cols)
-      raise RuntimeError.new("GPU clone requires valid device pointers") unless (sptr = self.device_ptr) && (dptr = dup.device_ptr) && !sptr.null? && !dptr.null?
+      raise RuntimeError.new("GPU clone requires valid device pointers") unless (sptr = device_ptr) && (dptr = dup.device_ptr) && !sptr.null? && !dptr.null?
 
       # If we have GPU data, copy it directly on GPU
       if device_dirty?
@@ -516,10 +516,10 @@ module SHAInet
     # In-place element-wise addition - optimized with cuDNN and cuBLAS.
     def add!(other : CudaMatrix)
       raise ArgumentError.new("size mismatch") unless other.rows == @rows && other.cols == @cols
-      raise RuntimeError.new("GPU add! requires valid device pointers") unless (ptr_a = self.device_ptr) && (ptr_b = other.device_ptr) && !ptr_a.null? && !ptr_b.null?
+      raise RuntimeError.new("GPU add! requires valid device pointers") unless (ptr_a = device_ptr) && (ptr_b = other.device_ptr) && !ptr_a.null? && !ptr_b.null?
 
       # Ensure both matrices have up-to-date GPU data
-      self.sync_to_device!("matrix_add_inplace") unless device_dirty?
+      sync_to_device!("matrix_add_inplace") unless device_dirty?
       other.sync_to_device!("matrix_add_inplace") unless other.device_dirty?
 
       # Try cuDNN first for element-wise operations
@@ -527,8 +527,8 @@ module SHAInet
         begin
           CUDNN.element_add!(self, self, other, 1.0, 1.0)
           return self
-        rescue e : Exception
-          Log.error { "cuDNN element_add failed: #{e}, falling back to cuBLAS" }
+        rescue ex : Exception
+          Log.error { "cuDNN element_add failed: #{ex}, falling back to cuBLAS" }
         end
       end
 
@@ -547,10 +547,10 @@ module SHAInet
     # In-place element-wise subtraction - optimized with cuBLAS.
     def sub!(other : CudaMatrix)
       raise ArgumentError.new("size mismatch") unless other.rows == @rows && other.cols == @cols
-      raise RuntimeError.new("GPU sub! requires valid device pointers") unless (ptr_a = self.device_ptr) && (ptr_b = other.device_ptr) && !ptr_a.null? && !ptr_b.null?
+      raise RuntimeError.new("GPU sub! requires valid device pointers") unless (ptr_a = device_ptr) && (ptr_b = other.device_ptr) && !ptr_a.null? && !ptr_b.null?
 
       # Ensure both matrices have up-to-date GPU data
-      self.sync_to_device!("matrix_sub_inplace") unless device_dirty?
+      sync_to_device!("matrix_sub_inplace") unless device_dirty?
       other.sync_to_device!("matrix_sub_inplace") unless other.device_dirty?
 
       handle = CUDA.create_handle
@@ -589,13 +589,13 @@ module SHAInet
 
     # Optimized scalar multiplication using cuBLAS SCAL
     def *(scalar : Number)
-      raise RuntimeError.new("GPU scalar multiplication requires valid device pointer") unless (dptr = self.device_ptr) && !dptr.null?
+      raise RuntimeError.new("GPU scalar multiplication requires valid device pointer") unless (dptr = device_ptr) && !dptr.null?
 
       # Ensure self has up-to-date GPU data
-      self.sync_to_device!("scalar_multiplication") unless device_dirty?
+      sync_to_device!("scalar_multiplication") unless device_dirty?
 
       # Create a copy to avoid modifying the original
-      out = self.clone
+      out = clone
       ptr = out.device_ptr.not_nil!
 
       handle = CUDA.create_handle
@@ -619,16 +619,16 @@ module SHAInet
         begin
           CUDNN.add_bias!(self, bias)
           return self
-        rescue e : Exception
-          Log.error { "cuDNN add_bias failed: #{e}, falling back to CUDA kernel" }
+        rescue ex : Exception
+          Log.error { "cuDNN add_bias failed: #{ex}, falling back to CUDA kernel" }
         end
       end
 
       # Fallback to CUDA kernel
-      raise RuntimeError.new("GPU add_bias! requires valid device pointers") unless (dptr = self.device_ptr) && (bptr = bias.device_ptr) && !dptr.null? && !bptr.null?
+      raise RuntimeError.new("GPU add_bias! requires valid device pointers") unless (dptr = device_ptr) && (bptr = bias.device_ptr) && !dptr.null? && !bptr.null?
 
       # Ensure both matrices have up-to-date GPU data
-      self.sync_to_device!("bias_addition") unless device_dirty?
+      sync_to_device!("bias_addition") unless device_dirty?
       bias.sync_to_device!("bias_addition") unless bias.device_dirty?
 
       CUDA.add_bias(dptr, bptr, @rows, @cols)
@@ -645,16 +645,16 @@ module SHAInet
         begin
           CUDNN.relu_forward(self, self)
           return self
-        rescue e : Exception
-          Log.error { "cuDNN ReLU failed: #{e}, falling back to CUDA kernel" }
+        rescue ex : Exception
+          Log.error { "cuDNN ReLU failed: #{ex}, falling back to CUDA kernel" }
         end
       end
 
       # Fallback to CUDA kernel
-      raise RuntimeError.new("GPU ReLU requires valid device pointer") unless (dptr = self.device_ptr) && !dptr.null?
+      raise RuntimeError.new("GPU ReLU requires valid device pointer") unless (dptr = device_ptr) && !dptr.null?
 
       # Ensure self has up-to-date GPU data
-      self.sync_to_device!("relu_activation") unless device_dirty?
+      sync_to_device!("relu_activation") unless device_dirty?
 
       CUDA.relu(dptr, (@rows*@cols))
 
@@ -666,10 +666,10 @@ module SHAInet
     # Multiply each column by the corresponding value in a row vector in-place.
     def mul_row_vector!(vec : CudaMatrix)
       raise ArgumentError.new("vector size mismatch") unless vec.rows == 1 && vec.cols == @cols
-      raise RuntimeError.new("GPU mul_row_vector! requires valid device pointers") unless (dptr = self.device_ptr) && (vptr = vec.device_ptr) && !dptr.null? && !vptr.null?
+      raise RuntimeError.new("GPU mul_row_vector! requires valid device pointers") unless (dptr = device_ptr) && (vptr = vec.device_ptr) && !dptr.null? && !vptr.null?
 
       # Ensure both matrices have up-to-date GPU data
-      self.sync_to_device!("mul_row_vector") unless device_dirty?
+      sync_to_device!("mul_row_vector") unless device_dirty?
       vec.sync_to_device!("mul_row_vector") unless vec.device_dirty?
 
       # Use GPU kernel for column-wise scaling
@@ -752,7 +752,7 @@ module SHAInet
     # Copy data from another CudaMatrix
     def copy_from!(other : CudaMatrix)
       raise ArgumentError.new("size mismatch") unless @rows == other.rows && @cols == other.cols
-      raise RuntimeError.new("GPU copy requires valid device pointers") unless (sptr = other.device_ptr) && (dptr = self.device_ptr) && !sptr.null? && !dptr.null?
+      raise RuntimeError.new("GPU copy requires valid device pointers") unless (sptr = other.device_ptr) && (dptr = device_ptr) && !sptr.null? && !dptr.null?
 
       # Ensure source has up-to-date GPU data
       other.sync_to_device!("copy_from") unless other.device_dirty?
@@ -792,16 +792,16 @@ module SHAInet
         begin
           CUDNN.sigmoid_forward!(self, self)
           return self
-        rescue e : Exception
-          Log.error { "cuDNN sigmoid failed: #{e}, falling back to CUDA kernel" }
+        rescue ex : Exception
+          Log.error { "cuDNN sigmoid failed: #{ex}, falling back to CUDA kernel" }
         end
       end
 
       # Fallback to CUDA kernel
-      raise RuntimeError.new("GPU sigmoid requires valid device pointer") unless (dptr = self.device_ptr) && !dptr.null?
+      raise RuntimeError.new("GPU sigmoid requires valid device pointer") unless (dptr = device_ptr) && !dptr.null?
 
       # Ensure self has up-to-date GPU data
-      self.sync_to_device!("sigmoid_activation") unless device_dirty?
+      sync_to_device!("sigmoid_activation") unless device_dirty?
 
       # Apply sigmoid in-place - use same pointer for all three parameters
       size = @rows * @cols
@@ -814,10 +814,10 @@ module SHAInet
 
     # High-performance in-place scalar multiplication using cuBLAS SCAL
     def scale!(scalar : Float64)
-      raise RuntimeError.new("GPU scale! requires valid device pointer") unless (dptr = self.device_ptr) && !dptr.null?
+      raise RuntimeError.new("GPU scale! requires valid device pointer") unless (dptr = device_ptr) && !dptr.null?
 
       # Ensure self has up-to-date GPU data
-      self.sync_to_device!("scalar_scale_inplace") unless device_dirty?
+      sync_to_device!("scalar_scale_inplace") unless device_dirty?
 
       handle = CUDA.create_handle
       begin
@@ -837,9 +837,9 @@ module SHAInet
 
       result = CudaMatrix.new(@rows, @cols)
 
-      if CUDA.fully_available? && (sptr = self.device_ptr) && (optr = other.device_ptr) && (dptr = result.device_ptr) && !sptr.null? && !optr.null? && !dptr.null?
+      if CUDA.fully_available? && (sptr = device_ptr) && (optr = other.device_ptr) && (dptr = result.device_ptr) && !sptr.null? && !optr.null? && !dptr.null?
         # Ensure both operands have up-to-date GPU data
-        self.sync_to_device!("element_division") unless device_dirty?
+        sync_to_device!("element_division") unless device_dirty?
         other.sync_to_device!("element_division") unless other.device_dirty?
 
         size = @rows * @cols
@@ -848,12 +848,12 @@ module SHAInet
         result.mark_device_dirty!
       else
         # Fallback to CPU implementation
-        self.sync_from_device!("element_division") if device_dirty?
+        sync_from_device!("element_division") if device_dirty?
         other.sync_from_device!("element_division") if other.device_dirty?
 
         @rows.times do |i|
           @cols.times do |j|
-            self_val = self.unsafe_get(i, j)
+            self_val = unsafe_get(i, j)
             other_val = other.unsafe_get(i, j)
             result.unsafe_set(i, j, other_val == 0.0 ? 0.0 : self_val / other_val)
           end
@@ -872,28 +872,28 @@ module SHAInet
         begin
           CUDNN.softmax_rows(self, self)
           return self
-        rescue e : Exception
-          Log.error { "cuDNN softmax failed: #{e}, falling back to CUDA kernel" }
+        rescue ex : Exception
+          Log.error { "cuDNN softmax failed: #{ex}, falling back to CUDA kernel" }
         end
       end
 
       # Try custom CUDA kernel before falling back to CPU
-      if CUDA.fully_available? && (dptr = self.device_ptr) && !dptr.null?
+      if CUDA.fully_available? && (dptr = device_ptr) && !dptr.null?
         begin
-          self.sync_to_device!("softmax_kernel") unless device_dirty?
+          sync_to_device!("softmax_kernel") unless device_dirty?
           CUDA.softmax_rows(dptr, dptr, @rows, @cols)
           mark_device_dirty!
           return self
-        rescue e : Exception
-          Log.error { "CUDA softmax kernel failed: #{e}, falling back to CPU" }
+        rescue ex : Exception
+          Log.error { "CUDA softmax kernel failed: #{ex}, falling back to CPU" }
         end
       end
 
       # CPU fallback implementation
-      raise RuntimeError.new("GPU softmax requires valid device pointer") unless (dptr = self.device_ptr) && !dptr.null?
+      raise RuntimeError.new("GPU softmax requires valid device pointer") unless (dptr = device_ptr) && !dptr.null?
 
       # Ensure self has up-to-date CPU data
-      self.sync_from_device!("softmax_fallback")
+      sync_from_device!("softmax_fallback")
       @rows.times do |i|
         # Compute softmax for each row
         row_max = -Float64::INFINITY
@@ -908,7 +908,7 @@ module SHAInet
 
         @cols.times { |j| unsafe_set(i, j, unsafe_get(i, j) / row_sum) }
       end
-      self.sync_to_device!("softmax_result")
+      sync_to_device!("softmax_result")
 
       # Mark self as having newer GPU data
       mark_device_dirty!
@@ -969,7 +969,7 @@ module SHAInet
       raise ArgumentError.new("size mismatch for in-place GEMM") unless a.cols == b.rows && @rows == a.rows && @cols == b.cols
       ptr_a = a.device_ptr
       ptr_b = b.device_ptr
-      ptr_c = self.device_ptr
+      ptr_c = device_ptr
       if !ptr_a || !ptr_b || !ptr_c || ptr_a.null? || ptr_b.null? || ptr_c.null?
         raise RuntimeError.new("GPU in-place GEMM requires valid device pointers")
       end
@@ -977,7 +977,7 @@ module SHAInet
       # Ensure all operands have up-to-date GPU data
       a.sync_to_device!("gemm_inplace") unless a.device_dirty?
       b.sync_to_device!("gemm_inplace") unless b.device_dirty?
-      self.sync_to_device!("gemm_inplace") unless device_dirty?
+      sync_to_device!("gemm_inplace") unless device_dirty?
 
       handle = CUDA.create_handle
       begin
@@ -1002,10 +1002,10 @@ module SHAInet
     # In-place weight update: self = self - lr * gradient
     def weight_update!(gradient : CudaMatrix, learning_rate : Float64)
       raise ArgumentError.new("size mismatch for weight update") unless @rows == gradient.rows && @cols == gradient.cols
-      raise RuntimeError.new("GPU weight update requires valid device pointers") unless (grad_ptr = gradient.device_ptr) && (weight_ptr = self.device_ptr) && !grad_ptr.null? && !weight_ptr.null?
+      raise RuntimeError.new("GPU weight update requires valid device pointers") unless (grad_ptr = gradient.device_ptr) && (weight_ptr = device_ptr) && !grad_ptr.null? && !weight_ptr.null?
 
       # Ensure both matrices have up-to-date GPU data
-      self.sync_to_device!("weight_update") unless device_dirty?
+      sync_to_device!("weight_update") unless device_dirty?
       gradient.sync_to_device!("weight_update") unless gradient.device_dirty?
 
       handle = CUDA.create_handle
@@ -1029,58 +1029,58 @@ module SHAInet
         begin
           CUDNN.element_multiply!(self, self, other, alpha, beta)
           return self
-        rescue e : Exception
-          Log.error { "cuDNN element_mul failed: #{e}, falling back to CPU" }
+        rescue ex : Exception
+          Log.error { "cuDNN element_mul failed: #{ex}, falling back to CPU" }
         end
       end
 
       # CPU fallback
       raise ArgumentError.new("size mismatch") unless @rows == other.rows && @cols == other.cols
-      self.sync_from_device!("cudnn_element_mul_fallback") if device_dirty?
+      sync_from_device!("cudnn_element_mul_fallback") if device_dirty?
       other.sync_from_device!("cudnn_element_mul_fallback") if other.device_dirty?
 
       @rows.times do |i|
         @cols.times do |j|
-          self_val = self.unsafe_get(i, j)
+          self_val = unsafe_get(i, j)
           other_val = other.unsafe_get(i, j)
           result_val = alpha * self_val * other_val + beta * self_val
-          self.unsafe_set(i, j, result_val)
+          unsafe_set(i, j, result_val)
         end
       end
-      self.sync_to_device!("cudnn_element_mul_result")
+      sync_to_device!("cudnn_element_mul_result")
       mark_device_dirty!
       self
     end
 
     # Dropout using custom CUDA kernel (always, since cuDNN does not support Float64)
     def dropout!(prob : Float64, seed : UInt64 = Random.rand(UInt64::MAX))
-      if CUDA.fully_available? && (dptr = self.device_ptr) && !dptr.null?
+      if CUDA.fully_available? && (dptr = device_ptr) && !dptr.null?
         begin
-          self.sync_to_device!("dropout_kernel") unless device_dirty?
+          sync_to_device!("dropout_kernel") unless device_dirty?
           result = CUDA.dropout(dptr, (@rows * @cols), prob.to_f32, seed)
           if result == 0
             mark_device_dirty!
             return self
           end
-        rescue e : Exception
-          Log.error { "CUDA dropout kernel failed: #{e}, falling back to CPU" }
+        rescue ex : Exception
+          Log.error { "CUDA dropout kernel failed: #{ex}, falling back to CPU" }
         end
       end
 
       # CPU fallback (inverted dropout: scale kept values by 1/(1-p))
-      self.sync_from_device!("dropout_fallback") if device_dirty?
+      sync_from_device!("dropout_fallback") if device_dirty?
       if prob >= 1.0
-        @rows.times { |i| @cols.times { |j| self.unsafe_set(i, j, 0.0) } }
+        @rows.times { |i| @cols.times { |j| unsafe_set(i, j, 0.0) } }
       elsif prob > 0.0
         scale = 1.0 / (1.0 - prob)
         @rows.times do |i|
           @cols.times do |j|
-            result_val = Random.rand < prob ? 0.0 : self.unsafe_get(i, j) * scale
-            self.unsafe_set(i, j, result_val)
+            result_val = Random.rand < prob ? 0.0 : unsafe_get(i, j) * scale
+            unsafe_set(i, j, result_val)
           end
         end
       end
-      self.sync_to_device!("dropout_result")
+      sync_to_device!("dropout_result")
       mark_device_dirty!
       self
     end
@@ -1092,20 +1092,20 @@ module SHAInet
         begin
           CUDNN.tanh_forward!(self, self)
           return self
-        rescue e : Exception
-          Log.error { "cuDNN tanh failed: #{e}, falling back to CPU" }
+        rescue ex : Exception
+          Log.error { "cuDNN tanh failed: #{ex}, falling back to CPU" }
         end
       end
 
       # CPU fallback
-      self.sync_from_device!("tanh_fallback") if device_dirty?
+      sync_from_device!("tanh_fallback") if device_dirty?
       @rows.times do |i|
         @cols.times do |j|
-          val = self.unsafe_get(i, j)
-          self.unsafe_set(i, j, Math.tanh(val))
+          val = unsafe_get(i, j)
+          unsafe_set(i, j, Math.tanh(val))
         end
       end
-      self.sync_to_device!("tanh_result")
+      sync_to_device!("tanh_result")
       mark_device_dirty!
       self
     end

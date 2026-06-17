@@ -49,8 +49,8 @@ module SHAInet
         Log.info { "Input => #{input}, network output => #{output}" }
       end
       output
-    rescue e : Exception
-      raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
+    rescue ex : Exception
+      raise NeuralNetRunError.new("Error running on layers: #{ex} #{ex.inspect_with_backtrace}")
     end
 
     # Overload allowing retrieval of the raw matrix
@@ -77,8 +77,8 @@ module SHAInet
         Log.info { "Input => #{input}, network output => #{output}" } unless stealth
         output
       end
-    rescue e : Exception
-      raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
+    rescue ex : Exception
+      raise NeuralNetRunError.new("Error running on layers: #{ex} #{ex.inspect_with_backtrace}")
     end
 
     # GPU path - all CudaMatrix operations
@@ -176,8 +176,8 @@ module SHAInet
         matrix = out_layer.forward(matrix)
         matrix.as(CudaMatrix)
       end
-    rescue e : Exception
-      raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
+    rescue ex : Exception
+      raise NeuralNetRunError.new("Error running on layers: #{ex} #{ex.inspect_with_backtrace}")
     end
 
     # CPU path - all SimpleMatrix operations
@@ -196,7 +196,7 @@ module SHAInet
           when TransformerLayer
             matrix = l.as(TransformerLayer).forward(matrix)
           when LlamaLayer
-            matrix = if @use_kv_cache
+            matrix = if use_kv_cache?
                        l.as(LlamaLayer).forward_cached(matrix)
                      else
                        l.as(LlamaLayer).forward(matrix)
@@ -258,8 +258,8 @@ module SHAInet
         matrix = out_layer.forward(matrix)
         matrix.as(SimpleMatrix)
       end
-    rescue e : Exception
-      raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
+    rescue ex : Exception
+      raise NeuralNetRunError.new("Error running on layers: #{ex} #{ex.inspect_with_backtrace}")
     end
 
     # Run a batch of sequences by calling `run` for each sequence
@@ -291,7 +291,7 @@ module SHAInet
     # Accept integer input for embedding layers
     # Creates a column vector [N, 1] so the embedding layer can look up token IDs.
     def run(input : Array(Int32), stealth : Bool = false) : Array(Float64)
-      if @hidden_layers.any?(&.is_a?(EmbeddingLayer))
+      if @hidden_layers.any?(EmbeddingLayer)
         matrix = SimpleMatrix.new(input.size, 1)
         input.each_with_index { |id, i| matrix[i, 0] = id.to_f64 }
         result = run(matrix, stealth: stealth)
@@ -302,7 +302,7 @@ module SHAInet
     end
 
     def run(input : Array(Int32), *, return_matrix : Bool, stealth : Bool = false) : Array(Float64) | CudaMatrix | SimpleMatrix
-      if @hidden_layers.any?(&.is_a?(EmbeddingLayer))
+      if @hidden_layers.any?(EmbeddingLayer)
         matrix = SimpleMatrix.new(input.size, 1)
         input.each_with_index { |id, i| matrix[i, 0] = id.to_f64 }
         result = run(matrix, stealth: stealth)
@@ -335,8 +335,8 @@ module SHAInet
       else
         result_matrix.to_a
       end
-    rescue e : Exception
-      raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
+    rescue ex : Exception
+      raise NeuralNetRunError.new("Error running on layers: #{ex} #{ex.inspect_with_backtrace}")
     end
 
     def run(input : Array(Array(GenNum)), *, return_matrix : Bool, stealth : Bool = false) : Array(Array(Float64)) | CudaMatrix | SimpleMatrix
@@ -362,8 +362,8 @@ module SHAInet
           result_matrix.to_a
         end
       end
-    rescue e : Exception
-      raise NeuralNetRunError.new("Error running on layers: #{e} #{e.inspect_with_backtrace}")
+    rescue ex : Exception
+      raise NeuralNetRunError.new("Error running on layers: #{ex} #{ex.inspect_with_backtrace}")
     end
 
     # Quantifies how good the network performed for a single input compared to the expected output
@@ -439,8 +439,8 @@ module SHAInet
       # puts "@total_error: #{@total_error}"
 
 
-    rescue e : Exception
-      raise NeuralNetRunError.new("Error in evaluate: #{e}")
+    rescue ex : Exception
+      raise NeuralNetRunError.new("Error in evaluate: #{ex}")
     end
 
     # Evaluate using matrices already on the desired device
@@ -450,7 +450,6 @@ module SHAInet
                  cost_function : CostFunction = SHAInet.quadratic_cost)
       actual_matrix = run(input_data, stealth: true)
 
-      output_layer = @output_layers.last
       grad = GPUMemory.like(actual_matrix, actual_matrix.rows, actual_matrix.cols)
 
       loss_value = 0.0
@@ -463,7 +462,7 @@ module SHAInet
             pointerof(loss_value),
             grad.as(CudaMatrix)
           )
-        rescue e
+        rescue
           loss_value = compute_cost_and_gradient_cpu(actual_matrix, expected_output, grad, cost_function)
         end
       else
@@ -486,8 +485,8 @@ module SHAInet
                 end
         @transformer_error = trans.is_a?(CudaMatrix) ? trans.to_simple : trans
       end
-    rescue e : Exception
-      raise NeuralNetRunError.new("Error in evaluate: #{e}")
+    rescue ex : Exception
+      raise NeuralNetRunError.new("Error in evaluate: #{ex}")
     end
 
     # Accept integer input for embeddings
@@ -543,8 +542,8 @@ module SHAInet
       # puts "@total_error: #{@total_error}"
 
 
-    rescue e : Exception
-      raise NeuralNetRunError.new("Error in evaluate: #{e}")
+    rescue ex : Exception
+      raise NeuralNetRunError.new("Error in evaluate: #{ex}")
     end
 
     # Convenience wrapper for integer inputs
@@ -695,12 +694,6 @@ module SHAInet
       end
     end
 
-    # Convenience wrapper for integer inputs
-    def evaluate_sequence_label(input_data : Array(Array(Int32)), label : Int32)
-      seq = input_data.map { |x| x.map(&.to_f64) }
-      evaluate_sequence_label(seq, label)
-    end
-
     # Calculate MSE from the error signal of the output layer
     def update_mse
       n = @output_layers.last.size
@@ -723,7 +716,7 @@ module SHAInet
               mini_batch_size : Int32 = 1,
               log_each : Int32 = 1,
               show_slice : Bool = false,
-              autosave : NamedTuple(freq: Int32, path: String) | Nil = nil)
+              autosave : NamedTuple(freq: Int32, path: String)? = nil)
       verify_net_before_train
 
       stream = data.is_a?(SHAInet::StreamingData) ? data : nil
@@ -890,9 +883,9 @@ module SHAInet
       in_rows, in_cols = get_dims.call(first_input)
       out_rows, out_cols = get_dims.call(first_output)
 
-      input_workspace : CudaMatrix | Nil = nil
-      expected_workspace : CudaMatrix | Nil = nil
-      output_grad : SimpleMatrix | CudaMatrix | Nil = nil
+      input_workspace : CudaMatrix? = nil
+      expected_workspace : CudaMatrix? = nil
+      output_grad : SimpleMatrix | CudaMatrix? = nil
 
       if CUDA.fully_available?
         if !first_input.is_a?(CudaMatrix)
@@ -992,7 +985,6 @@ module SHAInet
         actual_matrix = run(input_matrix, stealth: true)
 
         # Optimize: Use GPU-accelerated cost and gradient computation when possible
-        sample_error = 0.0
         output_layer = @output_layers.last
 
         if output_layer.is_a?(MatrixLayer)
@@ -1055,8 +1047,8 @@ module SHAInet
                 )
               end
               sample_error = loss_value
-            rescue e : Exception
-              Log.debug { "GPU cross-entropy failed: #{e}, falling back to CPU computation" } unless use_label_gpu
+            rescue ex : Exception
+              Log.debug { "GPU cross-entropy failed: #{ex}, falling back to CPU computation" } unless use_label_gpu
               # Fall back to CPU computation below
               if use_label_gpu
                 # Convert label indices to one-hot for CPU fallback
@@ -1090,7 +1082,7 @@ module SHAInet
           grad = output_layer.backward(grad_matrix)
 
           # Handle transformer layers backward pass with proper gradient reshaping
-          if @transformer_layers.any?
+          if @transformer_layers.present?
             # For transformers, we need to map gradients from output space back to transformer space
             # The gradient from output layer is (1 x vocab_size), but transformer expects (seq_len x d_model)
 
@@ -1196,7 +1188,7 @@ module SHAInet
         end
       end
 
-      update_transformer_layers if @transformer_layers.any?
+      update_transformer_layers if @transformer_layers.present?
 
       batch_error
     end
@@ -1296,8 +1288,10 @@ module SHAInet
 
     def validate_values(array : Array(Float64), location : String)
       # Detect NaNs in output
-      array.each { |ar| raise NeuralNetRunError.new(
-        "Found a NaN value, run stopped.\n#{location}: #{array}") if ar.nan? }
+      array.each do |ar|
+        raise NeuralNetRunError.new(
+          "Found a NaN value, run stopped.\n#{location}: #{array}") if ar.nan?
+      end
     end
 
     def get_cost_proc(function_name : String) : CostFunction
@@ -1348,7 +1342,7 @@ module SHAInet
                          )
                          result.mark_device_dirty!
                          result
-                       rescue e
+                       rescue
                          # Fallback to elementwise copy if GPU operation fails
                          last_token_fallback = CudaMatrix.new(1, matrix.cols)
                          matrix.cols.times do |j|
@@ -1552,16 +1546,16 @@ module SHAInet
         begin
           matrix.sigmoid!
           return true
-        rescue e
-          Log.debug { "GPU sigmoid failed: #{e}, falling back to CPU" }
+        rescue ex
+          Log.debug { "GPU sigmoid failed: #{ex}, falling back to CPU" }
         end
       when SHAInet.relu
         # Use in-place ReLU operation
         begin
           matrix.relu!
           return true
-        rescue e
-          Log.debug { "GPU ReLU failed: #{e}, falling back to CPU" }
+        rescue ex
+          Log.debug { "GPU ReLU failed: #{ex}, falling back to CPU" }
         end
       end
 

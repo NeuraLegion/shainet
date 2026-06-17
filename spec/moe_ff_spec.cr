@@ -87,12 +87,12 @@ describe SHAInet::MoEFF do
 
     # Router favors expert 0 for [1,0,..] inputs and expert 2 for [0,..,1].
     r = SHAInet::SimpleMatrix.new(d_model, ne)
-    r[0, 0] = 10.0 # row-0 feature -> expert 0
+    r[0, 0] = 10.0           # row-0 feature -> expert 0
     r[d_model - 1, 2] = 10.0 # last feature -> expert 2
     moe.router = r
 
     x = SHAInet::SimpleMatrix.new(2, d_model)
-    x[0, 0] = 1.0          # token 0 -> expert 0
+    x[0, 0] = 1.0           # token 0 -> expert 0
     x[1, d_model - 1] = 1.0 # token 1 -> expert 2
 
     row0 = SHAInet::SimpleMatrix.new(1, d_model); row0[0, 0] = 1.0

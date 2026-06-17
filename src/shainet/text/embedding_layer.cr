@@ -25,7 +25,7 @@ module SHAInet
     end
 
     # Pre-allocated workspace matrices to avoid allocations during forward pass
-    @workspace_result : CudaMatrix | Nil
+    @workspace_result : CudaMatrix?
     @last_ids_size : Int32
 
     def initialize(vocab_size : Int32, l_size : Int32, activation_function : ActivationFunction = SHAInet.none)

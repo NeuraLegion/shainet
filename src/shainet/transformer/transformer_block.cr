@@ -9,7 +9,7 @@ module SHAInet
     getter ffn : PositionWiseFF
     getter norm1 : LayerNorm
     getter norm2 : LayerNorm
-    property positional_encoding : SimpleMatrix | CudaMatrix | Nil
+    property positional_encoding : SimpleMatrix | CudaMatrix?
     property drop_percent : Int32
 
     def initialize(d_model : Int32, num_heads : Int32, ff_hidden : Int32,
@@ -38,7 +38,7 @@ module SHAInet
     end
 
     # GPU path - all CudaMatrix operations
-    def forward(x : CudaMatrix, pe : CudaMatrix | Nil = nil, mask : CudaMatrix | Nil = nil) : CudaMatrix
+    def forward(x : CudaMatrix, pe : CudaMatrix? = nil, mask : CudaMatrix? = nil) : CudaMatrix
       input = if enc = (pe || (@positional_encoding ? @positional_encoding.as(CudaMatrix) : nil))
                 # Check dimensions and provide better error message
                 if enc.cols != x.cols
@@ -71,7 +71,7 @@ module SHAInet
     end
 
     # CPU path - all SimpleMatrix operations
-    def forward(x : SimpleMatrix, pe : SimpleMatrix | Nil = nil, mask : SimpleMatrix | Nil = nil) : SimpleMatrix
+    def forward(x : SimpleMatrix, pe : SimpleMatrix? = nil, mask : SimpleMatrix? = nil) : SimpleMatrix
       input = if enc = (pe || (@positional_encoding ? @positional_encoding.as(SimpleMatrix) : nil))
                 # Check dimensions and provide better error message
                 if enc.cols != x.cols

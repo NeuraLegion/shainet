@@ -22,20 +22,20 @@ module SHAInet
     getter :input_layers, :output_layers, :hidden_layers, :recurrent_layers, :lstm_layers
     getter :transformer_layers
     getter transformer_error : SimpleMatrix
-    property final_norm : RMSNorm | Nil
+    property final_norm : RMSNorm?
     getter error_signal : Array(Float64), total_error : Float64, :mse, w_gradient : Array(Float64), b_gradient : Array(Float64)
 
     # Parameters for SGD + Momentum
     property learning_rate : Float64, momentum : Float64
 
     # KV cache mode for autoregressive LLM inference
-    property use_kv_cache : Bool = false
+    property? use_kv_cache : Bool = false
 
     # Status flag set to true once quantize! has converted weights to Q8.
     # Informational only — the quantized lm_head dispatch in Network#run keys
     # off @lm_head_q (and block/FFN weights off their own QuantizedCudaMatrix
     # type), not off this flag.
-    property quantize_weights : Bool = false
+    property? quantize_weights : Bool = false
 
     # Quantized lm_head weight (populated by quantize! when CUDA is available).
     @lm_head_q : QuantizedWeight? = nil
@@ -54,9 +54,9 @@ module SHAInet
     property warmup_steps : Int32
     property weight_decay : Float64
     property accumulation_steps : Int32
-    property mixed_precision : Bool
+    property? mixed_precision : Bool
 
-    @cached_expanded_grad : SimpleMatrix | CudaMatrix | Nil
+    @cached_expanded_grad : SimpleMatrix | CudaMatrix?
 
     # First creates an empty shell of the entire network
     def initialize
@@ -220,8 +220,8 @@ module SHAInet
           connect_ltl(@hidden_layers.last, out_layer, :full)
         end
       end
-    rescue e : Exception
-      raise NeuralNetRunError.new("Error fully connecting network: #{e}")
+    rescue ex : Exception
+      raise NeuralNetRunError.new("Error fully connecting network: #{ex}")
     end
 
     # Connect two specific layers
@@ -253,8 +253,8 @@ module SHAInet
           dest_layer.biases = mat_klass.new(dest_layer.size, 1).random_fill!
         end
       end
-    rescue e : Exception
-      raise NeuralNetRunError.new("Error in connect_ltl: #{e}")
+    rescue ex : Exception
+      raise NeuralNetRunError.new("Error in connect_ltl: #{ex}")
     end
 
     def log_summary(e)

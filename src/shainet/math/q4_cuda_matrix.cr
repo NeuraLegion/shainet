@@ -96,7 +96,7 @@ module SHAInet
             qv = (wdata[kk * n + col] * inv).round
             qv = 7.0_f32 if qv > 7.0_f32
             qv = -7.0_f32 if qv < -7.0_f32 # symmetric range
-            nib = (qv.to_i + 8) & 0x0F      # store value+8 in 0..15
+            nib = (qv.to_i + 8) & 0x0F     # store value+8 in 0..15
             byte_idx = row_base + (kk >> 1)
             if (kk & 1) == 0
               q_host[byte_idx] = (q_host[byte_idx] & 0xF0_u8) | nib.to_u8
