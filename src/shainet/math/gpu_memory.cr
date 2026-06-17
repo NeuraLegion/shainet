@@ -13,7 +13,7 @@ module SHAInet
     @@pool = Hash(Int32, Array(Pointer(Float32))).new { |h, k| h[k] = [] of Pointer(Float32) }
 
     # Configure the maximum number of cached buffers
-    class_getter pool_limit : Int32 = 2 # Very small pool to reduce memory pressure
+    class_property pool_limit : Int32 = 2 # Very small pool to reduce memory pressure
 
     # Debug counter to track active GPU allocations
     @@active_allocations = 0
