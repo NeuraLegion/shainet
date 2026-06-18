@@ -1,39 +1,34 @@
 name: Crystal CI
 
 on:
+  workflow_dispatch:
   push:
-    branches: [ "master" ]
+    branches: [master]
   pull_request:
-    branches: [ "master" ]
+    branches: [master]
+
+permissions:
+  contents: read
 
 jobs:
-  build:
-
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        crystal: [latest, nightly]
     runs-on: ubuntu-latest
 
-    container:
-      image: crystallang/crystal
-
     steps:
-    - uses: actions/checkout@v3
+      - name: Install Crystal
+        uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: ${{ matrix.crystal }}
 
-    - name: Install basic tools
-      run: apt-get update && apt-get install -y wget curl
-    - name: install CUDA libs
-      run: |
-        # 1. Add the NVIDIA keyring
-        wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
-        dpkg -i cuda-keyring_1.1-1_all.deb
+      - name: Download source
+        uses: actions/checkout@v6
 
-        # 2. Update APT
-        apt-get update
+      - name: Install dependencies
+        run: shards install
 
-        # 3. Preconfigure DEBIAN_FRONTEND to suppress prompts
-        export DEBIAN_FRONTEND=noninteractive
-
-        # 4. Install CUDA toolkit without interactive prompts
-        apt-get -y install cuda-toolkit-12-9
-    - name: Install dependencies
-      run: shards install
-    - name: Run tests
-      run: crystal spec
+      - name: Run specs
+        run: crystal spec
