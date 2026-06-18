@@ -11,7 +11,9 @@ SHAInet (Super Human Artificial Intelligence Network) is a neural network librar
 - Various training algorithms (SGD, Adam, iRprop+, etc.)
 - Streaming data support for large datasets
 - HuggingFace model import via SafeTensors (no Python required)
-- Transformer and modern NLP support
+- LLM inference: GPT-2, LLaMA, Mistral, Qwen2, Qwen3, and Qwen3-MoE
+- KV-cache decoding, Q8/Q4 weight quantization, and MoE expert offload
+  (run large Mixture-of-Experts models on small GPUs)
 
 ---
 
@@ -112,26 +114,26 @@ puts net.run([0, 1])
 
 ### Load a HuggingFace Model (SafeTensors)
 
-Load any GPT-2 compatible model directly from HuggingFace SafeTensors format.
-No Python, no PyTorch — pure Crystal binary parsing.
+Load models directly from HuggingFace SafeTensors — no Python, no PyTorch, just
+pure Crystal binary parsing. `HFLoader.load` auto-detects the architecture from
+the model's `config.json`:
 
 ```crystal
 require "shainet"
 
-# Download model.safetensors and config.json from HuggingFace
-net = SHAInet::HFLoader.load_gpt2("/path/to/model-dir")
+# Auto-detects the architecture (gpt2 / llama / mistral / qwen2 / qwen3 / qwen3_moe)
+net = SHAInet::HFLoader.load("/path/to/model-dir")
 
-# Run inference — input is token IDs as column vector
-input = SHAInet::SimpleMatrix.new(3, 1) # 3 tokens
-input[0, 0] = 15.0  # token id
-input[1, 0] = 42.0
-input[2, 0] = 7.0
-
-output = net.run(input) # => [3, vocab_size] logits
+# Optionally quantize weights to int8 at load time (Q8):
+net = SHAInet::HFLoader.load("/path/to/model-dir", quantize: true, bits: 8)
 ```
 
-Supported formats: F16, BF16, F32, F64. Works with any GPT-2 architecture
-model on HuggingFace that provides `model.safetensors`.
+Supported architectures: **GPT-2, LLaMA, Mistral, Qwen2, Qwen3, Qwen3-MoE**.
+Supported tensor dtypes: F16, BF16, F32, F64.
+
+For a full chat loop (tokenizer, KV-cache decoding, sampling) see
+`examples/llama_chat.cr`; for a tool-using coding agent built on `Network#run`
+see `examples/agent.cr`.
 
 ### Iris Classification
 
@@ -191,6 +193,19 @@ net.train(
   VRAM ~4x (1B model: ~5GB fp32 → ~1.3GB) and speeds up memory-bound decode.
   `llama_chat.cr` quantizes by default on GPU; set `SHAINET_FP32=1` to keep fp32.
   Benchmark/eval both paths with `examples/q8_eval.cr`.
+- 4-bit quantization (Q4) + MoE expert offload: run large Mixture-of-Experts
+  models on small GPUs by keeping experts in host RAM (pinned) and streaming
+  them to the GPU on demand, backed by a hot-expert LRU cache. Controlled via
+  environment variables:
+  - `SHAINET_Q4=1` — 4-bit weight quantization
+  - `SHAINET_MOE_OFFLOAD=1` — offload MoE experts to host RAM
+  - `SHAINET_EXPERT_CACHE_MB=<N>` — VRAM budget for the hot-expert cache (`0` disables)
+
+  For example, Qwen3-Coder-30B-A3B (30B params, ~3B active) runs on a 16 GB GPU.
+- Tool-using coding agent: `examples/agent.cr` is a small CLI coding agent
+  (file tools + shell, context management, streaming UI) built entirely on
+  `Network#run`. Run it against a local instruct model, e.g.
+  `SHAINET_Q4=1 SHAINET_MOE_OFFLOAD=1 crystal run examples/agent.cr -Denable_cuda -- /path/to/model-dir`.
 - See `examples/babylm_transformer.cr` for training a transformer language model.
 - Use `SHAInet::SafeTensors::File` to read any `.safetensors` file directly.
 
