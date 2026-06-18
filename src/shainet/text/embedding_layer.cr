@@ -4,32 +4,23 @@ module SHAInet
   # Simple embedding lookup table. Maps integer token IDs to vectors of floats.
   class EmbeddingLayer < MatrixLayer
     property embeddings : SimpleMatrix | CudaMatrix
+
     # Gradient table is allocated lazily on first access (training only). For
     # inference via Network#run it is never touched, so we avoid a wasteful
     # [vocab, l_size] allocation (e.g. ~2.18 GB host + 2.18 GB device for a 7B).
-    @gradients : (SimpleMatrix | CudaMatrix)?
-    getter current_ids : Array(Int32)
-
-    # Lazily allocate and return the gradient table, matching the current
-    # storage type of @embeddings (CudaMatrix on GPU, SimpleMatrix on CPU).
-    def gradients : SimpleMatrix | CudaMatrix
-      g = @gradients
-      return g if g
-      ng = @embeddings.is_a?(CudaMatrix) ? CudaMatrix.zeros(@embeddings.rows, @l_size) : SimpleMatrix.zeros(@embeddings.rows, @l_size)
-      @gradients = ng
-      ng
+    getter gradients : SimpleMatrix | CudaMatrix do
+      @embeddings.is_a?(CudaMatrix) ? CudaMatrix.zeros(@embeddings.rows, @l_size) : SimpleMatrix.zeros(@embeddings.rows, @l_size)
     end
 
-    def gradients=(g : SimpleMatrix | CudaMatrix)
-      @gradients = g
-    end
+    getter current_ids = [] of Int32
 
     # Pre-allocated workspace matrices to avoid allocations during forward pass
     @workspace_result : CudaMatrix?
-    @last_ids_size : Int32
+    @last_ids_size : Int32 = 0
 
     def initialize(vocab_size : Int32, l_size : Int32, activation_function : ActivationFunction = SHAInet.none)
       super(l_size, activation_function)
+
       mat_klass = CUDA.fully_available? ? CudaMatrix : SimpleMatrix
       # Initialize with random values between -0.1 and 0.1
       @embeddings = mat_klass.new(vocab_size, l_size)
@@ -38,12 +29,6 @@ module SHAInet
           @embeddings[r, c] = rand(-0.1..0.1)
         end
       end
-      @gradients = nil # allocated lazily on first training use (see #gradients)
-      @current_ids = [] of Int32
-
-      # Initialize workspace matrices
-      @workspace_result = nil
-      @last_ids_size = 0
     end
 
     # Convert embeddings and gradients to GPU

@@ -33,6 +33,7 @@ module SHAInet
   # q = round(v / scale), clamped to [-127, 127].
   class QuantizedCudaMatrix
     include QuantizedWeight
+
     BLOCK = 32
 
     getter rows : Int32   # K (in_features)

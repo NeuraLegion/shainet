@@ -20,9 +20,9 @@ module SHAInet
     # for methods regarding creating and maintaining go to network_setup.cr
     # ------------
 
-    @batch_in_ws : CudaMatrix? = nil
-    @batch_out_ws : CudaMatrix? = nil
-    @batch_grad_ws : CudaMatrix? = nil
+    @batch_in_ws : CudaMatrix?
+    @batch_out_ws : CudaMatrix?
+    @batch_grad_ws : CudaMatrix?
 
     # Run an input through the network to get an output (weights & biases do not change)
     # Simple wrapper that converts array input to matrix and calls the core matrix method
@@ -883,9 +883,9 @@ module SHAInet
       in_rows, in_cols = get_dims.call(first_input)
       out_rows, out_cols = get_dims.call(first_output)
 
-      input_workspace : CudaMatrix? = nil
-      expected_workspace : CudaMatrix? = nil
-      output_grad : SimpleMatrix | CudaMatrix? = nil
+      input_workspace : CudaMatrix?
+      expected_workspace : CudaMatrix?
+      output_grad : SimpleMatrix | CudaMatrix?
 
       if CUDA.fully_available?
         if !first_input.is_a?(CudaMatrix)

@@ -7,10 +7,10 @@ module SHAInet
     @w_v : SimpleMatrix | CudaMatrix
     @w_o : SimpleMatrix | CudaMatrix
     @x : SimpleMatrix | CudaMatrix?
-    @q_heads : Array(SimpleMatrix | CudaMatrix)
-    @k_heads : Array(SimpleMatrix | CudaMatrix)
-    @v_heads : Array(SimpleMatrix | CudaMatrix)
-    @attn : Array(SimpleMatrix | CudaMatrix)
+    @q_heads = [] of SimpleMatrix | CudaMatrix
+    @k_heads = [] of SimpleMatrix | CudaMatrix
+    @v_heads = [] of SimpleMatrix | CudaMatrix
+    @attn = [] of SimpleMatrix | CudaMatrix
     @out : SimpleMatrix | CudaMatrix
 
     # Gradient matrices - keep same type as weights
@@ -44,33 +44,33 @@ module SHAInet
     @workspace_x_t : CudaMatrix?
 
     # Workspace matrices for attention computation (per head)
-    @workspace_scores : Array(CudaMatrix?) = [] of CudaMatrix?
-    @workspace_attn_output : Array(CudaMatrix?) = [] of CudaMatrix?
-    @workspace_k_transposed : Array(CudaMatrix?) = [] of CudaMatrix?
-    @workspace_q_transposed : Array(CudaMatrix?) = [] of CudaMatrix?
+    @workspace_scores = [] of CudaMatrix?
+    @workspace_attn_output = [] of CudaMatrix?
+    @workspace_k_transposed = [] of CudaMatrix?
+    @workspace_q_transposed = [] of CudaMatrix?
 
     # Workspace matrices for Q, K, V head slices
-    @q_head_ws : Array(CudaMatrix?) = [] of CudaMatrix?
-    @k_head_ws : Array(CudaMatrix?) = [] of CudaMatrix?
-    @v_head_ws : Array(CudaMatrix?) = [] of CudaMatrix?
+    @q_head_ws = [] of CudaMatrix?
+    @k_head_ws = [] of CudaMatrix?
+    @v_head_ws = [] of CudaMatrix?
 
     # Cached workspace matrices for backward pass (per head)
-    @d_v_temp_ws : Array(CudaMatrix?) = [] of CudaMatrix?
-    @d_attn_temp_ws : Array(CudaMatrix?) = [] of CudaMatrix?
-    @d_scores_temp_ws : Array(CudaMatrix?) = [] of CudaMatrix?
-    @d_q_temp_ws : Array(CudaMatrix?) = [] of CudaMatrix?
-    @d_k_temp_ws : Array(CudaMatrix?) = [] of CudaMatrix?
+    @d_v_temp_ws = [] of CudaMatrix?
+    @d_attn_temp_ws = [] of CudaMatrix?
+    @d_scores_temp_ws = [] of CudaMatrix?
+    @d_q_temp_ws = [] of CudaMatrix?
+    @d_k_temp_ws = [] of CudaMatrix?
 
     # Workspace matrices for temporary transposes during backward pass
-    @attn_t_ws : Array(CudaMatrix?) = [] of CudaMatrix?
-    @v_t_ws : Array(CudaMatrix?) = [] of CudaMatrix?
-    @scores_t_ws : Array(CudaMatrix?) = [] of CudaMatrix?
+    @attn_t_ws = [] of CudaMatrix?
+    @v_t_ws = [] of CudaMatrix?
+    @scores_t_ws = [] of CudaMatrix?
 
     # Workspace slices of d_concat for each head
-    @d_concat_slices_ws : Array(CudaMatrix?) = [] of CudaMatrix?
+    @d_concat_slices_ws = [] of CudaMatrix?
 
     # Additional persistent workspaces for backward pass
-    @workspace_head_out : Array(CudaMatrix?) = [] of CudaMatrix?
+    @workspace_head_out = [] of CudaMatrix?
     @workspace_concat_t : CudaMatrix?
     @workspace_w_o_t : CudaMatrix?
     @workspace_temp_grad_o : CudaMatrix?
@@ -79,7 +79,7 @@ module SHAInet
     @workspace_temp_grad_v : CudaMatrix?
     @workspace_d_x : CudaMatrix?
 
-    @last_batch_size : Int32
+    @last_batch_size : Int32 = 0
 
     getter w_q, w_k, w_v, w_o
     property g_w_q, g_w_k, g_w_v, g_w_o
@@ -101,54 +101,14 @@ module SHAInet
       @g_w_v = mat_klass.zeros(@d_model, @d_model)
       @g_w_o = mat_klass.zeros(@d_model, @d_model)
 
-      @q_heads = [] of (SimpleMatrix | CudaMatrix)
-      @k_heads = [] of (SimpleMatrix | CudaMatrix)
-      @v_heads = [] of (SimpleMatrix | CudaMatrix)
-      @attn = [] of (SimpleMatrix | CudaMatrix)
       @out = mat_klass.zeros(1, 1)
-
-      # Initialize workspace matrices as nil - will be allocated on first use
-      @workspace_concat = nil
-      @workspace_d_q_concat = nil
-      @workspace_d_k_concat = nil
-      @workspace_d_v_concat = nil
-      @workspace_q = nil
-      @workspace_k = nil
-      @workspace_v = nil
-      @workspace_d_x_q = nil
-      @workspace_d_x_k = nil
-      @workspace_d_x_v = nil
-      @workspace_x_t = nil
-      @workspace_k_transposed = [] of CudaMatrix?
-      @workspace_q_transposed = [] of CudaMatrix?
-      @d_v_temp_ws = [] of CudaMatrix?
-      @d_attn_temp_ws = [] of CudaMatrix?
-      @d_scores_temp_ws = [] of CudaMatrix?
-      @d_q_temp_ws = [] of CudaMatrix?
-      @d_k_temp_ws = [] of CudaMatrix?
-      @q_head_ws = [] of CudaMatrix?
-      @k_head_ws = [] of CudaMatrix?
-      @v_head_ws = [] of CudaMatrix?
-      @attn_t_ws = [] of CudaMatrix?
-      @v_t_ws = [] of CudaMatrix?
-      @scores_t_ws = [] of CudaMatrix?
-      @d_concat_slices_ws = [] of CudaMatrix?
-      @workspace_head_out = [] of CudaMatrix?
-      @workspace_concat_t = nil
-      @workspace_w_o_t = nil
-      @workspace_temp_grad_o = nil
-      @workspace_temp_grad_q = nil
-      @workspace_temp_grad_k = nil
-      @workspace_temp_grad_v = nil
-      @workspace_d_x = nil
-
-      @last_batch_size = 0
 
       # Initialize cached transposes
       @w_q_t = mat_klass.new(@d_model, @d_model)
       @w_k_t = mat_klass.new(@d_model, @d_model)
       @w_v_t = mat_klass.new(@d_model, @d_model)
       @w_o_t = mat_klass.new(@d_model, @d_model)
+
       update_transposes
     end
 

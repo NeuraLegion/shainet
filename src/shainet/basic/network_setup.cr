@@ -38,10 +38,10 @@ module SHAInet
     property? quantize_weights : Bool = false
 
     # Quantized lm_head weight (populated by quantize! when CUDA is available).
-    @lm_head_q : QuantizedWeight? = nil
+    @lm_head_q : QuantizedWeight?
     # Persistent decode buffers for the quantized lm_head GEMV (reused per token).
-    @lm_head_x : CudaMatrix? = nil
-    @lm_head_r : CudaMatrix? = nil
+    @lm_head_x : CudaMatrix?
+    @lm_head_r : CudaMatrix?
 
     # Parameters for Rprop
     property etah_plus : Float64, etah_minus : Float64, delta_max : Float64, delta_min : Float64
@@ -64,7 +64,6 @@ module SHAInet
       @output_layers = Array(MatrixLayer).new
       @hidden_layers = Array(MatrixLayer).new
       @transformer_layers = Array(TransformerLayer | LlamaLayer).new
-      @final_norm = nil
       @all_layers = Array(MatrixLayer).new
       @error_signal = Array(Float64).new # Array of errors for each element in the output layers
       @total_error = 1_f64               # Sum of errors from output layer, based on a specific input
@@ -94,13 +93,8 @@ module SHAInet
       @mixed_precision = false
 
       # Gradient transformation caching for efficient transformer backward pass
-      @cached_expanded_grad = nil
       @cached_seq_len = 0
       @cached_d_model = 0
-
-      @batch_in_ws = nil
-      @batch_out_ws = nil
-      @batch_grad_ws = nil
     end
 
     # Create and populate a layer

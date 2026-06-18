@@ -18,14 +18,14 @@ module SHAInet
     getter q_dim : Int32
     # Qwen3 QK-norm: per-head RMSNorm applied to Q and K (over head_dim) right
     # before RoPE. nil = disabled (the LLaMA/Qwen2 default — zero overhead).
-    property q_norm : Array(Float32)? = nil
-    property k_norm : Array(Float32)? = nil
+    property q_norm : Array(Float32)?
+    property k_norm : Array(Float32)?
     @qk_norm_eps : Float64 = 1e-6
     property rope_theta : Float64
     # Optional precomputed inverse frequencies (size head_dim/2). When set,
     # these override the default theta^(-2i/d) computation (used for LLaMA 3
     # rope_scaling). nil means use the default.
-    property rope_freqs : Array(Float32)? = nil
+    property rope_freqs : Array(Float32)?
 
     property w_q : SimpleMatrix | CudaMatrix | QuantizedWeight
     property w_k : SimpleMatrix | CudaMatrix | QuantizedWeight
@@ -38,9 +38,9 @@ module SHAInet
     # identically on the fp32, CUDA, and Q8 weight paths. nil means "no bias"
     # (the LLaMA default — zero overhead, behaviour unchanged). Sizes: b_q is
     # d_model; b_k/b_v are num_kv_heads * head_dim. o_proj has no bias in Qwen2.
-    property b_q : Array(Float32)? = nil
-    property b_k : Array(Float32)? = nil
-    property b_v : Array(Float32)? = nil
+    property b_q : Array(Float32)?
+    property b_k : Array(Float32)?
+    property b_v : Array(Float32)?
 
     # KV cache: stored per kv_head as [seq_len, head_dim] growing matrices
     @k_cache : Array(Array(Float32)) # [num_kv_heads][seq_len * head_dim]
@@ -66,7 +66,7 @@ module SHAInet
     @@gpu_attn_ws : Pointer(Float32) = Pointer(Float32).null
     @@gpu_attn_ws_cap : Int32 = 0
     @@staging_host : Array(Float32) = Array(Float32).new
-    @gpu_attn_avail : Bool? = nil
+    @gpu_attn_avail : Bool?
     # Force the CPU attention path even when CUDA is available (tests/fallback).
     property? force_cpu_attention : Bool = false
 

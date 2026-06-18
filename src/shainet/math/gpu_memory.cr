@@ -11,20 +11,13 @@ module SHAInet
 
     # -- Simple GPU allocator -------------------------------------------------
     @@pool = Hash(Int32, Array(Pointer(Float32))).new { |h, k| h[k] = [] of Pointer(Float32) }
-    @@pool_limit : Int32 = 2 # Very small pool to reduce memory pressure
+
+    # Configure the maximum number of cached buffers
+    class_property pool_limit : Int32 = 2 # Very small pool to reduce memory pressure
 
     # Debug counter to track active GPU allocations
     @@active_allocations = 0
     @@total_allocated_bytes = 0_u64
-
-    # Configure the maximum number of cached buffers
-    def pool_limit
-      @@pool_limit
-    end
-
-    def pool_limit=(limit : Int32)
-      @@pool_limit = limit
-    end
 
     # Preallocate +count+ buffers of given shape
     def preallocate!(rows : Int32, cols : Int32, count : Int32)

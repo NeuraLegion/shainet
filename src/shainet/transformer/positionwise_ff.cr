@@ -18,19 +18,19 @@ module SHAInet
     @w2_t : SimpleMatrix | CudaMatrix
 
     # Workspace matrices to avoid repeated allocations
-    @workspace_temp_bias : CudaMatrix? = nil
+    @workspace_temp_bias : CudaMatrix?
 
     # Persistent workspaces used during backward pass
-    @workspace_w2_t : CudaMatrix? = nil
-    @workspace_w1_t : CudaMatrix? = nil
-    @workspace_x_t : CudaMatrix? = nil
-    @workspace_temp_grad_w2 : CudaMatrix? = nil
-    @workspace_temp_grad_w1 : CudaMatrix? = nil
-    @workspace_d_input : CudaMatrix? = nil
-    @workspace_h_t : CudaMatrix? = nil
-    @workspace_dh : CudaMatrix? = nil
-    @workspace_h : CudaMatrix? = nil
-    @workspace_out : CudaMatrix? = nil
+    @workspace_w2_t : CudaMatrix?
+    @workspace_w1_t : CudaMatrix?
+    @workspace_x_t : CudaMatrix?
+    @workspace_temp_grad_w2 : CudaMatrix?
+    @workspace_temp_grad_w1 : CudaMatrix?
+    @workspace_d_input : CudaMatrix?
+    @workspace_h_t : CudaMatrix?
+    @workspace_dh : CudaMatrix?
+    @workspace_h : CudaMatrix?
+    @workspace_out : CudaMatrix?
     @last_batch_size : Int32 = 0
 
     property g_w1 : SimpleMatrix | CudaMatrix
@@ -56,19 +56,6 @@ module SHAInet
       @w1_t = mat_klass.new(hidden_dim, d_model)
       @w2_t = mat_klass.new(d_model, hidden_dim)
       update_transposes
-
-      # Workspace buffers will be allocated on first forward pass
-      @workspace_w2_t = nil
-      @workspace_w1_t = nil
-      @workspace_x_t = nil
-      @workspace_temp_grad_w2 = nil
-      @workspace_temp_grad_w1 = nil
-      @workspace_d_input = nil
-      @workspace_h_t = nil
-      @workspace_dh = nil
-      @workspace_h = nil
-      @workspace_out = nil
-      @last_batch_size = 0
     end
 
     # Convert all internal matrices to GPU

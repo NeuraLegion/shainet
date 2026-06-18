@@ -279,34 +279,34 @@ module SHAInet
     # Optional kernels implemented in src/shainet/native/cuda_kernels.cu
     # These methods dynamically load from libshainet_cuda_kernels.so when available
     @@kernels_handle : Pointer(Void) = Pointer(Void).null
-    @@softmax_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Void)? = nil
-    @@dropout_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Float64, UInt64, Void)? = nil
-    @@gather_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Int32), Int32, Int32, Void)? = nil
-    @@slice_cols_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Void)? = nil
-    @@set_cols_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Void)? = nil
-    @@row_mean_var_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Void)? = nil
-    @@layer_norm_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Float64, Void)? = nil
-    @@layer_norm_backward_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Float64, Void)? = nil
-    @@sum_cols_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Void)? = nil
-    @@mul_row_vector_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Void)? = nil
-    @@transpose_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Void)? = nil
-    @@sigmoid_forward_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Void)? = nil
-    @@apply_gradient_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Void)? = nil
-    @@accumulate_bias_grad_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Void)? = nil
-    @@row_sum_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Void)? = nil
-    @@zero_matrix_proc : Proc(Pointer(Float32), Int32, Void)? = nil
-    @@fill_matrix_proc : Proc(Pointer(Float32), Float64, Int32, Void)? = nil
-    @@element_div_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Void)? = nil
-    @@count_pairs_proc : Proc(Pointer(Int32), Pointer(Int32), Pointer(Int32), Int32, Int32, Pointer(Int32), Void)? = nil
-    @@relu_backward_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Void)? = nil
-    @@softmax_backward_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Void)? = nil
-    @@element_log_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Void)? = nil
-    @@cross_entropy_loss_grad_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Void)? = nil
-    @@softmax_cross_entropy_label_proc : Proc(Pointer(Float32), Pointer(Int32), Pointer(Float32), Pointer(Float32), Int32, Int32, Void)? = nil
-    @@gemm_q8_f32_proc : Proc(Pointer(Float32), Pointer(Int8), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Void)? = nil
-    @@gemm_q4_f32_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Void)? = nil
-    @@kv_cache_append_f32_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Void)? = nil
-    @@attention_kv_f32_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void)? = nil
+    @@softmax_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Void)?
+    @@dropout_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Float64, UInt64, Void)?
+    @@gather_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Int32), Int32, Int32, Void)?
+    @@slice_cols_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Void)?
+    @@set_cols_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Void)?
+    @@row_mean_var_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Void)?
+    @@layer_norm_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Float64, Void)?
+    @@layer_norm_backward_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Float64, Void)?
+    @@sum_cols_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Void)?
+    @@mul_row_vector_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Void)?
+    @@transpose_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Void)?
+    @@sigmoid_forward_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Void)?
+    @@apply_gradient_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Void)?
+    @@accumulate_bias_grad_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Void)?
+    @@row_sum_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Void)?
+    @@zero_matrix_proc : Proc(Pointer(Float32), Int32, Void)?
+    @@fill_matrix_proc : Proc(Pointer(Float32), Float64, Int32, Void)?
+    @@element_div_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Void)?
+    @@count_pairs_proc : Proc(Pointer(Int32), Pointer(Int32), Pointer(Int32), Int32, Int32, Pointer(Int32), Void)?
+    @@relu_backward_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Void)?
+    @@softmax_backward_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Void)?
+    @@element_log_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Void)?
+    @@cross_entropy_loss_grad_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Void)?
+    @@softmax_cross_entropy_label_proc : Proc(Pointer(Float32), Pointer(Int32), Pointer(Float32), Pointer(Float32), Int32, Int32, Void)?
+    @@gemm_q8_f32_proc : Proc(Pointer(Float32), Pointer(Int8), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@gemm_q4_f32_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@kv_cache_append_f32_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Void)?
+    @@attention_kv_f32_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void)?
 
     def softmax_rows(dst : Pointer(Float32), src : Pointer(Float32), rows : Int32, cols : Int32)
       # Validate inputs

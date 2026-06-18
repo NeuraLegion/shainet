@@ -23,6 +23,7 @@ module SHAInet
   # value = round(v / scale) clamped to [-7, 7], stored nibble = value + 8.
   class Q4CudaMatrix
     include QuantizedWeight
+
     BLOCK = 32
 
     getter rows : Int32   # K (in_features)
