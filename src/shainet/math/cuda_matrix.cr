@@ -214,19 +214,24 @@ module SHAInet
     end
 
     def finalize
-      # Each CudaMatrix cleans up its own GPU memory directly
-      if dptr = @device_ptr
-        unless dptr.null?
-          begin
-            CUDA.free(dptr.as(Pointer(Void)))
-            @@total_gpu_memory_allocated -= @gpu_memory_size
-            @@active_matrices -= 1
-            @device_ptr = Pointer(Float32).null
-            @gpu_memory_size = 0_u64
-          rescue ex
-            Log.warn { "CudaMatrix.finalize: Failed to free GPU memory for #{@rows}x#{@cols}: #{ex}" }
-          end
+      free!
+    end
+
+    # Explicitly release this matrix's GPU memory now. Idempotent. Only call on
+    # matrices that are no longer referenced (e.g. local temporaries in a hot
+    # loop) — conservative GC can't reclaim them mid-forward, so without this the
+    # device buffers pile up across layers until OOM.
+    def free!
+      if (dptr = @device_ptr) && !dptr.null?
+        begin
+          CUDA.free(dptr.as(Pointer(Void)))
+          @@total_gpu_memory_allocated -= @gpu_memory_size
+          @@active_matrices -= 1
+        rescue ex
+          Log.warn { "CudaMatrix.free!: failed to free GPU memory for #{@rows}x#{@cols}: #{ex}" }
         end
+        @device_ptr = Pointer(Float32).null
+        @gpu_memory_size = 0_u64
       end
     end
 

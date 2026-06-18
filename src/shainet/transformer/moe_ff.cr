@@ -47,7 +47,11 @@ module SHAInet
       r = @router
       if r.is_a?(CudaMatrix)
         xg = x.to_cuda
-        (xg * r).to_simple
+        prod = xg * r
+        res = prod.to_simple
+        xg.free!
+        prod.free!
+        res
       else
         x * r.as(SimpleMatrix)
       end

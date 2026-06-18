@@ -54,15 +54,18 @@ module SHAInet
     @gpu_k_cache : Pointer(Float32) = Pointer(Float32).null
     @gpu_v_cache : Pointer(Float32) = Pointer(Float32).null
     @gpu_cache_cap : Int32 = 0
-    # Persistent device buffers for the attention hot path (grow-only, never
-    # freed mid-inference so they cannot be GC-collected during a kernel).
-    @gpu_staging : Pointer(Float32) = Pointer(Float32).null
-    @gpu_staging_cap : Int32 = 0
-    @gpu_attn_out : Pointer(Float32) = Pointer(Float32).null
-    @gpu_attn_out_cap : Int32 = 0
-    @gpu_attn_ws : Pointer(Float32) = Pointer(Float32).null
-    @gpu_attn_ws_cap : Int32 = 0
-    @staging_host : Array(Float32) = Array(Float32).new
+    # Persistent device scratch for the attention hot path. SHARED across all
+    # blocks (class-level): blocks run sequentially, so one grow-only scratch set
+    # serves every layer instead of each of N layers holding its own ~(heads×
+    # seq×seq) workspace (which was ~N× redundant and exhausted VRAM on long
+    # prefills). The KV cache above stays per-instance.
+    @@gpu_staging : Pointer(Float32) = Pointer(Float32).null
+    @@gpu_staging_cap : Int32 = 0
+    @@gpu_attn_out : Pointer(Float32) = Pointer(Float32).null
+    @@gpu_attn_out_cap : Int32 = 0
+    @@gpu_attn_ws : Pointer(Float32) = Pointer(Float32).null
+    @@gpu_attn_ws_cap : Int32 = 0
+    @@staging_host : Array(Float32) = Array(Float32).new
     @gpu_attn_avail : Bool? = nil
     # Force the CPU attention path even when CUDA is available (tests/fallback).
     property? force_cpu_attention : Bool = false
@@ -119,7 +122,9 @@ module SHAInet
     end
 
     def finalize
-      {@gpu_k_cache, @gpu_v_cache, @gpu_staging, @gpu_attn_out, @gpu_attn_ws}.each do |p|
+      # Only free the per-instance KV cache; the attention scratch is class-level
+      # and shared across all blocks, so it must not be freed per instance.
+      {@gpu_k_cache, @gpu_v_cache}.each do |p|
         CUDA.free(p.as(Pointer(Void))) unless p.null?
       end
     end
@@ -413,14 +418,14 @@ module SHAInet
       ws_floats = @num_heads * new_tokens * total_len
 
       ensure_gpu_cache!(total_len)
-      @gpu_staging, @gpu_staging_cap = grow_dev_buf(@gpu_staging, @gpu_staging_cap, staging_floats)
-      @gpu_attn_out, @gpu_attn_out_cap = grow_dev_buf(@gpu_attn_out, @gpu_attn_out_cap, q_floats)
-      @gpu_attn_ws, @gpu_attn_ws_cap = grow_dev_buf(@gpu_attn_ws, @gpu_attn_ws_cap, ws_floats)
+      @@gpu_staging, @@gpu_staging_cap = grow_dev_buf(@@gpu_staging, @@gpu_staging_cap, staging_floats)
+      @@gpu_attn_out, @@gpu_attn_out_cap = grow_dev_buf(@@gpu_attn_out, @@gpu_attn_out_cap, q_floats)
+      @@gpu_attn_ws, @@gpu_attn_ws_cap = grow_dev_buf(@@gpu_attn_ws, @@gpu_attn_ws_cap, ws_floats)
 
-      st = @staging_host
+      st = @@staging_host
       if st.size < staging_floats
         st = Array(Float32).new(staging_floats, 0.0_f32)
-        @staging_host = st
+        @@staging_host = st
       end
       stp = st.to_unsafe
 
@@ -461,15 +466,15 @@ module SHAInet
         end
       end
 
-      CUDA.memcpy(@gpu_staging.as(Pointer(Void)), stp.as(Pointer(Void)),
+      CUDA.memcpy(@@gpu_staging.as(Pointer(Void)), stp.as(Pointer(Void)),
         staging_floats.to_u64 * 4_u64, CUDA::MemcpyKind::HostToDevice)
-      CUDA.kv_cache_append_f32(@gpu_staging, @gpu_k_cache, @gpu_v_cache,
+      CUDA.kv_cache_append_f32(@@gpu_staging, @gpu_k_cache, @gpu_v_cache,
         new_tokens, start_pos, @num_kv_heads, head_dim, @gpu_cache_cap)
-      CUDA.attention_kv_f32(@gpu_staging + 2 * kv_floats, @gpu_k_cache, @gpu_v_cache,
-        @gpu_attn_out, @gpu_attn_ws, new_tokens, start_pos,
+      CUDA.attention_kv_f32(@@gpu_staging + 2 * kv_floats, @gpu_k_cache, @gpu_v_cache,
+        @@gpu_attn_out, @@gpu_attn_ws, new_tokens, start_pos,
         @num_heads, heads_per_kv, head_dim, @gpu_cache_cap, scale)
       # Synchronous D2H read-back also orders after both kernels above.
-      CUDA.memcpy(output.data.to_unsafe.as(Pointer(Void)), @gpu_attn_out.as(Pointer(Void)),
+      CUDA.memcpy(output.data.to_unsafe.as(Pointer(Void)), @@gpu_attn_out.as(Pointer(Void)),
         q_floats.to_u64 * 4_u64, CUDA::MemcpyKind::DeviceToHost)
     end
 
@@ -741,6 +746,8 @@ module SHAInet
           result_gpu.sync_from_device!("q8_gemm_out") if result_gpu.device_dirty?
           result = SimpleMatrix.new(result_gpu.rows, result_gpu.cols)
           result.data.to_unsafe.copy_from(result_gpu.raw_data.to_unsafe, result_gpu.rows * result_gpu.cols)
+          x_gpu.free!
+          result_gpu.free!
           result
         end
       elsif w.is_a?(CudaMatrix)
@@ -752,6 +759,8 @@ module SHAInet
         result_gpu.sync_from_device!("gemm_out") if result_gpu.device_dirty?
         result = SimpleMatrix.new(result_gpu.rows, result_gpu.cols)
         result_gpu.rows.times { |r| result_gpu.cols.times { |c| result[r, c] = result_gpu[r, c].to_f32 } }
+        x_gpu.free!
+        result_gpu.free!
         result
       else
         x * w
