@@ -55,9 +55,10 @@ module AgentDemo
       Tool.new(
         "list_directory",
         "List the files and subdirectories in a directory.",
-        [ToolParam.new("path", "string", "Directory path to list.")]
+        [ToolParam.new("path", "string", "Directory path to list (default: current directory).")]
       ) do |args|
-        path = args["path"]? || "."
+        path = (args["path"]? || "").strip
+        path = "." if path.empty?
         if Dir.exists?(path)
           Dir.children(path).sort.map { |e| Dir.exists?(File.join(path, e)) ? "#{e}/" : e }.join("\n")
         else
