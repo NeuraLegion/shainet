@@ -15,5 +15,16 @@ jobs:
       - name: Download source
         uses: actions/checkout@v6
 
-      - name: Run Ameba Linter
-        uses: crystal-ameba/github-action@master
+      - name: Install Crystal
+        uses: crystal-lang/install-crystal@v1
+
+      - name: Install dependencies
+        run: shards install
+
+      # Build and run the exact ameba commit pinned in shard.yml/shard.lock so
+      # CI lint matches what developers run locally (no version skew).
+      - name: Build pinned Ameba
+        run: crystal build lib/ameba/src/cli.cr -o bin/ameba
+
+      - name: Run Ameba
+        run: ./bin/ameba
