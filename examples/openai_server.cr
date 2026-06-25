@@ -338,11 +338,15 @@ server = HTTP::Server.new do |ctx|
     next
   end
 
-  case {req.method, req.path}
+  # Accept routes with or without the `/v1` prefix: some OpenAI clients are
+  # configured with a base URL that already includes `/v1`, others without.
+  route = req.path.sub(/^\/v1/, "")
+
+  case {req.method, route}
   when {"GET", "/health"}
     res.content_type = "application/json"
     res.print %({"status":"ok"})
-  when {"GET", "/v1/models"}
+  when {"GET", "/models"}
     res.content_type = "application/json"
     models = JSON.build do |j|
       j.object do
@@ -360,7 +364,7 @@ server = HTTP::Server.new do |ctx|
       end
     end
     res.print models
-  when {"POST", "/v1/chat/completions"}
+  when {"POST", "/chat/completions"}
     body = req.body.try(&.gets_to_end) || ""
     request =
       begin
