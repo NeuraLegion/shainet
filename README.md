@@ -206,6 +206,14 @@ net.train(
   (file tools + shell, context management, streaming UI) built entirely on
   `Network#run`. Run it against a local instruct model, e.g.
   `SHAINET_Q4=1 SHAINET_MOE_OFFLOAD=1 crystal run examples/agent.cr -Denable_cuda -- /path/to/model-dir`.
+- OpenAI-compatible API server: `examples/openai_server.cr` serves a loaded
+  model over a subset of the OpenAI REST API (`POST /v1/chat/completions` with
+  streaming SSE, `GET /v1/models`), so existing OpenAI clients (the `openai`
+  Python package, `curl`, LangChain, …) can use it as a drop-in local endpoint.
+  Built entirely on `Network#run`. Example:
+  `crystal run examples/openai_server.cr -Denable_cuda -- /path/to/model-dir 8080`.
+  Binds to `127.0.0.1` with no authentication by default — set `SHAINET_API_KEY`
+  to require an `Authorization: Bearer <key>` header before exposing it.
 - See `examples/babylm_transformer.cr` for training a transformer language model.
 - Use `SHAInet::SafeTensors::File` to read any `.safetensors` file directly.
 
