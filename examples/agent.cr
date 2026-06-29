@@ -536,7 +536,11 @@ end
 # Entry point
 # ----------------------------------------------------------------------------
 model_dir = ARGV[0]?
-max_tokens = (ARGV[1]? || "512").to_i
+# Per-response generation ceiling. This is a safety bound, not a target — the
+# model stops itself on <|im_end|>. It must be large enough that a tool call
+# writing a whole file isn't truncated before its closing </tool_call> tag
+# (which would make the call unparseable). KV cache grows ~linearly with it.
+max_tokens = (ARGV[1]? || ENV["SHAINET_AGENT_MAX_TOKENS"]? || "4096").to_i
 unless model_dir && Dir.exists?(model_dir)
   STDERR.puts "Usage: agent <model-dir> [max_tokens]"
   STDERR.puts "  (point at an already-downloaded model, e.g. ~/models/Qwen3-Coder-30B-A3B-Instruct)"
