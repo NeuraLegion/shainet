@@ -5,8 +5,23 @@ require "./spec_helper"
 # updates were never uploaded to the device, and because the per-batch input /
 # expected workspaces were handed back to the shared workspace pool while still
 # in use.
+#
+# The global RNG is seeded in each example because MatrixLayer#random_fill!
+# draws from it, and unseeded weight init would make the convergence
+# thresholds below non-deterministic.
+private def flatten_weights(layer : SHAInet::MatrixLayer) : Array(Float64)
+  w = layer.weights
+  values = Array(Float64).new(w.rows * w.cols)
+  w.rows.times do |i|
+    w.cols.times { |j| values << w[i, j] }
+  end
+  values
+end
+
 describe "training convergence" do
   it "drives XOR error down with adam" do
+    Random::DEFAULT.new_seed(42_u64, 54_u64)
+
     data = [
       [[0.0, 0.0], [0.0]],
       [[1.0, 0.0], [1.0]],
@@ -41,11 +56,12 @@ describe "training convergence" do
       log_each: 10_000
     )
 
-    after = mse.call
-    after.should be < before * 0.5
+    mse.call.should be < before * 0.5
   end
 
   it "drives error down for a multi-label sigmoid output layer" do
+    Random::DEFAULT.new_seed(1234_u64, 5678_u64)
+
     rng = Random.new(1234)
     pairs = Array(Array(Array(Float64))).new
     300.times do
@@ -71,6 +87,10 @@ describe "training convergence" do
       total / (pairs.size * 5)
     end
 
+    output_layer = net.output_layers.first.as(SHAInet::MatrixLayer)
+    hidden_layer = net.hidden_layers.first.as(SHAInet::MatrixLayer)
+    output_before = flatten_weights(output_layer)
+    hidden_before = flatten_weights(hidden_layer)
     before = mse.call
 
     net.train(
@@ -82,6 +102,15 @@ describe "training convergence" do
       mini_batch_size: 32,
       log_each: 10_000
     )
+
+    # The original symptom was weights that never moved at all, so assert that
+    # directly in addition to the error dropping: an error metric can shift for
+    # unrelated reasons, but every trainable weight must have been updated.
+    output_after = flatten_weights(output_layer)
+    hidden_after = flatten_weights(hidden_layer)
+
+    output_after.zip(output_before).count { |a, b| (a - b).abs > 1e-9 }.should eq(output_before.size)
+    hidden_after.zip(hidden_before).count { |a, b| (a - b).abs > 1e-9 }.should eq(hidden_before.size)
 
     mse.call.should be < before * 0.7
   end
