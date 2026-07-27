@@ -911,6 +911,7 @@ module SHAInet
 
         @cols.times { |j| unsafe_set(i, j, unsafe_get(i, j) / row_sum) }
       end
+      mark_host_modified!
       sync_to_device!("softmax_result")
 
       # Mark self as having newer GPU data
@@ -1050,6 +1051,7 @@ module SHAInet
           unsafe_set(i, j, result_val)
         end
       end
+      mark_host_modified!
       sync_to_device!("cudnn_element_mul_result")
       mark_device_dirty!
       self
@@ -1083,6 +1085,7 @@ module SHAInet
           end
         end
       end
+      mark_host_modified!
       sync_to_device!("dropout_result")
       mark_device_dirty!
       self
@@ -1108,6 +1111,7 @@ module SHAInet
           unsafe_set(i, j, Math.tanh(val))
         end
       end
+      mark_host_modified!
       sync_to_device!("tanh_result")
       mark_device_dirty!
       self

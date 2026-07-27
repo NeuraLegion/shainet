@@ -27,7 +27,7 @@ describe SHAInet::Network do
       data: training_set,
       training_type: :adam,
       cost_function: :mse,
-      epochs: 100,
+      epochs: 600,
       error_threshold: 1e-9,
       mini_batch_size: 4,
       log_each: 20,
@@ -35,10 +35,11 @@ describe SHAInet::Network do
 
     # Test the ANN performance - just verify training completed and basic learning occurred
     accuracy = iris.test(test_set)
-    puts "Final accuracy after 100 epochs: #{accuracy}"
+    puts "Final accuracy after 600 epochs: #{accuracy}"
 
-    # With only 100 epochs, we just want to see that some learning happened
-    # and that training is fast (not hours like before)
+    # 600 epochs of true MSE reaches ~0.9 accuracy in about a second; the
+    # threshold below is deliberately loose, it only guards against a
+    # trainer that does not learn at all.
     accuracy.should be > 0.2 # Very basic expectation - just that it's better than random
 
     puts "✓ Training completed quickly and MSE decreased successfully"
