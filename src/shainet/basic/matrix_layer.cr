@@ -455,7 +455,13 @@ module SHAInet
         end
       end
 
-      # Sync back to device
+      # Sync back to device — mark host modified since unsafe_set doesn't set the flag
+      weights.mark_host_modified!
+      biases.mark_host_modified!
+      m_w.mark_host_modified!
+      m_b.mark_host_modified!
+      v_w.mark_host_modified!
+      v_b.mark_host_modified!
       weights.sync_to_device!("adam_update")
       biases.sync_to_device!("adam_update")
       m_w.sync_to_device!("adam_update")

@@ -150,6 +150,7 @@ module SHAInet
                 end
               end
             end
+            matrix.mark_host_modified!
             matrix.sync_to_device!("activation_fallback")
           end
         end
@@ -1028,7 +1029,12 @@ module SHAInet
           grad_matrix = output_grad.not_nil!
 
           # Try GPU-accelerated cross-entropy when possible
-          if actual_matrix.is_a?(CudaMatrix) && expected_matrix.is_a?(CudaMatrix) && CUDNN.available?
+          # Only use CUDNN softmax+CE when the output layer has identity activation
+          # (i.e., raw logits). CUDNN applies softmax internally, so if the output
+          # layer already applied sigmoid/other activation, this produces wrong gradients.
+          output_is_raw_logits = output_layer.activation_function == SHAInet.identity ||
+                                 output_layer.activation_function == SHAInet.none
+          if output_is_raw_logits && actual_matrix.is_a?(CudaMatrix) && expected_matrix.is_a?(CudaMatrix) && CUDNN.available?
             begin
               loss_value = 0.0
               if use_label_gpu
@@ -1155,13 +1161,12 @@ module SHAInet
         # Force cleanup of temporary matrices created during forward/backward pass
         # Persistent GPU buffers handle workspace reuse
 
-        # Return workspace matrices used for this sample
-        if input_matrix.is_a?(CudaMatrix) && input_workspace && input_matrix.object_id == input_workspace.object_id
-          CudaMatrix.return_workspace(input_matrix)
-        end
-        if expected_matrix.is_a?(CudaMatrix) && expected_workspace && expected_matrix.object_id == expected_workspace.object_id
-          CudaMatrix.return_workspace(expected_matrix)
-        end
+        # NOTE: @batch_in_ws / @batch_out_ws are owned by the network and reused
+        # for every sample in the batch (and across batches). They must NOT be
+        # returned to the shared workspace pool: get_workspace would hand the
+        # same buffer out as a temporary (e.g. the output layer's forward
+        # scratch, which has the same shape as the expected-output workspace),
+        # zero it and overwrite it mid-sample, corrupting the input/target.
       end
 
       learning_rate = current_learning_rate
@@ -1206,42 +1211,26 @@ module SHAInet
           cols = arr[0].as(Array).size
           mat = CudaMatrix.new(rows, cols)
 
-          flat_slice = Slice(Float64).new(rows * cols) do |idx|
-            r = idx // cols
-            c = idx % cols
-            arr[r].as(Array)[c].as(GenNum).to_f64
+          # Write F32 values to host buffer, then sync to device
+          rows.times do |r|
+            cols.times do |c|
+              mat.raw_data[r * cols + c] = arr[r].as(Array)[c].as(GenNum).to_f32
+            end
           end
-
-          if dptr = mat.device_ptr
-            CUDA.memcpy(
-              dptr.as(Pointer(Void)),
-              flat_slice.to_unsafe.as(Pointer(Void)),
-              (flat_slice.size * 4).to_u64,
-              CUDA::MemcpyKind::HostToDevice
-            )
-            mat.mark_device_dirty!
-          end
-
-          flat_slice.each_with_index { |v, i| mat.raw_data[i] = v.to_f32 }
+          mat.mark_host_modified!
+          mat.sync_to_device!("to_matrix")
 
           mat
         else
           cols = arr.size
           mat = CudaMatrix.new(1, cols)
 
-          flat_slice = Slice(Float64).new(cols) { |i| arr[i].as(GenNum).to_f64 }
-
-          if dptr = mat.device_ptr
-            CUDA.memcpy(
-              dptr.as(Pointer(Void)),
-              flat_slice.to_unsafe.as(Pointer(Void)),
-              (flat_slice.size * 4).to_u64,
-              CUDA::MemcpyKind::HostToDevice
-            )
-            mat.mark_device_dirty!
+          # Write F32 values to host buffer, then sync to device
+          cols.times do |i|
+            mat.raw_data[i] = arr[i].as(GenNum).to_f32
           end
-
-          flat_slice.each_with_index { |v, i| mat.raw_data[i] = v.to_f32 }
+          mat.mark_host_modified!
+          mat.sync_to_device!("to_matrix")
 
           mat
         end
@@ -1648,8 +1637,8 @@ module SHAInet
       end
 
       if grad_matrix.is_a?(CudaMatrix)
+        grad_matrix.as(CudaMatrix).mark_host_modified!
         grad_matrix.as(CudaMatrix).sync_to_device!("cost_grad_cpu")
-        grad_matrix.as(CudaMatrix).mark_device_dirty!
       end
 
       sample_error
