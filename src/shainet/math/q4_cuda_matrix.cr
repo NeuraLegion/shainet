@@ -105,7 +105,7 @@ module SHAInet
             kk += 1
           end
 
-          scale = max_abs > 0.0_f32 ? (max_abs / 7.0_f32) : 1.0_f32
+          scale : Float32 = max_abs > 0.0_f32 ? (max_abs / 7.0_f32).to_f32 : 1.0_f32
           inv = 1.0_f32 / scale
           s_host[col * blocks + b] = scale
 
