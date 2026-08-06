@@ -295,6 +295,20 @@ module SHAInet
     end
 
     def save_to_file(file_path : String)
+      Log.info { "Saving network to: #{file_path}" }
+      File.open(file_path, "w") do |io|
+        save_to_io(io)
+      end
+    end
+
+    def save_as_string : String
+      Log.info { "Saving network as string" }
+      io = IO::Memory.new
+      save_to_io(io)
+      io.to_s
+    end
+
+    def save_to_io(io : IO)
       dump_network = [] of Hash(String, JSON::Any)
 
       [@input_layers, @hidden_layers, @output_layers].flatten.each do |layer|
@@ -316,15 +330,19 @@ module SHAInet
         dump_network << dump_layer
       end
 
-      File.write(file_path, {"layers" => dump_network}.to_json)
-      Log.info { "Network saved to: #{file_path}" }
+      {"layers" => dump_network}.to_json(io)
+      Log.info { "Network saved" }
     end
 
     def load_from_file(file_path : String)
-      load_from_io(File.open(file_path))
+      Log.info { "Loading network from: #{file_path}" }
+      File.open(file_path) do |io|
+        load_from_io(io)
+      end
     end
 
     def load_from_string(data : String)
+      Log.info { "Loading network from string (#{data.size} bytes)" }
       load_from_io(IO::Memory.new(data))
     end
 
@@ -356,7 +374,7 @@ module SHAInet
         dest_layer.weights = SimpleMatrix.from_a(w)
         dest_layer.biases = SimpleMatrix.from_a([b])
       end
-      Log.info { "Network loaded from: #{file_path}" }
+      Log.info { "Network loaded" }
     end
 
     # Load a model from a HuggingFace SafeTensors directory.
