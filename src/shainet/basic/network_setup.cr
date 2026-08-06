@@ -325,7 +325,7 @@ module SHAInet
     end
 
     def load_from_string(data : String)
-      load_from_io(IO::Memory.new(String))
+      load_from_io(IO::Memory.new(data))
     end
 
     def load_from_io(io : IO)
