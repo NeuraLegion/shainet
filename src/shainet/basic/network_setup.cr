@@ -321,7 +321,15 @@ module SHAInet
     end
 
     def load_from_file(file_path : String)
-      data = JSON.parse(File.read(file_path))
+      load_from_io(File.open(file_path))
+    end
+
+    def load_from_string(data : String)
+      load_from_io(IO::Memory.new(data))
+    end
+
+    def load_from_io(io : IO)
+      data = JSON.parse(io.gets_to_end)
       layers = data["layers"].as_a
 
       layers.each do |layer_data|
