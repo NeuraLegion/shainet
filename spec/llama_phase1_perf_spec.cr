@@ -37,9 +37,12 @@ private def best_of(n : Int32, &block : ->) : Time::Span
   block.call # warm up: first call pays kernel load, buffer growth, JIT of nothing
   best = Time::Span::MAX
   n.times do
-    t0 = Time.instant
+    # Time.monotonic rather than the newer Time.instant: this shard is consumed
+    # by projects on older Crystal, so the deprecation warning is preferable to
+    # an API that will not compile there. src/ uses Time.monotonic throughout.
+    t0 = Time.monotonic
     block.call
-    dt = Time.instant - t0
+    dt = Time.monotonic - t0
     best = dt if dt < best
   end
   best
