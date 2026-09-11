@@ -110,6 +110,45 @@ describe "device-resident MoE decode" do
     device_readbacks.should be < host_readbacks
   end
 
+  it "does not drift when its own output is fed back over many steps" do
+    pending! "CUDA with the fused SwiGLU kernel not available" unless cuda_ready?
+
+    # Single-step parity can hide a small systematic bias (a slightly different
+    # activation, an accumulation order) that only shows up once it compounds. Real
+    # decoding compounds it: each step's output conditions the next. Feeding the
+    # output back reproduces that without needing a multi-GB model, and the
+    # magnitude is renormalised each step so the test measures drift rather than
+    # the recurrence exploding or collapsing.
+    d_model = 64
+    moe = build_moe(d_model, 128, 8, 4)
+    moe.to_gpu!(quantize: true, bits: 4)
+
+    seed = fill_pattern!(SHAInet::SimpleMatrix.new(1, d_model), 0.25)
+
+    run_chain = ->(device : Bool) do
+      x = SHAInet::SimpleMatrix.new(1, d_model)
+      d_model.times { |c| x[0, c] = seed[0, c] }
+      with_device_decode(device) do
+        20.times do
+          y = moe.forward(x)
+          sq = 0.0
+          d_model.times { |c| sq += y[0, c] * y[0, c] }
+          rms = Math.sqrt(sq / d_model)
+          rms = 1.0 if rms < 1e-12
+          d_model.times { |c| x[0, c] = y[0, c] / rms }
+        end
+      end
+      x
+    end
+
+    host = run_chain.call(false)
+    dev = run_chain.call(true)
+
+    d_model.times do |c|
+      dev[0, c].should be_close(host[0, c], 1e-3)
+    end
+  end
+
   it "falls back to the host path when experts are not quantized" do
     d_model = 32
     moe = build_moe(d_model, 64, 4, 2)
