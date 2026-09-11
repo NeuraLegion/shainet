@@ -5,7 +5,7 @@ authors:
   - Bar Hofesh <bar.hofesh@brightsec.com>
   - Art Linkov <artlinkov@gmail.com>
 
-crystal: 1.6.2
+crystal: 1.14.0
 
 development_dependencies:
   ameba:

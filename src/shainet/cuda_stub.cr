@@ -102,6 +102,18 @@ module SHAInet
       raise "CUDA disabled"
     end
 
+    def kv_cache_append_f16(*args)
+      raise "CUDA disabled"
+    end
+
+    def attention_kv_f16(*args)
+      raise "CUDA disabled"
+    end
+
+    def kv_f16_kernels_available? : Bool
+      false
+    end
+
     def geam(*args)
     end
 

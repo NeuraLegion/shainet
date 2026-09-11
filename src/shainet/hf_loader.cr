@@ -311,6 +311,12 @@ module SHAInet
         config.vocab_size.times do |i|
           d.times { |j| emb_layer.embeddings[i, j] = embed[i, j] }
         end
+        # Keep the embedding table in host RAM for quantized (inference) loads:
+        # it is gather-only, so residency costs vocab * d * 4 bytes of VRAM
+        # (~3.7 GB for a 150k-vocab 30B) and buys nothing. Opt out with
+        # SHAINET_EMBED_HOST=0; set it to 1 to also skip the transient device
+        # allocation during the load above.
+        emb_layer.to_host! if do_quant && ENV.fetch("SHAINET_EMBED_HOST", "1") != "0"
         # Reclaim the embedding read transients before the layer loop begins
         # (the bf16->f32 conversion buffer is large for big-vocab models).
         GC.collect if do_quant

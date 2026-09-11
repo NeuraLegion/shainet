@@ -14,6 +14,12 @@ module SHAInet
 
     getter current_ids = [] of Int32
 
+    # True when the table lives in host RAM and #embed uploads only the gathered
+    # rows. See #to_host! for why this is the right default at inference.
+    getter? host_resident : Bool = false
+    # Reusable host staging buffer for the gathered [ids, l_size] slice.
+    @host_stage : Array(Float32) = Array(Float32).new
+
     # Pre-allocated workspace matrices to avoid allocations during forward pass
     @workspace_result : CudaMatrix?
     @last_ids_size : Int32 = 0
@@ -21,7 +27,12 @@ module SHAInet
     def initialize(vocab_size : Int32, l_size : Int32, activation_function : ActivationFunction = SHAInet.none)
       super(l_size, activation_function)
 
-      mat_klass = CUDA.fully_available? ? CudaMatrix : SimpleMatrix
+      # SHAINET_EMBED_HOST=1 builds the table in host RAM from the start, so the
+      # [vocab, l_size] device buffer is never allocated at all (that allocation
+      # is a transient ~3.7 GB for a 150k-vocab 30B). Without it the table is
+      # built on device as before and #to_host! can move it afterwards.
+      @host_resident = CUDA.fully_available? && ENV["SHAINET_EMBED_HOST"]? == "1"
+      mat_klass = (CUDA.fully_available? && !@host_resident) ? CudaMatrix : SimpleMatrix
       # Initialize with random values between -0.1 and 0.1
       @embeddings = mat_klass.new(vocab_size, l_size)
       vocab_size.times do |r|
@@ -31,8 +42,31 @@ module SHAInet
       end
     end
 
+    # Move the embedding table to host RAM and release its device buffer.
+    #
+    # At inference the table is gather-only: a decode step reads one row per
+    # token (a few KB), so keeping the whole [vocab, l_size] table resident buys
+    # nothing while costing vocab * l_size * 4 bytes of VRAM. #embed still
+    # returns a CudaMatrix — it gathers on the host and uploads just the
+    # requested rows — so callers are unaffected.
+    #
+    # Not for training: gradient accumulation and #apply_gradients fall back to
+    # their CPU branches once the table is off-device.
+    def to_host!
+      return if @host_resident
+      emb = @embeddings
+      if emb.is_a?(CudaMatrix)
+        @embeddings = emb.to_simple
+        emb.free!
+      end
+      @host_resident = true
+    end
+
     # Convert embeddings and gradients to GPU
     def to_gpu!
+      # Host-resident tables stay put: the whole point is to keep the
+      # [vocab, l_size] buffer off the device. #embed handles the upload.
+      return if @host_resident
       if CUDA.fully_available? && !@embeddings.is_a?(CudaMatrix)
         @embeddings = @embeddings.as(SimpleMatrix).to_cuda
         if g = @gradients
@@ -82,6 +116,8 @@ module SHAInet
 
     # GPU path - retrieve embeddings for multiple ids as a CudaMatrix
     def embed(ids : Array(Int32)) : CudaMatrix
+      return embed_from_host(ids) if @host_resident && CUDA.fully_available?
+
       if !CUDA.fully_available? || !@embeddings.is_a?(CudaMatrix)
         # If we can't use GPU, ensure embeddings are converted to CudaMatrix first
         to_gpu! unless @embeddings.is_a?(CudaMatrix)
@@ -92,6 +128,13 @@ module SHAInet
       # Ensure workspace result matrix is allocated for this batch size
       ensure_workspace_result(ids.size)
       result = @workspace_result.not_nil!
+
+      # The table is written host-side (random init, or the loader's per-row
+      # copy) and nothing else uploads it, so without this the gather below
+      # reads an unpopulated device buffer and returns zeros. sync_to_device!
+      # already no-ops when the host copy is unchanged, so this is free on the
+      # steady-state path.
+      @embeddings.as(CudaMatrix).sync_to_device!("embed_table")
 
       e_ptr = @embeddings.as(CudaMatrix).device_ptr
       r_ptr = result.device_ptr
@@ -123,6 +166,51 @@ module SHAInet
 
       @current_ids.concat(ids)
       result
+    end
+
+    # Host-resident path: gather the requested rows out of the host table, then
+    # upload only that [ids, l_size] slice. A decode step moves a few KB, which
+    # is immaterial next to the step's own weight traffic, so this trades no
+    # measurable speed for the whole table's worth of VRAM.
+    private def embed_from_host(ids : Array(Int32)) : CudaMatrix
+      emb = @embeddings
+      return embed_cpu(ids).to_cuda unless emb.is_a?(SimpleMatrix)
+
+      # The gather below copies by pointer, so ids must be validated here (the
+      # Array-indexed paths get this from Crystal's own bounds checks).
+      vocab = emb.rows
+      ids.each do |id|
+        raise IndexError.new("token id #{id} outside vocab 0...#{vocab}") if id < 0 || id >= vocab
+      end
+
+      begin
+        ensure_workspace_result(ids.size)
+        result = @workspace_result.not_nil!
+        dptr = result.device_ptr
+        return embed_cpu(ids).to_cuda if dptr.nil? || dptr.null?
+
+        count = ids.size * @l_size
+        stage = @host_stage
+        if stage.size < count
+          stage = Array(Float32).new(count, 0.0_f32)
+          @host_stage = stage
+        end
+        sp = stage.to_unsafe
+        src = emb.data.to_unsafe
+        ids.each_with_index do |id, row|
+          (sp + row * @l_size).copy_from(src + id * @l_size, @l_size)
+        end
+
+        CUDA.memcpy(dptr.as(Pointer(Void)), sp.as(Pointer(Void)),
+          count.to_u64 * 4_u64, CUDA::MemcpyKind::HostToDevice)
+        result.mark_device_dirty!
+        @current_ids.concat(ids)
+        result
+      rescue
+        # Any CUDA-side failure degrades to the host gather plus a fresh upload
+        # rather than taking down inference.
+        embed_cpu(ids).to_cuda
+      end
     end
 
     # CPU path - retrieve embeddings for multiple ids as a SimpleMatrix
@@ -203,9 +291,12 @@ module SHAInet
           end
         end
       end
-      # Don't sync gradients from device - keep them on GPU for performance
+      # The accumulation above writes the HOST copy, while #apply_gradients
+      # consumes the DEVICE copy via axpy. Marking the device dirty here would
+      # claim the device is newer and discard everything just accumulated, so
+      # push the host writes down instead.
       if CUDA.fully_available? && grads.is_a?(CudaMatrix)
-        grads.as(CudaMatrix).mark_device_dirty!
+        grads.as(CudaMatrix).sync_to_device!("embedding_gradients")
       end
     end
 
@@ -218,6 +309,12 @@ module SHAInet
         e_ptr = @embeddings.as(CudaMatrix).device_ptr
         g_ptr = grads.as(CudaMatrix).device_ptr
         if e_ptr && g_ptr && !e_ptr.null? && !g_ptr.null?
+          # Both matrices accept host-side writes (direct assignment, or the CPU
+          # accumulation branch above), and axpy reads the DEVICE copies, so push
+          # any pending host state down first. sync_to_device! no-ops when the
+          # host copy is unchanged.
+          @embeddings.as(CudaMatrix).sync_to_device!("embedding_apply")
+          grads.as(CudaMatrix).sync_to_device!("embedding_grads_apply")
           handle = CUDA.create_handle
           total = @embeddings.rows * @embeddings.cols
           CUDA.axpy(handle, -lr, g_ptr, e_ptr, total)
@@ -226,7 +323,10 @@ module SHAInet
           CUDA.memcpy(g_ptr.as(Pointer(Void)), zeros.to_unsafe.as(Pointer(Void)), total.to_u64 * 4_u64, CUDA::MemcpyKind::HostToDevice)
           # Don't sync embeddings from device - keep them on GPU for performance
           @embeddings.as(CudaMatrix).mark_device_dirty!
-          grads.as(CudaMatrix).mark_device_clean! # gradients were zeroed on GPU
+          # The gradients were zeroed on the DEVICE, so the device copy is the
+          # authoritative one. Marking it clean instead would leave the stale
+          # non-zero host values to be re-uploaded and applied a second time.
+          grads.as(CudaMatrix).mark_device_dirty!
           return
         end
       end

@@ -306,7 +306,10 @@ module SHAInet
     @@gemm_q8_f32_proc : Proc(Pointer(Float32), Pointer(Int8), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@gemm_q4_f32_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@kv_cache_append_f32_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Void)?
+    @@kv_cache_append_f16_proc : Proc(Pointer(Float32), Pointer(UInt16), Pointer(UInt16), Int32, Int32, Int32, Int32, Int32, Void)?
+    @@kv_f16_available : Bool? = nil
     @@attention_kv_f32_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void)?
+    @@attention_kv_f16_proc : Proc(Pointer(Float32), Pointer(UInt16), Pointer(UInt16), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void)?
 
     def softmax_rows(dst : Pointer(Float32), src : Pointer(Float32), rows : Int32, cols : Int32)
       # Validate inputs
@@ -888,6 +891,84 @@ module SHAInet
         Log.error { "CUDA Error in attention_kv_f32: #{ex}" }
         raise ex
       end
+    end
+
+    # fp16 KV cache variants. The cache buffers are __half on the device; Crystal
+    # has no native half type, so they travel as UInt16 pointers. Staging, q, out
+    # and ws all stay fp32 — only the stored cache precision changes.
+    def kv_cache_append_f16(staging : Pointer(Float32), kc : Pointer(UInt16), vc : Pointer(UInt16),
+                            new_tokens : Int32, start_pos : Int32, num_kv_heads : Int32,
+                            head_dim : Int32, capacity : Int32)
+      unless fn = @@kv_cache_append_f16_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "kv_cache_append_f16")
+          unless sym.null?
+            @@kv_cache_append_f16_proc = Proc(Pointer(Float32), Pointer(UInt16), Pointer(UInt16), Int32, Int32, Int32, Int32, Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@kv_cache_append_f16_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+
+      begin
+        fn.call(staging, kc, vc, new_tokens, start_pos, num_kv_heads, head_dim, capacity)
+      rescue ex
+        Log.error { "CUDA Error in kv_cache_append_f16: #{ex}" }
+        raise ex
+      end
+    end
+
+    def attention_kv_f16(q : Pointer(Float32), kc : Pointer(UInt16), vc : Pointer(UInt16),
+                         out_ptr : Pointer(Float32), ws : Pointer(Float32),
+                         new_tokens : Int32, start_pos : Int32, num_heads : Int32,
+                         heads_per_kv : Int32, head_dim : Int32, capacity : Int32,
+                         scale : Float32)
+      unless fn = @@attention_kv_f16_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "attention_kv_f16")
+          unless sym.null?
+            @@attention_kv_f16_proc = Proc(Pointer(Float32), Pointer(UInt16), Pointer(UInt16), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void).new(sym, Pointer(Void).null)
+            fn = @@attention_kv_f16_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+
+      begin
+        fn.call(q, kc, vc, out_ptr, ws, new_tokens, start_pos, num_heads, heads_per_kv, head_dim, capacity, scale)
+      rescue ex
+        Log.error { "CUDA Error in attention_kv_f16: #{ex}" }
+        raise ex
+      end
+    end
+
+    # Reports whether the fp16 KV kernels are present in the loaded kernel
+    # library. Older prebuilt .so files predate them, so the KV cache falls back
+    # to fp32 rather than failing when they are missing.
+    def kv_f16_kernels_available? : Bool
+      avail = @@kv_f16_available
+      return avail unless avail.nil?
+      result = begin
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        if @@kernels_handle.null?
+          false
+        else
+          !LibC.dlsym(@@kernels_handle, "kv_cache_append_f16").null? &&
+          !LibC.dlsym(@@kernels_handle, "attention_kv_f16").null?
+        end
+      rescue
+        false
+      end
+      @@kv_f16_available = result
+      result
     end
 
     # Cross-entropy loss and gradient computation kernel
