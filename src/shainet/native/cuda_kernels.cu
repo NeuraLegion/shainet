@@ -1,6 +1,7 @@
 #include <curand_kernel.h>
 #include <cuda_fp16.h>
 #include <cstdio>
+#include <cstdlib>
 
 // Device kernels
 // Simple row-wise softmax kernel. This version runs one thread per row and
@@ -675,12 +676,107 @@ __global__ void gemm_q4_f32_kernel(const float* __restrict__ x,
     if (tid == 0) y[(long)m * N + n] = sdata[0];
 }
 
+// Output columns handled per block, one warp each. Raising this increases how
+// many columns share a single staged activation tile.
+#define Q4_COLS_PER_BLOCK 8
+// Activation elements staged in shared memory per iteration. 1024 = 32 scale
+// blocks = exactly one block per warp lane, so no lane is idle on a full tile.
+#define Q4_TILE 1024
+
+// Vectorized Q4 GEMM.
+//
+// Improves on gemm_q4_f32_kernel in four ways:
+//   * one WARP per output column instead of one block, so the reduction is a
+//     __shfl_down_sync chain rather than an 8-step shared-memory tree with a
+//     __syncthreads between every step;
+//   * Q4_COLS_PER_BLOCK columns share one staged activation tile, so x is read
+//     from global memory once per block instead of once per output column;
+//   * weights move as uint4 (16 bytes = 32 nibbles = exactly one scale block),
+//     so each lane issues one 16-byte load where the scalar kernel issued 32
+//     single-byte loads, and consecutive lanes cover 512 contiguous bytes;
+//   * the per-lane unpack loop is fully unrolled over the 16 bytes.
+//
+// Requires K % Q4_BLK == 0. That also makes every packed column row a multiple
+// of 16 bytes (kbytes = K/2), which is what makes the uint4 loads legal; the
+// caller falls back to the scalar kernel otherwise.
+__global__ void gemm_q4_f32_vec_kernel(const float* __restrict__ x,
+                                       const unsigned char* __restrict__ q,
+                                       const float* __restrict__ scales,
+                                       float* __restrict__ y,
+                                       int M, int N, int K) {
+    int m = blockIdx.y;
+    if (m >= M) return; // uniform across the block, so no divergent barrier
+
+    int warp = threadIdx.x >> 5;
+    int lane = threadIdx.x & 31;
+    int n = blockIdx.x * Q4_COLS_PER_BLOCK + warp;
+
+    int nblocks = K >> 5; // exact, K % 32 == 0
+    int kbytes = K >> 1;
+    const float* xrow = x + (long)m * K;
+    const unsigned char* qrow = q + (long)n * kbytes;
+    const float* srow = scales + (long)n * nblocks;
+
+    extern __shared__ float xs[]; // Q4_TILE floats
+
+    float acc = 0.0f;
+    for (int ktile = 0; ktile < K; ktile += Q4_TILE) {
+        int tile = min(Q4_TILE, K - ktile);
+        // Whole block cooperates on the load, then every warp reads it back.
+        for (int i = threadIdx.x; i < tile; i += blockDim.x) xs[i] = xrow[ktile + i];
+        __syncthreads();
+
+        if (n < N && lane * Q4_BLK < tile) {
+            int kb = (ktile >> 5) + lane; // this lane's scale block
+            uint4 packed = *reinterpret_cast<const uint4*>(qrow + (long)kb * 16);
+            const unsigned char* b = reinterpret_cast<const unsigned char*>(&packed);
+            const float* xb = xs + lane * Q4_BLK;
+            float sum = 0.0f;
+#pragma unroll
+            for (int j = 0; j < 16; ++j) {
+                unsigned char byte = b[j];
+                sum += (float)((int)(byte & 0x0F) - 8) * xb[2 * j];
+                sum += (float)((int)(byte >> 4) - 8) * xb[2 * j + 1];
+            }
+            acc += sum * srow[kb];
+        }
+        __syncthreads(); // tile is reused next iteration
+    }
+
+    // Warp reduction. Every lane reaches this, including lanes whose column is
+    // out of range, so the shuffle mask stays full.
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) acc += __shfl_down_sync(0xffffffffu, acc, off);
+    if (lane == 0 && n < N) y[(long)m * N + n] = acc;
+}
+
+// Force the scalar Q4 kernel even on shapes the vectorized one supports. Exists
+// so the two kernels can be A/B'd end to end on a real model, where every shape
+// otherwise takes the vectorized path. Read once, on first use.
+static int q4_scalar_forced = -1;
+static inline bool q4_force_scalar() {
+    if (q4_scalar_forced < 0) {
+        const char* e = getenv("SHAINET_Q4_SCALAR");
+        q4_scalar_forced = (e && e[0] == '1') ? 1 : 0;
+    }
+    return q4_scalar_forced == 1;
+}
+
 void gemm_q4_f32(const float* x, const unsigned char* q, const float* scales,
                  float* y, int M, int N, int K) {
-    int threads = 256;
-    dim3 grid(N, M);
-    size_t shmem = threads * sizeof(float);
-    gemm_q4_f32_kernel<<<grid, threads, shmem>>>(x, q, scales, y, M, N, K);
+    if (K % Q4_BLK == 0 && !q4_force_scalar()) {
+        int threads = Q4_COLS_PER_BLOCK * 32;
+        dim3 grid((N + Q4_COLS_PER_BLOCK - 1) / Q4_COLS_PER_BLOCK, M);
+        size_t shmem = Q4_TILE * sizeof(float);
+        gemm_q4_f32_vec_kernel<<<grid, threads, shmem>>>(x, q, scales, y, M, N, K);
+    } else {
+        // Packed rows are not 16-byte aligned for this K, so uint4 loads would
+        // be illegal. Correctness first.
+        int threads = 256;
+        dim3 grid(N, M);
+        size_t shmem = threads * sizeof(float);
+        gemm_q4_f32_kernel<<<grid, threads, shmem>>>(x, q, scales, y, M, N, K);
+    }
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         printf("CUDA Error in gemm_q4_f32: %s\n", cudaGetErrorString(err));
