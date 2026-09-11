@@ -80,10 +80,12 @@ module SHAInet
       rows = gate.rows
       cols = gate.cols
       hidden = SimpleMatrix.new(rows, cols)
-      rows.times do |i|
-        cols.times do |j|
-          g = gate[i, j]
-          hidden[i, j] = (g / (1.0 + Math.exp(-g))) * up[i, j]
+      Profile.measure("ffn.swiglu_act") do
+        rows.times do |i|
+          cols.times do |j|
+            g = gate[i, j]
+            hidden[i, j] = (g / (1.0 + Math.exp(-g))) * up[i, j]
+          end
         end
       end
 
@@ -116,14 +118,18 @@ module SHAInet
       if w.is_a?(QuantizedWeight)
         if x.rows == 1
           xb = (@q8_in_bufs[x.cols] ||= CudaMatrix.new(1, x.cols))
-          xb.raw_data.to_unsafe.copy_from(x.data.to_unsafe, x.cols)
-          xb.mark_host_modified!
-          xb.sync_to_device!("q8_ffn_in")
+          Profile.measure("gemm.in_h2d") do
+            xb.raw_data.to_unsafe.copy_from(x.data.to_unsafe, x.cols)
+            xb.mark_host_modified!
+            xb.sync_to_device!("q8_ffn_in")
+          end
           ob = (@q8_out_bufs[w.cols] ||= CudaMatrix.new(1, w.cols))
-          w.gemv_into(xb, ob)
-          ob.sync_from_device!("q8_ffn_out") if ob.device_dirty?
+          Profile.measure("gemm.kernel") { w.gemv_into(xb, ob) }
+          Profile.measure("gemm.out_d2h") { ob.sync_from_device!("q8_ffn_out") if ob.device_dirty? }
           result = SimpleMatrix.new(1, w.cols)
-          result.data.to_unsafe.copy_from(ob.raw_data.to_unsafe, w.cols)
+          Profile.measure("gemm.result_copy") do
+            result.data.to_unsafe.copy_from(ob.raw_data.to_unsafe, w.cols)
+          end
           result
         else
           x_gpu = CudaMatrix.new(x.rows, x.cols)

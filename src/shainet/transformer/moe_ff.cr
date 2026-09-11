@@ -86,15 +86,17 @@ module SHAInet
     # run via SwiGLUFF#forward (which itself dispatches to GPU gemv when its
     # weights are quantized), and their outputs are summed with the gate weights.
     def forward(x : SimpleMatrix) : SimpleMatrix
-      logits = router_logits(x)
+      logits = Profile.measure("ffn.router") { router_logits(x) }
       out = SimpleMatrix.zeros(x.rows, @d_model)
       row = SimpleMatrix.new(1, @d_model)
       x.rows.times do |t|
-        gating = top_k_gating(logits, t)
+        gating = Profile.measure("ffn.topk") { top_k_gating(logits, t) }
         @d_model.times { |c| row[0, c] = x[t, c] }
         gating.each do |(e, w)|
           ey = @experts[e].forward(row) # [1, d_model]
-          @d_model.times { |c| out[t, c] = out[t, c] + w * ey[0, c] }
+          Profile.measure("ffn.combine") do
+            @d_model.times { |c| out[t, c] = out[t, c] + w * ey[0, c] }
+          end
         end
       end
       out

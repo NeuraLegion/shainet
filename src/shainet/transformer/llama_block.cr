@@ -210,12 +210,12 @@ module SHAInet
 
     # CPU forward with KV cache — only processes new tokens
     def forward_cached(x : SimpleMatrix) : SimpleMatrix
-      normed = @norm1.forward(x)
+      normed = Profile.measure("block.norm") { @norm1.forward(x) }
       attn = attention_cached_cpu(normed)
-      h = x + attn
-      normed2 = @norm2.forward(h)
+      h = Profile.measure("block.residual") { x + attn }
+      normed2 = Profile.measure("block.norm") { @norm2.forward(h) }
       ff_out = @ffn.forward(normed2)
-      h + ff_out
+      Profile.measure("block.residual") { h + ff_out }
     end
 
     # GPU forward — full sequence
@@ -288,23 +288,25 @@ module SHAInet
 
       # Apply RoPE to new K at insert time (HF half-split), then append to cache.
       half = head_dim // 2
-      @num_kv_heads.times do |kv_h|
-        kv_col = kv_h * head_dim
-        new_tokens.times do |t|
-          pos = start_pos + t
-          rotated = Array(Float32).new(head_dim, 0.0_f32)
-          half.times do |i|
-            freq = inv_freq(i)
-            angle = (pos * freq).to_f32
-            cos_val = Math.cos(angle).to_f32
-            sin_val = Math.sin(angle).to_f32
-            x0 = k_new[t, kv_col + i].to_f32
-            x1 = k_new[t, kv_col + i + half].to_f32
-            rotated[i] = x0 * cos_val - x1 * sin_val
-            rotated[i + half] = x1 * cos_val + x0 * sin_val
+      Profile.measure("attn.rope_kv_append") do
+        @num_kv_heads.times do |kv_h|
+          kv_col = kv_h * head_dim
+          new_tokens.times do |t|
+            pos = start_pos + t
+            rotated = Array(Float32).new(head_dim, 0.0_f32)
+            half.times do |i|
+              freq = inv_freq(i)
+              angle = (pos * freq).to_f32
+              cos_val = Math.cos(angle).to_f32
+              sin_val = Math.sin(angle).to_f32
+              x0 = k_new[t, kv_col + i].to_f32
+              x1 = k_new[t, kv_col + i + half].to_f32
+              rotated[i] = x0 * cos_val - x1 * sin_val
+              rotated[i + half] = x1 * cos_val + x0 * sin_val
+            end
+            rotated.each { |val| @k_cache[kv_h] << val }
+            head_dim.times { |d| @v_cache[kv_h] << v_new[t, kv_col + d].to_f32 }
           end
-          rotated.each { |val| @k_cache[kv_h] << val }
-          head_dim.times { |d| @v_cache[kv_h] << v_new[t, kv_col + d].to_f32 }
         end
       end
 
@@ -482,47 +484,55 @@ module SHAInet
         kvf = @num_kv_heads * cf
         qf = n * dm
 
-        # This chunk's new K/V rows: each kv_head's slice is contiguous in the
-        # CPU mirror (RoPE already applied to K at insert).
-        tail = base_pos * head_dim
-        @num_kv_heads.times do |kv_h|
-          (stp + kv_h * cf).copy_from(@k_cache[kv_h].to_unsafe + tail, cf)
-          (stp + kvf + kv_h * cf).copy_from(@v_cache[kv_h].to_unsafe + tail, cf)
-        end
-
-        # RoPE-rotate this chunk's Q (HF half-split) into the staging blob,
-        # token-major and re-based to the chunk's own first row.
-        qst = stp + 2 * kvf
-        n.times do |i|
-          pos = base_pos + i
-          half.times do |r|
-            angle = (pos * inv_freq(r)).to_f32
-            cp[r] = Math.cos(angle).to_f32
-            sp[r] = Math.sin(angle).to_f32
+        Profile.measure("attn.stage_host") do
+          # This chunk's new K/V rows: each kv_head's slice is contiguous in the
+          # CPU mirror (RoPE already applied to K at insert).
+          tail = base_pos * head_dim
+          @num_kv_heads.times do |kv_h|
+            (stp + kv_h * cf).copy_from(@k_cache[kv_h].to_unsafe + tail, cf)
+            (stp + kvf + kv_h * cf).copy_from(@v_cache[kv_h].to_unsafe + tail, cf)
           end
-          src_row = (off + i) * dm
-          dst_row = i * dm
-          @num_heads.times do |h|
-            sb = src_row + h * head_dim
-            db = dst_row + h * head_dim
-            r = 0
-            while r < half
-              x0 = qptr[sb + r]
-              x1 = qptr[sb + r + half]
-              qst[db + r] = x0 * cp[r] - x1 * sp[r]
-              qst[db + r + half] = x1 * cp[r] + x0 * sp[r]
-              r += 1
+
+          # RoPE-rotate this chunk's Q (HF half-split) into the staging blob,
+          # token-major and re-based to the chunk's own first row.
+          qst = stp + 2 * kvf
+          n.times do |i|
+            pos = base_pos + i
+            half.times do |r|
+              angle = (pos * inv_freq(r)).to_f32
+              cp[r] = Math.cos(angle).to_f32
+              sp[r] = Math.sin(angle).to_f32
+            end
+            src_row = (off + i) * dm
+            dst_row = i * dm
+            @num_heads.times do |h|
+              sb = src_row + h * head_dim
+              db = dst_row + h * head_dim
+              r = 0
+              while r < half
+                x0 = qptr[sb + r]
+                x1 = qptr[sb + r + half]
+                qst[db + r] = x0 * cp[r] - x1 * sp[r]
+                qst[db + r + half] = x1 * cp[r] + x0 * sp[r]
+                r += 1
+              end
             end
           end
         end
 
-        CUDA.memcpy(@@gpu_staging.as(Pointer(Void)), stp.as(Pointer(Void)),
-          (2 * kvf + qf).to_u64 * 4_u64, CUDA::MemcpyKind::HostToDevice)
-        append_kv(n, base_pos)
-        attend_kv(@@gpu_staging + 2 * kvf, n, base_pos, heads_per_kv, scale)
+        Profile.measure("attn.h2d") do
+          CUDA.memcpy(@@gpu_staging.as(Pointer(Void)), stp.as(Pointer(Void)),
+            (2 * kvf + qf).to_u64 * 4_u64, CUDA::MemcpyKind::HostToDevice)
+        end
+        Profile.measure("attn.kernels") do
+          append_kv(n, base_pos)
+          attend_kv(@@gpu_staging + 2 * kvf, n, base_pos, heads_per_kv, scale)
+        end
         # Synchronous D2H read-back also orders after both kernels above.
-        CUDA.memcpy((outp + off * dm).as(Pointer(Void)), @@gpu_attn_out.as(Pointer(Void)),
-          qf.to_u64 * 4_u64, CUDA::MemcpyKind::DeviceToHost)
+        Profile.measure("attn.d2h") do
+          CUDA.memcpy((outp + off * dm).as(Pointer(Void)), @@gpu_attn_out.as(Pointer(Void)),
+            qf.to_u64 * 4_u64, CUDA::MemcpyKind::DeviceToHost)
+        end
 
         off += n
       end
@@ -971,14 +981,18 @@ module SHAInet
         if x.rows == 1
           # Decode (M=1): reuse persistent device buffers, no per-call alloc/free.
           xb = (@q8_in_bufs[x.cols] ||= CudaMatrix.new(1, x.cols))
-          xb.raw_data.to_unsafe.copy_from(x.data.to_unsafe, x.cols)
-          xb.mark_host_modified!
-          xb.sync_to_device!("q8_gemm_in")
+          Profile.measure("gemm.in_h2d") do
+            xb.raw_data.to_unsafe.copy_from(x.data.to_unsafe, x.cols)
+            xb.mark_host_modified!
+            xb.sync_to_device!("q8_gemm_in")
+          end
           ob = (@q8_out_bufs[w.cols] ||= CudaMatrix.new(1, w.cols))
-          w.gemv_into(xb, ob)
-          ob.sync_from_device!("q8_gemm_out") if ob.device_dirty?
+          Profile.measure("gemm.kernel") { w.gemv_into(xb, ob) }
+          Profile.measure("gemm.out_d2h") { ob.sync_from_device!("q8_gemm_out") if ob.device_dirty? }
           result = SimpleMatrix.new(1, w.cols)
-          result.data.to_unsafe.copy_from(ob.raw_data.to_unsafe, w.cols)
+          Profile.measure("gemm.result_copy") do
+            result.data.to_unsafe.copy_from(ob.raw_data.to_unsafe, w.cols)
+          end
           result
         else
           # Prefill / batch (M>1): one-off allocation.
