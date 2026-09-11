@@ -1,4 +1,5 @@
 #include <curand_kernel.h>
+#include <cuda_fp16.h>
 #include <cstdio>
 
 // Device kernels
@@ -688,16 +689,37 @@ void gemm_q4_f32(const float* x, const unsigned char* q, const float* scales,
 
 // ---- KV-cache attention (LLaMA decode/prefill) ----
 // Device cache layout: [num_kv_heads, capacity, head_dim] for both K and V.
+// Templates cannot carry C linkage, so the generic kernels live in a nested
+// extern "C++" block; only the concrete wrappers below stay callable by name.
+extern "C++" {
+
+// Storage traits for the KV cache element type. The cache may be kept in fp16
+// to halve its VRAM footprint (it is the dominant consumer at long context);
+// all arithmetic still happens in fp32 after conversion, so only the stored
+// precision changes.
+template <typename KV> struct KVStore;
+template <> struct KVStore<float> {
+    __device__ static inline float load(const float* p, long i) { return p[i]; }
+    __device__ static inline void store(float* p, long i, float v) { p[i] = v; }
+};
+template <> struct KVStore<__half> {
+    __device__ static inline float load(const __half* p, long i) { return __half2float(p[i]); }
+    __device__ static inline void store(__half* p, long i, float v) { p[i] = __float2half(v); }
+};
+
 // `staging` holds the newly appended rows, already RoPE'd (K) on the host:
 //   [num_kv_heads * new_tokens * head_dim] K chunks (kv_head-major, then
 //   token-major — i.e. each kv_head's tail is contiguous), followed by the
 //   same layout for V. Scatter them into the cache at position start_pos.
-__global__ void kv_cache_append_kernel(const float* __restrict__ staging,
-                                       float* __restrict__ kc,
-                                       float* __restrict__ vc,
-                                       int new_tokens, int start_pos,
-                                       int num_kv_heads, int head_dim,
-                                       int capacity) {
+// Staging is always fp32; the cache element type is the template parameter, so
+// the fp16 cache is written through a conversion here.
+template <typename KV>
+__global__ void kv_cache_append_kernel_t(const float* __restrict__ staging,
+                                         KV* __restrict__ kc,
+                                         KV* __restrict__ vc,
+                                         int new_tokens, int start_pos,
+                                         int num_kv_heads, int head_dim,
+                                         int capacity) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int chunk = new_tokens * head_dim;       // floats per kv_head per tensor
     int total = num_kv_heads * chunk;        // floats per tensor (K or V)
@@ -707,8 +729,11 @@ __global__ void kv_cache_append_kernel(const float* __restrict__ staging,
     int kv_h = r / chunk;
     int rem = r - kv_h * chunk;              // t * head_dim + d
     long dst = ((long)kv_h * capacity + start_pos) * head_dim + rem;
-    if (is_v) vc[dst] = staging[idx]; else kc[dst] = staging[idx];
+    if (is_v) KVStore<KV>::store(vc, dst, staging[idx]);
+    else      KVStore<KV>::store(kc, dst, staging[idx]);
 }
+
+} // extern "C++"
 
 void kv_cache_append_f32(const float* staging, float* kc, float* vc,
                          int new_tokens, int start_pos, int num_kv_heads,
@@ -716,14 +741,36 @@ void kv_cache_append_f32(const float* staging, float* kc, float* vc,
     int total = 2 * num_kv_heads * new_tokens * head_dim;
     int threads = 256;
     int blocks = (total + threads - 1) / threads;
-    kv_cache_append_kernel<<<blocks, threads>>>(staging, kc, vc, new_tokens,
-                                                start_pos, num_kv_heads,
-                                                head_dim, capacity);
+    kv_cache_append_kernel_t<float><<<blocks, threads>>>(staging, kc, vc, new_tokens,
+                                                         start_pos, num_kv_heads,
+                                                         head_dim, capacity);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         printf("CUDA Error in kv_cache_append_f32: %s\n", cudaGetErrorString(err));
     }
 }
+
+// fp16 cache variant. `kc`/`vc` are __half buffers passed from Crystal as
+// UInt16 pointers (Crystal has no native half type); staging stays fp32.
+void kv_cache_append_f16(const float* staging, unsigned short* kc, unsigned short* vc,
+                         int new_tokens, int start_pos, int num_kv_heads,
+                         int head_dim, int capacity) {
+    int total = 2 * num_kv_heads * new_tokens * head_dim;
+    int threads = 256;
+    int blocks = (total + threads - 1) / threads;
+    kv_cache_append_kernel_t<__half><<<blocks, threads>>>(staging,
+                                                          reinterpret_cast<__half*>(kc),
+                                                          reinterpret_cast<__half*>(vc),
+                                                          new_tokens, start_pos,
+                                                          num_kv_heads, head_dim,
+                                                          capacity);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in kv_cache_append_f16: %s\n", cudaGetErrorString(err));
+    }
+}
+
+extern "C++" {
 
 // Causal attention over the device KV cache. One block per (head, token):
 //   scores[j] = scale * (q_h · K[kv_h][j])  for j < visible = start_pos+i+1
@@ -731,14 +778,17 @@ void kv_cache_append_f32(const float* staging, float* kc, float* vc,
 // q/out are [new_tokens, num_heads*head_dim] row-major (q already RoPE'd).
 // ws is a global scratch of at least num_heads*new_tokens*total_len floats.
 // GQA: query head h reads kv head h / heads_per_kv.
-__global__ void attention_kv_kernel(const float* __restrict__ q,
-                                    const float* __restrict__ kc,
-                                    const float* __restrict__ vc,
-                                    float* __restrict__ out,
-                                    float* __restrict__ ws,
-                                    int new_tokens, int start_pos,
-                                    int num_heads, int heads_per_kv,
-                                    int head_dim, int capacity, float scale) {
+// KV is the cache storage type (float or __half); loads convert to fp32 so the
+// dot product, softmax and weighted sum are identical in both instantiations.
+template <typename KV>
+__global__ void attention_kv_kernel_t(const float* __restrict__ q,
+                                      const KV* __restrict__ kc,
+                                      const KV* __restrict__ vc,
+                                      float* __restrict__ out,
+                                      float* __restrict__ ws,
+                                      int new_tokens, int start_pos,
+                                      int num_heads, int heads_per_kv,
+                                      int head_dim, int capacity, float scale) {
     int h = blockIdx.x;
     int i = blockIdx.y;
     if (h >= num_heads || i >= new_tokens) return;
@@ -749,8 +799,8 @@ __global__ void attention_kv_kernel(const float* __restrict__ q,
     int d_model = num_heads * head_dim;
 
     const float* qv = q + (long)i * d_model + (long)h * head_dim;
-    const float* kh = kc + (long)kv_h * capacity * head_dim;
-    const float* vh = vc + (long)kv_h * capacity * head_dim;
+    const KV* kh = kc + (long)kv_h * capacity * head_dim;
+    const KV* vh = vc + (long)kv_h * capacity * head_dim;
     float* wsrow = ws + ((long)h * new_tokens + i) * total_len;
 
     int tid = threadIdx.x;
@@ -765,9 +815,9 @@ __global__ void attention_kv_kernel(const float* __restrict__ q,
     // Pass 1: scores into ws, track max for stable softmax.
     float lmax = -INFINITY;
     for (int j = tid; j < visible; j += nt) {
-        const float* krow = kh + (long)j * head_dim;
+        const KV* krow = kh + (long)j * head_dim;
         float dot = 0.0f;
-        for (int d = 0; d < head_dim; ++d) dot += q_s[d] * krow[d];
+        for (int d = 0; d < head_dim; ++d) dot += q_s[d] * KVStore<KV>::load(krow, d);
         dot *= scale;
         wsrow[j] = dot;
         if (dot > lmax) lmax = dot;
@@ -800,10 +850,12 @@ __global__ void attention_kv_kernel(const float* __restrict__ q,
     // threads read adjacent V elements (coalesced per j).
     for (int d = tid; d < head_dim; d += nt) {
         float acc = 0.0f;
-        for (int j = 0; j < visible; ++j) acc += wsrow[j] * vh[(long)j * head_dim + d];
+        for (int j = 0; j < visible; ++j) acc += wsrow[j] * KVStore<KV>::load(vh, (long)j * head_dim + d);
         out[(long)i * d_model + (long)h * head_dim + d] = acc * inv_sum;
     }
 }
+
+} // extern "C++"
 
 void attention_kv_f32(const float* q, const float* kc, const float* vc,
                       float* out, float* ws, int new_tokens, int start_pos,
@@ -812,15 +864,36 @@ void attention_kv_f32(const float* q, const float* kc, const float* vc,
     int threads = 128;
     dim3 grid(num_heads, new_tokens);
     size_t shmem = (head_dim + threads) * sizeof(float);
-    attention_kv_kernel<<<grid, threads, shmem>>>(q, kc, vc, out, ws,
-                                                  new_tokens, start_pos,
-                                                  num_heads, heads_per_kv,
-                                                  head_dim, capacity, scale);
+    attention_kv_kernel_t<float><<<grid, threads, shmem>>>(q, kc, vc, out, ws,
+                                                           new_tokens, start_pos,
+                                                           num_heads, heads_per_kv,
+                                                           head_dim, capacity, scale);
     // No device sync: callers read `out` back via a default-stream D2H memcpy
     // which is ordered after this kernel. Just surface launch errors.
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         printf("CUDA Error in attention_kv_f32: %s\n", cudaGetErrorString(err));
+    }
+}
+
+// fp16 cache variant. Q, out and ws stay fp32; only the cache is half.
+void attention_kv_f16(const float* q, const unsigned short* kc, const unsigned short* vc,
+                      float* out, float* ws, int new_tokens, int start_pos,
+                      int num_heads, int heads_per_kv, int head_dim,
+                      int capacity, float scale) {
+    int threads = 128;
+    dim3 grid(num_heads, new_tokens);
+    size_t shmem = (head_dim + threads) * sizeof(float);
+    attention_kv_kernel_t<__half><<<grid, threads, shmem>>>(q,
+                                                            reinterpret_cast<const __half*>(kc),
+                                                            reinterpret_cast<const __half*>(vc),
+                                                            out, ws,
+                                                            new_tokens, start_pos,
+                                                            num_heads, heads_per_kv,
+                                                            head_dim, capacity, scale);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in attention_kv_f16: %s\n", cudaGetErrorString(err));
     }
 }
 

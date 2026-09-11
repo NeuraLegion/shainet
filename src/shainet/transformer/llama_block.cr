@@ -51,9 +51,17 @@ module SHAInet
     # head_dim] per tensor. The CPU cache stays the source of truth: the GPU
     # copy is appended incrementally each token and fully re-uploaded from the
     # mirror whenever capacity grows. Only used when CUDA kernels are loaded.
-    @gpu_k_cache : Pointer(Float32) = Pointer(Float32).null
-    @gpu_v_cache : Pointer(Float32) = Pointer(Float32).null
+    #
+    # Stored as an untyped pointer because the element type is chosen at first
+    # allocation: fp16 halves the cache's VRAM footprint, and at long context
+    # the cache is the single largest consumer (0.375 MB per token for a 48-layer
+    # 8-KV-head model in fp32). Arithmetic stays fp32 in both cases — the kernels
+    # convert on load — so only the stored precision differs.
+    @gpu_k_cache : Pointer(Void) = Pointer(Void).null
+    @gpu_v_cache : Pointer(Void) = Pointer(Void).null
     @gpu_cache_cap : Int32 = 0
+    # nil until the first device allocation decides the cache dtype.
+    @kv_fp16 : Bool? = nil
     # Persistent device scratch for the attention hot path. SHARED across all
     # blocks (class-level): blocks run sequentially, so one grow-only scratch set
     # serves every layer instead of each of N layers holding its own ~(heads×
@@ -69,6 +77,15 @@ module SHAInet
     @gpu_attn_avail : Bool?
     # Force the CPU attention path even when CUDA is available (tests/fallback).
     property? force_cpu_attention : Bool = false
+
+    # Ceiling on the attention workspace, in fp32 elements (256 MB). Prefill is
+    # chunked so num_heads * chunk_tokens * total_len stays under this; without
+    # chunking the workspace grows as num_heads * seq^2, which is the single
+    # sharpest VRAM cliff on a long prompt.
+    ATTN_WS_BUDGET_FLOATS = 64_i64 * 1024 * 1024
+    # Upper bound on chunk size regardless of budget. Larger chunks stop paying
+    # off once the per-launch work saturates the device.
+    ATTN_CHUNK_MAX = 256
 
     def initialize(@d_model : Int32, @num_heads : Int32, ff_hidden : Int32,
                    eps : Float64 = 1e-6, @rope_theta : Float64 = 10000.0,
@@ -125,7 +142,7 @@ module SHAInet
       # Only free the per-instance KV cache; the attention scratch is class-level
       # and shared across all blocks, so it must not be freed per instance.
       {@gpu_k_cache, @gpu_v_cache}.each do |p|
-        CUDA.free(p.as(Pointer(Void))) unless p.null?
+        CUDA.free(p) unless p.null?
       end
     end
 
@@ -411,16 +428,26 @@ module SHAInet
       dm = @q_dim
       half = head_dim // 2
       heads_per_kv = @num_heads // @num_kv_heads
-      chunk = new_tokens * head_dim     # floats per kv_head per tensor
-      kv_floats = @num_kv_heads * chunk # staging size of K (and of V)
-      q_floats = new_tokens * dm
-      staging_floats = 2 * kv_floats + q_floats
-      ws_floats = @num_heads * new_tokens * total_len
 
-      ensure_gpu_cache!(total_len)
+      # Prefill is processed in bounded chunks of query tokens. The attention
+      # workspace is O(num_heads * tokens * total_len), so attending a whole
+      # long prompt in one launch is quadratic in the prompt length (a 32k
+      # prefill with 32 heads would need ~200 GB of scratch). Chunking caps the
+      # workspace at ATTN_WS_BUDGET_FLOATS and also bounds the staging and
+      # output buffers, which were previously linear in the full prompt length.
+      max_chunk = attn_chunk_tokens(total_len)
+      max_chunk = new_tokens if new_tokens < max_chunk
+
+      chunk_floats = max_chunk * head_dim   # floats per kv_head per tensor
+      kv_cap = @num_kv_heads * chunk_floats # staging size of K (and of V)
+      q_cap = max_chunk * dm
+      staging_floats = 2 * kv_cap + q_cap
+      ws_floats = @num_heads * max_chunk * total_len
+
       @@gpu_staging, @@gpu_staging_cap = grow_dev_buf(@@gpu_staging, @@gpu_staging_cap, staging_floats)
-      @@gpu_attn_out, @@gpu_attn_out_cap = grow_dev_buf(@@gpu_attn_out, @@gpu_attn_out_cap, q_floats)
-      @@gpu_attn_ws, @@gpu_attn_ws_cap = grow_dev_buf(@@gpu_attn_ws, @@gpu_attn_ws_cap, ws_floats)
+      @@gpu_attn_out, @@gpu_attn_out_cap = grow_dev_buf(@@gpu_attn_out, @@gpu_attn_out_cap, q_cap)
+      @@gpu_attn_ws, @@gpu_attn_ws_cap = grow_dev_buf(@@gpu_attn_ws, @@gpu_attn_ws_cap, ws_floats,
+        cap_limit: ATTN_WS_BUDGET_FLOATS.to_i32)
 
       st = @@staging_host
       if st.size < staging_floats
@@ -429,53 +456,88 @@ module SHAInet
       end
       stp = st.to_unsafe
 
-      # New K/V rows: each kv_head's tail is contiguous in the CPU mirror
-      # (RoPE already applied to K at insert).
-      tail = start_pos * head_dim
-      @num_kv_heads.times do |kv_h|
-        (stp + kv_h * chunk).copy_from(@k_cache[kv_h].to_unsafe + tail, chunk)
-        (stp + kv_floats + kv_h * chunk).copy_from(@v_cache[kv_h].to_unsafe + tail, chunk)
-      end
+      # Allocated last: growing the cache re-uploads the host mirror through the
+      # append kernel, which needs the staging buffers above already sized.
+      ensure_gpu_cache!(total_len, max_chunk)
 
-      # RoPE-rotate Q (HF half-split) into the staging blob, token-major.
-      # cos/sin depend only on (pos, rotation index), so compute once per token.
       qptr = q_full.data.to_unsafe
-      qst = stp + 2 * kv_floats
+      outp = output.data.to_unsafe
+      # cos/sin depend only on (pos, rotation index), so compute once per token.
       cosv = Array(Float32).new(half, 0.0_f32)
       sinv = Array(Float32).new(half, 0.0_f32)
       cp = cosv.to_unsafe
       sp = sinv.to_unsafe
-      new_tokens.times do |i|
-        pos = start_pos + i
-        half.times do |r|
-          angle = (pos * inv_freq(r)).to_f32
-          cp[r] = Math.cos(angle).to_f32
-          sp[r] = Math.sin(angle).to_f32
+
+      off = 0
+      while off < new_tokens
+        n = Math.min(max_chunk, new_tokens - off)
+        base_pos = start_pos + off
+        cf = n * head_dim
+        kvf = @num_kv_heads * cf
+        qf = n * dm
+
+        # This chunk's new K/V rows: each kv_head's slice is contiguous in the
+        # CPU mirror (RoPE already applied to K at insert).
+        tail = base_pos * head_dim
+        @num_kv_heads.times do |kv_h|
+          (stp + kv_h * cf).copy_from(@k_cache[kv_h].to_unsafe + tail, cf)
+          (stp + kvf + kv_h * cf).copy_from(@v_cache[kv_h].to_unsafe + tail, cf)
         end
-        row = i * dm
-        @num_heads.times do |h|
-          base = row + h * head_dim
-          r = 0
-          while r < half
-            x0 = qptr[base + r]
-            x1 = qptr[base + r + half]
-            qst[base + r] = x0 * cp[r] - x1 * sp[r]
-            qst[base + r + half] = x1 * cp[r] + x0 * sp[r]
-            r += 1
+
+        # RoPE-rotate this chunk's Q (HF half-split) into the staging blob,
+        # token-major and re-based to the chunk's own first row.
+        qst = stp + 2 * kvf
+        n.times do |i|
+          pos = base_pos + i
+          half.times do |r|
+            angle = (pos * inv_freq(r)).to_f32
+            cp[r] = Math.cos(angle).to_f32
+            sp[r] = Math.sin(angle).to_f32
+          end
+          src_row = (off + i) * dm
+          dst_row = i * dm
+          @num_heads.times do |h|
+            sb = src_row + h * head_dim
+            db = dst_row + h * head_dim
+            r = 0
+            while r < half
+              x0 = qptr[sb + r]
+              x1 = qptr[sb + r + half]
+              qst[db + r] = x0 * cp[r] - x1 * sp[r]
+              qst[db + r + half] = x1 * cp[r] + x0 * sp[r]
+              r += 1
+            end
           end
         end
-      end
 
-      CUDA.memcpy(@@gpu_staging.as(Pointer(Void)), stp.as(Pointer(Void)),
-        staging_floats.to_u64 * 4_u64, CUDA::MemcpyKind::HostToDevice)
-      CUDA.kv_cache_append_f32(@@gpu_staging, @gpu_k_cache, @gpu_v_cache,
-        new_tokens, start_pos, @num_kv_heads, head_dim, @gpu_cache_cap)
-      CUDA.attention_kv_f32(@@gpu_staging + 2 * kv_floats, @gpu_k_cache, @gpu_v_cache,
-        @@gpu_attn_out, @@gpu_attn_ws, new_tokens, start_pos,
-        @num_heads, heads_per_kv, head_dim, @gpu_cache_cap, scale)
-      # Synchronous D2H read-back also orders after both kernels above.
-      CUDA.memcpy(output.data.to_unsafe.as(Pointer(Void)), @@gpu_attn_out.as(Pointer(Void)),
-        q_floats.to_u64 * 4_u64, CUDA::MemcpyKind::DeviceToHost)
+        CUDA.memcpy(@@gpu_staging.as(Pointer(Void)), stp.as(Pointer(Void)),
+          (2 * kvf + qf).to_u64 * 4_u64, CUDA::MemcpyKind::HostToDevice)
+        append_kv(n, base_pos)
+        attend_kv(@@gpu_staging + 2 * kvf, n, base_pos, heads_per_kv, scale)
+        # Synchronous D2H read-back also orders after both kernels above.
+        CUDA.memcpy((outp + off * dm).as(Pointer(Void)), @@gpu_attn_out.as(Pointer(Void)),
+          qf.to_u64 * 4_u64, CUDA::MemcpyKind::DeviceToHost)
+
+        off += n
+      end
+    end
+
+    # Query tokens attended per kernel launch. Sized so the attention scratch
+    # (num_heads * tokens * total_len floats) stays within ATTN_WS_BUDGET_FLOATS,
+    # capped at ATTN_CHUNK_MAX. Override with SHAINET_ATTN_CHUNK.
+    #
+    # Public so the budget math can be asserted directly rather than inferred
+    # from an allocation side effect.
+    def attn_chunk_tokens(total_len : Int32) : Int32
+      if env = ENV["SHAINET_ATTN_CHUNK"]?
+        forced = env.to_i?
+        return forced if forced && forced > 0
+      end
+      per_token = @num_heads.to_i64 * total_len.to_i64
+      return ATTN_CHUNK_MAX if per_token <= 0
+      n = (ATTN_WS_BUDGET_FLOATS // per_token).to_i32
+      return 1 if n < 1
+      n > ATTN_CHUNK_MAX ? ATTN_CHUNK_MAX : n
     end
 
     # GPU attention is used whenever the CUDA kernels are loadable and the
@@ -491,42 +553,146 @@ module SHAInet
       avail
     end
 
+    # Whether the device KV cache is kept in fp16. Decided once, at the first
+    # allocation, and then fixed for the lifetime of the buffers so a resize
+    # never has to reinterpret existing contents. Requires the fp16 kernels to
+    # be present in the loaded kernel library (older prebuilt .so files predate
+    # them); opt out with SHAINET_KV_FP16=0.
+    def kv_cache_fp16? : Bool
+      flag = @kv_fp16
+      return flag unless flag.nil?
+      flag = ENV.fetch("SHAINET_KV_FP16", "1") != "0" && CUDA.kv_f16_kernels_available?
+      @kv_fp16 = flag
+      flag
+    end
+
+    # Current device footprint of this block's KV cache in bytes (K and V), at
+    # the allocated capacity rather than the used length.
+    def kv_cache_bytes : UInt64
+      return 0_u64 if @gpu_cache_cap == 0
+      2_u64 * @num_kv_heads.to_u64 * @gpu_cache_cap.to_u64 * @head_dim.to_u64 * kv_elem_bytes
+    end
+
+    # Bytes per cache element for the active dtype.
+    private def kv_elem_bytes : UInt64
+      kv_cache_fp16? ? 2_u64 : 4_u64
+    end
+
     # Ensure the device KV cache holds at least total_len positions per
     # kv_head. Grows by doubling; on growth the CPU mirror (which already
     # contains the new tokens) is re-uploaded into the fresh buffers.
-    private def ensure_gpu_cache!(total_len : Int32)
+    #
+    # `max_chunk` bounds the staging used by the re-upload, so this must be
+    # called after the staging buffers have been sized for that chunk.
+    private def ensure_gpu_cache!(total_len : Int32, max_chunk : Int32)
       return if @gpu_cache_cap >= total_len
       head_dim = @head_dim
       new_cap = Math.max(256, Math.max(total_len, @gpu_cache_cap * 2))
-      bytes = @num_kv_heads.to_u64 * new_cap.to_u64 * head_dim.to_u64 * 4_u64
-      CUDA.free(@gpu_k_cache.as(Pointer(Void))) unless @gpu_k_cache.null?
-      CUDA.free(@gpu_v_cache.as(Pointer(Void))) unless @gpu_v_cache.null?
-      kp = Pointer(Float32).null
-      vp = Pointer(Float32).null
-      CUDA.malloc(pointerof(kp).as(Pointer(Pointer(Void))), bytes)
-      CUDA.malloc(pointerof(vp).as(Pointer(Pointer(Void))), bytes)
+      bytes = @num_kv_heads.to_u64 * new_cap.to_u64 * head_dim.to_u64 * kv_elem_bytes
+      CUDA.free(@gpu_k_cache) unless @gpu_k_cache.null?
+      CUDA.free(@gpu_v_cache) unless @gpu_v_cache.null?
+      kp = Pointer(Void).null
+      vp = Pointer(Void).null
+      CUDA.malloc(pointerof(kp), bytes)
+      CUDA.malloc(pointerof(vp), bytes)
       @gpu_k_cache = kp
       @gpu_v_cache = vp
       @gpu_cache_cap = new_cap
-      @num_kv_heads.times do |kv_h|
-        used = @k_cache[kv_h].size
-        next if used == 0
-        dst_off = kv_h.to_i64 * new_cap * head_dim
-        CUDA.memcpy((kp + dst_off).as(Pointer(Void)), @k_cache[kv_h].to_unsafe.as(Pointer(Void)),
-          used.to_u64 * 4_u64, CUDA::MemcpyKind::HostToDevice)
-        CUDA.memcpy((vp + dst_off).as(Pointer(Void)), @v_cache[kv_h].to_unsafe.as(Pointer(Void)),
-          used.to_u64 * 4_u64, CUDA::MemcpyKind::HostToDevice)
+
+      used = @num_kv_heads > 0 ? @k_cache[0].size // head_dim : 0
+      reupload_gpu_cache!(used, max_chunk) if used > 0
+    end
+
+    # Re-populate the freshly grown device cache from the host mirror, in chunks
+    # of at most max_chunk positions. This goes through the append kernel rather
+    # than a raw memcpy so the fp32 mirror is converted for an fp16 cache, and so
+    # exactly one layout description exists for both dtypes.
+    private def reupload_gpu_cache!(upto : Int32, max_chunk : Int32)
+      head_dim = @head_dim
+      step = max_chunk < 1 ? 1 : max_chunk
+      st = @@staging_host
+      stp = st.to_unsafe
+
+      pos = 0
+      while pos < upto
+        n = Math.min(step, upto - pos)
+        cf = n * head_dim
+        kvf = @num_kv_heads * cf
+        src_off = pos * head_dim
+        @num_kv_heads.times do |kv_h|
+          (stp + kv_h * cf).copy_from(@k_cache[kv_h].to_unsafe + src_off, cf)
+          (stp + kvf + kv_h * cf).copy_from(@v_cache[kv_h].to_unsafe + src_off, cf)
+        end
+        CUDA.memcpy(@@gpu_staging.as(Pointer(Void)), stp.as(Pointer(Void)),
+          (2 * kvf).to_u64 * 4_u64, CUDA::MemcpyKind::HostToDevice)
+        append_kv(n, pos)
+        pos += n
       end
     end
 
+    # Dispatch the cache-append kernel for the active cache dtype. Staging is
+    # always fp32 and lives at the head of @@gpu_staging.
+    private def append_kv(n : Int32, base_pos : Int32)
+      if kv_cache_fp16?
+        CUDA.kv_cache_append_f16(@@gpu_staging, @gpu_k_cache.as(Pointer(UInt16)),
+          @gpu_v_cache.as(Pointer(UInt16)), n, base_pos, @num_kv_heads,
+          @head_dim, @gpu_cache_cap)
+      else
+        CUDA.kv_cache_append_f32(@@gpu_staging, @gpu_k_cache.as(Pointer(Float32)),
+          @gpu_v_cache.as(Pointer(Float32)), n, base_pos, @num_kv_heads,
+          @head_dim, @gpu_cache_cap)
+      end
+    end
+
+    # Dispatch the attention kernel for the active cache dtype.
+    private def attend_kv(q : Pointer(Float32), n : Int32, base_pos : Int32,
+                          heads_per_kv : Int32, scale : Float32)
+      if kv_cache_fp16?
+        CUDA.attention_kv_f16(q, @gpu_k_cache.as(Pointer(UInt16)),
+          @gpu_v_cache.as(Pointer(UInt16)), @@gpu_attn_out, @@gpu_attn_ws,
+          n, base_pos, @num_heads, heads_per_kv, @head_dim, @gpu_cache_cap, scale)
+      else
+        CUDA.attention_kv_f32(q, @gpu_k_cache.as(Pointer(Float32)),
+          @gpu_v_cache.as(Pointer(Float32)), @@gpu_attn_out, @@gpu_attn_ws,
+          n, base_pos, @num_heads, heads_per_kv, @head_dim, @gpu_cache_cap, scale)
+      end
+    end
+
+    # Pure size policy for grow_dev_buf, split out so it can be asserted directly
+    # without allocating anything or driving a GPU.
+    #
+    # Doubles to avoid realloc churn, but `cap_limit` clamps the doubling so a
+    # budgeted buffer cannot overshoot its budget: without the clamp a buffer
+    # sitting just under its limit doubles straight past it, making the effective
+    # ceiling 2x the stated one. A single request larger than the limit still
+    # wins, since under-allocating would corrupt the kernel's writes.
+    def self.next_buf_cap(cur_cap : Int32, needed : Int32, cap_limit : Int32? = nil) : Int32
+      doubled = cur_cap * 2
+      doubled = cap_limit if cap_limit && doubled > cap_limit
+      Math.max(needed, doubled)
+    end
+
     # Grow-only device buffer; frees and reallocates only when too small.
-    private def grow_dev_buf(ptr : Pointer(Float32), cur_cap : Int32, needed : Int32) : {Pointer(Float32), Int32}
+    private def grow_dev_buf(ptr : Pointer(Float32), cur_cap : Int32, needed : Int32,
+                             cap_limit : Int32? = nil) : {Pointer(Float32), Int32}
       return {ptr, cur_cap} if !ptr.null? && cur_cap >= needed
       CUDA.free(ptr.as(Pointer(Void))) unless ptr.null?
-      new_cap = Math.max(needed, cur_cap * 2)
+      new_cap = LlamaBlock.next_buf_cap(cur_cap, needed, cap_limit)
       np = Pointer(Float32).null
       CUDA.malloc(pointerof(np).as(Pointer(Pointer(Void))), new_cap.to_u64 * 4_u64)
       {np, new_cap}
+    end
+
+    # Diagnostics for the shared attention scratch. Chunked prefill must hold the
+    # workspace to O(num_heads * chunk * total_len) rather than the unchunked
+    # O(num_heads * seq^2); these let a spec assert that bound directly instead
+    # of trusting it.
+    def self.attn_ws_floats : Int32
+      @@gpu_attn_ws_cap
+    end
+
+    def self.attn_staging_floats : Int32
+      @@gpu_staging_cap
     end
 
     # --- GPU attention (full sequence, stays on device) ---
