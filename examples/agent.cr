@@ -165,11 +165,15 @@ module AgentDemo
   class StreamRenderer
     TAGS = {"<think>" => :think_open, "</think>" => :think_close,
             "<tool_call>" => :tool_open, "</tool_call>" => :tool_close}
+    SPINNER = %w[⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏]
 
     def initialize(@io : IO)
       @mode = :normal
       @pending = ""
       @started = false
+      @tool_chars = 0
+      @spin = 0
+      @status_shown = false
     end
 
     def feed(text : String)
@@ -197,12 +201,23 @@ module AgentDemo
     end
 
     def finish
+      clear_status
       emit(@pending)
       @pending = ""
     end
 
     private def emit(t : String)
       return if t.empty?
+      # Hidden tool-call tokens (the model writing a whole file inline) would
+      # otherwise be dead silence — show a live spinner + byte count instead.
+      if @mode == :tool
+        @tool_chars += t.size
+        @spin = (@spin + 1) % SPINNER.size
+        @io.print "\r  #{"#{SPINNER[@spin]} writing tool call… (#{@tool_chars} chars)".colorize(:dark_gray)}"
+        @io.flush
+        @status_shown = true
+        return
+      end
       # Trim leading whitespace before the very first visible chars.
       unless @started
         t = t.lstrip
@@ -212,16 +227,24 @@ module AgentDemo
       case @mode
       when :think  then @io.print t.colorize(:dark_gray)
       when :normal then @io.print t
-      end # :tool -> hidden
+      end
       @io.flush
+    end
+
+    # Erase the in-progress status line (so following output starts clean).
+    private def clear_status
+      return unless @status_shown
+      @io.print "\r" + (" " * 36) + "\r"
+      @io.flush
+      @status_shown = false
     end
 
     private def apply(action)
       case action
       when :think_open  then @mode = :think
       when :think_close then @mode = :normal
-      when :tool_open   then @mode = :tool
-      when :tool_close  then @mode = :normal
+      when :tool_open   then @tool_chars = 0; @mode = :tool
+      when :tool_close  then clear_status; @mode = :normal
       end
     end
 
