@@ -86,18 +86,143 @@ module SHAInet
     # run via SwiGLUFF#forward (which itself dispatches to GPU gemv when its
     # weights are quantized), and their outputs are summed with the gate weights.
     def forward(x : SimpleMatrix) : SimpleMatrix
-      logits = router_logits(x)
+      if result = forward_device_decode(x)
+        return result
+      end
+      logits = Profile.measure("ffn.router") { router_logits(x) }
       out = SimpleMatrix.zeros(x.rows, @d_model)
       row = SimpleMatrix.new(1, @d_model)
       x.rows.times do |t|
-        gating = top_k_gating(logits, t)
+        gating = Profile.measure("ffn.topk") { top_k_gating(logits, t) }
         @d_model.times { |c| row[0, c] = x[t, c] }
         gating.each do |(e, w)|
           ey = @experts[e].forward(row) # [1, d_model]
-          @d_model.times { |c| out[t, c] = out[t, c] + w * ey[0, c] }
+          Profile.measure("ffn.combine") do
+            @d_model.times { |c| out[t, c] = out[t, c] + w * ey[0, c] }
+          end
         end
       end
       out
+    end
+
+    # Device-resident workspaces for the decode path, allocated once.
+    @dev_x : CudaMatrix? = nil
+    @dev_out : CudaMatrix? = nil
+    @dev_expert_out : CudaMatrix? = nil
+
+    @@device_decode : Bool? = nil
+
+    # Device-resident decode is the default; SHAINET_MOE_DEVICE=0 forces the host
+    # path, which is how the A/B for this change is taken and how the fallback
+    # stays exercised.
+    def self.device_decode_enabled? : Bool
+      flag = @@device_decode
+      return flag unless flag.nil?
+      flag = ENV.fetch("SHAINET_MOE_DEVICE", "1") != "0"
+      @@device_decode = flag
+      flag
+    end
+
+    # Pass nil to forget the decision and re-read the environment.
+    def self.device_decode_enabled=(value : Bool?)
+      @@device_decode = value
+    end
+
+    # True when the experts can run the device path, so a caller can keep the whole
+    # block on the device.
+    def device_row_capable? : Bool
+      return false unless self.class.device_decode_enabled?
+      return false unless CUDA.fully_available?
+      return false unless @router.is_a?(CudaMatrix)
+      first = @experts.first?
+      !!(first && first.device_resident_capable?)
+    end
+
+    # Device row in, device row out, with NO readback. This is the variant the block
+    # chain uses: the FFN result feeds the block's residual add on the device, so the
+    # single readback that forward_device_decode still pays disappears entirely.
+    #
+    # The returned matrix is a workspace owned by this layer, so consume it before the
+    # next call.
+    def forward_device_row(x : CudaMatrix) : CudaMatrix
+      out_dev = (@dev_out ||= CudaMatrix.new(1, @d_model))
+      expert_out = (@dev_expert_out ||= CudaMatrix.new(1, @d_model))
+
+      logits = Profile.measure("ffn.router") { (x * @router.as(CudaMatrix)).to_simple }
+      gating = Profile.measure("ffn.topk") { top_k_gating(logits, 0) }
+
+      out_dev.zero!
+      handle = CUDA.create_handle
+      begin
+        gating.each do |(e, w)|
+          @experts[e].forward_device(x, expert_out)
+          Profile.measure("ffn.dev_combine") do
+            CUDA.axpy(handle, w, expert_out.device_ptr.not_nil!, out_dev.device_ptr.not_nil!, @d_model)
+          end
+        end
+      ensure
+        CUDA.destroy_handle(handle)
+      end
+      out_dev.mark_device_dirty!
+      out_dev
+    end
+
+    # Decode (single token) forward that keeps the activation on the device across
+    # every selected expert, so the step costs ONE host-to-device upload and ONE
+    # readback instead of three readbacks per expert.
+    #
+    # Returns nil when the fast path does not apply (prefill, no CUDA, unquantized
+    # experts, or a .so without the fused SwiGLU kernel), and the caller falls back
+    # to the host path.
+    #
+    # Routing still round-trips: the top-k choice is a host decision, and the logits
+    # are one small row per token rather than per expert, so it is not on the hot
+    # path this exists to fix.
+    private def forward_device_decode(x : SimpleMatrix) : SimpleMatrix?
+      return unless x.rows == 1
+      return unless self.class.device_decode_enabled?
+      return unless CUDA.fully_available?
+      return unless @router.is_a?(CudaMatrix)
+      first = @experts.first?
+      return unless first && first.device_resident_capable?
+
+      xb = (@dev_x ||= CudaMatrix.new(1, @d_model))
+      out_dev = (@dev_out ||= CudaMatrix.new(1, @d_model))
+      expert_out = (@dev_expert_out ||= CudaMatrix.new(1, @d_model))
+
+      # One upload, reused by the router GEMM and by every expert.
+      Profile.measure("ffn.dev_upload") do
+        xb.raw_data.to_unsafe.copy_from(x.data.to_unsafe, @d_model)
+        xb.mark_host_modified!
+        xb.sync_to_device!("moe_dev_in")
+      end
+
+      logits = Profile.measure("ffn.router") { (xb * @router.as(CudaMatrix)).to_simple }
+      gating = Profile.measure("ffn.topk") { top_k_gating(logits, 0) }
+
+      out_dev.zero!
+      handle = CUDA.create_handle
+      begin
+        gating.each do |(e, w)|
+          @experts[e].forward_device(xb, expert_out)
+          # out += w * expert_out, on the device. The GEMV above only launched, so
+          # this is ordered behind it on the default stream without a sync.
+          Profile.measure("ffn.dev_combine") do
+            CUDA.axpy(handle, w, expert_out.device_ptr.not_nil!, out_dev.device_ptr.not_nil!, @d_model)
+          end
+        end
+      ensure
+        CUDA.destroy_handle(handle)
+      end
+
+      out_dev.mark_device_dirty!
+      result = SimpleMatrix.new(1, @d_model)
+      # The single readback for the whole FFN, and the only sync point in it.
+      Profile.measure("ffn.dev_readback") do
+        out_dev.sync_from_device!("moe_dev_out")
+        result.data.to_unsafe.copy_from(out_dev.raw_data.to_unsafe, @d_model)
+      end
+      result
     end
 
     # fp32 GPU path. Routing + expert evaluation happen through the SimpleMatrix

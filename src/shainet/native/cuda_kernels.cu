@@ -331,6 +331,104 @@ void sigmoid_forward(float* activations, float* derivatives, const float* linear
     }
 }
 
+// hidden = silu(gate) * up, the SwiGLU activation, fused so the FFN's gate and up
+// projections never have to come back to the host to be combined. Uses expf
+// rather than __expf: the fast intrinsic drifts far enough from the CPU path to
+// break device/host parity, and this kernel is memory bound anyway.
+__global__ void swiglu_forward_kernel(float* hidden, const float* gate, const float* up, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= size) return;
+    float g = gate[idx];
+    hidden[idx] = (g / (1.0f + expf(-g))) * up[idx];
+}
+
+// Deliberately does NOT cudaDeviceSynchronize: this sits between two GEMV launches
+// on the default stream, so stream ordering already guarantees the gate/up writes
+// are visible. Syncing here would reintroduce the pipeline stall that keeping
+// activations on the device exists to remove.
+void swiglu_forward(float* hidden, const float* gate, const float* up, int size) {
+    int threads_per_block = 256;
+    int blocks = (size + threads_per_block - 1) / threads_per_block;
+
+    swiglu_forward_kernel<<<blocks, threads_per_block>>>(hidden, gate, up, size);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in swiglu_forward: %s\n", cudaGetErrorString(err));
+    }
+}
+
+// out = x / sqrt(mean(x^2) + eps) * gamma, one BLOCK per row so the sum of squares
+// is a shared-memory reduction rather than a host loop.
+//
+// Until this existed there was no RMSNorm kernel at all, and the CudaMatrix path
+// read the row back to the host, normalised it there and pushed it back, which made
+// a device-resident block chain impossible: every norm broke the chain.
+//
+// Accumulates in float, not double. The host path sums in Float64, so results are
+// close but not bit-identical; the specs assert parity to a tolerance and the real
+// check is that greedy decoding still picks the same tokens.
+__global__ void rms_norm_forward_kernel(float* out, const float* x, const float* gamma,
+                                        int rows, int cols, float eps) {
+    extern __shared__ float sdata[];
+    int row = blockIdx.x;
+    if (row >= rows) return;
+
+    const float* xr = x + (size_t)row * (size_t)cols;
+    float* orow = out + (size_t)row * (size_t)cols;
+
+    float local = 0.0f;
+    for (int j = threadIdx.x; j < cols; j += blockDim.x) {
+        float v = xr[j];
+        local += v * v;
+    }
+    sdata[threadIdx.x] = local;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x + s];
+        __syncthreads();
+    }
+
+    float inv = 1.0f / sqrtf(sdata[0] / (float)cols + eps);
+    for (int j = threadIdx.x; j < cols; j += blockDim.x) {
+        orow[j] = xr[j] * inv * gamma[j];
+    }
+}
+
+// No cudaDeviceSynchronize, same reasoning as swiglu_forward: it is ordered on the
+// default stream between the launches that produce and consume the row.
+void rms_norm_forward(float* out, const float* x, const float* gamma,
+                      int rows, int cols, float eps) {
+    int threads_per_block = 256;
+    // Power-of-two thread count is required by the halving reduction above.
+    size_t shmem = threads_per_block * sizeof(float);
+
+    rms_norm_forward_kernel<<<rows, threads_per_block, shmem>>>(out, x, gamma, rows, cols, eps);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in rms_norm_forward: %s\n", cudaGetErrorString(err));
+    }
+}
+
+// dst = dst + src, elementwise, for the block's residual adds. cuBLAS axpy could do
+// this, but it needs a handle per call and the residual is on the hot path.
+__global__ void add_inplace_kernel(float* dst, const float* src, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= size) return;
+    dst[idx] += src[idx];
+}
+
+void add_inplace(float* dst, const float* src, int size) {
+    int threads_per_block = 256;
+    int blocks = (size + threads_per_block - 1) / threads_per_block;
+
+    add_inplace_kernel<<<blocks, threads_per_block>>>(dst, src, size);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in add_inplace: %s\n", cudaGetErrorString(err));
+    }
+}
+
 __global__ void apply_gradient_kernel(float* local_grad, const float* grad, const float* derivatives, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= size) return;

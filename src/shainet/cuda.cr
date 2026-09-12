@@ -308,6 +308,11 @@ module SHAInet
     @@kv_cache_append_f32_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Void)?
     @@kv_cache_append_f16_proc : Proc(Pointer(Float32), Pointer(UInt16), Pointer(UInt16), Int32, Int32, Int32, Int32, Int32, Void)?
     @@kv_f16_available : Bool? = nil
+    @@swiglu_forward_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Void)?
+    @@swiglu_available : Bool? = nil
+    @@rms_norm_forward_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Float32, Void)?
+    @@add_inplace_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Void)?
+    @@block_device_available : Bool? = nil
     @@attention_kv_f32_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void)?
     @@attention_kv_f16_proc : Proc(Pointer(Float32), Pointer(UInt16), Pointer(UInt16), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void)?
 
@@ -430,6 +435,102 @@ module SHAInet
         Log.error { "CUDA Error in set_cols: #{ex}" }
         raise ex
       end
+    end
+
+    # hidden = silu(gate) * up, computed on the device so the FFN's gate and up
+    # projections do not have to be read back to the host to be combined.
+    def swiglu_forward(hidden : Pointer(Float32), gate : Pointer(Float32), up : Pointer(Float32), size : Int32)
+      unless fn = @@swiglu_forward_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "swiglu_forward")
+          unless sym.null?
+            @@swiglu_forward_proc = Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@swiglu_forward_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(hidden, gate, up, size)
+    end
+
+    # False when the loaded .so predates the fused SwiGLU kernel, so callers can
+    # fall back to the host path instead of raising.
+    def swiglu_kernel_available? : Bool
+      avail = @@swiglu_available
+      return avail unless avail.nil?
+      result = begin
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        @@kernels_handle.null? ? false : !LibC.dlsym(@@kernels_handle, "swiglu_forward").null?
+      rescue
+        false
+      end
+      @@swiglu_available = result
+      result
+    end
+
+    # out = x / sqrt(mean(x^2) + eps) * gamma, computed on the device so a norm no
+    # longer breaks a device-resident chain.
+    def rms_norm_forward(dst : Pointer(Float32), src : Pointer(Float32), gamma : Pointer(Float32),
+                         rows : Int32, cols : Int32, eps : Float32)
+      unless fn = @@rms_norm_forward_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "rms_norm_forward")
+          unless sym.null?
+            @@rms_norm_forward_proc = Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Float32, Void).new(sym, Pointer(Void).null)
+            fn = @@rms_norm_forward_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(dst, src, gamma, rows, cols, eps)
+    end
+
+    # dst += src elementwise, for the block's residual adds.
+    def add_inplace(dst : Pointer(Float32), src : Pointer(Float32), size : Int32)
+      unless fn = @@add_inplace_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "add_inplace")
+          unless sym.null?
+            @@add_inplace_proc = Proc(Pointer(Float32), Pointer(Float32), Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@add_inplace_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(dst, src, size)
+    end
+
+    # False when the loaded .so predates the block-residency kernels, so callers fall
+    # back to the host path instead of raising.
+    def block_device_kernels_available? : Bool
+      avail = @@block_device_available
+      return avail unless avail.nil?
+      result = begin
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        if @@kernels_handle.null?
+          false
+        else
+          !LibC.dlsym(@@kernels_handle, "rms_norm_forward").null? &&
+          !LibC.dlsym(@@kernels_handle, "add_inplace").null?
+        end
+      rescue
+        false
+      end
+      @@block_device_available = result
+      result
     end
 
     def row_mean_var(src : Pointer(Float32), mean : Pointer(Float32), var : Pointer(Float32), rows : Int32, cols : Int32)
