@@ -199,7 +199,17 @@ net.train(
   environment variables:
   - `SHAINET_Q4=1` — 4-bit weight quantization
   - `SHAINET_MOE_OFFLOAD=1` — offload MoE experts to host RAM
-  - `SHAINET_EXPERT_CACHE_MB=<N>` — VRAM budget for the hot-expert cache (`0` disables)
+  - `SHAINET_DENSE_OFFLOAD=1` — offload the **dense** weights too (attention
+    projections, dense FFN, lm_head). Requires `SHAINET_Q4=1`. This is what takes
+    dense models off the VRAM budget, so a far larger dense model fits. Unlike
+    experts, dense weights are touched on every token, so there is no sparsity to
+    amortize the transfer: expect slower decode. **Pair it with
+    `SHAINET_EXPERT_CACHE_MB`** — left unbounded the hot cache promotes the dense
+    weights straight back onto the card and you can end up using more VRAM than
+    not offloading (measured on Qwen3-0.6B: 586 MB with the default budget vs
+    483 MB not offloading vs 228 MB with the cache disabled, at 51 ms/step
+    resident and 80 ms/step streamed, with identical greedy output throughout).
+  - `SHAINET_EXPERT_CACHE_MB=<N>` — VRAM budget for the hot-weight cache (`0` disables)
 
   For example, Qwen3-Coder-30B-A3B (30B params, ~3B active) runs on a 16 GB GPU.
 - Tool-using coding agent: `examples/agent.cr` is a small CLI coding agent

@@ -95,11 +95,19 @@ module SHAInet
 
     def initialize(@d_model : Int32, @num_heads : Int32, ff_hidden : Int32,
                    eps : Float64 = 1e-6, @rope_theta : Float64 = 10000.0,
-                   @num_kv_heads : Int32 = @num_heads, head_dim : Int32? = nil,
+                   num_kv_heads : Int32? = nil, head_dim : Int32? = nil,
                    moe_experts : Int32? = nil, moe_top_k : Int32 = 8,
                    moe_norm_topk : Bool = true, moe_ff_hidden : Int32? = nil,
                    moe_offload : Bool = false)
       super(@d_model, SHAInet.none)
+      # num_kv_heads defaults to num_heads (no grouped-query attention). It cannot
+      # be written as `@num_kv_heads : Int32 = @num_heads` in the parameter list:
+      # a default argument that reads another ivar assigned in the same list counts
+      # as a use-before-initialize, which makes @num_heads nilable and makes the
+      # whole constructor uninstantiable unless the caller passes num_kv_heads
+      # explicitly. Every existing caller happened to pass it, so the default was
+      # never exercised.
+      @num_kv_heads = num_kv_heads || @num_heads
       raise ArgumentError.new("num_heads must be divisible by num_kv_heads") unless @num_kv_heads > 0 && @num_heads % @num_kv_heads == 0
       # head_dim defaults to d_model/num_heads (LLaMA/Qwen2). Qwen3 passes it
       # explicitly (e.g. 128), so q_dim = num_heads*head_dim may differ from d_model.
@@ -153,14 +161,20 @@ module SHAInet
       end
     end
 
-    def to_gpu!(quantize : Bool = false, bits : Int32 = 8)
+    # When offload is true the (Q4-only) dense weights are kept in host RAM and
+    # streamed to the GPU on demand, which is what moves the dense model ceiling
+    # off the 16 GB VRAM budget and onto host RAM. Unlike MoE experts, every one
+    # of these weights is touched on EVERY token, so there is no sparsity to
+    # amortize the transfer: this trades decode speed for capacity.
+    def to_gpu!(quantize : Bool = false, bits : Int32 = 8, offload : Bool = false)
       return unless CUDA.fully_available?
       if quantize
-        @w_q = to_quant(@w_q, bits)
-        @w_k = to_quant(@w_k, bits)
-        @w_v = to_quant(@w_v, bits)
-        @w_o = to_quant(@w_o, bits)
+        @w_q = to_quant(@w_q, bits, offload)
+        @w_k = to_quant(@w_k, bits, offload)
+        @w_v = to_quant(@w_v, bits, offload)
+        @w_o = to_quant(@w_o, bits, offload)
       else
+        raise ArgumentError.new("dense offload requires quantization (offload is Q4-only)") if offload
         # Only promote host weights; leave existing CudaMatrix/QuantizedWeight as-is.
         @w_q = @w_q.as(SimpleMatrix).to_cuda if @w_q.is_a?(SimpleMatrix)
         @w_k = @w_k.as(SimpleMatrix).to_cuda if @w_k.is_a?(SimpleMatrix)
@@ -169,22 +183,31 @@ module SHAInet
       end
       @norm1.to_gpu!
       @norm2.to_gpu!
-      @ffn.to_gpu!(quantize, bits)
+      # A dense SwiGLU takes the offload flag. MoE experts have their own
+      # (moe_offload) flag decided at construction, and its router stays fp32,
+      # so there is nothing for dense offload to do there.
+      case f = @ffn
+      when SwiGLUFF then f.to_gpu!(quantize, bits, offload)
+      else               f.to_gpu!(quantize, bits)
+      end
     end
 
     # Quantize a weight to the requested bit width: bits == 4 -> Q4, bits == 8 ->
-    # Q8. Already-quantized weights are returned unchanged (we quantize once
-    # during load, so the format is never switched in place).
-    private def to_quant(w : SimpleMatrix | CudaMatrix | QuantizedWeight, bits : Int32) : QuantizedWeight
+    # Q8. When offload is true the (Q4-only) weight is kept in host RAM as a
+    # Q4HostMatrix and streamed on demand. Already-quantized weights are returned
+    # unchanged (we quantize once during load, so the format is never switched in
+    # place).
+    private def to_quant(w : SimpleMatrix | CudaMatrix | QuantizedWeight, bits : Int32, offload : Bool = false) : QuantizedWeight
       raise ArgumentError.new("unsupported quantization bits: #{bits} (expected 8 or 4)") unless bits == 8 || bits == 4
+      raise ArgumentError.new("dense offload currently supports 4-bit only (got #{bits}-bit)") if offload && bits != 4
       case w
       when QuantizedWeight then w
       when CudaMatrix
         sm = w.to_simple
-        bits == 4 ? Q4CudaMatrix.from_simple(sm) : QuantizedCudaMatrix.from_simple(sm)
+        offload ? Q4HostMatrix.from_simple(sm) : (bits == 4 ? Q4CudaMatrix.from_simple(sm) : QuantizedCudaMatrix.from_simple(sm))
       else
         sm = w.as(SimpleMatrix)
-        bits == 4 ? Q4CudaMatrix.from_simple(sm) : QuantizedCudaMatrix.from_simple(sm)
+        offload ? Q4HostMatrix.from_simple(sm) : (bits == 4 ? Q4CudaMatrix.from_simple(sm) : QuantizedCudaMatrix.from_simple(sm))
       end
     end
 

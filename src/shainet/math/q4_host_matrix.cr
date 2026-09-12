@@ -139,6 +139,31 @@ module SHAInet
       end
     end
 
+    # Set the hot-cache budget explicitly, overriding the env var and the default.
+    #
+    # Needed because the default is BOTH process-global and memoized on first use
+    # (70% of whatever VRAM happened to be free then), so SHAINET_EXPERT_CACHE_MB
+    # cannot steer it after the first weight has been touched. Callers that must
+    # bound VRAM deterministically, and specs that must not let one example's
+    # cache starve later ones, set it here instead.
+    def self.budget_bytes=(bytes : UInt64) : UInt64
+      @@gpu_mutex.synchronize { @@budget_bytes = bytes }
+      bytes
+    end
+
+    # Evict every resident copy and drop the shared scratch, returning that VRAM
+    # to the device. The cache is otherwise held for the life of the process.
+    def self.release_cache!
+      @@gpu_mutex.synchronize do
+        @@resident.each_value(&.free!)
+        @@resident.clear
+        @@scratch.each_value(&.free!)
+        @@scratch.clear
+        @@freq.clear
+        @@used_bytes = 0_u64
+      end
+    end
+
     def self.cache_stats : NamedTuple(resident: Int32, used_mb: Float64, budget_mb: Float64, hits: UInt64, misses: UInt64, hit_rate: Float64)
       @@gpu_mutex.synchronize do
         total = @@hits + @@misses
