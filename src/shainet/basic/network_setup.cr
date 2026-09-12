@@ -38,7 +38,9 @@ module SHAInet
     property? quantize_weights : Bool = false
 
     # Quantized lm_head weight (populated by quantize! when CUDA is available).
-    @lm_head_q : QuantizedWeight?
+    # Readable so callers and specs can inspect its residency (a Q4HostMatrix
+    # reports device_bytes 0; a Q4CudaMatrix reports its real VRAM footprint).
+    getter lm_head_q : QuantizedWeight?
     # Persistent decode buffers for the quantized lm_head GEMV (reused per token).
     @lm_head_x : CudaMatrix?
     @lm_head_r : CudaMatrix?
@@ -162,8 +164,16 @@ module SHAInet
     # bit width: bits == 8 -> Q8_0 (int8), bits == 4 -> Q4_0 (4-bit), both with
     # per-32-block fp32 scales. Opt-in; the fp32 path is untouched. Requires CUDA
     # + custom kernels. After this, run with use_kv_cache = true.
-    def quantize!(bits : Int32 = 8)
+    #
+    # When offload is true the dense weights (attention projections, dense FFN,
+    # lm_head) are kept as packed Q4 in host RAM and streamed to the GPU on
+    # demand, the same mechanism MoE experts already use. This is a CAPACITY
+    # trade: it takes the dense weights off the VRAM budget so a much larger
+    # dense model fits, at the cost of PCIe traffic on every token (dense weights
+    # have no expert sparsity to amortize the transfer).
+    def quantize!(bits : Int32 = 8, offload : Bool = false)
       raise ArgumentError.new("unsupported quantization bits: #{bits} (expected 8 or 4)") unless bits == 8 || bits == 4
+      raise ArgumentError.new("dense offload currently supports 4-bit only (got #{bits}-bit)") if offload && bits != 4
       unless CUDA.fully_available?
         Log.warn { "quantize!: CUDA kernels unavailable, leaving weights in fp32" }
         return self
@@ -171,17 +181,24 @@ module SHAInet
 
       @quantize_weights = true
       @transformer_layers.each do |l|
-        l.as(LlamaBlock).to_gpu!(quantize: true, bits: bits) if l.is_a?(LlamaBlock)
+        l.as(LlamaBlock).to_gpu!(quantize: true, bits: bits, offload: offload) if l.is_a?(LlamaBlock)
       end
 
       # Quantize the output projection (lm_head). Stored separately so the
-      # generic MatrixLayer weight union stays fp32/CudaMatrix only.
+      # generic MatrixLayer weight union stays fp32/CudaMatrix only. On a large
+      # vocabulary this is one of the biggest single dense weights (Qwen3's
+      # 151936-wide head is ~1.2 GB in fp32), so it is the highest-value single
+      # tensor to move off the device.
       out_layer = @output_layers.last?
       if out_layer
         w = out_layer.weights
         sm = w.is_a?(SimpleMatrix) ? w : (w.is_a?(CudaMatrix) ? w.to_simple : nil)
         if sm
-          @lm_head_q = bits == 4 ? Q4CudaMatrix.from_simple(sm) : QuantizedCudaMatrix.from_simple(sm)
+          @lm_head_q = if offload
+                         Q4HostMatrix.from_simple(sm)
+                       else
+                         bits == 4 ? Q4CudaMatrix.from_simple(sm) : QuantizedCudaMatrix.from_simple(sm)
+                       end
         end
       end
 

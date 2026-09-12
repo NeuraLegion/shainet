@@ -298,6 +298,23 @@ module SHAInet
         # Offload MoE experts to host RAM (streamed to GPU on demand) when
         # requested — lets large MoE models fit small GPUs. Q4 only.
         moe_offload = ENV.fetch("SHAINET_MOE_OFFLOAD", "0") == "1"
+        # Offload the DENSE weights too (attention projections, dense FFN,
+        # lm_head). This is what lifts the dense-model ceiling off VRAM; unlike
+        # experts these are touched every token, so it costs PCIe bandwidth.
+        dense_offload = ENV.fetch("SHAINET_DENSE_OFFLOAD", "0") == "1"
+        if dense_offload && !(do_quant && bits == 4)
+          raise ArgumentError.new("SHAINET_DENSE_OFFLOAD=1 requires 4-bit quantization (set SHAINET_Q4=1); got quantize=#{quantize} bits=#{bits}")
+        end
+        # Dense offload only reduces VRAM if the hot cache is BOUNDED. Left at its
+        # default (70% of free VRAM) the cache promotes the dense weights straight
+        # back onto the card, and because they are touched every token it keeps
+        # them there: measured on Qwen3-0.6B the default budget gave a HIGHER peak
+        # than not offloading at all (586 MB vs 483 MB attributable), while
+        # SHAINET_EXPERT_CACHE_MB=0 gave 228 MB. Warn rather than silently
+        # delivering a pessimization.
+        if dense_offload && !ENV.has_key?("SHAINET_EXPERT_CACHE_MB")
+          Log.warn { "SHAINET_DENSE_OFFLOAD=1 without SHAINET_EXPERT_CACHE_MB: the hot cache defaults to 70% of free VRAM and will promote the dense weights back onto the device, which can use MORE VRAM than not offloading. Set SHAINET_EXPERT_CACHE_MB (0 disables the cache) to get the capacity win." }
+        end
         config.num_hidden_layers.times do
           net.add_layer(:llama, d, num_heads: n_heads, ff_hidden: ff, num_kv_heads: config.num_key_value_heads, eps: eps, head_dim: config.head_dim,
             moe_experts: config.num_experts, moe_top_k: config.num_experts_per_tok, moe_norm_topk: config.norm_topk_prob, moe_ff_hidden: config.moe_intermediate_size, moe_offload: moe_offload)
@@ -384,7 +401,7 @@ module SHAInet
           # transients are reclaimed before the next layer allocates — otherwise
           # GC lag lets ~28 layers of fp32 garbage pile up and OOM a big model.
           if do_quant
-            block.to_gpu!(quantize: true, bits: bits)
+            block.to_gpu!(quantize: true, bits: bits, offload: dense_offload)
             GC.collect
           end
         end
@@ -407,7 +424,7 @@ module SHAInet
         # Quantize the lm_head (and idempotently re-confirm the already-Q8
         # blocks) + set the quantized-weights flag. Blocks were quantized inline
         # above, so this only materializes the lm_head fp32 transiently.
-        net.quantize!(bits) if do_quant
+        net.quantize!(bits, offload: dense_offload) if do_quant
 
         net
       ensure
