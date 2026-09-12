@@ -811,9 +811,14 @@ void gemm_q8_f32(const float* x, const signed char* q, const float* scales,
 // laid out [N, ceil(K/32)]. Reproduces row-major fp32 GEMM semantics:
 //   result[m,n] = sum_k x[m,k] * (value(n,k) * scale[n, k/32]).
 #define Q4_BLK 32
+// Blocks sharing one fp32 super-block scale. Each block's own scale is a byte
+// relative to it: effective = d[block / Q4_SUPER] * sub[block] / 255. Must match
+// SHAInet::Q4CudaMatrix::SUPER.
+#define Q4_SUPER 8
 __global__ void gemm_q4_f32_kernel(const float* __restrict__ x,
                                    const unsigned char* __restrict__ q,
-                                   const float* __restrict__ scales,
+                                   const float* __restrict__ d,
+                                   const unsigned char* __restrict__ sub,
                                    float* __restrict__ y,
                                    int M, int N, int K) {
     int n = blockIdx.x; // output column (0..N)
@@ -821,20 +826,25 @@ __global__ void gemm_q4_f32_kernel(const float* __restrict__ x,
     if (n >= N || m >= M) return;
 
     int nblocks = (K + Q4_BLK - 1) / Q4_BLK;
+    int nsupers = (nblocks + Q4_SUPER - 1) / Q4_SUPER;
     int kbytes = (K + 1) >> 1; // packed bytes per output column
     const float* xrow = x + (long)m * K;
     const unsigned char* qrow = q + (long)n * kbytes;
-    const float* srow = scales + (long)n * nblocks;
+    const float* drow = d + (long)n * nsupers;
+    const unsigned char* subrow = sub + (long)n * nblocks;
 
     int tid = threadIdx.x;
     int nthreads = blockDim.x;
 
-    // Each thread strides over the full K dimension, unpacking its nibble.
+    // Each thread strides over the full K dimension, unpacking its nibble. The
+    // effective block scale is d[block / Q4_SUPER] * sub[block] / 255.
     float partial = 0.0f;
     for (int k = tid; k < K; k += nthreads) {
         unsigned char byte = qrow[k >> 1];
         int nib = (k & 1) ? (byte >> 4) : (byte & 0x0F);
-        partial += (float)(nib - 8) * xrow[k] * srow[k >> 5];
+        int b = k >> 5;
+        float eff = drow[b / Q4_SUPER] * (float)subrow[b] * (1.0f / 255.0f);
+        partial += (float)(nib - 8) * xrow[k] * eff;
     }
 
     extern __shared__ float sdata[];
@@ -872,7 +882,8 @@ __global__ void gemm_q4_f32_kernel(const float* __restrict__ x,
 // caller falls back to the scalar kernel otherwise.
 __global__ void gemm_q4_f32_vec_kernel(const float* __restrict__ x,
                                        const unsigned char* __restrict__ q,
-                                       const float* __restrict__ scales,
+                                       const float* __restrict__ d,
+                                       const unsigned char* __restrict__ sub,
                                        float* __restrict__ y,
                                        int M, int N, int K) {
     int m = blockIdx.y;
@@ -883,10 +894,12 @@ __global__ void gemm_q4_f32_vec_kernel(const float* __restrict__ x,
     int n = blockIdx.x * Q4_COLS_PER_BLOCK + warp;
 
     int nblocks = K >> 5; // exact, K % 32 == 0
+    int nsupers = (nblocks + Q4_SUPER - 1) / Q4_SUPER;
     int kbytes = K >> 1;
     const float* xrow = x + (long)m * K;
     const unsigned char* qrow = q + (long)n * kbytes;
-    const float* srow = scales + (long)n * nblocks;
+    const float* drow = d + (long)n * nsupers;
+    const unsigned char* subrow = sub + (long)n * nblocks;
 
     extern __shared__ float xs[]; // Q4_TILE floats
 
@@ -909,7 +922,7 @@ __global__ void gemm_q4_f32_vec_kernel(const float* __restrict__ x,
                 sum += (float)((int)(byte & 0x0F) - 8) * xb[2 * j];
                 sum += (float)((int)(byte >> 4) - 8) * xb[2 * j + 1];
             }
-            acc += sum * srow[kb];
+            acc += sum * (drow[kb / Q4_SUPER] * (float)subrow[kb] * (1.0f / 255.0f));
         }
         __syncthreads(); // tile is reused next iteration
     }
@@ -933,20 +946,20 @@ static inline bool q4_force_scalar() {
     return q4_scalar_forced == 1;
 }
 
-void gemm_q4_f32(const float* x, const unsigned char* q, const float* scales,
-                 float* y, int M, int N, int K) {
+void gemm_q4_f32(const float* x, const unsigned char* q, const float* d,
+                 const unsigned char* sub, float* y, int M, int N, int K) {
     if (K % Q4_BLK == 0 && !q4_force_scalar()) {
         int threads = Q4_COLS_PER_BLOCK * 32;
         dim3 grid((N + Q4_COLS_PER_BLOCK - 1) / Q4_COLS_PER_BLOCK, M);
         size_t shmem = Q4_TILE * sizeof(float);
-        gemm_q4_f32_vec_kernel<<<grid, threads, shmem>>>(x, q, scales, y, M, N, K);
+        gemm_q4_f32_vec_kernel<<<grid, threads, shmem>>>(x, q, d, sub, y, M, N, K);
     } else {
         // Packed rows are not 16-byte aligned for this K, so uint4 loads would
         // be illegal. Correctness first.
         int threads = 256;
         dim3 grid(N, M);
         size_t shmem = threads * sizeof(float);
-        gemm_q4_f32_kernel<<<grid, threads, shmem>>>(x, q, scales, y, M, N, K);
+        gemm_q4_f32_kernel<<<grid, threads, shmem>>>(x, q, d, sub, y, M, N, K);
     }
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {

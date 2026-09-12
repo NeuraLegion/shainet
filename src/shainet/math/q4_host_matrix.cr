@@ -37,10 +37,13 @@ module SHAInet
 
     @q_ptr : Pointer(UInt8)
     @s_ptr : Pointer(Float32)
+    @sub_ptr : Pointer(UInt8)
     @q_bytes : UInt64
     @s_bytes : UInt64
+    @sub_bytes : UInt64
     @q_arr : Array(UInt8)?
     @s_arr : Array(Float32)?
+    @sub_arr : Array(UInt8)?
 
     # Shape-keyed GPU scratch for cold (uncached) experts. Reused across experts.
     @@scratch = Hash(Tuple(Int32, Int32), Q4CudaMatrix).new
@@ -60,31 +63,39 @@ module SHAInet
     @@misses = 0_u64
     PROMOTE_THRESHOLD = 2
 
-    def initialize(@rows : Int32, @cols : Int32, q_host : Array(UInt8), s_host : Array(Float32))
+    def initialize(@rows : Int32, @cols : Int32, q_host : Array(UInt8), s_host : Array(Float32), sub_host : Array(UInt8))
       @q_bytes = q_host.size.to_u64
       @s_bytes = s_host.size.to_u64 * 4_u64
+      @sub_bytes = sub_host.size.to_u64
 
       qp = Pointer(UInt8).null
       sp = Pointer(Float32).null
+      bp = Pointer(UInt8).null
       pinned = false
       if CUDA.fully_available?
         qpp = Pointer(Void).null
         spp = Pointer(Void).null
+        bpp = Pointer(Void).null
         begin
           CUDA.malloc_host(pointerof(qpp), @q_bytes)
           CUDA.malloc_host(pointerof(spp), @s_bytes)
+          CUDA.malloc_host(pointerof(bpp), @sub_bytes)
           qp = qpp.as(Pointer(UInt8))
           sp = spp.as(Pointer(Float32))
+          bp = bpp.as(Pointer(UInt8))
           qp.copy_from(q_host.to_unsafe, q_host.size)
           sp.copy_from(s_host.to_unsafe, s_host.size)
+          bp.copy_from(sub_host.to_unsafe, sub_host.size)
           pinned = true
         rescue
-          # Free whatever was allocated before the failure (either pointer may be
-          # set independently of qp/sp), then fall back to pageable for this weight.
+          # Free whatever was allocated before the failure (any pointer may be set
+          # independently of the others), then fall back to pageable for this weight.
           CUDA.free_host(qpp) unless qpp.null?
           CUDA.free_host(spp) unless spp.null?
+          CUDA.free_host(bpp) unless bpp.null?
           qp = Pointer(UInt8).null
           sp = Pointer(Float32).null
+          bp = Pointer(UInt8).null
           pinned = false
         end
       end
@@ -92,11 +103,14 @@ module SHAInet
       if pinned
         @q_ptr = qp
         @s_ptr = sp
+        @sub_ptr = bp
       else
         @q_arr = q_host
         @s_arr = s_host
+        @sub_arr = sub_host
         @q_ptr = q_host.to_unsafe
         @s_ptr = s_host.to_unsafe
+        @sub_ptr = sub_host.to_unsafe
       end
       @pinned = pinned
     end
@@ -105,17 +119,18 @@ module SHAInet
       if @pinned
         CUDA.free_host(@q_ptr.as(Pointer(Void))) unless @q_ptr.null?
         CUDA.free_host(@s_ptr.as(Pointer(Void))) unless @s_ptr.null?
+        CUDA.free_host(@sub_ptr.as(Pointer(Void))) unless @sub_ptr.null?
       end
     end
 
     def self.from_simple(w : SimpleMatrix) : Q4HostMatrix
-      q_host, s_host = Q4CudaMatrix.pack(w)
-      new(w.rows, w.cols, q_host, s_host)
+      q_host, s_host, sub_host = Q4CudaMatrix.pack(w)
+      new(w.rows, w.cols, q_host, s_host, sub_host)
     end
 
-    # Host memory footprint in bytes (4-bit weights + fp32 scales).
+    # Host memory footprint in bytes (4-bit weights + super-block scales + sub-scales).
     def host_bytes : UInt64
-      @q_bytes + @s_bytes
+      @q_bytes + @s_bytes + @sub_bytes
     end
 
     # Resident GPU footprint per-weight is ~0 unless this weight is currently in
@@ -180,7 +195,8 @@ module SHAInet
 
     private def upload_to(s : Q4CudaMatrix)
       CUDA.memcpy(s.q_ptr.as(Pointer(Void)), @q_ptr.as(Pointer(Void)), @q_bytes, CUDA::MemcpyKind::HostToDevice)
-      CUDA.memcpy(s.scale_ptr.as(Pointer(Void)), @s_ptr.as(Pointer(Void)), @s_bytes, CUDA::MemcpyKind::HostToDevice)
+      CUDA.memcpy(s.d_ptr.as(Pointer(Void)), @s_ptr.as(Pointer(Void)), @s_bytes, CUDA::MemcpyKind::HostToDevice)
+      CUDA.memcpy(s.sub_ptr.as(Pointer(Void)), @sub_ptr.as(Pointer(Void)), @sub_bytes, CUDA::MemcpyKind::HostToDevice)
     end
 
     private def scratch : Q4CudaMatrix
