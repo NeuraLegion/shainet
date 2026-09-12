@@ -218,6 +218,127 @@ module SHAInet
       Profile.measure("block.residual") { h + ff_out }
     end
 
+    # Device-resident workspaces for the block chain, one set per block.
+    @dev_n1 : CudaMatrix? = nil
+    @dev_n2 : CudaMatrix? = nil
+    @dev_attn : CudaMatrix? = nil
+    @dev_h : CudaMatrix? = nil
+
+    @@block_device : Bool? = nil
+
+    # Device-resident block chain is the default; SHAINET_BLOCK_DEVICE=0 forces the
+    # host path, which is how the A/B is taken and how the fallback stays exercised.
+    def self.block_device_enabled? : Bool
+      flag = @@block_device
+      return flag unless flag.nil?
+      flag = ENV.fetch("SHAINET_BLOCK_DEVICE", "1") != "0"
+      @@block_device = flag
+      flag
+    end
+
+    # Pass nil to forget the decision and re-read the environment.
+    def self.block_device_enabled=(value : Bool?)
+      @@block_device = value
+    end
+
+    # True when the whole block can run with the activation staying on the device:
+    # both norms have their kernel and gamma there, the attention projections and
+    # o_proj are quantized, and the FFN has a device path.
+    def block_device_capable? : Bool
+      return false unless self.class.block_device_enabled?
+      return false unless CUDA.fully_available? && CUDA.block_device_kernels_available?
+      return false unless @norm1.device_capable? && @norm2.device_capable?
+      return false unless @w_q.is_a?(QuantizedWeight) && @w_k.is_a?(QuantizedWeight) &&
+                          @w_v.is_a?(QuantizedWeight) && @w_o.is_a?(QuantizedWeight)
+      return false unless gpu_attention?
+      ffn = @ffn
+      ffn.is_a?(MoEFF) ? ffn.device_row_capable? : false
+    end
+
+    # Decode forward for a single token whose activation never leaves the device.
+    #
+    # The host path spends, per layer: two host RMSNorm loops, two host residual adds,
+    # three uploads of the same normed row for q/k/v, a readback of the o_proj result
+    # and a readback of the FFN result. All of those are gone here. What remains is
+    # inherent to the attention implementation: q/k/v come back because RoPE, the KV
+    # host mirror and the attention staging are host-side, so this does NOT claim to
+    # make attention device-resident.
+    #
+    # `x` must be device-resident; the returned matrix is this block's own workspace,
+    # so the caller must consume or hand it straight to the next block.
+    def forward_cached_device(x : CudaMatrix) : CudaMatrix
+      dm = @d_model
+      n1 = (@dev_n1 ||= CudaMatrix.new(1, dm))
+      n2 = (@dev_n2 ||= CudaMatrix.new(1, dm))
+      attn_dev = (@dev_attn ||= CudaMatrix.new(1, dm))
+      h = (@dev_h ||= CudaMatrix.new(1, dm))
+
+      Profile.measure("block.dev_norm") { @norm1.forward_into(x, n1) }
+      attention_cached_device(n1, attn_dev)
+
+      # h = x + attn, then h += ffn(norm2(h)), both residuals on the device.
+      Profile.measure("block.dev_residual") do
+        CUDA.memcpy(h.device_ptr.not_nil!.as(Pointer(Void)), x.device_ptr.not_nil!.as(Pointer(Void)),
+          dm.to_u64 * 4_u64, CUDA::MemcpyKind::DeviceToDevice)
+        CUDA.add_inplace(h.device_ptr.not_nil!, attn_dev.device_ptr.not_nil!, dm)
+        h.mark_device_dirty!
+      end
+
+      Profile.measure("block.dev_norm") { @norm2.forward_into(h, n2) }
+      ff_out = @ffn.as(MoEFF).forward_device_row(n2)
+      Profile.measure("block.dev_residual") do
+        CUDA.add_inplace(h.device_ptr.not_nil!, ff_out.device_ptr.not_nil!, dm)
+        h.mark_device_dirty!
+      end
+      h
+    end
+
+    # Attention for the device chain: device row in, device row out. The interior is
+    # unchanged from the host path, so RoPE/KV/staging behaviour and the fp16 cache
+    # are identical; only the boundaries move.
+    private def attention_cached_device(x : CudaMatrix, dst : CudaMatrix) : Nil
+      new_tokens = 1
+      head_dim = @head_dim
+      scale = (1.0 / Math.sqrt(head_dim.to_f64)).to_f32
+      start_pos = @cache_len
+
+      q_full = gemv_from_device(x, @w_q.as(QuantizedWeight))
+      k_new = gemv_from_device(x, @w_k.as(QuantizedWeight))
+      v_new = gemv_from_device(x, @w_v.as(QuantizedWeight))
+      add_bias!(q_full, @b_q)
+      add_bias!(k_new, @b_k)
+      add_bias!(v_new, @b_v)
+      apply_head_rmsnorm!(q_full, @num_heads, @q_norm)
+      apply_head_rmsnorm!(k_new, @num_kv_heads, @k_norm)
+
+      half = head_dim // 2
+      Profile.measure("attn.rope_kv_append") do
+        @num_kv_heads.times do |kv_h|
+          kv_col = kv_h * head_dim
+          pos = start_pos
+          rotated = Array(Float32).new(head_dim, 0.0_f32)
+          half.times do |i|
+            angle = (pos * inv_freq(i)).to_f32
+            cos_val = Math.cos(angle).to_f32
+            sin_val = Math.sin(angle).to_f32
+            x0 = k_new[0, kv_col + i].to_f32
+            x1 = k_new[0, kv_col + i + half].to_f32
+            rotated[i] = x0 * cos_val - x1 * sin_val
+            rotated[i + half] = x1 * cos_val + x0 * sin_val
+          end
+          rotated.each { |val| @k_cache[kv_h] << val }
+          head_dim.times { |d| @v_cache[kv_h] << v_new[0, kv_col + d].to_f32 }
+        end
+      end
+
+      total_len = @cache_len + new_tokens
+      @cache_len = total_len
+      output = SimpleMatrix.new(new_tokens, @q_dim)
+      attention_heads_gpu(q_full, output, new_tokens, start_pos, total_len, scale)
+
+      gemv_to_device(output, @w_o.as(QuantizedWeight), dst)
+    end
+
     # GPU forward — full sequence
     def forward(x : CudaMatrix) : CudaMatrix
       normed = @norm1.forward(x)
@@ -1022,6 +1143,35 @@ module SHAInet
       else
         x * w
       end
+    end
+
+    # Projection whose INPUT is already device-resident. Saves the upload that
+    # gpu_matmul pays: on the device block chain the normed row is produced by the
+    # RMSNorm kernel, so q/k/v need no host-to-device copy at all. The result still
+    # comes back because RoPE, the KV host mirror and the attention staging are
+    # host-side.
+    private def gemv_from_device(x : CudaMatrix, w : QuantizedWeight) : SimpleMatrix
+      ob = (@q8_out_bufs[w.cols] ||= CudaMatrix.new(1, w.cols))
+      Profile.measure("gemm.kernel") { w.gemv_into(x, ob) }
+      Profile.measure("gemm.out_d2h") { ob.sync_from_device!("dev_proj_out") if ob.device_dirty? }
+      result = SimpleMatrix.new(1, w.cols)
+      Profile.measure("gemm.result_copy") do
+        result.data.to_unsafe.copy_from(ob.raw_data.to_unsafe, w.cols)
+      end
+      result
+    end
+
+    # Projection whose OUTPUT stays on the device. Used for o_proj, so the attention
+    # result feeds the residual add without a readback.
+    private def gemv_to_device(x : SimpleMatrix, w : QuantizedWeight, dst : CudaMatrix) : CudaMatrix
+      xb = (@q8_in_bufs[x.cols] ||= CudaMatrix.new(1, x.cols))
+      Profile.measure("gemm.in_h2d") do
+        xb.raw_data.to_unsafe.copy_from(x.data.to_unsafe, x.cols)
+        xb.mark_host_modified!
+        xb.sync_to_device!("dev_proj_in")
+      end
+      Profile.measure("gemm.kernel") { w.gemv_into(xb, dst) }
+      dst
     end
   end
 

@@ -122,6 +122,18 @@ module SHAInet
       false
     end
 
+    def rms_norm_forward(*args)
+      raise "CUDA disabled"
+    end
+
+    def add_inplace(*args)
+      raise "CUDA disabled"
+    end
+
+    def block_device_kernels_available? : Bool
+      false
+    end
+
     def geam(*args)
     end
 
