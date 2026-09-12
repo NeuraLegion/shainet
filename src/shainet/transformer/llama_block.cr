@@ -62,6 +62,12 @@ module SHAInet
     @gpu_cache_cap : Int32 = 0
     # nil until the first device allocation decides the cache dtype.
     @kv_fp16 : Bool? = nil
+    # Context budget: when set the device cache is allocated once at exactly this
+    # many positions rather than doubling into it. Resolved from
+    # SHAINET_KV_MAX_CONTEXT on first read; the checked flag keeps a deliberate
+    # nil from re-reading the environment on every forward pass.
+    @kv_max_context : Int32? = nil
+    @kv_max_context_checked : Bool = false
     # Persistent device scratch for the attention hot path. SHARED across all
     # blocks (class-level): blocks run sequentially, so one grow-only scratch set
     # serves every layer instead of each of N layers holding its own ~(heads×
@@ -579,15 +585,32 @@ module SHAInet
     end
 
     # Ensure the device KV cache holds at least total_len positions per
-    # kv_head. Grows by doubling; on growth the CPU mirror (which already
-    # contains the new tokens) is re-uploaded into the fresh buffers.
+    # kv_head.
     #
-    # `max_chunk` bounds the staging used by the re-upload, so this must be
-    # called after the staging buffers have been sized for that chunk.
+    # With a context budget configured (see #kv_max_context) the cache is
+    # allocated ONCE at exactly that size. Without one it grows by doubling,
+    # which overshoots badly: a measured 4128-token context allocated 8192 slots,
+    # so half the cache was never used.
+    #
+    # On (re)allocation the CPU mirror, which already contains the new tokens, is
+    # re-uploaded into the fresh buffers. `max_chunk` bounds the staging used by
+    # that re-upload, so this must be called after the staging buffers have been
+    # sized for that chunk.
     private def ensure_gpu_cache!(total_len : Int32, max_chunk : Int32)
       return if @gpu_cache_cap >= total_len
       head_dim = @head_dim
-      new_cap = Math.max(256, Math.max(total_len, @gpu_cache_cap * 2))
+
+      new_cap = if budget = kv_max_context
+                  if total_len > budget
+                    raise ArgumentError.new(
+                      "context length #{total_len} exceeds the configured KV budget #{budget}; " \
+                      "raise kv_max_context (or SHAINET_KV_MAX_CONTEXT) or shorten the prompt")
+                  end
+                  budget
+                else
+                  Math.max(256, Math.max(total_len, @gpu_cache_cap * 2))
+                end
+
       bytes = @num_kv_heads.to_u64 * new_cap.to_u64 * head_dim.to_u64 * kv_elem_bytes
       CUDA.free(@gpu_k_cache) unless @gpu_k_cache.null?
       CUDA.free(@gpu_v_cache) unless @gpu_v_cache.null?
@@ -601,6 +624,60 @@ module SHAInet
 
       used = @num_kv_heads > 0 ? @k_cache[0].size // head_dim : 0
       reupload_gpu_cache!(used, max_chunk) if used > 0
+    end
+
+    # Upper bound on cached positions. When set, the device KV cache is sized to
+    # exactly this once instead of doubling into it, which removes the overshoot
+    # (up to 2x) that doubling leaves behind, and removes the repeated
+    # free/malloc/re-upload cycle on the way there. The host mirror reserves the
+    # same capacity so it stops reallocating as it grows.
+    #
+    # Defaults from SHAINET_KV_MAX_CONTEXT; nil keeps the doubling behaviour.
+    def kv_max_context : Int32?
+      cached = @kv_max_context
+      return cached if cached
+      return if @kv_max_context_checked
+      @kv_max_context_checked = true
+      if raw = ENV["SHAINET_KV_MAX_CONTEXT"]?
+        if v = raw.to_i?
+          @kv_max_context = v if v > 0
+        end
+      end
+      @kv_max_context
+    end
+
+    # Set the context budget explicitly. Reserves host mirror capacity right
+    # away; the device buffers are sized on the next forward pass. Raises if the
+    # device cache has already grown past the new budget, since shrinking it
+    # would discard cached positions the caller may still be attending to.
+    def kv_max_context=(value : Int32?)
+      if v = value
+        raise ArgumentError.new("kv_max_context must be positive") unless v > 0
+        if @gpu_cache_cap > v
+          raise ArgumentError.new(
+            "device KV cache is already #{@gpu_cache_cap} positions; " \
+            "clear_cache! and free it before lowering the budget to #{v}")
+        end
+        reserve_host_cache!(v)
+      end
+      @kv_max_context_checked = true
+      @kv_max_context = value
+    end
+
+    # Grow the host mirror's capacity without changing its length, so appending
+    # up to `positions` tokens does not reallocate mid-generation.
+    private def reserve_host_cache!(positions : Int32)
+      want = positions.to_i64 * @head_dim
+      return if want <= 0
+      @num_kv_heads.times do |kv_h|
+        {@k_cache, @v_cache}.each do |cache|
+          arr = cache[kv_h]
+          next if arr.size >= want
+          grown = Array(Float32).new(want)
+          grown.concat(arr)
+          cache[kv_h] = grown
+        end
+      end
     end
 
     # Re-populate the freshly grown device cache from the host mirror, in chunks
