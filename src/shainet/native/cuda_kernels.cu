@@ -331,6 +331,32 @@ void sigmoid_forward(float* activations, float* derivatives, const float* linear
     }
 }
 
+// hidden = silu(gate) * up, the SwiGLU activation, fused so the FFN's gate and up
+// projections never have to come back to the host to be combined. Uses expf
+// rather than __expf: the fast intrinsic drifts far enough from the CPU path to
+// break device/host parity, and this kernel is memory bound anyway.
+__global__ void swiglu_forward_kernel(float* hidden, const float* gate, const float* up, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= size) return;
+    float g = gate[idx];
+    hidden[idx] = (g / (1.0f + expf(-g))) * up[idx];
+}
+
+// Deliberately does NOT cudaDeviceSynchronize: this sits between two GEMV launches
+// on the default stream, so stream ordering already guarantees the gate/up writes
+// are visible. Syncing here would reintroduce the pipeline stall that keeping
+// activations on the device exists to remove.
+void swiglu_forward(float* hidden, const float* gate, const float* up, int size) {
+    int threads_per_block = 256;
+    int blocks = (size + threads_per_block - 1) / threads_per_block;
+
+    swiglu_forward_kernel<<<blocks, threads_per_block>>>(hidden, gate, up, size);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in swiglu_forward: %s\n", cudaGetErrorString(err));
+    }
+}
+
 __global__ void apply_gradient_kernel(float* local_grad, const float* grad, const float* derivatives, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= size) return;

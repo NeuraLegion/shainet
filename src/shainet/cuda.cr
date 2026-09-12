@@ -308,6 +308,8 @@ module SHAInet
     @@kv_cache_append_f32_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Void)?
     @@kv_cache_append_f16_proc : Proc(Pointer(Float32), Pointer(UInt16), Pointer(UInt16), Int32, Int32, Int32, Int32, Int32, Void)?
     @@kv_f16_available : Bool? = nil
+    @@swiglu_forward_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Void)?
+    @@swiglu_available : Bool? = nil
     @@attention_kv_f32_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void)?
     @@attention_kv_f16_proc : Proc(Pointer(Float32), Pointer(UInt16), Pointer(UInt16), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void)?
 
@@ -430,6 +432,42 @@ module SHAInet
         Log.error { "CUDA Error in set_cols: #{ex}" }
         raise ex
       end
+    end
+
+    # hidden = silu(gate) * up, computed on the device so the FFN's gate and up
+    # projections do not have to be read back to the host to be combined.
+    def swiglu_forward(hidden : Pointer(Float32), gate : Pointer(Float32), up : Pointer(Float32), size : Int32)
+      unless fn = @@swiglu_forward_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "swiglu_forward")
+          unless sym.null?
+            @@swiglu_forward_proc = Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@swiglu_forward_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(hidden, gate, up, size)
+    end
+
+    # False when the loaded .so predates the fused SwiGLU kernel, so callers can
+    # fall back to the host path instead of raising.
+    def swiglu_kernel_available? : Bool
+      avail = @@swiglu_available
+      return avail unless avail.nil?
+      result = begin
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        @@kernels_handle.null? ? false : !LibC.dlsym(@@kernels_handle, "swiglu_forward").null?
+      rescue
+        false
+      end
+      @@swiglu_available = result
+      result
     end
 
     def row_mean_var(src : Pointer(Float32), mean : Pointer(Float32), var : Pointer(Float32), rows : Int32, cols : Int32)
