@@ -137,15 +137,21 @@ describe "device-resident block chain" do
       # Proves the device path ran rather than silently falling back.
       stats["block.dev_norm"].not_nil![:count].should eq layers * 2
       stats["block.dev_residual"].not_nil![:count].should eq layers * 2
+      # Attention now runs on the device too: RoPE, QK-norm and the KV append are
+      # kernels, so its projections never come home either.
+      stats["attn.dev_qkv"].not_nil![:count].should eq layers
+      stats["attn.dev_append"].not_nil![:count].should eq layers
+      stats["attn.dev_oproj"].not_nil![:count].should eq layers
 
-      # The FFN's per-layer readback is gone entirely: that is the phase this change
-      # exists to remove, so its absence is the assertion.
+      # The FFN's per-layer readback is gone entirely.
       stats["ffn.dev_readback"]?.should be_nil
 
-      # What remains is exactly three projection readbacks per layer (q, k, v). o_proj
-      # no longer reads back because it writes into a device buffer, so a regression
-      # that restored it would push this to 4 per layer.
-      stats["gemm.out_d2h"].not_nil![:count].should eq layers * 3
+      # And so is EVERY per-matmul readback: gemm.out_d2h is the phase every
+      # quantized matmul used to end with, and on this path it never fires. That is
+      # the whole claim of the change, so it is asserted as an absence rather than a
+      # smaller number.
+      stats["gemm.out_d2h"]?.should be_nil
+      stats["gemm.in_h2d"]?.should be_nil
     end
   ensure
     dev_in.try(&.free!)

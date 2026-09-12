@@ -313,6 +313,9 @@ module SHAInet
     @@rms_norm_forward_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Float32, Void)?
     @@add_inplace_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Void)?
     @@block_device_available : Bool? = nil
+    @@rope_forward_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@head_rmsnorm_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Float32, Void)?
+    @@attn_device_available : Bool? = nil
     @@attention_kv_f32_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void)?
     @@attention_kv_f16_proc : Proc(Pointer(Float32), Pointer(UInt16), Pointer(UInt16), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void)?
 
@@ -530,6 +533,65 @@ module SHAInet
         false
       end
       @@block_device_available = result
+      result
+    end
+
+    # Rotary position embedding in place on one token's row, HF half-split.
+    def rope_forward(x : Pointer(Float32), inv_freq : Pointer(Float32), pos : Int32,
+                     heads : Int32, head_dim : Int32)
+      unless fn = @@rope_forward_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "rope_forward")
+          unless sym.null?
+            @@rope_forward_proc = Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@rope_forward_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(x, inv_freq, pos, heads, head_dim)
+    end
+
+    # Qwen3 QK-norm: RMSNorm per head slice, in place.
+    def head_rmsnorm(x : Pointer(Float32), gamma : Pointer(Float32), heads : Int32,
+                     head_dim : Int32, eps : Float32)
+      unless fn = @@head_rmsnorm_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "head_rmsnorm")
+          unless sym.null?
+            @@head_rmsnorm_proc = Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Float32, Void).new(sym, Pointer(Void).null)
+            fn = @@head_rmsnorm_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(x, gamma, heads, head_dim, eps)
+    end
+
+    # False when the loaded .so predates the device-attention kernels.
+    def attention_device_kernels_available? : Bool
+      avail = @@attn_device_available
+      return avail unless avail.nil?
+      result = begin
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        if @@kernels_handle.null?
+          false
+        else
+          !LibC.dlsym(@@kernels_handle, "rope_forward").null? &&
+          !LibC.dlsym(@@kernels_handle, "head_rmsnorm").null?
+        end
+      rescue
+        false
+      end
+      @@attn_device_available = result
       result
     end
 

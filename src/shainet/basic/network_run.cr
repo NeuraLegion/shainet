@@ -256,9 +256,14 @@ module SHAInet
         if fn = @final_norm
           matrix = Profile.measure("net.final_norm") { fn.forward(matrix.as(SimpleMatrix)) }
         end
+        # When the quantized head applies the bias on the device, the host loop below
+        # is skipped: it walked the whole vocab row per token.
+        bias_on_device = false
         matrix = Profile.measure("net.lm_head") do
           if lq = @lm_head_q
-            gpu_lm_head_q(matrix.as(SimpleMatrix), lq)
+            row_bias = matrix.as(SimpleMatrix).rows >= 1 ? b : nil
+            bias_on_device = !row_bias.nil?
+            gpu_lm_head_q(matrix.as(SimpleMatrix), lq, row_bias)
           elsif w.is_a?(CudaMatrix)
             gpu_lm_head(matrix.as(SimpleMatrix), w.as(CudaMatrix))
           else
@@ -266,11 +271,13 @@ module SHAInet
           end
         end
 
-        # CPU bias addition
-        Profile.measure("net.out_bias") do
-          matrix.rows.times do |i|
-            matrix.cols.times do |j|
-              matrix[i, j] += b[0, j]
+        # CPU bias addition, unless the device head already added it.
+        unless bias_on_device
+          Profile.measure("net.out_bias") do
+            matrix.rows.times do |i|
+              matrix.cols.times do |j|
+                matrix[i, j] += b[0, j]
+              end
             end
           end
         end
@@ -1512,7 +1519,13 @@ module SHAInet
     # Quantized lm_head projection: [1, d_model] × dequant(W[d_model, vocab]).
     # Uses the dequant-in-kernel GEMV of the given quantized weight (Q8 or Q4).
     # Returns [1, vocab] logits.
-    private def gpu_lm_head_q(matrix : SimpleMatrix, weights : QuantizedWeight) : SimpleMatrix
+    @lm_head_b : CudaMatrix? = nil
+
+    # `bias` is added ON THE DEVICE before the readback when supplied, so the caller
+    # can skip its host loop. That loop walked the full vocab row (151936 wide on
+    # Qwen3) once per token, which the profiler showed at 0.25 ms/step.
+    private def gpu_lm_head_q(matrix : SimpleMatrix, weights : QuantizedWeight,
+                              bias : SimpleMatrix? = nil) : SimpleMatrix
       # Extract last token for transformer architectures (language modeling).
       last = if matrix.rows > 1
                sm = SimpleMatrix.new(1, matrix.cols)
@@ -1529,6 +1542,20 @@ module SHAInet
 
       r_gpu = (@lm_head_r ||= CudaMatrix.new(last.rows, weights.cols))
       weights.gemv_into(x_gpu, r_gpu)
+
+      if b = bias
+        bd = @lm_head_b
+        unless bd
+          bd = CudaMatrix.new(1, b.cols)
+          bd.raw_data.to_unsafe.copy_from(b.data.to_unsafe, b.cols)
+          bd.mark_host_modified!
+          bd.sync_to_device!("lm_head_bias")
+          @lm_head_b = bd
+        end
+        CUDA.add_inplace(r_gpu.device_ptr.not_nil!, bd.device_ptr.not_nil!, r_gpu.cols)
+        r_gpu.mark_device_dirty!
+      end
+
       r_gpu.sync_from_device!("lm_head_q_out") if r_gpu.device_dirty?
 
       result = SimpleMatrix.new(r_gpu.rows, r_gpu.cols)

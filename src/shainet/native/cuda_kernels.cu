@@ -429,6 +429,79 @@ void add_inplace(float* dst, const float* src, int size) {
     }
 }
 
+// Rotary position embedding, HF half-split layout, applied in place to a single
+// token's row of `heads` heads each `head_dim` wide.
+//
+// Until this existed RoPE ran on the host, which is the whole reason q/k/v had to be
+// read back from the device every layer. inv_freq is precomputed once per block and
+// kept on the device, so a decode step passes only the position.
+//
+// One block per head, half the head_dim worth of threads doing the pair rotation.
+__global__ void rope_forward_kernel(float* x, const float* inv_freq, int pos,
+                                    int heads, int head_dim) {
+    int head = blockIdx.x;
+    if (head >= heads) return;
+    int half = head_dim / 2;
+    float* row = x + (size_t)head * (size_t)head_dim;
+
+    for (int i = threadIdx.x; i < half; i += blockDim.x) {
+        float angle = (float)pos * inv_freq[i];
+        float c = cosf(angle);
+        float s = sinf(angle);
+        float x0 = row[i];
+        float x1 = row[i + half];
+        row[i] = x0 * c - x1 * s;
+        row[i + half] = x1 * c + x0 * s;
+    }
+}
+
+void rope_forward(float* x, const float* inv_freq, int pos, int heads, int head_dim) {
+    int threads = 128;
+    rope_forward_kernel<<<heads, threads>>>(x, inv_freq, pos, heads, head_dim);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in rope_forward: %s\n", cudaGetErrorString(err));
+    }
+}
+
+// Qwen3 QK-norm: RMSNorm applied independently to each head's slice, over head_dim,
+// in place. Same shape of reduction as rms_norm_forward but per head rather than per
+// row, and gamma is shared across heads.
+__global__ void head_rmsnorm_kernel(float* x, const float* gamma, int heads,
+                                    int head_dim, float eps) {
+    extern __shared__ float sdata[];
+    int head = blockIdx.x;
+    if (head >= heads) return;
+    float* row = x + (size_t)head * (size_t)head_dim;
+
+    float local = 0.0f;
+    for (int j = threadIdx.x; j < head_dim; j += blockDim.x) {
+        float v = row[j];
+        local += v * v;
+    }
+    sdata[threadIdx.x] = local;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x + s];
+        __syncthreads();
+    }
+
+    float inv = 1.0f / sqrtf(sdata[0] / (float)head_dim + eps);
+    for (int j = threadIdx.x; j < head_dim; j += blockDim.x) {
+        row[j] = row[j] * inv * gamma[j];
+    }
+}
+
+void head_rmsnorm(float* x, const float* gamma, int heads, int head_dim, float eps) {
+    int threads = 128;
+    size_t shmem = threads * sizeof(float);
+    head_rmsnorm_kernel<<<heads, threads, shmem>>>(x, gamma, heads, head_dim, eps);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in head_rmsnorm: %s\n", cudaGetErrorString(err));
+    }
+}
+
 __global__ void apply_gradient_kernel(float* local_grad, const float* grad, const float* derivatives, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= size) return;

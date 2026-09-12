@@ -140,6 +140,7 @@ module SHAInet
       @k_cache.each(&.clear)
       @v_cache.each(&.clear)
       @cache_len = 0
+      @host_kv_stale = false
       # Device cache buffers are kept; stale positions are rewritten by the
       # append kernel before they ever become visible to attention.
     end
@@ -223,6 +224,7 @@ module SHAInet
     @dev_n2 : CudaMatrix? = nil
     @dev_attn : CudaMatrix? = nil
     @dev_h : CudaMatrix? = nil
+    @dev_ff_out : CudaMatrix? = nil
 
     @@block_device : Bool? = nil
 
@@ -247,12 +249,17 @@ module SHAInet
     def block_device_capable? : Bool
       return false unless self.class.block_device_enabled?
       return false unless CUDA.fully_available? && CUDA.block_device_kernels_available?
+      return false unless CUDA.attention_device_kernels_available?
       return false unless @norm1.device_capable? && @norm2.device_capable?
       return false unless @w_q.is_a?(QuantizedWeight) && @w_k.is_a?(QuantizedWeight) &&
                           @w_v.is_a?(QuantizedWeight) && @w_o.is_a?(QuantizedWeight)
       return false unless gpu_attention?
       ffn = @ffn
-      ffn.is_a?(MoEFF) ? ffn.device_row_capable? : false
+      case ffn
+      when MoEFF    then ffn.device_row_capable?
+      when SwiGLUFF then ffn.device_resident_capable?
+      else               false
+      end
     end
 
     # Decode forward for a single token whose activation never leaves the device.
@@ -285,7 +292,14 @@ module SHAInet
       end
 
       Profile.measure("block.dev_norm") { @norm2.forward_into(h, n2) }
-      ff_out = @ffn.as(MoEFF).forward_device_row(n2)
+      ffn = @ffn
+      ff_out = case ffn
+               when MoEFF then ffn.forward_device_row(n2)
+               else
+                 # Dense SwiGLU: one expert, same device chain, no readback.
+                 ff_buf = (@dev_ff_out ||= CudaMatrix.new(1, dm))
+                 ffn.as(SwiGLUFF).forward_device(n2, ff_buf)
+               end
       Profile.measure("block.dev_residual") do
         CUDA.add_inplace(h.device_ptr.not_nil!, ff_out.device_ptr.not_nil!, dm)
         h.mark_device_dirty!
@@ -293,50 +307,143 @@ module SHAInet
       h
     end
 
-    # Attention for the device chain: device row in, device row out. The interior is
-    # unchanged from the host path, so RoPE/KV/staging behaviour and the fp16 cache
-    # are identical; only the boundaries move.
+    # Device-resident constants, uploaded once per block on first use.
+    @dev_q : CudaMatrix? = nil
+    @dev_k : CudaMatrix? = nil
+    @dev_v : CudaMatrix? = nil
+    @dev_attn_out : CudaMatrix? = nil
+    @dev_inv_freq : CudaMatrix? = nil
+    @dev_b_q : CudaMatrix? = nil
+    @dev_b_k : CudaMatrix? = nil
+    @dev_b_v : CudaMatrix? = nil
+    @dev_q_norm : CudaMatrix? = nil
+    @dev_k_norm : CudaMatrix? = nil
+
+    # True once the device cache holds positions the host mirror's CONTENTS do not.
+    # Length parity is still maintained, so a later prefill chunk indexes correctly;
+    # only the values are absent, and the CPU attention path refuses to run against
+    # them rather than silently attending to zeros.
+    @host_kv_stale : Bool = false
+
+    def host_kv_stale? : Bool
+      @host_kv_stale
+    end
+
+    private def upload_vec(src : Array(Float32)) : CudaMatrix
+      m = CudaMatrix.new(1, src.size)
+      m.raw_data.to_unsafe.copy_from(src.to_unsafe, src.size)
+      m.mark_host_modified!
+      m.sync_to_device!("dev_const")
+      m
+    end
+
+    private def dev_inv_freq_ptr : Pointer(Float32)
+      m = @dev_inv_freq
+      unless m
+        half = @head_dim // 2
+        freqs = Array(Float32).new(half) { |i| inv_freq(i) }
+        m = upload_vec(freqs)
+        @dev_inv_freq = m
+      end
+      m.device_ptr.not_nil!
+    end
+
+    # Fully device-resident attention for one decode token.
+    #
+    # This is the last plumbing step. Previously q/k/v were read back to the host
+    # every layer because RoPE, the QK-norm and the KV append all ran there, which
+    # left three synchronous readbacks per layer as 50.7% of a 48-layer decode step.
+    # Now the projections write device buffers, the bias add, QK-norm and RoPE are
+    # device kernels, K/V are appended into the device cache by the existing append
+    # kernel (which already read from device memory), the attention kernel consumes
+    # the device Q directly, and o_proj writes a device buffer. Nothing crosses PCIe.
     private def attention_cached_device(x : CudaMatrix, dst : CudaMatrix) : Nil
-      new_tokens = 1
       head_dim = @head_dim
       scale = (1.0 / Math.sqrt(head_dim.to_f64)).to_f32
-      start_pos = @cache_len
+      pos = @cache_len
+      kv_dim = @num_kv_heads * head_dim
+      total_len = pos + 1
 
-      q_full = gemv_from_device(x, @w_q.as(QuantizedWeight))
-      k_new = gemv_from_device(x, @w_k.as(QuantizedWeight))
-      v_new = gemv_from_device(x, @w_v.as(QuantizedWeight))
-      add_bias!(q_full, @b_q)
-      add_bias!(k_new, @b_k)
-      add_bias!(v_new, @b_v)
-      apply_head_rmsnorm!(q_full, @num_heads, @q_norm)
-      apply_head_rmsnorm!(k_new, @num_kv_heads, @k_norm)
+      qd = (@dev_q ||= CudaMatrix.new(1, @q_dim))
+      kd = (@dev_k ||= CudaMatrix.new(1, kv_dim))
+      vd = (@dev_v ||= CudaMatrix.new(1, kv_dim))
+      ao = (@dev_attn_out ||= CudaMatrix.new(1, @q_dim))
 
-      half = head_dim // 2
-      Profile.measure("attn.rope_kv_append") do
-        @num_kv_heads.times do |kv_h|
-          kv_col = kv_h * head_dim
-          pos = start_pos
-          rotated = Array(Float32).new(head_dim, 0.0_f32)
-          half.times do |i|
-            angle = (pos * inv_freq(i)).to_f32
-            cos_val = Math.cos(angle).to_f32
-            sin_val = Math.sin(angle).to_f32
-            x0 = k_new[0, kv_col + i].to_f32
-            x1 = k_new[0, kv_col + i + half].to_f32
-            rotated[i] = x0 * cos_val - x1 * sin_val
-            rotated[i + half] = x1 * cos_val + x0 * sin_val
-          end
-          rotated.each { |val| @k_cache[kv_h] << val }
-          head_dim.times { |d| @v_cache[kv_h] << v_new[0, kv_col + d].to_f32 }
-        end
+      Profile.measure("attn.dev_qkv") do
+        @w_q.as(QuantizedWeight).gemv_into(x, qd)
+        @w_k.as(QuantizedWeight).gemv_into(x, kd)
+        @w_v.as(QuantizedWeight).gemv_into(x, vd)
       end
 
-      total_len = @cache_len + new_tokens
-      @cache_len = total_len
-      output = SimpleMatrix.new(new_tokens, @q_dim)
-      attention_heads_gpu(q_full, output, new_tokens, start_pos, total_len, scale)
+      Profile.measure("attn.dev_prep") do
+        if b = @b_q
+          @dev_b_q ||= upload_vec(b)
+          CUDA.add_inplace(qd.device_ptr.not_nil!, @dev_b_q.not_nil!.device_ptr.not_nil!, @q_dim)
+        end
+        if b = @b_k
+          @dev_b_k ||= upload_vec(b)
+          CUDA.add_inplace(kd.device_ptr.not_nil!, @dev_b_k.not_nil!.device_ptr.not_nil!, kv_dim)
+        end
+        if b = @b_v
+          @dev_b_v ||= upload_vec(b)
+          CUDA.add_inplace(vd.device_ptr.not_nil!, @dev_b_v.not_nil!.device_ptr.not_nil!, kv_dim)
+        end
+        # Qwen3 QK-norm, then RoPE, in the same order as the host path.
+        if g = @q_norm
+          @dev_q_norm ||= upload_vec(g)
+          CUDA.head_rmsnorm(qd.device_ptr.not_nil!, @dev_q_norm.not_nil!.device_ptr.not_nil!,
+            @num_heads, head_dim, @qk_norm_eps.to_f32)
+        end
+        if g = @k_norm
+          @dev_k_norm ||= upload_vec(g)
+          CUDA.head_rmsnorm(kd.device_ptr.not_nil!, @dev_k_norm.not_nil!.device_ptr.not_nil!,
+            @num_kv_heads, head_dim, @qk_norm_eps.to_f32)
+        end
+        ifr = dev_inv_freq_ptr
+        CUDA.rope_forward(qd.device_ptr.not_nil!, ifr, pos, @num_heads, head_dim)
+        CUDA.rope_forward(kd.device_ptr.not_nil!, ifr, pos, @num_kv_heads, head_dim)
+      end
 
-      gemv_to_device(output, @w_o.as(QuantizedWeight), dst)
+      # Staging and workspace sized for a single query token.
+      @@gpu_staging, @@gpu_staging_cap = grow_dev_buf(@@gpu_staging, @@gpu_staging_cap, 2 * kv_dim + @q_dim)
+      @@gpu_attn_out, @@gpu_attn_out_cap = grow_dev_buf(@@gpu_attn_out, @@gpu_attn_out_cap, @q_dim)
+      @@gpu_attn_ws, @@gpu_attn_ws_cap = grow_dev_buf(@@gpu_attn_ws, @@gpu_attn_ws_cap,
+        @num_heads * total_len, cap_limit: ATTN_WS_BUDGET_FLOATS.to_i32)
+      ensure_gpu_cache!(total_len, 1)
+
+      Profile.measure("attn.dev_append") do
+        # The append kernel takes K then V from one contiguous device blob, so stage
+        # them with device-to-device copies (a few KB, no PCIe).
+        bytes = kv_dim.to_u64 * 4_u64
+        CUDA.memcpy(@@gpu_staging.as(Pointer(Void)), kd.device_ptr.not_nil!.as(Pointer(Void)),
+          bytes, CUDA::MemcpyKind::DeviceToDevice)
+        CUDA.memcpy((@@gpu_staging + kv_dim).as(Pointer(Void)), vd.device_ptr.not_nil!.as(Pointer(Void)),
+          bytes, CUDA::MemcpyKind::DeviceToDevice)
+        append_kv(1, pos)
+      end
+
+      # Keep the host mirror's LENGTH in step even though its contents are not
+      # filled: a later prefill chunk stages its own rows at base_pos, so the
+      # indices must still line up. The values are never read while stale.
+      @num_kv_heads.times do |kv_h|
+        head_dim.times do
+          @k_cache[kv_h] << 0.0_f32
+          @v_cache[kv_h] << 0.0_f32
+        end
+      end
+      @host_kv_stale = true
+      @cache_len = total_len
+
+      Profile.measure("attn.dev_kernel") do
+        attend_kv(qd.device_ptr.not_nil!, 1, pos, @num_heads // @num_kv_heads, scale)
+      end
+
+      Profile.measure("attn.dev_oproj") do
+        CUDA.memcpy(ao.device_ptr.not_nil!.as(Pointer(Void)), @@gpu_attn_out.as(Pointer(Void)),
+          @q_dim.to_u64 * 4_u64, CUDA::MemcpyKind::DeviceToDevice)
+        ao.mark_device_dirty!
+        @w_o.as(QuantizedWeight).gemv_into(ao, dst)
+      end
     end
 
     # GPU forward — full sequence
@@ -445,9 +552,18 @@ module SHAInet
     end
 
     # --- CPU head loop: scores -> softmax -> AV, per query head/token ---
+    # Refuses to run against a host mirror whose contents the device path has moved
+    # past. Length parity is kept so prefill still indexes correctly, but the values
+    # live only on the device, and attending to the placeholder zeros would be
+    # silently wrong. Callers switching back to the CPU path must clear_cache! first.
     private def attention_heads_cpu(q_full : SimpleMatrix, output : SimpleMatrix,
                                     new_tokens : Int32, start_pos : Int32,
                                     total_len : Int32, scale : Float32)
+      if @host_kv_stale
+        raise RuntimeError.new(
+          "KV cache lives on the device after device-resident decode; the CPU attention " \
+          "path would read placeholder rows. Call clear_cache! before switching paths.")
+      end
       head_dim = @head_dim
       heads_per_kv = @num_heads // @num_kv_heads
 
@@ -743,18 +859,53 @@ module SHAInet
                 end
 
       bytes = @num_kv_heads.to_u64 * new_cap.to_u64 * head_dim.to_u64 * kv_elem_bytes
-      CUDA.free(@gpu_k_cache) unless @gpu_k_cache.null?
-      CUDA.free(@gpu_v_cache) unless @gpu_v_cache.null?
+      old_k = @gpu_k_cache
+      old_v = @gpu_v_cache
+      old_cap = @gpu_cache_cap
       kp = Pointer(Void).null
       vp = Pointer(Void).null
       CUDA.malloc(pointerof(kp), bytes)
       CUDA.malloc(pointerof(vp), bytes)
+
+      # Carry the existing cache across DEVICE TO DEVICE rather than re-uploading the
+      # host mirror. Two reasons: it avoids a PCIe round trip on every growth, and it
+      # frees the device decode path from having to maintain a host mirror at all.
+      # The copy is per kv_head because the row stride is `cap`, so a single block
+      # copy would land every head at the wrong offset after the capacity changes.
+      #
+      # CLAMPED to the OLD capacity: on the host path the mirror is appended to before
+      # the device append runs, so cached_positions can already exceed what the old
+      # device buffer holds, and copying that many rows would read past its end. The
+      # rows beyond are written by the append kernel immediately after anyway.
+      used = Math.min(cached_positions, old_cap)
+      if used > 0 && !old_k.null? && !old_v.null?
+        esz = kv_elem_bytes
+        span = used.to_u64 * head_dim.to_u64 * esz
+        @num_kv_heads.times do |h|
+          dst_off = h.to_u64 * new_cap.to_u64 * head_dim.to_u64 * esz
+          src_off = h.to_u64 * old_cap.to_u64 * head_dim.to_u64 * esz
+          CUDA.memcpy((kp.as(Pointer(UInt8)) + dst_off).as(Pointer(Void)),
+            (old_k.as(Pointer(UInt8)) + src_off).as(Pointer(Void)),
+            span, CUDA::MemcpyKind::DeviceToDevice)
+          CUDA.memcpy((vp.as(Pointer(UInt8)) + dst_off).as(Pointer(Void)),
+            (old_v.as(Pointer(UInt8)) + src_off).as(Pointer(Void)),
+            span, CUDA::MemcpyKind::DeviceToDevice)
+        end
+      end
+
+      CUDA.free(old_k) unless old_k.null?
+      CUDA.free(old_v) unless old_v.null?
       @gpu_k_cache = kp
       @gpu_v_cache = vp
       @gpu_cache_cap = new_cap
+    end
 
-      used = @num_kv_heads > 0 ? @k_cache[0].size // head_dim : 0
-      reupload_gpu_cache!(used, max_chunk) if used > 0
+    # Positions currently held in the cache. The device path is authoritative and
+    # does not fill the host mirror's contents, so this reads @cache_len there and
+    # falls back to the mirror's length only when the mirror is still the truth.
+    private def cached_positions : Int32
+      return @cache_len if @host_kv_stale
+      @num_kv_heads > 0 ? @k_cache[0].size // @head_dim : 0
     end
 
     # Upper bound on cached positions. When set, the device KV cache is sized to
@@ -808,33 +959,6 @@ module SHAInet
           grown.concat(arr)
           cache[kv_h] = grown
         end
-      end
-    end
-
-    # Re-populate the freshly grown device cache from the host mirror, in chunks
-    # of at most max_chunk positions. This goes through the append kernel rather
-    # than a raw memcpy so the fp32 mirror is converted for an fp16 cache, and so
-    # exactly one layout description exists for both dtypes.
-    private def reupload_gpu_cache!(upto : Int32, max_chunk : Int32)
-      head_dim = @head_dim
-      step = max_chunk < 1 ? 1 : max_chunk
-      st = @@staging_host
-      stp = st.to_unsafe
-
-      pos = 0
-      while pos < upto
-        n = Math.min(step, upto - pos)
-        cf = n * head_dim
-        kvf = @num_kv_heads * cf
-        src_off = pos * head_dim
-        @num_kv_heads.times do |kv_h|
-          (stp + kv_h * cf).copy_from(@k_cache[kv_h].to_unsafe + src_off, cf)
-          (stp + kvf + kv_h * cf).copy_from(@v_cache[kv_h].to_unsafe + src_off, cf)
-        end
-        CUDA.memcpy(@@gpu_staging.as(Pointer(Void)), stp.as(Pointer(Void)),
-          (2 * kvf).to_u64 * 4_u64, CUDA::MemcpyKind::HostToDevice)
-        append_kv(n, pos)
-        pos += n
       end
     end
 
@@ -1143,35 +1267,6 @@ module SHAInet
       else
         x * w
       end
-    end
-
-    # Projection whose INPUT is already device-resident. Saves the upload that
-    # gpu_matmul pays: on the device block chain the normed row is produced by the
-    # RMSNorm kernel, so q/k/v need no host-to-device copy at all. The result still
-    # comes back because RoPE, the KV host mirror and the attention staging are
-    # host-side.
-    private def gemv_from_device(x : CudaMatrix, w : QuantizedWeight) : SimpleMatrix
-      ob = (@q8_out_bufs[w.cols] ||= CudaMatrix.new(1, w.cols))
-      Profile.measure("gemm.kernel") { w.gemv_into(x, ob) }
-      Profile.measure("gemm.out_d2h") { ob.sync_from_device!("dev_proj_out") if ob.device_dirty? }
-      result = SimpleMatrix.new(1, w.cols)
-      Profile.measure("gemm.result_copy") do
-        result.data.to_unsafe.copy_from(ob.raw_data.to_unsafe, w.cols)
-      end
-      result
-    end
-
-    # Projection whose OUTPUT stays on the device. Used for o_proj, so the attention
-    # result feeds the residual add without a readback.
-    private def gemv_to_device(x : SimpleMatrix, w : QuantizedWeight, dst : CudaMatrix) : CudaMatrix
-      xb = (@q8_in_bufs[x.cols] ||= CudaMatrix.new(1, x.cols))
-      Profile.measure("gemm.in_h2d") do
-        xb.raw_data.to_unsafe.copy_from(x.data.to_unsafe, x.cols)
-        xb.mark_host_modified!
-        xb.sync_to_device!("dev_proj_in")
-      end
-      Profile.measure("gemm.kernel") { w.gemv_into(xb, dst) }
-      dst
     end
   end
 
