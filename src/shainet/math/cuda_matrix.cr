@@ -943,6 +943,12 @@ module SHAInet
       key = "#{matrix.rows}x#{matrix.cols}"
       pool = @@matrix_pool[key]
 
+      # Idempotent. Pooling one object twice has the same effect as pooling a matrix
+      # that is still in use: get_workspace hands the same device buffer to two live
+      # callers, the second zero!s it under the first, and both eventually free it.
+      # Cheap identity scan, and the pool is the only place that can detect this.
+      return if pool.any?(&.same?(matrix))
+
       # Only pool if we haven't exceeded the limit
       if pool.size < @@max_pool_size
         pool << matrix

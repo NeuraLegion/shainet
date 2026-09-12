@@ -164,6 +164,13 @@ module SHAInet
         # Identity function: input passes through unchanged, derivatives are all 1.0
         CudaMatrix.return_workspace(activations_cuda)
         @activations = linear_result
+        # linear_result IS @forward_workspace, and it is now this layer's activations
+        # AND this method's return value. Ownership has moved, so drop the workspace
+        # handle: otherwise the ensure block below returns it to the pool while the
+        # caller is still reading it, the next get_workspace of this shape pops the
+        # same buffer and zero!s it, and two owners then race to free it. That was
+        # the intermittent SIGSEGV on the training path.
+        @forward_workspace = nil
         @sigma_primes = CudaMatrix.ones(linear_result.rows, linear_result.cols)
         @sigma_primes.as(CudaMatrix).mark_device_dirty!
       else
