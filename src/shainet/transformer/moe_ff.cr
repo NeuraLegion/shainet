@@ -128,6 +128,45 @@ module SHAInet
       @@device_decode = value
     end
 
+    # True when the experts can run the device path, so a caller can keep the whole
+    # block on the device.
+    def device_row_capable? : Bool
+      return false unless self.class.device_decode_enabled?
+      return false unless CUDA.fully_available?
+      return false unless @router.is_a?(CudaMatrix)
+      first = @experts.first?
+      !!(first && first.device_resident_capable?)
+    end
+
+    # Device row in, device row out, with NO readback. This is the variant the block
+    # chain uses: the FFN result feeds the block's residual add on the device, so the
+    # single readback that forward_device_decode still pays disappears entirely.
+    #
+    # The returned matrix is a workspace owned by this layer, so consume it before the
+    # next call.
+    def forward_device_row(x : CudaMatrix) : CudaMatrix
+      out_dev = (@dev_out ||= CudaMatrix.new(1, @d_model))
+      expert_out = (@dev_expert_out ||= CudaMatrix.new(1, @d_model))
+
+      logits = Profile.measure("ffn.router") { (x * @router.as(CudaMatrix)).to_simple }
+      gating = Profile.measure("ffn.topk") { top_k_gating(logits, 0) }
+
+      out_dev.zero!
+      handle = CUDA.create_handle
+      begin
+        gating.each do |(e, w)|
+          @experts[e].forward_device(x, expert_out)
+          Profile.measure("ffn.dev_combine") do
+            CUDA.axpy(handle, w, expert_out.device_ptr.not_nil!, out_dev.device_ptr.not_nil!, @d_model)
+          end
+        end
+      ensure
+        CUDA.destroy_handle(handle)
+      end
+      out_dev.mark_device_dirty!
+      out_dev
+    end
+
     # Decode (single token) forward that keeps the activation on the device across
     # every selected expert, so the step costs ONE host-to-device upload and ONE
     # readback instead of three readbacks per expert.

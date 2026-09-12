@@ -182,12 +182,31 @@ module SHAInet
     end
 
     # CPU path - all SimpleMatrix operations
+    # Scratch buffer for entering the device block chain, allocated once.
+    @dev_chain_in : CudaMatrix? = nil
+
+    # The single readback at the end of the device block chain. One per token for the
+    # whole stack, rather than one per layer.
+    private def device_row_to_host(src : CudaMatrix) : SimpleMatrix
+      Profile.measure("net.dev_readback") do
+        src.sync_from_device!("block_chain_out") if src.device_dirty?
+        out = SimpleMatrix.new(src.rows, src.cols)
+        out.data.to_unsafe.copy_from(src.raw_data.to_unsafe, src.rows * src.cols)
+        out
+      end
+    end
+
     def run(input : SimpleMatrix, stealth : Bool = false) : SimpleMatrix
       verify_net_before_train
 
       matrix = input
 
       if !@transformer_layers.empty?
+        # Holds the activation when it is living on the device across llama blocks, so
+        # a stack of blocks costs ONE upload and ONE readback instead of a host round
+        # trip per layer. nil means the activation is currently the host `matrix`.
+        dev_act : CudaMatrix? = nil
+
         @hidden_layers.each do |l|
           case l
           when EmbeddingLayer
@@ -197,13 +216,40 @@ module SHAInet
           when TransformerLayer
             matrix = l.as(TransformerLayer).forward(matrix)
           when LlamaLayer
-            matrix = if use_kv_cache?
-                       l.as(LlamaLayer).forward_cached(matrix)
-                     else
-                       l.as(LlamaLayer).forward(matrix)
-                     end
+            block = l.as(LlamaLayer)
+            if use_kv_cache?
+              sm = matrix.as(SimpleMatrix)
+              if (dev_act || sm.rows == 1) && block.block_device_capable?
+                if dev_act.nil?
+                  buf = (@dev_chain_in ||= CudaMatrix.new(1, sm.cols))
+                  Profile.measure("net.dev_upload") do
+                    buf.raw_data.to_unsafe.copy_from(sm.data.to_unsafe, sm.cols)
+                    buf.mark_host_modified!
+                    buf.sync_to_device!("block_chain_in")
+                  end
+                  dev_act = buf
+                end
+                dev_act = block.forward_cached_device(dev_act.not_nil!)
+              else
+                # A block that cannot take the device path ends the chain: bring the
+                # activation home first so the host path sees the real activation
+                # rather than a stale copy.
+                if da = dev_act
+                  matrix = device_row_to_host(da)
+                  dev_act = nil
+                end
+                matrix = block.forward_cached(matrix.as(SimpleMatrix))
+              end
+            else
+              matrix = block.forward(matrix)
+            end
           end
         end
+
+        if da = dev_act
+          matrix = device_row_to_host(da)
+        end
+
         out_layer = @output_layers.last
         w = out_layer.weights
         b = out_layer.biases.as(SimpleMatrix)
