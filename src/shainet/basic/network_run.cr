@@ -193,7 +193,7 @@ module SHAInet
           when EmbeddingLayer
             raise NeuralNetRunError.new("Embedding input mismatch") unless matrix.cols == 1
             tokens = (0...matrix.rows).map { |r| matrix[r, 0].to_i }
-            matrix = l.as(EmbeddingLayer).embed_cpu(tokens)
+            matrix = Profile.measure("net.embed") { l.as(EmbeddingLayer).embed_cpu(tokens) }
           when TransformerLayer
             matrix = l.as(TransformerLayer).forward(matrix)
           when LlamaLayer
@@ -208,20 +208,24 @@ module SHAInet
         w = out_layer.weights
         b = out_layer.biases.as(SimpleMatrix)
         if fn = @final_norm
-          matrix = fn.forward(matrix.as(SimpleMatrix))
+          matrix = Profile.measure("net.final_norm") { fn.forward(matrix.as(SimpleMatrix)) }
         end
-        matrix = if lq = @lm_head_q
-                   gpu_lm_head_q(matrix.as(SimpleMatrix), lq)
-                 elsif w.is_a?(CudaMatrix)
-                   gpu_lm_head(matrix.as(SimpleMatrix), w.as(CudaMatrix))
-                 else
-                   safe_output_transform(matrix.as(SimpleMatrix), w.as(SimpleMatrix))
-                 end
+        matrix = Profile.measure("net.lm_head") do
+          if lq = @lm_head_q
+            gpu_lm_head_q(matrix.as(SimpleMatrix), lq)
+          elsif w.is_a?(CudaMatrix)
+            gpu_lm_head(matrix.as(SimpleMatrix), w.as(CudaMatrix))
+          else
+            safe_output_transform(matrix.as(SimpleMatrix), w.as(SimpleMatrix))
+          end
+        end
 
         # CPU bias addition
-        matrix.rows.times do |i|
-          matrix.cols.times do |j|
-            matrix[i, j] += b[0, j]
+        Profile.measure("net.out_bias") do
+          matrix.rows.times do |i|
+            matrix.cols.times do |j|
+              matrix[i, j] += b[0, j]
+            end
           end
         end
 
