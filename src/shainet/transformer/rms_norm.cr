@@ -36,8 +36,33 @@ module SHAInet
       result
     end
 
+    # True when the norm can run entirely on the device: gamma already there and the
+    # kernel present in the loaded .so.
+    def device_capable? : Bool
+      @gamma.is_a?(CudaMatrix) && CUDA.fully_available? && CUDA.block_device_kernels_available?
+    end
+
+    # Normalise a device-resident matrix into a caller-owned device destination.
+    # Allocates nothing and never touches the host, so it can sit inside a
+    # device-resident block chain.
+    def forward_into(x : CudaMatrix, dst : CudaMatrix) : CudaMatrix
+      g = @gamma.as(CudaMatrix)
+      g.sync_to_device!("rmsnorm_gamma_up") unless g.device_dirty?
+      x.sync_to_device!("rmsnorm_in") unless x.device_dirty?
+      CUDA.rms_norm_forward(dst.device_ptr.not_nil!, x.device_ptr.not_nil!,
+        g.device_ptr.not_nil!, x.rows, x.cols, @eps.to_f32)
+      dst.mark_device_dirty!
+      dst
+    end
+
     def forward(x : CudaMatrix) : CudaMatrix
-      # RMSNorm on CPU then sync — small per-row operation
+      # With the kernel present this is a pure device op. Without it, fall back to the
+      # historical path below, which reads the row back, normalises on the host and
+      # pushes it again.
+      if device_capable?
+        return forward_into(x, CudaMatrix.new(x.rows, x.cols))
+      end
+
       x.sync_from_device!("rmsnorm") if x.device_dirty?
       gamma_sm = @gamma
       if gamma_sm.is_a?(CudaMatrix)

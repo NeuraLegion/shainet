@@ -27,6 +27,65 @@ module SHAInet
     @q8_in_bufs = Hash(Int32, CudaMatrix).new
     @q8_out_bufs = Hash(Int32, CudaMatrix).new
 
+    # Device-resident workspaces for the decode FFN chain, keyed by width.
+    #
+    # CLASS level, not instance level, on purpose: a MoE layer holds up to 128
+    # experts and a model up to 48 layers, and only one expert is ever mid-flight,
+    # so per-instance buffers would burn hundreds of MB of VRAM to hold identical
+    # shapes. gate and up are live at the same time as hidden, so they need
+    # separate hashes rather than one keyed by width.
+    #
+    # This inherits the same single-inference-at-a-time assumption the attention
+    # path's shared staging buffers already make.
+    @@dev_gate_bufs = Hash(Int32, CudaMatrix).new
+    @@dev_up_bufs = Hash(Int32, CudaMatrix).new
+    @@dev_hidden_bufs = Hash(Int32, CudaMatrix).new
+
+    # True when this expert can run the fully device-resident path: all three
+    # projections quantized onto the device (or host-resident Q4, which streams
+    # itself) and the fused SwiGLU kernel present in the loaded .so.
+    def device_resident_capable? : Bool
+      @gate_proj.is_a?(QuantizedWeight) &&
+        @up_proj.is_a?(QuantizedWeight) &&
+        @down_proj.is_a?(QuantizedWeight) &&
+        CUDA.fully_available? && CUDA.swiglu_kernel_available?
+    end
+
+    # Decode forward that takes a device-resident activation row and returns one,
+    # with no host round trip anywhere in between.
+    #
+    # The whole point: the host path spends three device-to-host readbacks per
+    # expert (gate, up, down) plus a host SwiGLU loop, and at 8 experts x 48 layers
+    # that readback latency dominated the decode step. Here gate and up are
+    # produced into device buffers, combined by a device kernel, and fed straight
+    # into the down projection. Nothing crosses PCIe.
+    #
+    # `xb` must already be device-resident. The returned CudaMatrix is a SHARED
+    # workspace owned by the caller's buffer table, so consume it before the next
+    # call to this method.
+    def forward_device(xb : CudaMatrix, out_buf : CudaMatrix) : CudaMatrix
+      gate_w = @gate_proj.as(QuantizedWeight)
+      up_w = @up_proj.as(QuantizedWeight)
+      down_w = @down_proj.as(QuantizedWeight)
+      hidden_cols = gate_w.cols
+
+      gate_buf = (@@dev_gate_bufs[hidden_cols] ||= CudaMatrix.new(1, hidden_cols))
+      up_buf = (@@dev_up_bufs[hidden_cols] ||= CudaMatrix.new(1, hidden_cols))
+      hidden_buf = (@@dev_hidden_bufs[hidden_cols] ||= CudaMatrix.new(1, hidden_cols))
+
+      Profile.measure("ffn.dev_gate_up") do
+        gate_w.gemv_into(xb, gate_buf)
+        up_w.gemv_into(xb, up_buf)
+      end
+      Profile.measure("ffn.dev_swiglu") do
+        CUDA.swiglu_forward(hidden_buf.device_ptr.not_nil!,
+          gate_buf.device_ptr.not_nil!, up_buf.device_ptr.not_nil!, hidden_cols)
+        hidden_buf.mark_device_dirty!
+      end
+      Profile.measure("ffn.dev_down") { down_w.gemv_into(hidden_buf, out_buf) }
+      out_buf
+    end
+
     def to_gpu!(quantize : Bool = false, bits : Int32 = 8, offload : Bool = false)
       return unless CUDA.fully_available?
       # Catch placeholder experts (allocate: false) that were never loaded — promoting
@@ -80,10 +139,12 @@ module SHAInet
       rows = gate.rows
       cols = gate.cols
       hidden = SimpleMatrix.new(rows, cols)
-      rows.times do |i|
-        cols.times do |j|
-          g = gate[i, j]
-          hidden[i, j] = (g / (1.0 + Math.exp(-g))) * up[i, j]
+      Profile.measure("ffn.swiglu_act") do
+        rows.times do |i|
+          cols.times do |j|
+            g = gate[i, j]
+            hidden[i, j] = (g / (1.0 + Math.exp(-g))) * up[i, j]
+          end
         end
       end
 
@@ -116,14 +177,18 @@ module SHAInet
       if w.is_a?(QuantizedWeight)
         if x.rows == 1
           xb = (@q8_in_bufs[x.cols] ||= CudaMatrix.new(1, x.cols))
-          xb.raw_data.to_unsafe.copy_from(x.data.to_unsafe, x.cols)
-          xb.mark_host_modified!
-          xb.sync_to_device!("q8_ffn_in")
+          Profile.measure("gemm.in_h2d") do
+            xb.raw_data.to_unsafe.copy_from(x.data.to_unsafe, x.cols)
+            xb.mark_host_modified!
+            xb.sync_to_device!("q8_ffn_in")
+          end
           ob = (@q8_out_bufs[w.cols] ||= CudaMatrix.new(1, w.cols))
-          w.gemv_into(xb, ob)
-          ob.sync_from_device!("q8_ffn_out") if ob.device_dirty?
+          Profile.measure("gemm.kernel") { w.gemv_into(xb, ob) }
+          Profile.measure("gemm.out_d2h") { ob.sync_from_device!("q8_ffn_out") if ob.device_dirty? }
           result = SimpleMatrix.new(1, w.cols)
-          result.data.to_unsafe.copy_from(ob.raw_data.to_unsafe, w.cols)
+          Profile.measure("gemm.result_copy") do
+            result.data.to_unsafe.copy_from(ob.raw_data.to_unsafe, w.cols)
+          end
           result
         else
           x_gpu = CudaMatrix.new(x.rows, x.cols)

@@ -182,46 +182,103 @@ module SHAInet
     end
 
     # CPU path - all SimpleMatrix operations
+    # Scratch buffer for entering the device block chain, allocated once.
+    @dev_chain_in : CudaMatrix? = nil
+
+    # The single readback at the end of the device block chain. One per token for the
+    # whole stack, rather than one per layer.
+    private def device_row_to_host(src : CudaMatrix) : SimpleMatrix
+      Profile.measure("net.dev_readback") do
+        src.sync_from_device!("block_chain_out") if src.device_dirty?
+        out = SimpleMatrix.new(src.rows, src.cols)
+        out.data.to_unsafe.copy_from(src.raw_data.to_unsafe, src.rows * src.cols)
+        out
+      end
+    end
+
     def run(input : SimpleMatrix, stealth : Bool = false) : SimpleMatrix
       verify_net_before_train
 
       matrix = input
 
       if !@transformer_layers.empty?
+        # Holds the activation when it is living on the device across llama blocks, so
+        # a stack of blocks costs ONE upload and ONE readback instead of a host round
+        # trip per layer. nil means the activation is currently the host `matrix`.
+        dev_act : CudaMatrix? = nil
+
         @hidden_layers.each do |l|
           case l
           when EmbeddingLayer
             raise NeuralNetRunError.new("Embedding input mismatch") unless matrix.cols == 1
             tokens = (0...matrix.rows).map { |r| matrix[r, 0].to_i }
-            matrix = l.as(EmbeddingLayer).embed_cpu(tokens)
+            matrix = Profile.measure("net.embed") { l.as(EmbeddingLayer).embed_cpu(tokens) }
           when TransformerLayer
             matrix = l.as(TransformerLayer).forward(matrix)
           when LlamaLayer
-            matrix = if use_kv_cache?
-                       l.as(LlamaLayer).forward_cached(matrix)
-                     else
-                       l.as(LlamaLayer).forward(matrix)
-                     end
+            block = l.as(LlamaLayer)
+            if use_kv_cache?
+              sm = matrix.as(SimpleMatrix)
+              if (dev_act || sm.rows == 1) && block.block_device_capable?
+                if dev_act.nil?
+                  buf = (@dev_chain_in ||= CudaMatrix.new(1, sm.cols))
+                  Profile.measure("net.dev_upload") do
+                    buf.raw_data.to_unsafe.copy_from(sm.data.to_unsafe, sm.cols)
+                    buf.mark_host_modified!
+                    buf.sync_to_device!("block_chain_in")
+                  end
+                  dev_act = buf
+                end
+                dev_act = block.forward_cached_device(dev_act.not_nil!)
+              else
+                # A block that cannot take the device path ends the chain: bring the
+                # activation home first so the host path sees the real activation
+                # rather than a stale copy.
+                if da = dev_act
+                  matrix = device_row_to_host(da)
+                  dev_act = nil
+                end
+                matrix = block.forward_cached(matrix.as(SimpleMatrix))
+              end
+            else
+              matrix = block.forward(matrix)
+            end
           end
         end
+
+        if da = dev_act
+          matrix = device_row_to_host(da)
+        end
+
         out_layer = @output_layers.last
         w = out_layer.weights
         b = out_layer.biases.as(SimpleMatrix)
         if fn = @final_norm
-          matrix = fn.forward(matrix.as(SimpleMatrix))
+          matrix = Profile.measure("net.final_norm") { fn.forward(matrix.as(SimpleMatrix)) }
         end
-        matrix = if lq = @lm_head_q
-                   gpu_lm_head_q(matrix.as(SimpleMatrix), lq)
-                 elsif w.is_a?(CudaMatrix)
-                   gpu_lm_head(matrix.as(SimpleMatrix), w.as(CudaMatrix))
-                 else
-                   safe_output_transform(matrix.as(SimpleMatrix), w.as(SimpleMatrix))
-                 end
+        # When the quantized head applies the bias on the device, the host loop below
+        # is skipped: it walked the whole vocab row per token.
+        bias_on_device = false
+        matrix = Profile.measure("net.lm_head") do
+          if lq = @lm_head_q
+            row_bias = matrix.as(SimpleMatrix).rows >= 1 ? b : nil
+            bias_on_device = !row_bias.nil?
+            gpu_lm_head_q(matrix.as(SimpleMatrix), lq, row_bias)
+          elsif w.is_a?(CudaMatrix)
+            gpu_lm_head(matrix.as(SimpleMatrix), w.as(CudaMatrix))
+          else
+            safe_output_transform(matrix.as(SimpleMatrix), w.as(SimpleMatrix))
+          end
+        end
 
-        # CPU bias addition
-        matrix.rows.times do |i|
-          matrix.cols.times do |j|
-            matrix[i, j] += b[0, j]
+        # CPU bias addition, unless the device head already added it.
+        unless bias_on_device
+          Profile.measure("net.out_bias") do
+            matrix.rows.times do |i|
+              matrix.cols.times do |j|
+                matrix[i, j] += b[0, j]
+              end
+            end
           end
         end
 
@@ -1462,7 +1519,13 @@ module SHAInet
     # Quantized lm_head projection: [1, d_model] × dequant(W[d_model, vocab]).
     # Uses the dequant-in-kernel GEMV of the given quantized weight (Q8 or Q4).
     # Returns [1, vocab] logits.
-    private def gpu_lm_head_q(matrix : SimpleMatrix, weights : QuantizedWeight) : SimpleMatrix
+    @lm_head_b : CudaMatrix? = nil
+
+    # `bias` is added ON THE DEVICE before the readback when supplied, so the caller
+    # can skip its host loop. That loop walked the full vocab row (151936 wide on
+    # Qwen3) once per token, which the profiler showed at 0.25 ms/step.
+    private def gpu_lm_head_q(matrix : SimpleMatrix, weights : QuantizedWeight,
+                              bias : SimpleMatrix? = nil) : SimpleMatrix
       # Extract last token for transformer architectures (language modeling).
       last = if matrix.rows > 1
                sm = SimpleMatrix.new(1, matrix.cols)
@@ -1479,6 +1542,20 @@ module SHAInet
 
       r_gpu = (@lm_head_r ||= CudaMatrix.new(last.rows, weights.cols))
       weights.gemv_into(x_gpu, r_gpu)
+
+      if b = bias
+        bd = @lm_head_b
+        unless bd
+          bd = CudaMatrix.new(1, b.cols)
+          bd.raw_data.to_unsafe.copy_from(b.data.to_unsafe, b.cols)
+          bd.mark_host_modified!
+          bd.sync_to_device!("lm_head_bias")
+          @lm_head_b = bd
+        end
+        CUDA.add_inplace(r_gpu.device_ptr.not_nil!, bd.device_ptr.not_nil!, r_gpu.cols)
+        r_gpu.mark_device_dirty!
+      end
+
       r_gpu.sync_from_device!("lm_head_q_out") if r_gpu.device_dirty?
 
       result = SimpleMatrix.new(r_gpu.rows, r_gpu.cols)

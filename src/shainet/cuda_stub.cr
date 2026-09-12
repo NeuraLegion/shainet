@@ -114,6 +114,38 @@ module SHAInet
       false
     end
 
+    def swiglu_forward(*args)
+      raise "CUDA disabled"
+    end
+
+    def swiglu_kernel_available? : Bool
+      false
+    end
+
+    def rms_norm_forward(*args)
+      raise "CUDA disabled"
+    end
+
+    def add_inplace(*args)
+      raise "CUDA disabled"
+    end
+
+    def block_device_kernels_available? : Bool
+      false
+    end
+
+    def rope_forward(*args)
+      raise "CUDA disabled"
+    end
+
+    def head_rmsnorm(*args)
+      raise "CUDA disabled"
+    end
+
+    def attention_device_kernels_available? : Bool
+      false
+    end
+
     def geam(*args)
     end
 
