@@ -126,6 +126,26 @@ module SHAInet
       false
     end
 
+    def rope_forward_rows(*args)
+      raise "CUDA disabled"
+    end
+
+    def head_rmsnorm_rows(*args)
+      raise "CUDA disabled"
+    end
+
+    def add_bias_rows(*args)
+      raise "CUDA disabled"
+    end
+
+    def pack_kv_heads(*args)
+      raise "CUDA disabled"
+    end
+
+    def prefill_attn_kernels_available? : Bool
+      false
+    end
+
     def scatter_add_rows(*args)
       raise "CUDA disabled"
     end

@@ -534,6 +534,132 @@ __global__ void head_rmsnorm_kernel(float* x, const float* gamma, int heads,
     }
 }
 
+// --- Multi-row variants for device-resident PREFILL -------------------------------
+//
+// The single-row kernels above serve decode, where there is one token and one
+// position. Prefill has `rows` tokens at consecutive positions, laid out
+// [rows, heads * head_dim] row-major, so these take a row dimension and derive each
+// token's position from base_pos. The math is identical per row, which is what makes
+// parity with the host path assertable.
+
+__global__ void rope_forward_rows_kernel(float* x, const float* inv_freq, int base_pos,
+                                        int rows, int heads, int head_dim) {
+    int head = blockIdx.x;
+    int r = blockIdx.y;
+    if (head >= heads || r >= rows) return;
+    int half = head_dim / 2;
+    int stride = heads * head_dim;
+    float* row = x + (size_t)r * (size_t)stride + (size_t)head * (size_t)head_dim;
+    float pos = (float)(base_pos + r);
+
+    for (int i = threadIdx.x; i < half; i += blockDim.x) {
+        float angle = pos * inv_freq[i];
+        float c = cosf(angle);
+        float s = sinf(angle);
+        float x0 = row[i];
+        float x1 = row[i + half];
+        row[i] = x0 * c - x1 * s;
+        row[i + half] = x1 * c + x0 * s;
+    }
+}
+
+void rope_forward_rows(float* x, const float* inv_freq, int base_pos,
+                       int rows, int heads, int head_dim) {
+    if (rows <= 0 || heads <= 0) return;
+    int threads = 128;
+    dim3 grid(heads, rows);
+    rope_forward_rows_kernel<<<grid, threads>>>(x, inv_freq, base_pos, rows, heads, head_dim);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in rope_forward_rows: %s\n", cudaGetErrorString(err));
+    }
+}
+
+__global__ void head_rmsnorm_rows_kernel(float* x, const float* gamma, int rows,
+                                        int heads, int head_dim, float eps) {
+    extern __shared__ float sdata[];
+    int head = blockIdx.x;
+    int r = blockIdx.y;
+    if (head >= heads || r >= rows) return;
+    int stride = heads * head_dim;
+    float* row = x + (size_t)r * (size_t)stride + (size_t)head * (size_t)head_dim;
+
+    float local = 0.0f;
+    for (int j = threadIdx.x; j < head_dim; j += blockDim.x) {
+        float v = row[j];
+        local += v * v;
+    }
+    sdata[threadIdx.x] = local;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x + s];
+        __syncthreads();
+    }
+
+    float inv = 1.0f / sqrtf(sdata[0] / (float)head_dim + eps);
+    for (int j = threadIdx.x; j < head_dim; j += blockDim.x) {
+        row[j] = row[j] * inv * gamma[j];
+    }
+}
+
+void head_rmsnorm_rows(float* x, const float* gamma, int rows, int heads,
+                       int head_dim, float eps) {
+    if (rows <= 0 || heads <= 0) return;
+    int threads = 128; // power of two: the halving reduction above requires it
+    size_t shmem = threads * sizeof(float);
+    dim3 grid(heads, rows);
+    head_rmsnorm_rows_kernel<<<grid, threads, shmem>>>(x, gamma, rows, heads, head_dim, eps);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in head_rmsnorm_rows: %s\n", cudaGetErrorString(err));
+    }
+}
+
+// x[r, c] += bias[c]: the projection biases are per output column, broadcast over
+// tokens. Qwen2 has them, LLaMA does not, so this is a no-op path for some models.
+__global__ void add_bias_rows_kernel(float* x, const float* bias, int rows, int cols) {
+    int r = blockIdx.x;
+    if (r >= rows) return;
+    float* row = x + (size_t)r * (size_t)cols;
+    for (int c = threadIdx.x; c < cols; c += blockDim.x) row[c] += bias[c];
+}
+
+void add_bias_rows(float* x, const float* bias, int rows, int cols) {
+    if (rows <= 0 || cols <= 0) return;
+    int threads = cols < 256 ? 32 : 256;
+    add_bias_rows_kernel<<<rows, threads>>>(x, bias, rows, cols);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in add_bias_rows: %s\n", cudaGetErrorString(err));
+    }
+}
+
+// Repack token-major [rows, kv_heads * head_dim] into the kv-head-major layout the
+// existing KV append expects: dst[kv_h][t][d]. This is what lets the projections stay
+// on the device while append_kv and attend_kv keep working unchanged, instead of the
+// host rebuilding the same blob from its mirror every chunk.
+__global__ void pack_kv_heads_kernel(float* dst, const float* src,
+                                    int rows, int kv_heads, int head_dim) {
+    int kv_h = blockIdx.x;
+    int r = blockIdx.y;
+    if (kv_h >= kv_heads || r >= rows) return;
+    int stride = kv_heads * head_dim;
+    const float* s = src + (size_t)r * (size_t)stride + (size_t)kv_h * (size_t)head_dim;
+    float* d = dst + (size_t)kv_h * (size_t)rows * (size_t)head_dim + (size_t)r * (size_t)head_dim;
+    for (int j = threadIdx.x; j < head_dim; j += blockDim.x) d[j] = s[j];
+}
+
+void pack_kv_heads(float* dst, const float* src, int rows, int kv_heads, int head_dim) {
+    if (rows <= 0 || kv_heads <= 0) return;
+    int threads = head_dim < 256 ? 32 : 256;
+    dim3 grid(kv_heads, rows);
+    pack_kv_heads_kernel<<<grid, threads>>>(dst, src, rows, kv_heads, head_dim);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in pack_kv_heads: %s\n", cudaGetErrorString(err));
+    }
+}
+
 void head_rmsnorm(float* x, const float* gamma, int heads, int head_dim, float eps) {
     int threads = 128;
     size_t shmem = threads * sizeof(float);
