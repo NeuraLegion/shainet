@@ -220,7 +220,7 @@ module SHAInet
       out_dev = (@dev_out ||= CudaMatrix.new(1, @d_model))
       expert_out = (@dev_expert_out ||= CudaMatrix.new(1, @d_model))
 
-      logits = Profile.measure("ffn.router") { (x * @router.as(CudaMatrix)).to_simple }
+      logits = Profile.measure("ffn.router") { device_router_logits(x) }
       gating = Profile.measure("ffn.topk") { top_k_gating(logits, 0) }
 
       out_dev.zero!
@@ -269,7 +269,7 @@ module SHAInet
         xb.sync_to_device!("moe_dev_in")
       end
 
-      logits = Profile.measure("ffn.router") { (xb * @router.as(CudaMatrix)).to_simple }
+      logits = Profile.measure("ffn.router") { device_router_logits(xb) }
       gating = Profile.measure("ffn.topk") { top_k_gating(logits, 0) }
 
       out_dev.zero!
@@ -329,7 +329,7 @@ module SHAInet
       # freed here: freeing them would hand a dangling pointer to the next layer. They
       # are released by release_prefill_workspaces!. Allocating them per call is what
       # left 134 MB per layer per call to Boehm's finalizers at 16k context.
-      dev_in = shared_workspace(@@prefill_in, x.rows)
+      dev_in = row_workspace(@@prefill_in, x.rows)
       Profile.measure("ffn.prefill_h2d") do
         dev_in.raw_data.to_unsafe.copy_from(x.data.to_unsafe, x.rows * @d_model)
         dev_in.mark_host_modified!
@@ -395,7 +395,7 @@ module SHAInet
 
       # One router GEMM for every token, and its logits are the ONLY thing read
       # back: [tokens, num_experts], not per expert.
-      logits = Profile.measure("ffn.router") { (x * @router.as(CudaMatrix)).to_simple }
+      logits = Profile.measure("ffn.router") { device_router_logits(x) }
 
       # Invert the routing: instead of "which experts does this token want", ask
       # "which tokens want this expert". A token's top-k choice is unchanged, so the
@@ -407,7 +407,7 @@ module SHAInet
         end
       end
 
-      dst = shared_workspace(@@prefill_dst, rows)
+      dst = row_workspace(@@prefill_dst, rows)
       dst.zero!
 
       # Tile so the workspaces are a fixed shape, and so one expert with a huge share
@@ -446,8 +446,8 @@ module SHAInet
         # The GEMM is sized to the REAL row count, so a short slice does not pay for a
         # padded tile. Buffers are cached per row count, and the tiling keeps that to a
         # handful of distinct shapes.
-        gathered = shared_workspace(@@gathered_shared, n)
-        batch_out = shared_workspace(@@batch_out_shared, n)
+        gathered = slice_workspace(@@gathered_shared, n)
+        batch_out = slice_workspace(@@batch_out_shared, n)
         idxp = idx_dev.ptr + offset
 
         Profile.measure("ffn.gather") do
@@ -469,10 +469,68 @@ module SHAInet
       dst
     end
 
-    # Shared, row-count-keyed workspaces. Tiling bounds the number of distinct shapes,
-    # so this is a few buffers for the whole model, not one per expert or per layer.
+    # Router logits for device-resident callers. The product is a device temporary and
+    # is freed here: left to Boehm it is rows * num_experts * 4 bytes per layer per
+    # call, which on a 48-layer model is churn in the same VRAM the expert cache is
+    # sized against.
+    private def device_router_logits(m : CudaMatrix) : SimpleMatrix
+      prod = m * @router.as(CudaMatrix)
+      begin
+        prod.to_simple
+      ensure
+        prod.free!
+      end
+    end
+
+    # Shared, shape-keyed workspaces. The number of distinct shapes MUST be bounded:
+    # keying by an exact per-call size is what leaked. Expert routing hands out slice
+    # sizes anywhere in 1..tile, so a cache keyed on the exact size accumulates a
+    # buffer per distinct size per layer. Summing n = 1..128 at 2048 columns is ~67 MB
+    # per cache per layer, and with two caches over 48 layers that reached ~6.5 GB of
+    # VRAM that was never released -- observed as an agent whose VRAM climbed
+    # 94% -> 100% across two turns and then failed a 19 MB cudaMalloc.
+    #
+    # Slice buffers are therefore bucketed to the next power of two: at most 8 shapes
+    # up to a 128-row tile, and the padding is never worse than 2x. The gather writes
+    # only the real rows; the extra rows hold finite leftovers, are computed by the
+    # GEMM, and are never scattered back.
+    private def bucket(n : Int32) : Int32
+      b = 1
+      while b < n
+        b <<= 1
+      end
+      b
+    end
+
     private def shared_workspace(cache : Hash(Tuple(Int32, Int32), CudaMatrix), n : Int32) : CudaMatrix
       cache[{n, @d_model}] ||= CudaMatrix.new(n, @d_model)
+    end
+
+    private def slice_workspace(cache : Hash(Tuple(Int32, Int32), CudaMatrix), n : Int32) : CudaMatrix
+      shared_workspace(cache, bucket(n))
+    end
+
+    # Row-count-keyed workspaces cannot be bucketed, because the result is read back
+    # at exactly `rows`. Prompt lengths vary per turn, so the cache is CAPPED instead:
+    # the least recently used shape is freed. Two entries covers a growing prompt plus
+    # the shape a re-prefill lands on.
+    MAX_ROW_SHAPES = 2
+
+    private def row_workspace(cache : Hash(Tuple(Int32, Int32), CudaMatrix), rows : Int32) : CudaMatrix
+      key = {rows, @d_model}
+      if existing = cache[key]?
+        # Refresh recency: re-inserting moves it to the end of the iteration order.
+        cache.delete(key)
+        cache[key] = existing
+        return existing
+      end
+
+      while cache.size >= MAX_ROW_SHAPES
+        oldest = cache.first_key
+        cache[oldest].free!
+        cache.delete(oldest)
+      end
+      cache[key] = CudaMatrix.new(rows, @d_model)
     end
 
     # Grown to fit, never shrunk: the plan is rows * top_k entries, so it settles after

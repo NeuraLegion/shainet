@@ -162,4 +162,66 @@ describe "device-resident MoE prefill" do
     SHAInet::MoEFF.release_prefill_workspaces!
     SHAInet::MoEFF.prefill_workspace_bytes.should eq(0)
   end
+
+  it "stays bounded across many DIFFERENT shapes, which is what leaked" do
+    pending! "CUDA/kernels not available" unless moe_prefill_ready?
+
+    # The regression this pins: workspaces were keyed by the EXACT per-call size, and
+    # expert routing hands out slice sizes anywhere in 1..tile. One buffer per distinct
+    # size per layer reached ~6.5 GB of VRAM never released, seen in the field as an
+    # agent whose VRAM climbed 94% -> 100% over two turns and then failed a 19 MB
+    # cudaMalloc.
+    #
+    # Slice shapes are bucketed to powers of two and row shapes are capped, so the
+    # footprint must PLATEAU rather than grow with the number of distinct shapes.
+    SHAInet::MoEFF.release_prefill_workspaces!
+    moe = build_moe(64, 96, 6, 2)
+
+    with_moe_device(true) do
+      # Warm every bucket and fill the row-shape cap.
+      [3, 5, 9, 17].each do |rows|
+        moe.forward(fill!(SHAInet::SimpleMatrix.new(rows, 64), rows * 0.11))
+      end
+      settled = SHAInet::MoEFF.prefill_workspace_bytes
+      settled.should be > 0
+
+      # Twelve more distinct shapes. Keyed by exact size this grows every time; with
+      # the bound in place it must not exceed what the biggest shape needs.
+      (2..13).each do |rows|
+        moe.forward(fill!(SHAInet::SimpleMatrix.new(rows, 64), rows * 0.07))
+      end
+
+      after = SHAInet::MoEFF.prefill_workspace_bytes
+      # Allow growth only for genuinely larger shapes, not for their NUMBER: 12 more
+      # exact-keyed shapes would have multiplied this.
+      after.should be <= settled * 2
+    end
+
+    SHAInet::MoEFF.release_prefill_workspaces!
+    SHAInet::MoEFF.prefill_workspace_bytes.should eq(0)
+  end
+
+  it "caps the row-keyed workspaces rather than keeping one per prompt length" do
+    pending! "CUDA/kernels not available" unless moe_prefill_ready?
+
+    # Prompt lengths vary every turn and the result is read back at exactly `rows`, so
+    # these cannot be bucketed. They are capped instead, and the cap is the assertion.
+    SHAInet::MoEFF.release_prefill_workspaces!
+    moe = build_moe(64, 96, 6, 2)
+
+    with_moe_device(true) do
+      (2..9).each do |rows|
+        moe.forward(fill!(SHAInet::SimpleMatrix.new(rows, 64), rows * 0.3))
+      end
+    end
+
+    # Eight distinct prompt lengths, at most MAX_ROW_SHAPES retained per cache. The
+    # two row caches hold [rows, 64] fp32, so bound the total by the cap times the
+    # largest shape, times the two caches.
+    largest = 9 * 64 * 4
+    cap = SHAInet::MoEFF::MAX_ROW_SHAPES
+    SHAInet::MoEFF.prefill_workspace_bytes.should be <= (largest * cap * 2 + largest * 8).to_u64
+
+    SHAInet::MoEFF.release_prefill_workspaces!
+  end
 end
