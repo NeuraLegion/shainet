@@ -575,15 +575,19 @@ STDERR.sync = true # stream tokens as they arrive (no buffering)
 AgentDemo.print_banner(STDERR, "#{File.basename(model_dir)} · local coding agent on Network#run")
 
 STDERR.puts "Loading model from #{model_dir}...".colorize(:dark_gray)
-t0 = Time.instant
+t0 = Time.monotonic
+# Q4 + MoE offload are the only configuration a large MoE model actually runs in on a
+# single consumer GPU: without them a 30B-A3B does not fit at all. So they are the
+# DEFAULT here rather than opt-in. SHAINET_Q8=1 and SHAINET_MOE_OFFLOAD=0 opt out.
+ENV["SHAINET_MOE_OFFLOAD"] = "1" unless ENV.has_key?("SHAINET_MOE_OFFLOAD")
 quantize = SHAInet::CUDA.fully_available? && !ENV["SHAINET_FP32"]?
-bits = ENV["SHAINET_Q4"]? ? 4 : 8
+bits = ENV.fetch("SHAINET_Q8", "0") == "1" ? 8 : 4
 offload = ENV.fetch("SHAINET_MOE_OFFLOAD", "0") == "1"
 STDERR.puts "  Mode: #{ENV["SHAINET_FP32"]? ? "fp32" : "Q#{bits}"}#{offload ? " (MoE offload)" : ""}"
 net = SHAInet::HFLoader.load(model_dir, quantize: quantize, bits: bits)
 net.use_kv_cache = true
 tokenizer = SHAInet::BPETokenizer.from_hf(File.join(model_dir, "tokenizer.json"))
-STDERR.puts "Loaded in #{(Time.instant - t0).total_seconds.round(1)}s (vocab #{tokenizer.vocab.size})"
+STDERR.puts "Loaded in #{(Time.monotonic - t0).total_seconds.round(1)}s (vocab #{tokenizer.vocab.size})"
 
 # Size the expert cache to leave headroom for the model + prefill activations.
 # (cudaMalloc now GC-reclaims dead GPU buffers on pressure, so this only needs a

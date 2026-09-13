@@ -7,6 +7,16 @@ module SHAInet
   module HFLoader
     SUPPORTED_MODELS = ["gpt2", "llama", "mistral", "qwen2", "qwen3", "qwen3_moe"]
 
+    # Experts read between forced collections while loading an MoE layer. Bounds the
+    # read/transpose garbage that would otherwise accumulate across a whole layer's
+    # experts; 32 keeps the load-time cost small while capturing most of the peak
+    # reduction. SHAINET_EXPERT_GC_INTERVAL overrides it; 0 disables the extra
+    # collections and restores the old per-layer-only behaviour.
+    EXPERT_GC_INTERVAL = begin
+      raw = (ENV["SHAINET_EXPERT_GC_INTERVAL"]? || "32").to_i
+      raw <= 0 ? Int32::MAX : raw
+    end
+
     # Open a model's weights whether they're a single model.safetensors or
     # sharded (model.safetensors.index.json + model-0000k-of-0000N.safetensors).
     # Returns either a SafeTensors::File or ShardedFile — both expose the same
@@ -365,6 +375,18 @@ module SHAInet
               expert.gate_proj = sf.read_matrix("#{eprefix}.gate_proj.weight").transpose
               expert.up_proj = sf.read_matrix("#{eprefix}.up_proj.weight").transpose
               expert.down_proj = sf.read_matrix("#{eprefix}.down_proj.weight").transpose
+
+              # The block-level collection below only fires once per LAYER, and a
+              # 128-expert layer reads 384 tensors before reaching it. Each read
+              # allocates a raw byte buffer and an fp32 matrix, and .transpose
+              # allocates a second matrix it then discards, so the garbage from one
+              # layer's experts reached several GB before anything reclaimed it.
+              #
+              # Measured on Qwen3-Coder-30B-A3B: the agent was OOM-killed at 42.3 GiB
+              # of anonymous RSS during load on a 62 GB host, while the same load with
+              # Boehm collecting harder (GC_FREE_SPACE_DIVISOR=8) peaked at 33.4 GiB.
+              # This is that reclaim, without asking the user for an env var.
+              GC.collect if do_quant && (e + 1) % EXPERT_GC_INTERVAL == 0
             end
           end
 
