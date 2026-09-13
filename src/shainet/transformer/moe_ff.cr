@@ -89,6 +89,9 @@ module SHAInet
       if result = forward_device_decode(x)
         return result
       end
+      if result = forward_prefill_via_device(x)
+        return result
+      end
       logits = Profile.measure("ffn.router") { router_logits(x) }
       out = SimpleMatrix.zeros(x.rows, @d_model)
       row = SimpleMatrix.new(1, @d_model)
@@ -107,6 +110,7 @@ module SHAInet
 
     # Device-resident workspaces for the decode path, allocated once.
     @dev_x : CudaMatrix? = nil
+    @dev_x_row : CudaMatrix? = nil
     @dev_out : CudaMatrix? = nil
     @dev_expert_out : CudaMatrix? = nil
 
@@ -228,8 +232,97 @@ module SHAInet
     # fp32 GPU path. Routing + expert evaluation happen through the SimpleMatrix
     # path; convert only at the boundary.
     def forward(x : CudaMatrix) : CudaMatrix
+      if result = forward_device_prefill(x)
+        return result
+      end
       x.sync_from_device!("moe_in") if x.device_dirty?
       forward(x.to_simple).to_cuda
+    end
+
+    # Host-facing PREFILL entry. The prefill block chain is SimpleMatrix based
+    # (LlamaBlock#forward_cached), so without this the FFN's expert matmuls each
+    # bounce to the GPU and back on their own: profiling a 512-token prefill on
+    # Qwen3-1.6B-A0.9B measured gemm.out_d2h at 61.7% of the time over 122880 calls
+    # (tokens * experts_per_token * 3 matmuls * layers) against 6.7% for the kernels
+    # those readbacks wait on.
+    #
+    # This uploads the activations ONCE, runs every expert on the device, and reads
+    # the result back ONCE: two transfers per layer instead of 24 per token per
+    # layer. Returns nil when the device path does not apply.
+    private def forward_prefill_via_device(x : SimpleMatrix) : SimpleMatrix?
+      return unless x.rows > 1
+      return unless self.class.device_decode_enabled?
+      return unless CUDA.fully_available?
+      return unless @router.is_a?(CudaMatrix)
+      first = @experts.first?
+      return unless first && first.device_resident_capable?
+
+      dev_in = Profile.measure("ffn.prefill_h2d") { x.to_cuda }
+      begin
+        dev_out = forward_device_prefill(dev_in)
+        return unless dev_out
+        begin
+          Profile.measure("ffn.prefill_d2h") { dev_out.to_simple }
+        ensure
+          dev_out.free!
+        end
+      ensure
+        dev_in.free!
+      end
+    end
+
+    # Device-resident PREFILL: activations stay on the device across every expert.
+    # The only transfer is the router logits, one [tokens, num_experts] readback per
+    # layer, because top-k is a host decision.
+    private def forward_device_prefill(x : CudaMatrix) : CudaMatrix?
+      return unless x.rows > 1 # decode has its own tuned path
+      return unless self.class.device_decode_enabled?
+      return unless CUDA.fully_available?
+      return unless @router.is_a?(CudaMatrix)
+      first = @experts.first?
+      return unless first && first.device_resident_capable?
+
+      rows = x.rows
+      x.sync_to_device!("moe_prefill_in") unless x.device_dirty?
+
+      # One router GEMM for every token, and its logits are the ONLY thing read
+      # back: [tokens, num_experts], not per expert.
+      logits = Profile.measure("ffn.router") { (x * @router.as(CudaMatrix)).to_simple }
+
+      out = CudaMatrix.new(rows, @d_model)
+      out.zero!
+      row = (@dev_x_row ||= CudaMatrix.new(1, @d_model))
+      expert_out = (@dev_expert_out ||= CudaMatrix.new(1, @d_model))
+
+      xp = x.device_ptr.not_nil!
+      op = out.device_ptr.not_nil!
+      rp = row.device_ptr.not_nil!
+      bytes = (@d_model.to_u64 * 4_u64)
+
+      # One handle for the whole prefill: creating one per token would add
+      # thousands of driver calls to the path this exists to speed up.
+      handle = CUDA.create_handle
+      begin
+        rows.times do |t|
+          # Device-to-device: the activation row never crosses PCIe.
+          CUDA.memcpy((rp).as(Pointer(Void)), (xp + t * @d_model).as(Pointer(Void)),
+            bytes, CUDA::MemcpyKind::DeviceToDevice)
+          row.mark_device_dirty!
+
+          gating = Profile.measure("ffn.topk") { top_k_gating(logits, t) }
+          gating.each do |(e, w)|
+            @experts[e].forward_device(row, expert_out)
+            Profile.measure("ffn.dev_combine") do
+              CUDA.axpy(handle, w, expert_out.device_ptr.not_nil!, op + t * @d_model, @d_model)
+            end
+          end
+        end
+      ensure
+        CUDA.destroy_handle(handle)
+      end
+
+      out.mark_device_dirty!
+      out
     end
   end
 end
