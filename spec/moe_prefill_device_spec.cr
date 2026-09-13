@@ -136,4 +136,30 @@ describe "device-resident MoE prefill" do
       end
     end
   end
+
+  it "costs one workspace set for many layers, not one per layer" do
+    pending! "CUDA/kernels not available" unless moe_prefill_ready?
+
+    # VRAM is the binding limit on context length, and a per-call [rows, d_model]
+    # allocation per layer is what this asserts against: at 16k that is 134 MB per
+    # layer per call. The claim is a BOUND, so it is asserted as one.
+    x = fill!(SHAInet::SimpleMatrix.new(12, 64), 0.4)
+
+    SHAInet::MoEFF.release_prefill_workspaces!
+    SHAInet::MoEFF.prefill_workspace_bytes.should eq(0)
+
+    one_layer = 0_u64
+    with_moe_device(true) do
+      build_moe(64, 96, 6, 2).forward(x)
+      one_layer = SHAInet::MoEFF.prefill_workspace_bytes
+      one_layer.should be > 0 # the buffers really were used
+
+      # Four more "layers" at the same shape must add NOTHING.
+      4.times { build_moe(64, 96, 6, 2).forward(x) }
+    end
+
+    SHAInet::MoEFF.prefill_workspace_bytes.should eq(one_layer)
+    SHAInet::MoEFF.release_prefill_workspaces!
+    SHAInet::MoEFF.prefill_workspace_bytes.should eq(0)
+  end
 end

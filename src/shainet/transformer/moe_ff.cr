@@ -181,8 +181,6 @@ module SHAInet
 
     @dev_idx : DeviceIndexBuffer? = nil
     @dev_w : DeviceWeightBuffer? = nil
-    @gathered_bufs = Hash(Int32, CudaMatrix).new
-    @batch_out_bufs = Hash(Int32, CudaMatrix).new
 
     @@device_decode : Bool? = nil
 
@@ -327,17 +325,56 @@ module SHAInet
       first = @experts.first?
       return unless first && first.device_resident_capable?
 
-      dev_in = Profile.measure("ffn.prefill_h2d") { x.to_cuda }
-      begin
-        dev_out = forward_device_prefill(dev_in)
-        return unless dev_out
-        begin
-          Profile.measure("ffn.prefill_d2h") { dev_out.to_simple }
-        ensure
-          dev_out.free!
-        end
-      ensure
-        dev_in.free!
+      # Both buffers are SHARED WORKSPACES, not per-call allocations, so neither is
+      # freed here: freeing them would hand a dangling pointer to the next layer. They
+      # are released by release_prefill_workspaces!. Allocating them per call is what
+      # left 134 MB per layer per call to Boehm's finalizers at 16k context.
+      dev_in = shared_workspace(@@prefill_in, x.rows)
+      Profile.measure("ffn.prefill_h2d") do
+        dev_in.raw_data.to_unsafe.copy_from(x.data.to_unsafe, x.rows * @d_model)
+        dev_in.mark_host_modified!
+        dev_in.sync_to_device!("moe_prefill_upload")
+      end
+
+      dev_out = forward_device_prefill(dev_in)
+      return unless dev_out
+      Profile.measure("ffn.prefill_d2h") { dev_out.to_simple }
+    end
+
+    # Prefill workspaces, keyed by row count and shared across ALL layers. Two
+    # reasons they are class-level rather than per-instance:
+    #
+    #   - Allocating fresh per call left a [rows, d_model] matrix per layer per call
+    #     to Boehm's finalizers. At 16k context that is 134 MB x 48 layers of
+    #     allocation churn whose release is not prompt, and VRAM is the binding limit
+    #     for context length (measured: 15600 MB of 16376 at 16k).
+    #   - Per-instance caching would be worse still: 48 live copies of the same
+    #     134 MB buffer.
+    #
+    # Only one layer runs at a time, so one set is enough. Same reasoning as
+    # SwiGLUFF's batch workspaces.
+    @@prefill_dst = Hash(Tuple(Int32, Int32), CudaMatrix).new
+    @@prefill_in = Hash(Tuple(Int32, Int32), CudaMatrix).new
+    @@gathered_shared = Hash(Tuple(Int32, Int32), CudaMatrix).new
+    @@batch_out_shared = Hash(Tuple(Int32, Int32), CudaMatrix).new
+
+    # Total VRAM held by the shared prefill workspaces. Exposed so the sharing claim
+    # is assertable directly: N layers at one shape must cost ONE set of buffers, not
+    # N sets.
+    def self.prefill_workspace_bytes : UInt64
+      total = 0_u64
+      [@@prefill_dst, @@prefill_in, @@gathered_shared, @@batch_out_shared].each do |cache|
+        cache.each_value { |m| total += (m.rows.to_u64 * m.cols.to_u64 * 4_u64) }
+      end
+      total
+    end
+
+    # Release every shared prefill workspace. Specs that bound VRAM need this, and so
+    # does a caller switching context length: the old shapes are dead weight.
+    def self.release_prefill_workspaces! : Nil
+      [@@prefill_dst, @@prefill_in, @@gathered_shared, @@batch_out_shared].each do |cache|
+        cache.each_value(&.free!)
+        cache.clear
       end
     end
 
@@ -370,7 +407,7 @@ module SHAInet
         end
       end
 
-      dst = CudaMatrix.new(rows, @d_model)
+      dst = shared_workspace(@@prefill_dst, rows)
       dst.zero!
 
       # Tile so the workspaces are a fixed shape, and so one expert with a huge share
@@ -409,8 +446,8 @@ module SHAInet
         # The GEMM is sized to the REAL row count, so a short slice does not pay for a
         # padded tile. Buffers are cached per row count, and the tiling keeps that to a
         # handful of distinct shapes.
-        gathered = workspace(@gathered_bufs, n)
-        batch_out = workspace(@batch_out_bufs, n)
+        gathered = shared_workspace(@@gathered_shared, n)
+        batch_out = shared_workspace(@@batch_out_shared, n)
         idxp = idx_dev.ptr + offset
 
         Profile.measure("ffn.gather") do
@@ -432,10 +469,10 @@ module SHAInet
       dst
     end
 
-    # Row-count-keyed workspaces. Tiling bounds the number of distinct shapes, so this
-    # is a few buffers, not one per expert.
-    private def workspace(cache : Hash(Int32, CudaMatrix), n : Int32) : CudaMatrix
-      cache[n] ||= CudaMatrix.new(n, @d_model)
+    # Shared, row-count-keyed workspaces. Tiling bounds the number of distinct shapes,
+    # so this is a few buffers for the whole model, not one per expert or per layer.
+    private def shared_workspace(cache : Hash(Tuple(Int32, Int32), CudaMatrix), n : Int32) : CudaMatrix
+      cache[{n, @d_model}] ||= CudaMatrix.new(n, @d_model)
     end
 
     # Grown to fit, never shrunk: the plan is rows * top_k entries, so it settles after
