@@ -518,6 +518,13 @@ module SHAInet
 
     # --- CPU attention with KV cache (incremental) ---
     private def attention_cached_cpu(x : SimpleMatrix) : SimpleMatrix
+      # Device-resident prefill first: it keeps Q/K/V, bias, QK-norm and RoPE on the
+      # device instead of reading three projections back and rebuilding a staging blob on
+      # the host. w_o is applied here so both paths return the same thing.
+      if dev_out = attention_prefill_device(x)
+        return gpu_matmul(dev_out, @w_o)
+      end
+
       new_tokens = x.rows
       head_dim = @head_dim
       scale = (1.0 / Math.sqrt(head_dim.to_f64)).to_f32
@@ -572,6 +579,214 @@ module SHAInet
       end
 
       gpu_matmul(output, @w_o)
+    end
+
+    # Device-resident prefill attention is the default; SHAINET_PREFILL_ATTN_DEVICE=0
+    # forces the host path, which is how the A/B is taken and how the fallback stays
+    # exercised.
+    @@prefill_attn_device : Bool? = nil
+
+    def self.prefill_attn_device_enabled? : Bool
+      flag = @@prefill_attn_device
+      return flag unless flag.nil?
+      flag = ENV.fetch("SHAINET_PREFILL_ATTN_DEVICE", "1") != "0"
+      @@prefill_attn_device = flag
+      flag
+    end
+
+    # Pass nil to forget the decision and re-read the environment.
+    def self.prefill_attn_device_enabled=(value : Bool?)
+      @@prefill_attn_device = value
+    end
+
+    # Device-resident PREFILL attention. Returns nil when it does not apply, and the
+    # caller falls back to the host path.
+    #
+    # The host path projects Q/K/V with a GPU GEMM, reads all three back, applies bias,
+    # QK-norm and RoPE on the CPU, writes K/V into the host mirror, and then
+    # attention_heads_gpu rebuilds a blob from that mirror and uploads it again. Here
+    # none of that leaves the device: the projections write into device workspaces, the
+    # multi-row kernels do bias, QK-norm and RoPE in place, and pack_kv_heads writes the
+    # exact layout append_kv already reads, so the KV cache code is untouched.
+    #
+    # The only remaining transfer is the attention OUTPUT, which the host block chain
+    # still consumes. Removing that one needs a device-resident multi-token block chain
+    # and is deliberately not attempted here.
+    #
+    # Ordering matters and matches the host path exactly: bias, then QK-norm, then RoPE.
+    private def attention_prefill_device(x : SimpleMatrix) : SimpleMatrix?
+      return unless x.rows > 1 # decode has its own path
+      return unless self.class.prefill_attn_device_enabled?
+      return unless gpu_attention?
+      return unless CUDA.prefill_attn_kernels_available?
+      wq = @w_q
+      wk = @w_k
+      wv = @w_v
+      return unless wq.is_a?(QuantizedWeight) && wk.is_a?(QuantizedWeight) && wv.is_a?(QuantizedWeight)
+
+      n = x.rows
+      head_dim = @head_dim
+      kv_dim = @num_kv_heads * head_dim
+      qdim = @q_dim
+      start_pos = @cache_len
+      total_len = start_pos + n
+      scale = (1.0 / Math.sqrt(head_dim.to_f64)).to_f32
+      heads_per_kv = @num_heads // @num_kv_heads
+
+      xd = attn_ws(@@attn_ws_x, n, @d_model)
+      Profile.measure("attn.dev_upload") do
+        xd.raw_data.to_unsafe.copy_from(x.data.to_unsafe, n * @d_model)
+        xd.mark_host_modified!
+        xd.sync_to_device!("attn_prefill_in")
+      end
+
+      qd = attn_ws(@@attn_ws_q, n, qdim)
+      kd = attn_ws(@@attn_ws_k, n, kv_dim)
+      vd = attn_ws(@@attn_ws_v, n, kv_dim)
+
+      Profile.measure("attn.dev_qkv") do
+        wq.gemv_into(xd, qd)
+        wk.gemv_into(xd, kd)
+        wv.gemv_into(xd, vd)
+      end
+
+      Profile.measure("attn.dev_prep") do
+        if b = @b_q
+          @dev_b_q ||= upload_vec(b)
+          CUDA.add_bias_rows(qd.device_ptr.not_nil!, @dev_b_q.not_nil!.device_ptr.not_nil!, n, qdim)
+        end
+        if b = @b_k
+          @dev_b_k ||= upload_vec(b)
+          CUDA.add_bias_rows(kd.device_ptr.not_nil!, @dev_b_k.not_nil!.device_ptr.not_nil!, n, kv_dim)
+        end
+        if b = @b_v
+          @dev_b_v ||= upload_vec(b)
+          CUDA.add_bias_rows(vd.device_ptr.not_nil!, @dev_b_v.not_nil!.device_ptr.not_nil!, n, kv_dim)
+        end
+        if g = @q_norm
+          @dev_q_norm ||= upload_vec(g)
+          CUDA.head_rmsnorm_rows(qd.device_ptr.not_nil!, @dev_q_norm.not_nil!.device_ptr.not_nil!,
+            n, @num_heads, head_dim, @qk_norm_eps.to_f32)
+        end
+        if g = @k_norm
+          @dev_k_norm ||= upload_vec(g)
+          CUDA.head_rmsnorm_rows(kd.device_ptr.not_nil!, @dev_k_norm.not_nil!.device_ptr.not_nil!,
+            n, @num_kv_heads, head_dim, @qk_norm_eps.to_f32)
+        end
+
+        ifr = dev_inv_freq_ptr
+        CUDA.rope_forward_rows(qd.device_ptr.not_nil!, ifr, start_pos, n, @num_heads, head_dim)
+        CUDA.rope_forward_rows(kd.device_ptr.not_nil!, ifr, start_pos, n, @num_kv_heads, head_dim)
+        qd.mark_device_dirty!
+        kd.mark_device_dirty!
+        vd.mark_device_dirty!
+      end
+
+      # Output is [tokens, q_dim], NOT [tokens, d_model]: q_dim is num_heads * head_dim,
+      # which on a 30B-A3B is 4096 against a d_model of 2048. The caller projects it down
+      # with w_o.
+      output = SimpleMatrix.new(n, qdim)
+      outp = output.data.to_unsafe
+
+      max_chunk = attn_chunk_tokens(total_len)
+      max_chunk = n if n < max_chunk
+      kv_cap = @num_kv_heads * max_chunk * head_dim
+      q_cap = max_chunk * qdim
+      # Staging now holds K and V only: Q is already on the device, so it does not pass
+      # through here any more.
+      @@gpu_staging, @@gpu_staging_cap = grow_dev_buf(@@gpu_staging, @@gpu_staging_cap, 2 * kv_cap)
+      @@gpu_attn_out, @@gpu_attn_out_cap = grow_dev_buf(@@gpu_attn_out, @@gpu_attn_out_cap, q_cap)
+      ws_floats = @num_heads * max_chunk * total_len
+      @@gpu_attn_ws, @@gpu_attn_ws_cap = grow_dev_buf(@@gpu_attn_ws, @@gpu_attn_ws_cap, ws_floats)
+      ensure_gpu_cache!(total_len, max_chunk)
+
+      off = 0
+      while off < n
+        c = max_chunk < (n - off) ? max_chunk : (n - off)
+        base_pos = start_pos + off
+        kvf = @num_kv_heads * c * head_dim
+
+        Profile.measure("attn.dev_pack") do
+          CUDA.pack_kv_heads(@@gpu_staging, kd.device_ptr.not_nil! + off * kv_dim,
+            c, @num_kv_heads, head_dim)
+          CUDA.pack_kv_heads(@@gpu_staging + kvf, vd.device_ptr.not_nil! + off * kv_dim,
+            c, @num_kv_heads, head_dim)
+        end
+        Profile.measure("attn.kernels") do
+          append_kv(c, base_pos)
+          attend_kv(qd.device_ptr.not_nil! + off * qdim, c, base_pos, heads_per_kv, scale)
+        end
+        Profile.measure("attn.d2h") do
+          CUDA.memcpy((outp + off * qdim).as(Pointer(Void)), @@gpu_attn_out.as(Pointer(Void)),
+            (c * qdim).to_u64 * 4_u64, CUDA::MemcpyKind::DeviceToHost)
+        end
+
+        off += c
+      end
+
+      # Keep the host mirror's LENGTH in step without its contents, exactly as the device
+      # decode path does: context_length is derived from it, and a later chunk stages at
+      # base_pos, so the indices must still line up. host_kv_stale marks the values as
+      # device-only so the CPU head loop refuses rather than attending to these zeros.
+      @num_kv_heads.times do |kv_h|
+        (n * head_dim).times do
+          @k_cache[kv_h] << 0.0_f32
+          @v_cache[kv_h] << 0.0_f32
+        end
+      end
+      @host_kv_stale = true
+      @cache_len = total_len
+
+      output
+    end
+
+    # Bounded per-shape workspaces for the prefill attention tensors.
+    #
+    # CLASS-level, shared across every layer, and that is not incidental: at a 4096-token
+    # prefill these are ~117 MB per layer (q alone is 4096 x 4096 x 4 = 67 MB), so holding
+    # a set per layer costs ~5.6 GB across 48 layers. Measured the wrong way round first:
+    # per-instance pushed VRAM to 15882 MB of 16376 and the next prefill failed a 64 MB
+    # allocation. Only one layer runs at a time, so one set is enough.
+    #
+    # Also CAPPED per shape, with the least recently used freed: prompt length varies per
+    # turn, and keying a device buffer cache on a per-call size without a bound is what
+    # leaked several GB in the MoE prefill path.
+    ATTN_WS_SHAPES = 2
+
+    @@attn_ws_x = Hash(Tuple(Int32, Int32), CudaMatrix).new
+    @@attn_ws_q = Hash(Tuple(Int32, Int32), CudaMatrix).new
+    @@attn_ws_k = Hash(Tuple(Int32, Int32), CudaMatrix).new
+    @@attn_ws_v = Hash(Tuple(Int32, Int32), CudaMatrix).new
+
+    # Total VRAM held by the shared attention workspaces, so the bound is assertable.
+    def self.attn_workspace_bytes : UInt64
+      total = 0_u64
+      [@@attn_ws_x, @@attn_ws_q, @@attn_ws_k, @@attn_ws_v].each do |cache|
+        cache.each_value { |m| total += (m.rows.to_u64 * m.cols.to_u64 * 4_u64) }
+      end
+      total
+    end
+
+    def self.release_attn_workspaces! : Nil
+      [@@attn_ws_x, @@attn_ws_q, @@attn_ws_k, @@attn_ws_v].each do |cache|
+        cache.each_value(&.free!)
+        cache.clear
+      end
+    end
+
+    private def attn_ws(cache : Hash(Tuple(Int32, Int32), CudaMatrix), rows : Int32, cols : Int32) : CudaMatrix
+      key = {rows, cols}
+      if existing = cache[key]?
+        cache.delete(key)
+        cache[key] = existing
+        return existing
+      end
+      while cache.size >= ATTN_WS_SHAPES
+        oldest = cache.first_key
+        cache[oldest].free!
+        cache.delete(oldest)
+      end
+      cache[key] = CudaMatrix.new(rows, cols)
     end
 
     # --- CPU head loop: scores -> softmax -> AV, per query head/token ---
