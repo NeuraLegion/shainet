@@ -527,11 +527,11 @@ module SHAInet
 
     # --- CPU attention with KV cache (incremental) ---
     private def attention_cached_cpu(x : SimpleMatrix) : SimpleMatrix
-      # Device-resident prefill first: it keeps Q/K/V, bias, QK-norm and RoPE on the
+      # Device-resident prefill first: it keeps Q/K/V, bias, QK-norm, RoPE and w_o on the
       # device instead of reading three projections back and rebuilding a staging blob on
-      # the host. w_o is applied here so both paths return the same thing.
+      # the host. w_o is already applied there, so the result is returned as it is.
       if dev_out = attention_prefill_device(x)
-        return gpu_matmul(dev_out, @w_o)
+        return dev_out
       end
 
       new_tokens = x.rows
@@ -629,7 +629,7 @@ module SHAInet
     # and is deliberately not attempted here.
     #
     # Ordering matters and matches the host path exactly: bias, then QK-norm, then RoPE.
-    private def attention_prefill_device(x : SimpleMatrix) : SimpleMatrix?
+    private def attention_prefill_device_core(xd : CudaMatrix) : CudaMatrix?
       # Any token count, including ONE. Restricting this to rows > 1 left a real hole:
       # forward_cached with a single token falls through to the host staging path, which
       # after a device prefill would index a mirror the device has moved past. While the
@@ -645,7 +645,7 @@ module SHAInet
       wv = @w_v
       return unless wq.is_a?(QuantizedWeight) && wk.is_a?(QuantizedWeight) && wv.is_a?(QuantizedWeight)
 
-      n = x.rows
+      n = xd.rows
       head_dim = @head_dim
       kv_dim = @num_kv_heads * head_dim
       qdim = @q_dim
@@ -654,12 +654,7 @@ module SHAInet
       scale = (1.0 / Math.sqrt(head_dim.to_f64)).to_f32
       heads_per_kv = @num_heads // @num_kv_heads
 
-      xd = attn_ws(@@attn_ws_x, n, @d_model)
-      Profile.measure("attn.dev_upload") do
-        xd.raw_data.to_unsafe.copy_from(x.data.to_unsafe, n * @d_model)
-        xd.mark_host_modified!
-        xd.sync_to_device!("attn_prefill_in")
-      end
+      xd.sync_to_device!("attn_prefill_in") unless xd.device_dirty?
 
       qd = attn_ws(@@attn_ws_q, n, qdim)
       kd = attn_ws(@@attn_ws_k, n, kv_dim)
@@ -703,11 +698,11 @@ module SHAInet
         vd.mark_device_dirty!
       end
 
-      # Output is [tokens, q_dim], NOT [tokens, d_model]: q_dim is num_heads * head_dim,
-      # which on a 30B-A3B is 4096 against a d_model of 2048. The caller projects it down
-      # with w_o.
-      output = SimpleMatrix.new(n, qdim)
-      outp = output.data.to_unsafe
+      # The attention result is [tokens, q_dim], NOT [tokens, d_model]: q_dim is
+      # num_heads * head_dim, which on a 30B-A3B is 4096 against a d_model of 2048. It
+      # stays on the device and w_o projects it down there, so whatever leaves the device
+      # is the smaller d_model-wide tensor.
+      aq = attn_ws(@@attn_ws_aq, n, qdim)
 
       max_chunk = attn_chunk_tokens(total_len)
       max_chunk = n if n < max_chunk
@@ -720,6 +715,8 @@ module SHAInet
       ws_floats = @num_heads * max_chunk * total_len
       @@gpu_attn_ws, @@gpu_attn_ws_cap = grow_dev_buf(@@gpu_attn_ws, @@gpu_attn_ws_cap, ws_floats)
       ensure_gpu_cache!(total_len, max_chunk)
+
+      aqp = aq.device_ptr.not_nil!
 
       off = 0
       while off < n
@@ -737,13 +734,16 @@ module SHAInet
           append_kv(c, base_pos)
           attend_kv(qd.device_ptr.not_nil! + off * qdim, c, base_pos, heads_per_kv, scale)
         end
-        Profile.measure("attn.d2h") do
-          CUDA.memcpy((outp + off * qdim).as(Pointer(Void)), @@gpu_attn_out.as(Pointer(Void)),
-            (c * qdim).to_u64 * 4_u64, CUDA::MemcpyKind::DeviceToHost)
+        # Device to device: the chunk's result is collected on the card, where it used to
+        # be copied out to the host once per chunk.
+        Profile.measure("attn.dev_collect") do
+          CUDA.memcpy((aqp + off * qdim).as(Pointer(Void)), @@gpu_attn_out.as(Pointer(Void)),
+            (c * qdim).to_u64 * 4_u64, CUDA::MemcpyKind::DeviceToDevice)
         end
 
         off += c
       end
+      aq.mark_device_dirty!
 
       # As in device decode: the host mirror is not extended. context_length reports
       # cache_len once host_kv_stale is set, and the host attention paths refuse rather
@@ -751,8 +751,109 @@ module SHAInet
       @host_kv_stale = true
       @cache_len = total_len
 
-      output
+      aq
     end
+
+    # Host-facing wrapper: device attention, w_o applied ON the device, and ONE readback
+    # of the d_model-wide result. It used to hand back the q_dim-wide tensor and let the
+    # caller run w_o through gpu_matmul, which read q_dim out and uploaded it again -- on
+    # this 30B that is 4096 wide against d_model's 2048, so this halves the transfer and
+    # removes a round trip.
+    private def attention_prefill_device(x : SimpleMatrix) : SimpleMatrix?
+      wo = @w_o
+      return unless wo.is_a?(QuantizedWeight)
+      xd = attn_ws(@@attn_ws_x, x.rows, @d_model)
+      Profile.measure("attn.dev_upload") do
+        xd.raw_data.to_unsafe.copy_from(x.data.to_unsafe, x.rows * @d_model)
+        xd.mark_host_modified!
+        xd.sync_to_device!("attn_prefill_in")
+      end
+      aq = attention_prefill_device_core(xd)
+      return unless aq
+
+      ao = attn_ws(@@attn_ws_o, aq.rows, @d_model)
+      Profile.measure("attn.dev_wo") { wo.gemv_into(aq, ao) }
+      Profile.measure("attn.d2h") do
+        ao.sync_from_device!("attn_out") if ao.device_dirty?
+        ao.to_simple
+      end
+    end
+
+    # Device chain wrapper: same core, and the result never leaves the card.
+    private def attention_prefill_device_into(xd : CudaMatrix, dst : CudaMatrix) : Bool
+      wo = @w_o
+      return false unless wo.is_a?(QuantizedWeight)
+      aq = attention_prefill_device_core(xd)
+      return false unless aq
+      Profile.measure("attn.dev_wo") { wo.gemv_into(aq, dst) }
+      true
+    end
+
+    # Multi-token device block chain: the whole block for a PREFILL, with no host round
+    # trip. The single-row forward_cached_device above is the decode equivalent; this is
+    # the same shape with a row dimension.
+    #
+    # This is what removes the last big transfer in prefill. With the FFN and attention
+    # each device-resident but the chain still host-driven, every layer paid an upload and
+    # a readback around each of them: attn.d2h alone measured 40.7% of a 4096-token
+    # prefill on a 30B-A3B. Here one upload enters the stack and one readback leaves it.
+    #
+    # Returns nil when it does not apply, and the caller keeps the host chain.
+    #
+    # The returned matrix is a shared workspace, so the caller must consume it or hand it
+    # straight to the next block.
+    def forward_cached_device_multi(x : CudaMatrix) : CudaMatrix?
+      return unless x.rows > 1
+      return unless self.class.prefill_attn_device_enabled?
+      return unless block_device_capable?
+      return unless CUDA.prefill_attn_kernels_available?
+      return unless @w_o.is_a?(QuantizedWeight)
+
+      dm = @d_model
+      n = x.rows
+      total = n * dm
+
+      n1 = attn_ws(@@blk_ws_n1, n, dm)
+      n2 = attn_ws(@@blk_ws_n2, n, dm)
+      attn_dev = attn_ws(@@blk_ws_attn, n, dm)
+      h = attn_ws(@@blk_ws_h, n, dm)
+
+      Profile.measure("block.dev_norm") { @norm1.forward_into(x, n1) }
+      return unless attention_prefill_device_into(n1, attn_dev)
+
+      # h = x + attn, then h += ffn(norm2(h)), both residuals on the device. add_inplace is
+      # elementwise, so the whole [tokens, d_model] block goes in one launch.
+      Profile.measure("block.dev_residual") do
+        CUDA.memcpy(h.device_ptr.not_nil!.as(Pointer(Void)), x.device_ptr.not_nil!.as(Pointer(Void)),
+          total.to_u64 * 4_u64, CUDA::MemcpyKind::DeviceToDevice)
+        CUDA.add_inplace(h.device_ptr.not_nil!, attn_dev.device_ptr.not_nil!, total)
+        h.mark_device_dirty!
+      end
+
+      Profile.measure("block.dev_norm") { @norm2.forward_into(h, n2) }
+
+      ffn = @ffn
+      ff_out = case ffn
+               when MoEFF
+                 ffn.forward_device_batch(n2)
+               else
+                 buf = attn_ws(@@blk_ws_ff, n, dm)
+                 ffn.as(SwiGLUFF).forward_device_batch(n2, buf)
+               end
+      return unless ff_out
+
+      Profile.measure("block.dev_residual") do
+        CUDA.add_inplace(h.device_ptr.not_nil!, ff_out.device_ptr.not_nil!, total)
+        h.mark_device_dirty!
+      end
+      h
+    end
+
+    @@blk_ws_n1 = Hash(Tuple(Int32, Int32), CudaMatrix).new
+    @@blk_ws_n2 = Hash(Tuple(Int32, Int32), CudaMatrix).new
+    @@blk_ws_attn = Hash(Tuple(Int32, Int32), CudaMatrix).new
+    @@blk_ws_h = Hash(Tuple(Int32, Int32), CudaMatrix).new
+    @@blk_ws_ff = Hash(Tuple(Int32, Int32), CudaMatrix).new
 
     # Bounded per-shape workspaces for the prefill attention tensors.
     #
@@ -773,18 +874,23 @@ module SHAInet
     @@attn_ws_q = Hash(Tuple(Int32, Int32), CudaMatrix).new
     @@attn_ws_k = Hash(Tuple(Int32, Int32), CudaMatrix).new
     @@attn_ws_v = Hash(Tuple(Int32, Int32), CudaMatrix).new
+    # Attention result in q_dim space, before w_o projects it to d_model.
+    @@attn_ws_aq = Hash(Tuple(Int32, Int32), CudaMatrix).new
+    # Post-w_o result, d_model wide: what the host path reads back and what the device
+    # chain hands to the residual add.
+    @@attn_ws_o = Hash(Tuple(Int32, Int32), CudaMatrix).new
 
     # Total VRAM held by the shared attention workspaces, so the bound is assertable.
     def self.attn_workspace_bytes : UInt64
       total = 0_u64
-      [@@attn_ws_x, @@attn_ws_q, @@attn_ws_k, @@attn_ws_v].each do |cache|
+      [@@attn_ws_x, @@attn_ws_q, @@attn_ws_k, @@attn_ws_v, @@attn_ws_aq, @@attn_ws_o].each do |cache|
         cache.each_value { |m| total += (m.rows.to_u64 * m.cols.to_u64 * 4_u64) }
       end
       total
     end
 
     def self.release_attn_workspaces! : Nil
-      [@@attn_ws_x, @@attn_ws_q, @@attn_ws_k, @@attn_ws_v].each do |cache|
+      [@@attn_ws_x, @@attn_ws_q, @@attn_ws_k, @@attn_ws_v, @@attn_ws_aq, @@attn_ws_o].each do |cache|
         cache.each_value(&.free!)
         cache.clear
       end
