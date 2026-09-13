@@ -13,8 +13,9 @@ private def q4_reference(w : SHAInet::SimpleMatrix, x : SHAInet::SimpleMatrix) :
   k = w.rows
   n = w.cols
   m = x.rows
-  q_host, s_host = SHAInet::Q4CudaMatrix.pack(w)
+  q_host, d_host, sub_host = SHAInet::Q4CudaMatrix.pack(w)
   nblocks = (k + 31) // 32
+  nsupers = (nblocks + SHAInet::Q4CudaMatrix::SUPER - 1) // SHAInet::Q4CudaMatrix::SUPER
   kbytes = (k + 1) // 2
 
   out = SHAInet::SimpleMatrix.new(m, n)
@@ -24,7 +25,12 @@ private def q4_reference(w : SHAInet::SimpleMatrix, x : SHAInet::SimpleMatrix) :
       k.times do |kk|
         byte = q_host[col * kbytes + (kk >> 1)]
         nib = (kk & 1) == 1 ? (byte >> 4) : (byte & 0x0F)
-        acc += (nib.to_i - 8) * x[row, kk] * s_host[col * nblocks + (kk >> 5)].to_f64
+        b = kk >> 5
+        # Effective block scale: fp32 super-block scale times the block's byte
+        # sub-scale over 255.
+        eff = d_host[col * nsupers + (b // SHAInet::Q4CudaMatrix::SUPER)].to_f64 *
+              sub_host[col * nblocks + b].to_f64 / 255.0
+        acc += (nib.to_i - 8) * x[row, kk] * eff
       end
       out[row, col] = acc
     end
