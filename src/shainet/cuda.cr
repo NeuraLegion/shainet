@@ -308,6 +308,11 @@ module SHAInet
     @@gather_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Int32), Int32, Int32, Void)?
     @@scatter_add_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Int32), Pointer(Float32), Int32, Int32, Void)?
     @@gather_available : Bool? = nil
+    @@rope_forward_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Void)?
+    @@head_rmsnorm_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Float32, Void)?
+    @@add_bias_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Void)?
+    @@pack_kv_heads_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@prefill_attn_available : Bool? = nil
     @@kv_cache_append_f32_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Void)?
     @@kv_cache_append_f16_proc : Proc(Pointer(Float32), Pointer(UInt16), Pointer(UInt16), Int32, Int32, Int32, Int32, Int32, Void)?
     @@kv_f16_available : Bool? = nil
@@ -499,6 +504,83 @@ module SHAInet
       end
       raise "CUDA kernels not available" unless fn
       fn.call(dst, src, idx, w, n, cols)
+    end
+
+    # Multi-row RoPE for prefill: `rows` tokens at consecutive positions from base_pos.
+    def rope_forward_rows(x : Pointer(Float32), inv_freq : Pointer(Float32), base_pos : Int32,
+                          rows : Int32, heads : Int32, head_dim : Int32)
+      unless fn = @@rope_forward_rows_proc
+        @@rope_forward_rows_proc = fn = load_kernel_proc("rope_forward_rows",
+          Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(x, inv_freq, base_pos, rows, heads, head_dim)
+    end
+
+    # Multi-row Qwen3 QK-norm for prefill.
+    def head_rmsnorm_rows(x : Pointer(Float32), gamma : Pointer(Float32), rows : Int32,
+                          heads : Int32, head_dim : Int32, eps : Float32)
+      unless fn = @@head_rmsnorm_rows_proc
+        @@head_rmsnorm_rows_proc = fn = load_kernel_proc("head_rmsnorm_rows",
+          Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Float32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(x, gamma, rows, heads, head_dim, eps)
+    end
+
+    # x[r, c] += bias[c], broadcast over rows.
+    def add_bias_rows(x : Pointer(Float32), bias : Pointer(Float32), rows : Int32, cols : Int32)
+      unless fn = @@add_bias_rows_proc
+        @@add_bias_rows_proc = fn = load_kernel_proc("add_bias_rows",
+          Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(x, bias, rows, cols)
+    end
+
+    # Token-major [rows, kv_heads * head_dim] -> kv-head-major, the layout the KV append
+    # expects.
+    def pack_kv_heads(dst : Pointer(Float32), src : Pointer(Float32), rows : Int32,
+                      kv_heads : Int32, head_dim : Int32)
+      unless fn = @@pack_kv_heads_proc
+        @@pack_kv_heads_proc = fn = load_kernel_proc("pack_kv_heads",
+          Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(dst, src, rows, kv_heads, head_dim)
+    end
+
+    # dlopen/dlsym once per symbol. The four multi-row prefill kernels share this rather
+    # than repeating the same twelve lines each.
+    private def load_kernel_proc(name : String, type : T.class) : T? forall T
+      if @@kernels_handle.null?
+        @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+      end
+      return if @@kernels_handle.null?
+      sym = LibC.dlsym(@@kernels_handle, name)
+      return if sym.null?
+      T.new(sym, Pointer(Void).null)
+    end
+
+    # False when the loaded .so predates the multi-row prefill kernels, so the caller
+    # falls back to the host path instead of raising.
+    def prefill_attn_kernels_available? : Bool
+      avail = @@prefill_attn_available
+      return avail unless avail.nil?
+      result = begin
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        if @@kernels_handle.null?
+          false
+        else
+          ["rope_forward_rows", "head_rmsnorm_rows", "add_bias_rows", "pack_kv_heads"].all? do |n|
+            !LibC.dlsym(@@kernels_handle, n).null?
+          end
+        end
+      end
+      @@prefill_attn_available = result
+      result
     end
 
     # False when the loaded .so predates the gather/scatter kernels, so the batched
