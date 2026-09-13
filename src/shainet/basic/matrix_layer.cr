@@ -34,8 +34,12 @@ module SHAInet
       mat_klass = CUDA.fully_available? ? CudaMatrix : SimpleMatrix
       @weights = mat_klass.new(in_size, @size).random_fill!
       @biases = mat_klass.new(1, @size).random_fill!
-      @g_w = mat_klass.zeros(in_size, @size)
-      @g_b = mat_klass.zeros(1, @size)
+      # Gradients start UNALLOCATED (0x0) and are materialized by the first
+      # backward pass. Inference never touches them, and they are not small: the
+      # 30B's output projection is 2048x151936, so an eagerly allocated g_w costs
+      # 1.245 GB of host RAM that pure inference never reads.
+      @g_w = SimpleMatrix.zeros(0, 0)
+      @g_b = SimpleMatrix.zeros(0, 0)
       @input = nil
       @activations = nil
       @sigma_primes = nil
@@ -50,8 +54,8 @@ module SHAInet
       mat_klass = CUDA.fully_available? ? CudaMatrix : SimpleMatrix
       @weights = mat_klass.new(1, @size).random_fill!
       @biases = mat_klass.new(1, @size).random_fill!
-      @g_w = mat_klass.zeros(1, @size)
-      @g_b = mat_klass.zeros(1, @size)
+      @g_w = SimpleMatrix.zeros(0, 0) # materialized by the first backward pass
+      @g_b = SimpleMatrix.zeros(0, 0)
       @input = nil
       @activations = nil
       @sigma_primes = nil
@@ -66,13 +70,30 @@ module SHAInet
       mat_klass = CUDA.fully_available? ? CudaMatrix : SimpleMatrix
       @weights = mat_klass.new(in_size, @size).random_fill!
       @biases = mat_klass.new(1, @size).random_fill!
-      @g_w = mat_klass.zeros(in_size, @size)
-      @g_b = mat_klass.zeros(1, @size)
+      @g_w = SimpleMatrix.zeros(0, 0) # materialized by the first backward pass
+      @g_b = SimpleMatrix.zeros(0, 0)
       @input = nil
       @activations = nil
       @sigma_primes = nil
       @forward_workspace = nil
       @grad_workspace = nil
+    end
+
+    # True once the gradient buffers have been materialized, i.e. once a backward
+    # pass has run. Pure inference leaves this false and pays nothing for them.
+    def gradients_allocated? : Bool
+      @g_w.rows == @weights.rows && @g_w.cols == @weights.cols
+    end
+
+    # Allocate the gradient buffers to match the current weights and biases.
+    # Called at the top of every backward pass; a no-op once allocated. Sizing off
+    # @weights rather than the constructor's in_size is what makes this correct
+    # after connect_ltl replaces the weights with their real shape.
+    def materialize_gradients!
+      return if gradients_allocated?
+      mat_klass = @weights.is_a?(CudaMatrix) ? CudaMatrix : SimpleMatrix
+      @g_w = mat_klass.zeros(@weights.rows, @weights.cols)
+      @g_b = mat_klass.zeros(@biases.rows, @biases.cols)
     end
 
     def inspect
@@ -84,8 +105,12 @@ module SHAInet
       if CUDA.fully_available?
         @weights = @weights.as(SimpleMatrix).to_cuda unless @weights.is_a?(CudaMatrix)
         @biases = @biases.as(SimpleMatrix).to_cuda unless @biases.is_a?(CudaMatrix)
-        @g_w = @g_w.as(SimpleMatrix).to_cuda unless @g_w.is_a?(CudaMatrix)
-        @g_b = @g_b.as(SimpleMatrix).to_cuda unless @g_b.is_a?(CudaMatrix)
+        # Skip unallocated (0x0) gradients: to_cuda on an empty matrix would ask
+        # the driver for a zero-byte allocation, which fails.
+        if gradients_allocated?
+          @g_w = @g_w.as(SimpleMatrix).to_cuda unless @g_w.is_a?(CudaMatrix)
+          @g_b = @g_b.as(SimpleMatrix).to_cuda unless @g_b.is_a?(CudaMatrix)
+        end
         @input = @input.as(SimpleMatrix).to_cuda if @input && @input.is_a?(SimpleMatrix)
         @activations = @activations.as(SimpleMatrix).to_cuda if @activations && @activations.is_a?(SimpleMatrix)
         @sigma_primes = @sigma_primes.as(SimpleMatrix).to_cuda if @sigma_primes && @sigma_primes.is_a?(SimpleMatrix)
@@ -97,8 +122,10 @@ module SHAInet
       if @weights.is_a?(CudaMatrix)
         @weights = @weights.as(CudaMatrix).to_simple
         @biases = @biases.as(CudaMatrix).to_simple
-        @g_w = @g_w.as(CudaMatrix).to_simple
-        @g_b = @g_b.as(CudaMatrix).to_simple
+        # Unallocated gradients are already a host 0x0 placeholder, so there is
+        # nothing to bring back.
+        @g_w = @g_w.as(CudaMatrix).to_simple if @g_w.is_a?(CudaMatrix)
+        @g_b = @g_b.as(CudaMatrix).to_simple if @g_b.is_a?(CudaMatrix)
         @input = @input.as(CudaMatrix).to_simple if @input && @input.is_a?(CudaMatrix)
         @activations = @activations.as(CudaMatrix).to_simple if @activations && @activations.is_a?(CudaMatrix)
         @sigma_primes = @sigma_primes.as(CudaMatrix).to_simple if @sigma_primes && @sigma_primes.is_a?(CudaMatrix)
@@ -225,6 +252,7 @@ module SHAInet
     def backward(grad : CudaMatrix) : CudaMatrix
       return grad if @input.nil? || @sigma_primes.nil?
 
+      materialize_gradients!
       input = @input.as(CudaMatrix)
       sigma_primes = @sigma_primes.as(CudaMatrix)
 
@@ -284,6 +312,7 @@ module SHAInet
     def backward(grad : SimpleMatrix) : SimpleMatrix
       return grad if @input.nil? || @sigma_primes.nil?
 
+      materialize_gradients!
       input = @input.as(SimpleMatrix)
       sigma_primes = @sigma_primes.as(SimpleMatrix)
 
@@ -317,6 +346,11 @@ module SHAInet
                        beta1 : Float64 = 0.9, beta2 : Float64 = 0.999,
                        epsilon : Float64 = 1e-8, time_step : Int32 = 1,
                        alpha : Float64 = 0.001, weight_decay : Float64 = 0.0)
+      # update_weights is reachable WITHOUT this layer having run backward (the
+      # transformer training path does exactly that), so the gradients must be
+      # materialized here too, not only in backward. Applying all-zero gradients is
+      # the same no-op the eagerly-allocated version performed.
+      materialize_gradients!
       case training_type.to_s
       when "sgdm"
         update_weights_sgd(learning_rate, momentum)
