@@ -167,8 +167,18 @@ describe "device-resident block chain" do
 
     with_prof do
       cur = x
-      with_block_device(false) do
-        blocks.each { |b| cur = b.forward_cached(cur) }
+      # "The host path" now means BOTH device paths off. Device-resident prefill attention
+      # also removes these readbacks, so with only the block chain disabled this example
+      # would measure a path that is still half on the device and its counter-baseline
+      # would be wrong.
+      prev_prefill = SHAInet::LlamaBlock.prefill_attn_device_enabled?
+      SHAInet::LlamaBlock.prefill_attn_device_enabled = false
+      begin
+        with_block_device(false) do
+          blocks.each { |b| cur = b.forward_cached(cur) }
+        end
+      ensure
+        SHAInet::LlamaBlock.prefill_attn_device_enabled = prev_prefill
       end
       stats = SHAInet::Profile.stats
       # The guard in the other direction: on the host path the FFN reads back once per
