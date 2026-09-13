@@ -149,6 +149,7 @@ module SHAInet
       @v_cache.each(&.clear)
       @cache_len = 0
       @host_kv_stale = false
+      @host_cache_reserved = false
       # Device cache buffers are kept; stale positions are rewritten by the
       # append kernel before they ever become visible to attention.
     end
@@ -347,6 +348,18 @@ module SHAInet
     # only the values are absent, and the CPU attention path refuses to run against
     # them rather than silently attending to zeros.
     @host_kv_stale : Bool = false
+    @host_cache_reserved : Bool = false
+
+    # Bytes of host RAM the fp32 KV mirror is holding. Exposed so "the device path does
+    # not touch it" is assertable directly rather than inferred. Counts capacity, not
+    # length, because an eager reservation is exactly the cost this is watching for.
+    def host_kv_bytes : UInt64
+      total = 0_u64
+      {@k_cache, @v_cache}.each do |cache|
+        cache.each { |arr| total += (arr.size.to_u64 * 4_u64) }
+      end
+      total
+    end
 
     def host_kv_stale? : Bool
       @host_kv_stale
@@ -445,15 +458,11 @@ module SHAInet
         append_kv(1, pos)
       end
 
-      # Keep the host mirror's LENGTH in step even though its contents are not
-      # filled: a later prefill chunk stages its own rows at base_pos, so the
-      # indices must still line up. The values are never read while stale.
-      @num_kv_heads.times do |kv_h|
-        head_dim.times do
-          @k_cache[kv_h] << 0.0_f32
-          @v_cache[kv_h] << 0.0_f32
-        end
-      end
+      # The host mirror is NOT extended here. It used to receive placeholder zeros purely
+      # to keep its length in step, which cost 192 KiB per token per layer of host RAM to
+      # store values nothing reads. context_length already reports cache_len once
+      # host_kv_stale is set, and the host paths refuse outright rather than indexing a
+      # mirror the device has moved past.
       @host_kv_stale = true
       @cache_len = total_len
 
@@ -546,6 +555,12 @@ module SHAInet
 
       # Apply RoPE to new K at insert time (HF half-split), then append to cache.
       half = head_dim // 2
+      # This is the only path that populates the host mirror, so it is where the
+      # reservation belongs: the device paths never read it and must not pay for it.
+      if budget = kv_max_context
+        reserve_host_cache!(budget) unless @host_cache_reserved
+        @host_cache_reserved = true
+      end
       Profile.measure("attn.rope_kv_append") do
         @num_kv_heads.times do |kv_h|
           kv_col = kv_h * head_dim
@@ -615,7 +630,13 @@ module SHAInet
     #
     # Ordering matters and matches the host path exactly: bias, then QK-norm, then RoPE.
     private def attention_prefill_device(x : SimpleMatrix) : SimpleMatrix?
-      return unless x.rows > 1 # decode has its own path
+      # Any token count, including ONE. Restricting this to rows > 1 left a real hole:
+      # forward_cached with a single token falls through to the host staging path, which
+      # after a device prefill would index a mirror the device has moved past. While the
+      # mirror was still padded with placeholder zeros that read silently wrong; now it
+      # would read past the end. Handling one row here keeps the whole of forward_cached
+      # on one side of the fence. forward_cached_device has its own decode path and does
+      # not come through here.
       return unless self.class.prefill_attn_device_enabled?
       return unless gpu_attention?
       return unless CUDA.prefill_attn_kernels_available?
@@ -724,16 +745,9 @@ module SHAInet
         off += c
       end
 
-      # Keep the host mirror's LENGTH in step without its contents, exactly as the device
-      # decode path does: context_length is derived from it, and a later chunk stages at
-      # base_pos, so the indices must still line up. host_kv_stale marks the values as
-      # device-only so the CPU head loop refuses rather than attending to these zeros.
-      @num_kv_heads.times do |kv_h|
-        (n * head_dim).times do
-          @k_cache[kv_h] << 0.0_f32
-          @v_cache[kv_h] << 0.0_f32
-        end
-      end
+      # As in device decode: the host mirror is not extended. context_length reports
+      # cache_len once host_kv_stale is set, and the host attention paths refuse rather
+      # than index a mirror whose rows were never written.
       @host_kv_stale = true
       @cache_len = total_len
 
@@ -751,7 +765,9 @@ module SHAInet
     # Also CAPPED per shape, with the least recently used freed: prompt length varies per
     # turn, and keying a device buffer cache on a per-call size without a bound is what
     # leaked several GB in the MoE prefill path.
-    ATTN_WS_SHAPES = 2
+    # Three shapes, not two: a prompt length, the single row a decode step uses, and one
+    # spare so a changing prompt length does not evict the decode shape on every turn.
+    ATTN_WS_SHAPES = 3
 
     @@attn_ws_x = Hash(Tuple(Int32, Int32), CudaMatrix).new
     @@attn_ws_q = Hash(Tuple(Int32, Int32), CudaMatrix).new
@@ -907,6 +923,14 @@ module SHAInet
     private def attention_heads_gpu(q_full : SimpleMatrix, output : SimpleMatrix,
                                     new_tokens : Int32, start_pos : Int32,
                                     total_len : Int32, scale : Float32)
+      # This path stages K/V out of the host mirror. Once a device path has run, the
+      # mirror is no longer extended at all, so indexing it here would read PAST its end
+      # rather than merely read stale values. Refuse loudly instead.
+      if @host_kv_stale
+        raise RuntimeError.new(
+          "KV cache lives on the device; the host staging path would read past the end " \
+          "of the mirror. Call clear_cache! before switching paths.")
+      end
       head_dim = @head_dim
       dm = @q_dim
       half = head_dim // 2
@@ -1178,7 +1202,13 @@ module SHAInet
             "device KV cache is already #{@gpu_cache_cap} positions; " \
             "clear_cache! and free it before lowering the budget to #{v}")
         end
-        reserve_host_cache!(v)
+        # Deliberately NOT reserving the host mirror here. The mirror exists only for the
+        # host attention paths, and both prefill and decode are device-resident by
+        # default, so reserving at configuration time allocated host RAM for values
+        # nothing reads: positions * head_dim per kv_head per cache, which for a 48-layer
+        # 30B at a 32k budget is about 6.4 GB. The host path reserves on its first append
+        # instead, which is the same guarantee (no reallocation mid-generation) paid for
+        # only when it is used.
       end
       @kv_max_context_checked = true
       @kv_max_context = value
