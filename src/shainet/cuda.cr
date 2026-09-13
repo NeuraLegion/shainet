@@ -305,6 +305,9 @@ module SHAInet
     @@softmax_cross_entropy_label_proc : Proc(Pointer(Float32), Pointer(Int32), Pointer(Float32), Pointer(Float32), Int32, Int32, Void)?
     @@gemm_q8_f32_proc : Proc(Pointer(Float32), Pointer(Int8), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@gemm_q4_f32_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@gather_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Int32), Int32, Int32, Void)?
+    @@scatter_add_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Int32), Pointer(Float32), Int32, Int32, Void)?
+    @@gather_available : Bool? = nil
     @@kv_cache_append_f32_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Void)?
     @@kv_cache_append_f16_proc : Proc(Pointer(Float32), Pointer(UInt16), Pointer(UInt16), Int32, Int32, Int32, Int32, Int32, Void)?
     @@kv_f16_available : Bool? = nil
@@ -457,6 +460,65 @@ module SHAInet
       end
       raise "CUDA kernels not available" unless fn
       fn.call(hidden, gate, up, size)
+    end
+
+    # Gather the rows named by idx into a contiguous batch, on the device. One launch
+    # replaces a per-row cudaMemcpy, which is what made batching by expert pay.
+    def gather_rows(dst : Pointer(Float32), src : Pointer(Float32), idx : Pointer(Int32),
+                    n : Int32, cols : Int32)
+      unless fn = @@gather_rows_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "gather_rows")
+          unless sym.null?
+            @@gather_rows_proc = Proc(Pointer(Float32), Pointer(Float32), Pointer(Int32), Int32, Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@gather_rows_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(dst, src, idx, n, cols)
+    end
+
+    # dst[idx[r]] += w[r] * src[r] for the whole batch in one launch.
+    def scatter_add_rows(dst : Pointer(Float32), src : Pointer(Float32), idx : Pointer(Int32),
+                         w : Pointer(Float32), n : Int32, cols : Int32)
+      unless fn = @@scatter_add_rows_proc
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        unless @@kernels_handle.null?
+          sym = LibC.dlsym(@@kernels_handle, "scatter_add_rows")
+          unless sym.null?
+            @@scatter_add_rows_proc = Proc(Pointer(Float32), Pointer(Float32), Pointer(Int32), Pointer(Float32), Int32, Int32, Void).new(sym, Pointer(Void).null)
+            fn = @@scatter_add_rows_proc
+          end
+        end
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(dst, src, idx, w, n, cols)
+    end
+
+    # False when the loaded .so predates the gather/scatter kernels, so the batched
+    # prefill path can decline instead of raising.
+    def gather_kernels_available? : Bool
+      avail = @@gather_available
+      return avail unless avail.nil?
+      result = begin
+        if @@kernels_handle.null?
+          @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+        end
+        if @@kernels_handle.null?
+          false
+        else
+          !LibC.dlsym(@@kernels_handle, "gather_rows").null? &&
+          !LibC.dlsym(@@kernels_handle, "scatter_add_rows").null?
+        end
+      end
+      @@gather_available = result
+      result
     end
 
     # False when the loaded .so predates the fused SwiGLU kernel, so callers can

@@ -93,20 +93,31 @@ void dropout(float* out, const float* in, int rows, int cols, double drop_p, uns
     }
 }
 
+// One block per row, threads cooperating across the row. It was <<<rows, 1>>> with a
+// serial column loop, which made it useless for batching a d_model-wide gather: one
+// thread copying 2048 floats per row.
 __global__ void gather_rows_kernel(float* out, const float* in, const int* ids, int rows, int cols) {
     int row = blockIdx.x;
     if(row >= rows) return;
     int id = ids[row];
-    const float *row_in = in + id * cols;
-    float *row_out = out + row * cols;
-    for(int j=0;j<cols;++j){
+    const float *row_in = in + (long)id * cols;
+    float *row_out = out + (long)row * cols;
+    for(int j = threadIdx.x; j < cols; j += blockDim.x){
         row_out[j] = row_in[j];
     }
 }
 
+// No cudaDeviceSynchronize: it is ordered on the default stream against whatever
+// consumes the gathered batch, and the blocking sync per call was costing a device
+// round trip on every gather.
 void gather_rows(float* out, const float* in, const int* ids, int rows, int cols) {
-    gather_rows_kernel<<<rows, 1>>>(out, in, ids, rows, cols);
-    cudaDeviceSynchronize();
+    if (rows <= 0 || cols <= 0) return;
+    int threads = cols < 256 ? 32 : 256;
+    gather_rows_kernel<<<rows, threads>>>(out, in, ids, rows, cols);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in gather_rows: %s\n", cudaGetErrorString(err));
+    }
 }
 
 __global__ void row_mean_var_kernel(const float* in, float* mean, float* var,
@@ -392,6 +403,37 @@ __global__ void rms_norm_forward_kernel(float* out, const float* x, const float*
     float inv = 1.0f / sqrtf(sdata[0] / (float)cols + eps);
     for (int j = threadIdx.x; j < cols; j += blockDim.x) {
         orow[j] = xr[j] * inv * gamma[j];
+    }
+}
+
+// dst[idx[r]] += w[r] * src[r], the routing weight applied as the batch is returned
+// to token order.
+//
+// No atomics: a token selects a given expert at most once, so the rows of ONE launch
+// never collide, and separate launches are ordered on the default stream.
+__global__ void scatter_add_rows_kernel(float* __restrict__ dst,
+                                        const float* __restrict__ src,
+                                        const int* __restrict__ idx,
+                                        const float* __restrict__ w,
+                                        int n, int cols) {
+    int r = blockIdx.x;
+    if (r >= n) return;
+    const float* s = src + (long)r * cols;
+    float* d = dst + (long)idx[r] * cols;
+    float wr = w[r];
+    for (int c = threadIdx.x; c < cols; c += blockDim.x) d[c] += wr * s[c];
+}
+
+// No cudaDeviceSynchronize, same reasoning as swiglu_forward: ordered on the default
+// stream between the launches that produce and consume the batch.
+void scatter_add_rows(float* dst, const float* src, const int* idx,
+                      const float* w, int n, int cols) {
+    if (n <= 0 || cols <= 0) return;
+    int threads = cols < 256 ? 32 : 256;
+    scatter_add_rows_kernel<<<n, threads>>>(dst, src, idx, w, n, cols);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in scatter_add_rows: %s\n", cudaGetErrorString(err));
     }
 }
 

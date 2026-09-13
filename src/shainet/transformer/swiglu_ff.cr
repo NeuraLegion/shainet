@@ -41,6 +41,13 @@ module SHAInet
     @@dev_up_bufs = Hash(Int32, CudaMatrix).new
     @@dev_hidden_bufs = Hash(Int32, CudaMatrix).new
 
+    # Batched workspaces, keyed by {rows, hidden_cols}: prefill tiles to a fixed row
+    # count so this stays a handful of buffers rather than one per distinct expert
+    # load.
+    @@dev_gate_batch = Hash(Tuple(Int32, Int32), CudaMatrix).new
+    @@dev_up_batch = Hash(Tuple(Int32, Int32), CudaMatrix).new
+    @@dev_hidden_batch = Hash(Tuple(Int32, Int32), CudaMatrix).new
+
     # True when this expert can run the fully device-resident path: all three
     # projections quantized onto the device (or host-resident Q4, which streams
     # itself) and the fused SwiGLU kernel present in the loaded .so.
@@ -83,6 +90,40 @@ module SHAInet
         hidden_buf.mark_device_dirty!
       end
       Profile.measure("ffn.dev_down") { down_w.gemv_into(hidden_buf, out_buf) }
+      out_buf
+    end
+
+    # Batched variant: many token rows through ONE expert in three GEMMs instead of
+    # three GEMVs per token. The quantized weights already take M rows (gemv_into
+    # passes x.rows straight to gemm_q4_f32), so what this adds is the multi-row
+    # workspaces and a SwiGLU over the whole contiguous batch rather than one row.
+    #
+    # This is what makes the expert's weights pay off: a Q4 weight read once serves
+    # xb.rows tokens instead of being re-read per token, and prefill's cost after the
+    # device-resident change is dominated by exactly those weight reads.
+    def forward_device_batch(xb : CudaMatrix, out_buf : CudaMatrix) : CudaMatrix
+      gate_w = @gate_proj.as(QuantizedWeight)
+      up_w = @up_proj.as(QuantizedWeight)
+      down_w = @down_proj.as(QuantizedWeight)
+      hidden_cols = gate_w.cols
+      n = xb.rows
+
+      key = {n, hidden_cols}
+      gate_buf = (@@dev_gate_batch[key] ||= CudaMatrix.new(n, hidden_cols))
+      up_buf = (@@dev_up_batch[key] ||= CudaMatrix.new(n, hidden_cols))
+      hidden_buf = (@@dev_hidden_batch[key] ||= CudaMatrix.new(n, hidden_cols))
+
+      Profile.measure("ffn.batch_gate_up") do
+        gate_w.gemv_into(xb, gate_buf)
+        up_w.gemv_into(xb, up_buf)
+      end
+      Profile.measure("ffn.batch_swiglu") do
+        # Elementwise over the whole batch: the buffers are contiguous [n, hidden].
+        CUDA.swiglu_forward(hidden_buf.device_ptr.not_nil!,
+          gate_buf.device_ptr.not_nil!, up_buf.device_ptr.not_nil!, n * hidden_cols)
+        hidden_buf.mark_device_dirty!
+      end
+      Profile.measure("ffn.batch_down") { down_w.gemv_into(hidden_buf, out_buf) }
       out_buf
     end
 

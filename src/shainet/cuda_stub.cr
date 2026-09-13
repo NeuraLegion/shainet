@@ -122,6 +122,18 @@ module SHAInet
       false
     end
 
+    def gather_kernels_available? : Bool
+      false
+    end
+
+    def gather_rows(*args)
+      raise "CUDA disabled"
+    end
+
+    def scatter_add_rows(*args)
+      raise "CUDA disabled"
+    end
+
     def rms_norm_forward(*args)
       raise "CUDA disabled"
     end

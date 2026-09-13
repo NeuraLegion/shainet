@@ -114,6 +114,76 @@ module SHAInet
     @dev_out : CudaMatrix? = nil
     @dev_expert_out : CudaMatrix? = nil
 
+    # Rows per batched expert GEMM during prefill. 128 measured best on a 4090 for a
+    # 512-token prefill (2.26 ms/tok, against 2.32 at 64 and 2.38 at 32); the curve is
+    # flat enough past 64 that this is not worth tuning per model.
+    # SHAINET_MOE_TILE overrides it.
+    TILE_ROWS = (ENV["SHAINET_MOE_TILE"]? || "128").to_i
+
+    # Small device-side scratch for the gather/scatter kernels: the token indices of
+    # one expert's slice, and their routing weights. CudaMatrix is Float32 only, so
+    # the index side needs its own allocation.
+    private class DeviceIndexBuffer
+      getter ptr : Pointer(Int32)
+      getter capacity : Int32
+
+      def initialize(@capacity : Int32)
+        raw = Pointer(Pointer(Void)).malloc(1)
+        CUDA.malloc(raw, (@capacity.to_u64 * 4_u64).to_u64)
+        @ptr = raw.value.as(Pointer(Int32))
+      end
+
+      def upload(host : Array(Int32), n : Int32)
+        raise ArgumentError.new("index upload exceeds capacity") if n > @capacity
+        CUDA.memcpy(@ptr.as(Pointer(Void)), host.to_unsafe.as(Pointer(Void)),
+          (n.to_u64 * 4_u64).to_u64, CUDA::MemcpyKind::HostToDevice)
+      end
+
+      def release!
+        unless @ptr.null?
+          CUDA.free(@ptr.as(Pointer(Void)))
+          @ptr = Pointer(Int32).null
+        end
+      end
+
+      def finalize
+        release!
+      end
+    end
+
+    private class DeviceWeightBuffer
+      getter ptr : Pointer(Float32)
+      getter capacity : Int32
+
+      def initialize(@capacity : Int32)
+        raw = Pointer(Pointer(Void)).malloc(1)
+        CUDA.malloc(raw, (@capacity.to_u64 * 4_u64).to_u64)
+        @ptr = raw.value.as(Pointer(Float32))
+      end
+
+      def upload(host : Array(Float32), n : Int32)
+        raise ArgumentError.new("weight upload exceeds capacity") if n > @capacity
+        CUDA.memcpy(@ptr.as(Pointer(Void)), host.to_unsafe.as(Pointer(Void)),
+          (n.to_u64 * 4_u64).to_u64, CUDA::MemcpyKind::HostToDevice)
+      end
+
+      def release!
+        unless @ptr.null?
+          CUDA.free(@ptr.as(Pointer(Void)))
+          @ptr = Pointer(Float32).null
+        end
+      end
+
+      def finalize
+        release!
+      end
+    end
+
+    @dev_idx : DeviceIndexBuffer? = nil
+    @dev_w : DeviceWeightBuffer? = nil
+    @gathered_bufs = Hash(Int32, CudaMatrix).new
+    @batch_out_bufs = Hash(Int32, CudaMatrix).new
+
     @@device_decode : Bool? = nil
 
     # Device-resident decode is the default; SHAINET_MOE_DEVICE=0 forces the host
@@ -278,6 +348,7 @@ module SHAInet
       return unless x.rows > 1 # decode has its own tuned path
       return unless self.class.device_decode_enabled?
       return unless CUDA.fully_available?
+      return unless CUDA.gather_kernels_available?
       return unless @router.is_a?(CudaMatrix)
       first = @experts.first?
       return unless first && first.device_resident_capable?
@@ -289,40 +360,102 @@ module SHAInet
       # back: [tokens, num_experts], not per expert.
       logits = Profile.measure("ffn.router") { (x * @router.as(CudaMatrix)).to_simple }
 
-      out = CudaMatrix.new(rows, @d_model)
-      out.zero!
-      row = (@dev_x_row ||= CudaMatrix.new(1, @d_model))
-      expert_out = (@dev_expert_out ||= CudaMatrix.new(1, @d_model))
-
-      xp = x.device_ptr.not_nil!
-      op = out.device_ptr.not_nil!
-      rp = row.device_ptr.not_nil!
-      bytes = (@d_model.to_u64 * 4_u64)
-
-      # One handle for the whole prefill: creating one per token would add
-      # thousands of driver calls to the path this exists to speed up.
-      handle = CUDA.create_handle
-      begin
+      # Invert the routing: instead of "which experts does this token want", ask
+      # "which tokens want this expert". A token's top-k choice is unchanged, so the
+      # arithmetic is identical -- only the order the work is issued in differs.
+      buckets = Array(Array(Tuple(Int32, Float64))).new(@num_experts) { [] of Tuple(Int32, Float64) }
+      Profile.measure("ffn.topk") do
         rows.times do |t|
-          # Device-to-device: the activation row never crosses PCIe.
-          CUDA.memcpy((rp).as(Pointer(Void)), (xp + t * @d_model).as(Pointer(Void)),
-            bytes, CUDA::MemcpyKind::DeviceToDevice)
-          row.mark_device_dirty!
-
-          gating = Profile.measure("ffn.topk") { top_k_gating(logits, t) }
-          gating.each do |(e, w)|
-            @experts[e].forward_device(row, expert_out)
-            Profile.measure("ffn.dev_combine") do
-              CUDA.axpy(handle, w, expert_out.device_ptr.not_nil!, op + t * @d_model, @d_model)
-            end
-          end
+          top_k_gating(logits, t).each { |(e, w)| buckets[e] << {t, w} }
         end
-      ensure
-        CUDA.destroy_handle(handle)
       end
 
-      out.mark_device_dirty!
-      out
+      dst = CudaMatrix.new(rows, @d_model)
+      dst.zero!
+
+      # Tile so the workspaces are a fixed shape, and so one expert with a huge share
+      # of the tokens does not size every buffer.
+      tile = rows < TILE_ROWS ? rows : TILE_ROWS
+
+      # Build the whole layer's plan first, then upload the routing ONCE. Uploading per
+      # slice meant a synchronous H2D copy per slice, and each of those drains the
+      # pipeline the batched GEMMs are meant to keep full.
+      plan = [] of Tuple(Int32, Int32, Int32) # {expert, offset, n}
+      all_idx = [] of Int32
+      all_w = [] of Float32
+      buckets.each_with_index do |toks, e|
+        next if toks.empty?
+        toks.each_slice(tile) do |slice|
+          plan << {e, all_idx.size, slice.size}
+          slice.each do |(t, w)|
+            all_idx << t
+            all_w << w.to_f32
+          end
+        end
+      end
+      return dst if plan.empty?
+
+      idx_dev = index_scratch(all_idx.size)
+      w_dev = weight_scratch(all_w.size)
+      Profile.measure("ffn.plan_upload") do
+        idx_dev.upload(all_idx, all_idx.size)
+        w_dev.upload(all_w, all_w.size)
+      end
+
+      xp = x.device_ptr.not_nil!
+      op = dst.device_ptr.not_nil!
+
+      plan.each do |(e, offset, n)|
+        # The GEMM is sized to the REAL row count, so a short slice does not pay for a
+        # padded tile. Buffers are cached per row count, and the tiling keeps that to a
+        # handful of distinct shapes.
+        gathered = workspace(@gathered_bufs, n)
+        batch_out = workspace(@batch_out_bufs, n)
+        idxp = idx_dev.ptr + offset
+
+        Profile.measure("ffn.gather") do
+          CUDA.gather_rows(gathered.device_ptr.not_nil!, xp, idxp, n, @d_model)
+          gathered.mark_device_dirty!
+        end
+
+        # THE point of all of this: three GEMMs for the whole slice, where the
+        # per-token path issued three GEMVs per token.
+        @experts[e].forward_device_batch(gathered, batch_out)
+
+        Profile.measure("ffn.scatter") do
+          CUDA.scatter_add_rows(op, batch_out.device_ptr.not_nil!, idxp,
+            w_dev.ptr + offset, n, @d_model)
+        end
+      end
+
+      dst.mark_device_dirty!
+      dst
+    end
+
+    # Row-count-keyed workspaces. Tiling bounds the number of distinct shapes, so this
+    # is a few buffers, not one per expert.
+    private def workspace(cache : Hash(Int32, CudaMatrix), n : Int32) : CudaMatrix
+      cache[n] ||= CudaMatrix.new(n, @d_model)
+    end
+
+    # Grown to fit, never shrunk: the plan is rows * top_k entries, so it settles after
+    # the first prefill of a given length.
+    private def index_scratch(n : Int32) : DeviceIndexBuffer
+      buf = @dev_idx
+      if buf.nil? || buf.capacity < n
+        buf.try(&.release!)
+        buf = @dev_idx = DeviceIndexBuffer.new(n)
+      end
+      buf
+    end
+
+    private def weight_scratch(n : Int32) : DeviceWeightBuffer
+      buf = @dev_w
+      if buf.nil? || buf.capacity < n
+        buf.try(&.release!)
+        buf = @dev_w = DeviceWeightBuffer.new(n)
+      end
+      buf
     end
   end
 end

@@ -88,8 +88,19 @@ describe "device-resident MoE prefill" do
         stats["gemm.out_d2h"]?.should be_nil
         stats["gemm.in_h2d"]?.should be_nil
 
-        # The expert work still happened, so this is not vacuously clean.
-        stats["ffn.dev_combine"].not_nil![:count].should eq(12 * 2)
+        # The batching claim. 12 tokens x 2 experts is 24 token-expert assignments,
+        # issued as ONE batched GEMM per expert that received tokens (at most 6),
+        # not one per assignment. The phases are measured per batch, so this count
+        # IS the number of GEMM batches.
+        gemms = stats["ffn.batch_gate_up"].not_nil![:count]
+        gemms.should be > 0
+        gemms.should be <= 6
+        gemms.should be < 12 * 2
+        stats["ffn.batch_down"].not_nil![:count].should eq(gemms)
+
+        # And no token took the per-token single-row expert path, which is the
+        # thing being replaced. Asserted as an absence.
+        stats["ffn.dev_gate_up"]?.should be_nil
       end
     end
   end
