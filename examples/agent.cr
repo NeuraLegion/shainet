@@ -22,7 +22,11 @@ module AgentDemo
   MAX_TOOL_STEPS =      8
 
   record ToolParam, name : String, type : String, description : String, required : Bool = true
-  record Message, role : String, content : String
+  # `ids` holds the EXACT tokens the model produced for an assistant turn, when they are
+  # known. Re-encoding the decoded text does not reliably reproduce them -- a decode,
+  # UTF-8 scrub and re-encode round trip can shift token boundaries -- and a single
+  # mismatched token destroys KV prefix reuse for the whole conversation.
+  record Message, role : String, content : String, ids : Array(Int32)? = nil
   record ToolCall, name : String, args : Hash(String, String)
 
   class Tool
@@ -313,11 +317,26 @@ module AgentDemo
       ids
     end
 
+    # Same framing, but with the assistant's body taken VERBATIM from the tokens the model
+    # emitted. This is what makes the KV prefix match: during generation the cache holds
+    # `<|im_start|>assistant\n` followed by exactly these ids, so the cache is a true prefix
+    # of the next prompt and only the tail has to be prefilled.
+    private def render_assistant(body : Array(Int32)) : Array(Int32)
+      ids = [@im_start]
+      ids.concat(@tokenizer.encode("assistant\n"))
+      ids.concat(body)
+      ids << @im_end
+      ids.concat(@nl)
+      ids
+    end
+
     private def build_prompt : Array(Int32)
       ids = render_message("system", @system_block)
       @messages.each do |m|
         if m.role == "tool"
           ids.concat(render_message("user", "<tool_response>\n#{m.content}\n</tool_response>"))
+        elsif body = m.ids
+          ids.concat(render_assistant(body))
         else
           ids.concat(render_message(m.role, m.content))
         end
@@ -334,6 +353,10 @@ module AgentDemo
 
     def reset
       @messages.clear
+      # Also drop the KV cache. Prefix reuse would stay correct without this -- a shorter
+      # prompt cannot be an extension of the old cache, so it would fall back to a full
+      # prefill -- but there is no reason to keep the old conversation's cache resident.
+      reset_cache!
     end
 
     # Tokens one message contributes to the prompt.
@@ -359,7 +382,7 @@ module AgentDemo
       prompt.concat(render_message("user", instruction))
       prompt << @im_start
       prompt.concat(@tokenizer.encode("assistant\n"))
-      summary = generate_from(prompt, 384).strip
+      summary = generate_from(prompt, 384)[0].strip
       summary.empty? ? TRUNCATION_MARKER : summary
     end
 
@@ -425,12 +448,79 @@ module AgentDemo
       "[#{parts.join(" · ")}]"
     end
 
-    # Generate from an explicit prompt; re-prefills it fresh (KV cleared). When
-    # echo is set, the user-facing prose is streamed live (with <think> and
-    # tool-call markup filtered out).
-    private def generate_from(prompt : Array(Int32), max_tokens : Int32, echo : Bool = false) : String
+    # Tokens currently held in the KV cache, in order. This is what makes turn 2 onwards
+    # cheap: the cache already contains the whole conversation so far, so only the new tail
+    # has to be prefilled.
+    @cache_ids = [] of Int32
+
+    # Clearing the KV cache and forgetting what it held MUST happen together. If they drift,
+    # a later turn believes the cache still holds a prefix that is gone and reuses it, which
+    # is silently wrong output rather than an error.
+    private def reset_cache!
       @net.clear_cache!
-      logits = @net.run(prompt, stealth: true, return_matrix: true).as(SHAInet::SimpleMatrix)
+      @cache_ids.clear
+    end
+
+    # Prefill `prompt`, reusing whatever the KV cache already holds.
+    #
+    # This used to clear the cache and re-prefill the entire transcript on EVERY call, and
+    # the tool loop calls it once per step -- so one request with three tool calls paid four
+    # full prefills of a growing context. At 16k that is around 405 s each, which is the
+    # multi-minute silence between an answer and the next action. It was never hidden
+    # reasoning; it was prefill with nothing to show.
+    #
+    # build_prompt appends, so consecutive prompts share a long prefix. Reuse is only taken
+    # when the cache is EXACTLY a prefix of the new prompt: a KV cache cannot drop a suffix,
+    # so a partial match cannot be salvaged. If the assistant's text re-tokenizes differently
+    # from the tokens that were generated, the common prefix simply ends early and this falls
+    # back to a full prefill -- slower, never wrong.
+    private def prefill(prompt : Array(Int32)) : SHAInet::SimpleMatrix
+      shared = 0
+      limit = Math.min(@cache_ids.size, prompt.size)
+      while shared < limit && @cache_ids[shared] == prompt[shared]
+        shared += 1
+      end
+
+      if shared == @cache_ids.size && shared > 0 && shared < prompt.size
+        reused = shared
+        tail = prompt[shared..]
+        STDERR.puts "  reusing #{reused} cached tok · prefilling #{tail.size}".colorize(:dark_gray)
+        logits = run_prefill(tail, reused, prompt.size)
+        @cache_ids = prompt.dup
+        logits
+      else
+        STDERR.puts "  prefilling #{prompt.size} tok from scratch".colorize(:dark_gray) if prompt.size > 512
+        reset_cache!
+        logits = run_prefill(prompt, 0, prompt.size)
+        @cache_ids = prompt.dup
+        logits
+      end
+    end
+
+    # Feed tokens to the model in slices so there is something to show. The KV cache
+    # accumulates across calls, so slicing is equivalent to one call.
+    private def run_prefill(ids : Array(Int32), already : Int32, total : Int32) : SHAInet::SimpleMatrix
+      slice = 512
+      show = ids.size > slice
+      logits = nil
+      i = 0
+      while i < ids.size
+        n = Math.min(slice, ids.size - i)
+        logits = @net.run(ids[i, n], stealth: true, return_matrix: true).as(SHAInet::SimpleMatrix)
+        i += n
+        if show
+          done = already + i
+          STDERR.print "\r  prefill #{done}/#{total} tok (#{done * 100 // total}%)".colorize(:dark_gray)
+        end
+      end
+      STDERR.print "\r\033[K" if show
+      logits.not_nil!
+    end
+
+    # Generate from an explicit prompt. When echo is set, the user-facing prose is streamed
+    # live (with <think> and tool-call markup filtered out).
+    private def generate_from(prompt : Array(Int32), max_tokens : Int32, echo : Bool = false) : Tuple(String, Array(Int32))
+      logits = prefill(prompt)
       generated = [] of Int32
       renderer = echo ? AgentDemo::StreamRenderer.new(STDERR) : nil
       prev = ""
@@ -447,16 +537,19 @@ module AgentDemo
           prev = full
         end
         logits = @net.run([id], stealth: true, return_matrix: true).as(SHAInet::SimpleMatrix)
+        # The sampled token is now in the cache too, so the next turn can reuse it.
+        @cache_ids << id
       end
       renderer.try(&.finish)
       # scrub: a broken model can emit tokens that decode to invalid UTF-8, which
-      # would crash downstream regex/parsing.
-      @tokenizer.decode(generated).scrub
+      # would crash downstream regex/parsing. The raw ids go back too: the decoded text is
+      # for humans and parsing, the ids are what the KV cache actually holds.
+      {@tokenizer.decode(generated).scrub, generated}
     end
 
     # Generate one assistant turn from the current transcript, streaming the
     # filtered prose live. Re-prefills the whole (growing) context each call.
-    private def generate(max_tokens : Int32) : String
+    private def generate(max_tokens : Int32) : Tuple(String, Array(Int32))
       generate_from(build_prompt, max_tokens, echo: true)
     end
 
@@ -481,18 +574,18 @@ module AgentDemo
         STDERR.print "\n#{"Agent".colorize(:light_cyan).bold} ❯ "
         STDERR.flush
         begin
-          text = generate(max_tokens) # streams the filtered prose inline
+          text, text_ids = generate(max_tokens) # streams the filtered prose inline
         rescue ex
           STDERR.puts "\n  [agent] generation failed: #{ex.message}".colorize(:red)
           STDERR.puts "  (out of GPU memory? try /clear, a shorter request, or a smaller SHAINET_EXPERT_CACHE_MB)".colorize(:dark_gray)
-          @net.clear_cache!
+          reset_cache!
           break
         end
         STDERR.puts ""
         calls = AgentDemo.parse_tool_calls(text)
 
         # Keep the assistant's output (incl. any tool_call markup) verbatim.
-        @messages << Message.new("assistant", text.strip)
+        @messages << Message.new("assistant", text.strip, text_ids)
         break if calls.empty?
 
         calls.each do |c|
@@ -575,6 +668,16 @@ STDERR.sync = true # stream tokens as they arrive (no buffering)
 AgentDemo.print_banner(STDERR, "#{File.basename(model_dir)} · local coding agent on Network#run")
 
 STDERR.puts "Loading model from #{model_dir}...".colorize(:dark_gray)
+# A 30B takes about nine minutes here. Without a progress line that is indistinguishable
+# from a hang, and the layer loop is where nearly all of it goes.
+load_started = Time.monotonic
+SHAInet::HFLoader.progress = ->(done : Int32, total : Int32) do
+  elapsed = (Time.monotonic - load_started).total_seconds
+  eta = done > 0 ? (elapsed / done) * (total - done) : 0.0
+  STDERR.print "\r  layer #{done}/#{total} (#{done * 100 // total}%) " \
+               "· #{elapsed.round.to_i}s elapsed · ~#{eta.round.to_i}s left".colorize(:dark_gray)
+  STDERR.print "\n" if done == total
+end
 t0 = Time.monotonic
 # Q4 + MoE offload are the only configuration a large MoE model actually runs in on a
 # single consumer GPU: without them a 30B-A3B does not fit at all. So they are the

@@ -7,6 +7,22 @@ module SHAInet
   module HFLoader
     SUPPORTED_MODELS = ["gpt2", "llama", "mistral", "qwen2", "qwen3", "qwen3_moe"]
 
+    # Optional progress reporting for the layer loop. A 30B takes about nine minutes to
+    # load and quantize, which is indistinguishable from a hang without this. Set to nil to
+    # silence it again. Deliberately a class-level hook rather than a parameter threaded
+    # through every architecture loader.
+    #
+    # The callback receives (layers_done, layers_total).
+    @@progress : Proc(Int32, Int32, Nil)? = nil
+
+    def self.progress=(callback : Proc(Int32, Int32, Nil)?)
+      @@progress = callback
+    end
+
+    def self.progress : Proc(Int32, Int32, Nil)?
+      @@progress
+    end
+
     # Experts read between forced collections while loading an MoE layer. Bounds the
     # read/transpose garbage that would otherwise accumulate across a whole layer's
     # experts; 32 keeps the load-time cost small while capturing most of the peak
@@ -426,6 +442,7 @@ module SHAInet
             block.to_gpu!(quantize: true, bits: bits, offload: dense_offload)
             GC.collect
           end
+          @@progress.try &.call(idx + 1, config.num_hidden_layers)
         end
 
         # Output head
