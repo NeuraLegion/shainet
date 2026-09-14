@@ -789,19 +789,46 @@ module SHAInet
       true
     end
 
+    # Rows per prefill chunk through the block chain. This is what decouples workspace
+    # VRAM from prompt length: measured, a 20480-token prefill died on a 160 MB
+    # cudaMalloc, and 167772160 / 4 / 20480 is exactly 2048 -- d_model. About a dozen
+    # [prompt_length, d_model] workspaces live across the chain, the attention path and
+    # the MoE prefill, which is roughly 2 GB at 20k against 1236 MB of headroom left at
+    # 16k. Chunked, they are all sized to this instead, and only the KV cache still grows
+    # with context. SHAINET_PREFILL_CHUNK overrides it.
+    #
+    # Settable so a spec can force several chunks over a short prompt: with the default a
+    # test prompt is one chunk and the chunking would never be exercised.
+    @@prefill_chunk : Int32? = nil
+
+    def self.prefill_chunk : Int32
+      v = @@prefill_chunk
+      return v if v
+      v = (ENV["SHAINET_PREFILL_CHUNK"]? || "2048").to_i
+      v = 1 if v < 1
+      @@prefill_chunk = v
+      v
+    end
+
+    # Pass nil to forget the value and re-read the environment.
+    def self.prefill_chunk=(value : Int32?)
+      @@prefill_chunk = value
+    end
+
     # Multi-token device block chain: the whole block for a PREFILL, with no host round
     # trip. The single-row forward_cached_device above is the decode equivalent; this is
     # the same shape with a row dimension.
     #
-    # This is what removes the last big transfer in prefill. With the FFN and attention
-    # each device-resident but the chain still host-driven, every layer paid an upload and
-    # a readback around each of them: attn.d2h alone measured 40.7% of a 4096-token
-    # prefill on a 30B-A3B. Here one upload enters the stack and one readback leaves it.
+    # The rows are processed in chunks, IN PLACE. That is sound because the block is causal
+    # and per-token everywhere it is not: chunk B's attention sees chunk A's KV because A
+    # was appended first, and the norms, the FFN and the residuals treat each token
+    # independently. Once a chunk's rows have been consumed they can be overwritten, so one
+    # full-length buffer carries the activation and every workspace is chunk-sized.
     #
     # Returns nil when it does not apply, and the caller keeps the host chain.
     #
-    # The returned matrix is a shared workspace, so the caller must consume it or hand it
-    # straight to the next block.
+    # x is UPDATED IN PLACE and returned, so the caller must not expect its input back
+    # unchanged.
     def forward_cached_device_multi(x : CudaMatrix) : CudaMatrix?
       return unless x.rows > 1
       return unless self.class.prefill_attn_device_enabled?
@@ -811,44 +838,69 @@ module SHAInet
 
       dm = @d_model
       n = x.rows
-      total = n * dm
+      xp = x.device_ptr.not_nil!
+      chunk = self.class.prefill_chunk
+      chunk = n if n < chunk
 
-      n1 = attn_ws(@@blk_ws_n1, n, dm)
-      n2 = attn_ws(@@blk_ws_n2, n, dm)
-      attn_dev = attn_ws(@@blk_ws_attn, n, dm)
-      h = attn_ws(@@blk_ws_h, n, dm)
+      off = 0
+      while off < n
+        c = chunk < (n - off) ? chunk : (n - off)
+        total = c * dm
 
-      Profile.measure("block.dev_norm") { @norm1.forward_into(x, n1) }
-      return unless attention_prefill_device_into(n1, attn_dev)
+        xc = attn_ws(@@blk_ws_x, c, dm)
+        n1 = attn_ws(@@blk_ws_n1, c, dm)
+        n2 = attn_ws(@@blk_ws_n2, c, dm)
+        attn_dev = attn_ws(@@blk_ws_attn, c, dm)
+        h = attn_ws(@@blk_ws_h, c, dm)
 
-      # h = x + attn, then h += ffn(norm2(h)), both residuals on the device. add_inplace is
-      # elementwise, so the whole [tokens, d_model] block goes in one launch.
-      Profile.measure("block.dev_residual") do
-        CUDA.memcpy(h.device_ptr.not_nil!.as(Pointer(Void)), x.device_ptr.not_nil!.as(Pointer(Void)),
+        # Bring this chunk's rows into a chunk-sized buffer, device to device.
+        CUDA.memcpy(xc.device_ptr.not_nil!.as(Pointer(Void)),
+          (xp + off * dm).as(Pointer(Void)),
           total.to_u64 * 4_u64, CUDA::MemcpyKind::DeviceToDevice)
-        CUDA.add_inplace(h.device_ptr.not_nil!, attn_dev.device_ptr.not_nil!, total)
-        h.mark_device_dirty!
+        xc.mark_device_dirty!
+
+        Profile.measure("block.dev_norm") { @norm1.forward_into(xc, n1) }
+        return unless attention_prefill_device_into(n1, attn_dev)
+
+        # h = xc + attn, then h += ffn(norm2(h)), both residuals on the device.
+        Profile.measure("block.dev_residual") do
+          CUDA.memcpy(h.device_ptr.not_nil!.as(Pointer(Void)), xc.device_ptr.not_nil!.as(Pointer(Void)),
+            total.to_u64 * 4_u64, CUDA::MemcpyKind::DeviceToDevice)
+          CUDA.add_inplace(h.device_ptr.not_nil!, attn_dev.device_ptr.not_nil!, total)
+          h.mark_device_dirty!
+        end
+
+        Profile.measure("block.dev_norm") { @norm2.forward_into(h, n2) }
+
+        ffn = @ffn
+        ff_out = case ffn
+                 when MoEFF
+                   ffn.forward_device_batch(n2)
+                 else
+                   buf = attn_ws(@@blk_ws_ff, c, dm)
+                   ffn.as(SwiGLUFF).forward_device_batch(n2, buf)
+                 end
+        return unless ff_out
+
+        Profile.measure("block.dev_residual") do
+          CUDA.add_inplace(h.device_ptr.not_nil!, ff_out.device_ptr.not_nil!, total)
+          h.mark_device_dirty!
+        end
+
+        # Write the finished chunk back over its own rows. Safe in place: later chunks read
+        # only their own rows, and this chunk's input is no longer needed.
+        CUDA.memcpy((xp + off * dm).as(Pointer(Void)),
+          h.device_ptr.not_nil!.as(Pointer(Void)),
+          total.to_u64 * 4_u64, CUDA::MemcpyKind::DeviceToDevice)
+
+        off += c
       end
 
-      Profile.measure("block.dev_norm") { @norm2.forward_into(h, n2) }
-
-      ffn = @ffn
-      ff_out = case ffn
-               when MoEFF
-                 ffn.forward_device_batch(n2)
-               else
-                 buf = attn_ws(@@blk_ws_ff, n, dm)
-                 ffn.as(SwiGLUFF).forward_device_batch(n2, buf)
-               end
-      return unless ff_out
-
-      Profile.measure("block.dev_residual") do
-        CUDA.add_inplace(h.device_ptr.not_nil!, ff_out.device_ptr.not_nil!, total)
-        h.mark_device_dirty!
-      end
-      h
+      x.mark_device_dirty!
+      x
     end
 
+    @@blk_ws_x = Hash(Tuple(Int32, Int32), CudaMatrix).new
     @@blk_ws_n1 = Hash(Tuple(Int32, Int32), CudaMatrix).new
     @@blk_ws_n2 = Hash(Tuple(Int32, Int32), CudaMatrix).new
     @@blk_ws_attn = Hash(Tuple(Int32, Int32), CudaMatrix).new
@@ -883,14 +935,16 @@ module SHAInet
     # Total VRAM held by the shared attention workspaces, so the bound is assertable.
     def self.attn_workspace_bytes : UInt64
       total = 0_u64
-      [@@attn_ws_x, @@attn_ws_q, @@attn_ws_k, @@attn_ws_v, @@attn_ws_aq, @@attn_ws_o].each do |cache|
+      [@@attn_ws_x, @@attn_ws_q, @@attn_ws_k, @@attn_ws_v, @@attn_ws_aq, @@attn_ws_o,
+       @@blk_ws_x, @@blk_ws_n1, @@blk_ws_n2, @@blk_ws_attn, @@blk_ws_h, @@blk_ws_ff].each do |cache|
         cache.each_value { |m| total += (m.rows.to_u64 * m.cols.to_u64 * 4_u64) }
       end
       total
     end
 
     def self.release_attn_workspaces! : Nil
-      [@@attn_ws_x, @@attn_ws_q, @@attn_ws_k, @@attn_ws_v, @@attn_ws_aq, @@attn_ws_o].each do |cache|
+      [@@attn_ws_x, @@attn_ws_q, @@attn_ws_k, @@attn_ws_v, @@attn_ws_aq, @@attn_ws_o,
+       @@blk_ws_x, @@blk_ws_n1, @@blk_ws_n2, @@blk_ws_attn, @@blk_ws_h, @@blk_ws_ff].each do |cache|
         cache.each_value(&.free!)
         cache.clear
       end
