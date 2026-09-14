@@ -1102,6 +1102,139 @@ __global__ void gemm_q4_f32_vec_kernel(const float* __restrict__ x,
     if (lane == 0 && n < N) y[(long)m * N + n] = acc;
 }
 
+// Register-tiled Q4 GEMM. Addresses what the current kernel is actually limited by, which
+// is NOT what it looks like from the source.
+//
+// Bisection on the vectorized kernel: separately removing the weight load, the activation
+// reads, the nibble decode, and even the whole shared-memory staging each changed the time
+// by under 3%. Nothing in the inner loop dominates. What does is the shape of the work: at
+// the expert projection (M=128, K=2048, N=768) it launches 12288 blocks x 256 threads for
+// only 201M MACs, so each thread performs 64 MACs and then pays two __syncthreads and a
+// five-step warp-shuffle reduction. Overhead per thread is comparable to its useful work,
+// and it reached 1004 GFLOP/s, about 3.5% of this card's fp32 peak.
+//
+// So this kernel gives each thread a TILE of outputs it owns across the whole K:
+//   - 8192 MACs per thread instead of 64
+//   - no cross-lane reduction at all, since a thread accumulates its own outputs
+//   - the Q4 weights are dequantized into shared memory ONCE per block per k-tile,
+//     instead of once per row-block
+//
+// Deliberately NOT the llama.cpp approach of int8 DP4A with quantized activations: that
+// accelerates the decode and the MAC, which the bisection above shows are already free
+// here, and it would cost activation precision for nothing.
+#define MMQ_BM 32 // rows per block
+#define MMQ_BN 32 // cols per block
+#define MMQ_TM 2  // rows per thread
+#define MMQ_TN 2  // cols per thread
+// k per iteration is Q4_BLK: one k-tile is exactly one quantization block, so a column's
+// scale is loaded once per tile rather than recomputed per element.
+
+__global__ void gemm_q4_f32_tiled_kernel(const float* __restrict__ x,
+                                         const unsigned char* __restrict__ q,
+                                         const float* __restrict__ d,
+                                         const unsigned char* __restrict__ sub,
+                                         float* __restrict__ y,
+                                         int M, int N, int K) {
+    __shared__ float xs[MMQ_BM][Q4_BLK];
+    __shared__ float ws[Q4_BLK][MMQ_BN];
+
+    const int m0 = blockIdx.y * MMQ_BM;
+    const int n0 = blockIdx.x * MMQ_BN;
+    const int tid = threadIdx.x;
+
+    // Thread's output tile: MMQ_TM rows x MMQ_TN cols.
+    const int tm = (tid / (MMQ_BN / MMQ_TN)) * MMQ_TM;
+    const int tn = (tid % (MMQ_BN / MMQ_TN)) * MMQ_TN;
+
+    const int nblocks = K >> 5; // K % 32 == 0, checked by the caller
+    const int nsupers = (nblocks + Q4_SUPER - 1) / Q4_SUPER;
+    const int kbytes = K >> 1;
+
+    float acc[MMQ_TM][MMQ_TN];
+#pragma unroll
+    for (int i = 0; i < MMQ_TM; ++i)
+#pragma unroll
+        for (int j = 0; j < MMQ_TN; ++j) acc[i][j] = 0.0f;
+
+    for (int kb = 0; kb < nblocks; ++kb) {
+        const int k0 = kb * Q4_BLK;
+
+        // Stage the activation tile: MMQ_BM x 32 floats.
+        for (int idx = tid; idx < MMQ_BM * Q4_BLK; idx += blockDim.x) {
+            const int r = idx / Q4_BLK;
+            const int c = idx - r * Q4_BLK;
+            const int gm = m0 + r;
+            xs[r][c] = (gm < M) ? x[(long)gm * K + k0 + c] : 0.0f;
+        }
+
+        // Dequantize this k-block for all MMQ_BN columns into shared memory. Each column's
+        // 32 values are 16 packed bytes; four threads share a column, eight values each.
+        for (int idx = tid; idx < MMQ_BN * 4; idx += blockDim.x) {
+            const int col = idx & (MMQ_BN - 1);
+            const int part = idx / MMQ_BN; // 0..3
+            const int gn = n0 + col;
+            if (gn < N) {
+                const unsigned char* qrow = q + (long)gn * kbytes + (long)kb * 16;
+                const float scale = d[(long)gn * nsupers + kb / Q4_SUPER] *
+                                    (float)sub[(long)gn * nblocks + kb] * (1.0f / 255.0f);
+#pragma unroll
+                for (int b = 0; b < 4; ++b) {
+                    const unsigned char byte = qrow[part * 4 + b];
+                    const int kk = (part * 4 + b) * 2;
+                    ws[kk][col] = (float)((int)(byte & 0x0F) - 8) * scale;
+                    ws[kk + 1][col] = (float)((int)(byte >> 4) - 8) * scale;
+                }
+            } else {
+#pragma unroll
+                for (int b = 0; b < 4; ++b) {
+                    const int kk = (part * 4 + b) * 2;
+                    ws[kk][col] = 0.0f;
+                    ws[kk + 1][col] = 0.0f;
+                }
+            }
+        }
+        __syncthreads();
+
+        // The point: 128 MACs per thread per k-tile, from registers, no reduction.
+#pragma unroll
+        for (int kk = 0; kk < Q4_BLK; ++kk) {
+            float a[MMQ_TM];
+            float b[MMQ_TN];
+#pragma unroll
+            for (int i = 0; i < MMQ_TM; ++i) a[i] = xs[tm + i][kk];
+#pragma unroll
+            for (int j = 0; j < MMQ_TN; ++j) b[j] = ws[kk][tn + j];
+#pragma unroll
+            for (int i = 0; i < MMQ_TM; ++i)
+#pragma unroll
+                for (int j = 0; j < MMQ_TN; ++j) acc[i][j] += a[i] * b[j];
+        }
+        __syncthreads();
+    }
+
+#pragma unroll
+    for (int i = 0; i < MMQ_TM; ++i) {
+        const int gm = m0 + tm + i;
+        if (gm >= M) continue;
+#pragma unroll
+        for (int j = 0; j < MMQ_TN; ++j) {
+            const int gn = n0 + tn + j;
+            if (gn < N) y[(long)gm * N + gn] = acc[i][j];
+        }
+    }
+}
+
+// Force the one-row-per-block kernel at M > 1, so the register-tiled kernel can be A/B'd
+// end to end on a real model. Read once, on first use.
+static int q4_no_tile_forced = -1;
+static inline bool q4_no_tile() {
+    if (q4_no_tile_forced < 0) {
+        const char* e = getenv("SHAINET_Q4_NO_TILE");
+        q4_no_tile_forced = (e && e[0] == '1') ? 1 : 0;
+    }
+    return q4_no_tile_forced == 1;
+}
+
 // Force the scalar Q4 kernel even on shapes the vectorized one supports. Exists
 // so the two kernels can be A/B'd end to end on a real model, where every shape
 // otherwise takes the vectorized path. Read once, on first use.
@@ -1117,10 +1250,19 @@ static inline bool q4_force_scalar() {
 void gemm_q4_f32(const float* x, const unsigned char* q, const float* d,
                  const unsigned char* sub, float* y, int M, int N, int K) {
     if (K % Q4_BLK == 0 && !q4_force_scalar()) {
-        int threads = Q4_COLS_PER_BLOCK * 32;
-        dim3 grid((N + Q4_COLS_PER_BLOCK - 1) / Q4_COLS_PER_BLOCK, M);
-        size_t shmem = Q4_TILE * sizeof(float);
-        gemm_q4_f32_vec_kernel<<<grid, threads, shmem>>>(x, q, d, sub, y, M, N, K);
+        // Multi-row shapes go to the register-tiled kernel; M == 1 (decode) keeps the
+        // GEMV-shaped kernel, where there is no output tile to amortize over.
+        // SHAINET_Q4_NO_TILE=1 forces the old path so the two can be A/B'd end to end.
+        if (M > 1 && !q4_no_tile()) {
+            dim3 grid((N + MMQ_BN - 1) / MMQ_BN, (M + MMQ_BM - 1) / MMQ_BM);
+            int threads = (MMQ_BM / MMQ_TM) * (MMQ_BN / MMQ_TN);
+            gemm_q4_f32_tiled_kernel<<<grid, threads>>>(x, q, d, sub, y, M, N, K);
+        } else {
+            int threads = Q4_COLS_PER_BLOCK * 32;
+            dim3 grid((N + Q4_COLS_PER_BLOCK - 1) / Q4_COLS_PER_BLOCK, M);
+            size_t shmem = Q4_TILE * sizeof(float);
+            gemm_q4_f32_vec_kernel<<<grid, threads, shmem>>>(x, q, d, sub, y, M, N, K);
+        }
     } else {
         // Packed rows are not 16-byte aligned for this K, so uint4 loads would
         // be illegal. Correctness first.
