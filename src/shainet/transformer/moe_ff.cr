@@ -118,7 +118,39 @@ module SHAInet
     # 512-token prefill (2.26 ms/tok, against 2.32 at 64 and 2.38 at 32); the curve is
     # flat enough past 64 that this is not worth tuning per model.
     # SHAINET_MOE_TILE overrides it.
-    TILE_ROWS = (ENV["SHAINET_MOE_TILE"]? || "128").to_i
+    # Rows per batched expert GEMM during prefill. This governs the SHAPE of every expert
+    # GEMM, which is where the remaining headroom is: cuBLAS fp32 reaches 4393 GFLOP/s at
+    # M=2048 against 792 at M=128, so a bigger M is worth having.
+    #
+    # 512 measured best on a 4090 at a 4096-token prefill, but only in combination with a
+    # prefill chunk large enough to feed it -- the two are one knob in two halves:
+    #
+    #   chunk 2048 tile  128   33.3 s   8.12 ms/tok   (the old defaults)
+    #   chunk 8192 tile  128   33.7 s   8.24          chunk alone changes nothing
+    #   chunk 8192 tile  512   29.4 s   7.17          1.13x
+    #   chunk 8192 tile 1024   29.4 s   7.17          saturated
+    #
+    # Chunk alone is flat because tokens-per-expert-per-chunk is chunk * top_k / experts:
+    # at chunk 2048 that is 128, so a larger tile has nothing to fill it with.
+    # SHAINET_MOE_TILE overrides it.
+    #
+    # Settable at runtime as well, so a sweep can compare tile sizes within ONE process. A
+    # 30B takes about twelve minutes to load, which makes a per-value process prohibitive.
+    @@tile_rows : Int32? = nil
+
+    def self.tile_rows : Int32
+      v = @@tile_rows
+      return v if v
+      v = (ENV["SHAINET_MOE_TILE"]? || "512").to_i
+      v = 1 if v < 1
+      @@tile_rows = v
+      v
+    end
+
+    # Pass nil to forget the value and re-read the environment.
+    def self.tile_rows=(value : Int32?)
+      @@tile_rows = value
+    end
 
     # Small device-side scratch for the gather/scatter kernels: the token indices of
     # one expert's slice, and their routing weights. CudaMatrix is Float32 only, so
@@ -418,7 +450,8 @@ module SHAInet
 
       # Tile so the workspaces are a fixed shape, and so one expert with a huge share
       # of the tokens does not size every buffer.
-      tile = rows < TILE_ROWS ? rows : TILE_ROWS
+      tile_rows = self.class.tile_rows
+      tile = rows < tile_rows ? rows : tile_rows
 
       # Build the whole layer's plan first, then upload the routing ONCE. Uploading per
       # slice meant a synchronous H2D copy per slice, and each of those drains the

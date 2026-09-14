@@ -789,22 +789,31 @@ module SHAInet
       true
     end
 
-    # Rows per prefill chunk through the block chain. This is what decouples workspace
-    # VRAM from prompt length: measured, a 20480-token prefill died on a 160 MB
-    # cudaMalloc, and 167772160 / 4 / 20480 is exactly 2048 -- d_model. About a dozen
-    # [prompt_length, d_model] workspaces live across the chain, the attention path and
-    # the MoE prefill, which is roughly 2 GB at 20k against 1236 MB of headroom left at
-    # 16k. Chunked, they are all sized to this instead, and only the KV cache still grows
-    # with context. SHAINET_PREFILL_CHUNK overrides it.
+    # Rows per prefill chunk through the block chain. Two jobs, in tension:
     #
-    # Settable so a spec can force several chunks over a short prompt: with the default a
-    # test prompt is one chunk and the chunking would never be exercised.
+    # It decouples workspace VRAM from prompt length. Measured, a 20480-token prefill died
+    # on a 160 MB cudaMalloc, and 167772160 / 4 / 20480 is exactly 2048 -- d_model. About a
+    # dozen [prompt_length, d_model] workspaces live across the chain, the attention path
+    # and the MoE prefill, roughly 2 GB at 20k against 1236 MB of headroom left at 16k.
+    # Chunked, they are all sized to this instead.
+    #
+    # It also sets how many tokens each expert receives per chunk (chunk * top_k / experts),
+    # and so the M of every expert GEMM. 8192 with MoEFF.tile_rows at 512 measured 29.4 s
+    # against 33.3 s at chunk 2048 tile 128 for a 4096-token prefill; the two only pay off
+    # together, since at chunk 2048 an expert only gets 128 tokens and a larger tile has
+    # nothing to fill it with.
+    #
+    # Bigger is therefore faster but costs workspace VRAM, which is what caps context.
+    # SHAINET_PREFILL_CHUNK overrides it.
+    #
+    # Settable at runtime too: with a fixed value a spec-sized prompt is one chunk and the
+    # chunking would never be exercised.
     @@prefill_chunk : Int32? = nil
 
     def self.prefill_chunk : Int32
       v = @@prefill_chunk
       return v if v
-      v = (ENV["SHAINET_PREFILL_CHUNK"]? || "2048").to_i
+      v = (ENV["SHAINET_PREFILL_CHUNK"]? || "8192").to_i
       v = 1 if v < 1
       @@prefill_chunk = v
       v
