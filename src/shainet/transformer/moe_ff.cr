@@ -378,6 +378,12 @@ module SHAInet
       end
     end
 
+    # Public device-in/device-out entry for the multi-token block chain: same batched
+    # prefill path the host wrapper uses, without the transfer either side of it.
+    def forward_device_batch(x : CudaMatrix) : CudaMatrix?
+      forward_device_prefill(x)
+    end
+
     # Device-resident PREFILL: activations stay on the device across every expert.
     # The only transfer is the router logits, one [tokens, num_experts] readback per
     # layer, because top-k is a host decision.

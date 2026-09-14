@@ -183,7 +183,27 @@ module SHAInet
 
     # CPU path - all SimpleMatrix operations
     # Scratch buffer for entering the device block chain, allocated once.
-    @dev_chain_in : CudaMatrix? = nil
+    # Keyed by shape: a prefill and a decode step have different row counts, and the
+    # chain entry buffer is reused across turns. Bounded by MAX_CHAIN_SHAPES so a varying
+    # prompt length cannot accumulate one buffer per length -- the same unbounded-cache
+    # mistake that leaked several GB in the MoE prefill path.
+    MAX_CHAIN_SHAPES = 3
+    @dev_chain_bufs = Hash(Tuple(Int32, Int32), CudaMatrix).new
+
+    private def chain_buf(rows : Int32, cols : Int32) : CudaMatrix
+      key = {rows, cols}
+      if existing = @dev_chain_bufs[key]?
+        @dev_chain_bufs.delete(key)
+        @dev_chain_bufs[key] = existing
+        return existing
+      end
+      while @dev_chain_bufs.size >= MAX_CHAIN_SHAPES
+        oldest = @dev_chain_bufs.first_key
+        @dev_chain_bufs[oldest].free!
+        @dev_chain_bufs.delete(oldest)
+      end
+      @dev_chain_bufs[key] = CudaMatrix.new(rows, cols)
+    end
 
     # The single readback at the end of the device block chain. One per token for the
     # whole stack, rather than one per layer.
@@ -219,17 +239,32 @@ module SHAInet
             block = l.as(LlamaLayer)
             if use_kv_cache?
               sm = matrix.as(SimpleMatrix)
-              if (dev_act || sm.rows == 1) && block.block_device_capable?
+              # Any row count now, not just a single token. A prefill used to be excluded
+              # here, so every layer paid an upload and a readback around its attention and
+              # its FFN even though both were device-resident internally.
+              if (dev_act || sm.rows >= 1) && block.block_device_capable?
                 if dev_act.nil?
-                  buf = (@dev_chain_in ||= CudaMatrix.new(1, sm.cols))
+                  buf = chain_buf(sm.rows, sm.cols)
                   Profile.measure("net.dev_upload") do
-                    buf.raw_data.to_unsafe.copy_from(sm.data.to_unsafe, sm.cols)
+                    buf.raw_data.to_unsafe.copy_from(sm.data.to_unsafe, sm.rows * sm.cols)
                     buf.mark_host_modified!
                     buf.sync_to_device!("block_chain_in")
                   end
                   dev_act = buf
                 end
-                dev_act = block.forward_cached_device(dev_act.not_nil!)
+                nxt = if dev_act.not_nil!.rows > 1
+                        block.forward_cached_device_multi(dev_act.not_nil!)
+                      else
+                        block.forward_cached_device(dev_act.not_nil!)
+                      end
+                if nxt
+                  dev_act = nxt
+                else
+                  # The multi-token chain declined: finish this block on the host.
+                  matrix = device_row_to_host(dev_act.not_nil!)
+                  dev_act = nil
+                  matrix = block.forward_cached(matrix.as(SimpleMatrix))
+                end
               else
                 # A block that cannot take the device path ends the chain: bring the
                 # activation home first so the host path sees the real activation
