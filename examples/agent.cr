@@ -71,7 +71,7 @@ module AgentDemo
       end,
       Tool.new(
         "read_file",
-        "Read the contents of a text file (truncated if very large).",
+        "Read the contents of a text file (truncated if very large). Binary files are refused.",
         [ToolParam.new("path", "string", "File path to read.")]
       ) do |args|
         path = args["path"]? || ""
@@ -79,7 +79,19 @@ module AgentDemo
           "Error: not a file: #{path}"
         else
           c = File.read(path)
-          c.bytesize > MAX_READ_BYTES ? "#{c.byte_slice(0, MAX_READ_BYTES)}\n... [truncated]" : c
+          # Refuse binaries outright. A model asked to inspect a directory will happily try
+          # to read a compiled executable, and the bytes are useless to it while being
+          # ruinously expensive: 64 KB of binary tokenized to 60534 tokens in one observed
+          # run, against an 8192-token window. A NUL byte is the cheap, reliable signal.
+          if c.byte_slice(0, Math.min(c.bytesize, 8192)).includes?('\u0000')
+            "Error: #{path} looks like a binary file (contains NUL bytes); refusing to read it"
+          elsif !c.valid_encoding?
+            "Error: #{path} is not valid UTF-8; refusing to read it"
+          elsif c.bytesize > MAX_READ_BYTES
+            "#{c.byte_slice(0, MAX_READ_BYTES)}\n... [truncated]"
+          else
+            c
+          end
         end
       end,
       Tool.new(
@@ -359,6 +371,24 @@ module AgentDemo
       reset_cache!
     end
 
+    # Bound a tool result in TOKENS, not bytes.
+    #
+    # The tools already cap their output at MAX_READ_BYTES, but bytes are the wrong unit: the
+    # binding constraint is the context window, and the bytes-per-token ratio varies wildly.
+    # 64 KB of English is roughly 16k tokens; 64 KB of a compiled binary tokenized to 60534
+    # in one observed run, which then tried to prefill against an 8192-token window.
+    # Compaction cannot rescue that either, because it drops the OLDEST messages while the
+    # offending one is the newest.
+    #
+    # A quarter of the window leaves room for the transcript, the primer and a reply.
+    private def clamp_tool_result(result : String) : String
+      budget = @max_context // 4
+      ids = @tokenizer.encode(result)
+      return result if ids.size <= budget
+      kept = @tokenizer.decode(ids[0, budget]).scrub
+      "#{kept}\n... [truncated: #{ids.size} tokens exceeded the #{budget}-token tool budget]"
+    end
+
     # Tokens one message contributes to the prompt.
     private def message_tokens(m : Message) : Int32
       if m.role == "tool"
@@ -601,7 +631,7 @@ module AgentDemo
             else
               "Error: unknown tool #{c.name}"
             end
-          @messages << Message.new("tool", result)
+          @messages << Message.new("tool", clamp_tool_result(result))
         end
       end
     end
