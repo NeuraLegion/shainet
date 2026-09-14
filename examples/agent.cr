@@ -290,7 +290,7 @@ module AgentDemo
     @sampler : SHAInet::Sampler
     getter max_context : Int32
 
-    def initialize(@net : SHAInet::Network, @tokenizer : SHAInet::BPETokenizer, @tools : Array(Tool), @max_context : Int32 = 4096)
+    def initialize(@net : SHAInet::Network, @tokenizer : SHAInet::BPETokenizer, @tools : Array(Tool), @max_context : Int32 = 16384)
       im_start = @tokenizer.vocab["<|im_start|>"]?
       im_end = @tokenizer.vocab["<|im_end|>"]?
       raise "model is not ChatML (<|im_start|>/<|im_end|> missing); this agent targets Qwen3-style models" unless im_start && im_end
@@ -592,15 +592,28 @@ STDERR.puts "Loaded in #{(Time.monotonic - t0).total_seconds.round(1)}s (vocab #
 # Size the expert cache to leave headroom for the model + prefill activations.
 # (cudaMalloc now GC-reclaims dead GPU buffers on pressure, so this only needs a
 # modest reserve.) Override with SHAINET_EXPERT_CACHE_MB (0 disables).
+max_context = (ENV["SHAINET_AGENT_CONTEXT"]? || "16384").to_i
+
+# The reserve has to cover what GROWS with context -- the KV cache above all -- not just a
+# flat allowance. Measured on Qwen3-Coder-30B-A3B: with a fixed 6 GB reserve the cache took
+# 7881 MB and a 16384-token prefill peaked at 15140 MB of 16376, leaving 1.2 GB. That is
+# where a multi-turn agent runs out. Capping the cache instead put the same prefill at
+# 11455 MB, and 24576 tokens fit in 11069 MB.
+#
+# 128 KiB per token is deliberately generous: fp16 KV on this 48-layer 30B is about 96
+# KiB/token, and the slack covers the prefill workspaces. A smaller model over-reserves,
+# which costs it cache it did not need anyway since it is not near the VRAM limit.
+# SHAINET_EXPERT_CACHE_MB overrides the whole calculation (0 disables the cache).
 if offload && !ENV["SHAINET_EXPERT_CACHE_MB"]? && (info = SHAInet::CUDA.memory_info)
-  reserve = 6_u64 * 1024 * 1024 * 1024
+  kv_reserve = max_context.to_u64 * 128_u64 * 1024_u64
+  reserve = 6_u64 * 1024 * 1024 * 1024 + kv_reserve
   free = info[:free]
   budget_mb = free > reserve ? ((free - reserve) // (1024_u64 * 1024_u64)) : 0_u64
   ENV["SHAINET_EXPERT_CACHE_MB"] = budget_mb.to_s
-  STDERR.puts "  Expert cache budget: #{budget_mb} MB (free #{free // (1024*1024)} MB − 6GB reserve)".colorize(:dark_gray)
+  STDERR.puts "  Expert cache budget: #{budget_mb} MB " \
+              "(free #{free // (1024*1024)} MB − 6GB − #{kv_reserve // (1024*1024)} MB for #{max_context} tok context)".colorize(:dark_gray)
 end
 
-max_context = (ENV["SHAINET_AGENT_CONTEXT"]? || "4096").to_i
 agent = AgentDemo::Agent.new(net, tokenizer, AgentDemo.build_tools, max_context)
 STDERR.puts "Ready · tools: #{AgentDemo.build_tools.map(&.name).join(", ")} · max context #{max_context} tok".colorize(:green)
 STDERR.puts "Commands: /context  /compact  /clear  /help   (Ctrl-D to exit)".colorize(:dark_gray)

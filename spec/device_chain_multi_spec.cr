@@ -124,4 +124,82 @@ describe "multi-token device block chain" do
       end
     end
   end
+
+  it "gives the same answer chunked as unchunked" do
+    pending! "CUDA/kernels not available" unless chain_ready?
+
+    # Chunking is only sound because the block is causal and per-token everywhere it is
+    # not: chunk B's attention sees chunk A's KV because A was appended first, and the
+    # norms, FFN and residuals treat tokens independently. That argument is what this
+    # asserts, over a prompt split into four chunks against the same prompt in one.
+    x = fill!(SHAInet::SimpleMatrix.new(12, 64), 0.77)
+
+    run = ->(chunk : Int32?) do
+      prev = SHAInet::LlamaBlock.prefill_chunk
+      SHAInet::LlamaBlock.prefill_chunk = chunk
+      begin
+        blocks = stack_of(3)
+        gx = x.to_cuda
+        gx.sync_to_device!("spec_chunk_in") unless gx.device_dirty?
+        cur = gx
+        result = nil
+        with_prefill_device(true) do
+          blocks.each do |b|
+            nxt = b.forward_cached_device_multi(cur)
+            nxt.should_not be_nil
+            cur = nxt.not_nil!
+          end
+          cur.sync_from_device!("spec_chunk_out") if cur.device_dirty?
+          result = cur.to_simple
+        end
+        result.not_nil!
+      ensure
+        SHAInet::LlamaBlock.prefill_chunk = prev
+      end
+    end
+
+    whole = run.call(64) # one chunk covers all 12 rows
+    split = run.call(3)  # four chunks of three
+
+    whole.rows.times do |i|
+      whole.cols.times { |j| split[i, j].should be_close(whole[i, j], 5e-3) }
+    end
+  end
+
+  it "stops scaling workspace VRAM with prompt length" do
+    pending! "CUDA/kernels not available" unless chain_ready?
+
+    # The measured failure this fixes: a 20480-token prefill died on a 160 MB cudaMalloc,
+    # and 167772160 / 4 / 20480 is exactly d_model, so it was a full-prompt-length
+    # workspace. Chunked, a longer prompt must NOT enlarge them.
+    prev = SHAInet::LlamaBlock.prefill_chunk
+    SHAInet::LlamaBlock.prefill_chunk = 4
+    begin
+      short = 0_u64
+      long = 0_u64
+
+      SHAInet::LlamaBlock.release_attn_workspaces!
+      with_prefill_device(true) do
+        b = stack_of(1).first
+        b.forward_cached_device_multi(fill!(SHAInet::SimpleMatrix.new(8, 64), 0.3).to_cuda)
+        short = SHAInet::LlamaBlock.attn_workspace_bytes
+      end
+      short.should be > 0
+
+      SHAInet::LlamaBlock.release_attn_workspaces!
+      with_prefill_device(true) do
+        b = stack_of(1).first
+        # Five times the tokens, same chunk size.
+        b.forward_cached_device_multi(fill!(SHAInet::SimpleMatrix.new(40, 64), 0.3).to_cuda)
+        long = SHAInet::LlamaBlock.attn_workspace_bytes
+      end
+
+      # Identical, not merely similar: every workspace is sized to the chunk, so a 5x
+      # longer prompt adds nothing.
+      long.should eq(short)
+    ensure
+      SHAInet::LlamaBlock.prefill_chunk = prev
+      SHAInet::LlamaBlock.release_attn_workspaces!
+    end
+  end
 end
