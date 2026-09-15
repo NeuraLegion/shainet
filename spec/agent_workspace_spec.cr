@@ -117,4 +117,124 @@ describe AgentDemo::WorkspacePath do
       AgentDemo::WorkspacePath.resolve(root, ".").should eq(root)
     end
   end
+
+  # An out-of-workspace path is NEGOTIABLE, not forbidden, so the escape refusals above raise
+  # a distinguishable subclass. The agent asks the user about those and refuses the rest
+  # outright; telling the two apart by message text would break on any rewording.
+  it "raises the escape subclass for an absolute path" do
+    with_root do |root|
+      expect_raises(AgentDemo::WorkspaceEscapeError) do
+        AgentDemo::WorkspacePath.resolve(root, "/etc/passwd")
+      end
+    end
+  end
+
+  it "raises the escape subclass for a traversal" do
+    with_root do |root|
+      expect_raises(AgentDemo::WorkspaceEscapeError) do
+        AgentDemo::WorkspacePath.resolve(root, "../outside.txt")
+      end
+    end
+  end
+
+  it "does NOT raise the escape subclass for an empty path, which no approval can fix" do
+    with_root do |root|
+      # A WorkspacePathError that is not a WorkspaceEscapeError: refused outright.
+      ex = expect_raises(AgentDemo::WorkspacePathError) do
+        AgentDemo::WorkspacePath.resolve(root, "  ")
+      end
+      ex.class.should eq(AgentDemo::WorkspacePathError)
+    end
+  end
+
+  it "does NOT raise the escape subclass for a .git path" do
+    with_root do |root|
+      ex = expect_raises(AgentDemo::WorkspacePathError) do
+        AgentDemo::WorkspacePath.resolve(root, ".git/config")
+      end
+      ex.class.should eq(AgentDemo::WorkspacePathError)
+    end
+  end
+end
+
+describe "AgentDemo::WorkspacePath outside-workspace access" do
+  it "resolves an absolute path outside the root" do
+    with_root do |root|
+      outside = File.tempname("shainet_out")
+      Dir.mkdir_p(outside)
+      begin
+        File.write(File.join(outside, "cfg.json"), "{}\n")
+        target = File.join(File.realpath(outside), "cfg.json")
+        AgentDemo::WorkspacePath.resolve_anywhere(root, target).should eq(target)
+      ensure
+        FileUtils.rm_rf(outside)
+      end
+    end
+  end
+
+  it "canonicalizes an approved outside path through a symlink" do
+    with_root do |root|
+      real = File.tempname("shainet_real")
+      Dir.mkdir_p(real)
+      link = File.tempname("shainet_link")
+      begin
+        File.write(File.join(real, "f.txt"), "x\n")
+        File.symlink(real, link)
+        # Approving a path must record the REAL location: without realpath the approval would
+        # name a label that could later point somewhere else.
+        AgentDemo::WorkspacePath.resolve_anywhere(root, File.join(link, "f.txt"))
+          .should eq(File.join(File.realpath(real), "f.txt"))
+      ensure
+        File.delete(link) if File.symlink?(link)
+        FileUtils.rm_rf(real)
+      end
+    end
+  end
+
+  it "still refuses .git outside the workspace" do
+    with_root do |root|
+      outside = File.tempname("shainet_outgit")
+      Dir.mkdir_p(File.join(outside, ".git"))
+      begin
+        expect_raises(AgentDemo::WorkspacePathError, /\.git/) do
+          AgentDemo::WorkspacePath.resolve_anywhere(root, File.join(File.realpath(outside), ".git", "config"))
+        end
+      ensure
+        FileUtils.rm_rf(outside)
+      end
+    end
+  end
+
+  it "remembers an approval per path, so the same file is not asked about twice" do
+    AgentDemo::WorkspacePath.reset_outside_approvals!
+    begin
+      AgentDemo::WorkspacePath.approved_outside?("/tmp/a.txt").should be_false
+      AgentDemo::WorkspacePath.approve_outside("/tmp/a.txt")
+      # The whole claim of "one time approval": asked once, remembered after.
+      AgentDemo::WorkspacePath.approved_outside?("/tmp/a.txt").should be_true
+    ensure
+      AgentDemo::WorkspacePath.reset_outside_approvals!
+    end
+  end
+
+  it "does not let one approval cover a DIFFERENT outside path" do
+    AgentDemo::WorkspacePath.reset_outside_approvals!
+    begin
+      AgentDemo::WorkspacePath.approve_outside("/home/u/models/cfg.json")
+      # The reason approval is per path: approving a model config must not also grant this.
+      AgentDemo::WorkspacePath.approved_outside?("/home/u/.ssh/id_rsa").should be_false
+    ensure
+      AgentDemo::WorkspacePath.reset_outside_approvals!
+    end
+  end
+
+  it "forgets every approval on reset, so /ask fully revokes" do
+    AgentDemo::WorkspacePath.reset_outside_approvals!
+    AgentDemo::WorkspacePath.approve_outside("/tmp/x")
+    AgentDemo::WorkspacePath.approve_outside("/tmp/y")
+    AgentDemo::WorkspacePath.approved_outside_count.should eq(2)
+    AgentDemo::WorkspacePath.reset_outside_approvals!
+    AgentDemo::WorkspacePath.approved_outside_count.should eq(0)
+    AgentDemo::WorkspacePath.approved_outside?("/tmp/x").should be_false
+  end
 end

@@ -71,13 +71,34 @@ module AgentDemo
     @@workspace
   end
 
-  # Resolve a model-supplied path inside the workspace. Returns {path, ""} on success and
-  # {nil, error_text} on refusal, so a tool body stays a single line and the model gets told
-  # WHY rather than just "error".
+  # Resolve a model-supplied path. Returns {path, ""} on success and {nil, error_text} on
+  # refusal, so a tool body stays a single line and the model gets told WHY.
+  #
+  # Inside the workspace needs no approval. OUTSIDE it, the path is negotiable rather than
+  # forbidden: the user is asked once per location and the answer is remembered, so working on
+  # a file elsewhere costs one prompt instead of one per tool call. An approval is per PATH on
+  # purpose -- approving a model config should not also hand over ~/.ssh/id_rsa. Answering "a"
+  # still opens everything, matching the prompt's existing meaning.
   def self.safe_path(raw : String?) : {String?, String}
     {WorkspacePath.resolve(@@workspace, raw || ""), ""}
+  rescue WorkspaceEscapeError
+    outside_path(raw || "")
   rescue ex : WorkspacePathError
-    {nil, "Error: #{ex.message}. Paths must be relative to the workspace (#{@@workspace})."}
+    {nil, "Error: #{ex.message}."}
+  end
+
+  private def self.outside_path(raw : String) : {String?, String}
+    resolved = WorkspacePath.resolve_anywhere(@@workspace, raw)
+    return {resolved, ""} if allow_all? || WorkspacePath.approved_outside?(resolved)
+    unless confirm?("access #{resolved} — OUTSIDE the workspace (#{@@workspace})")
+      return {nil, "Error: #{raw} is outside the workspace and the user declined access. " \
+                   "Work within #{@@workspace} instead."}
+    end
+    # Remembered, so the next tool call on this file does not ask again.
+    WorkspacePath.approve_outside(resolved)
+    {resolved, ""}
+  rescue ex : WorkspacePathError
+    {nil, "Error: #{ex.message}."}
   end
 
   # A unified-ish diff of a proposed whole-file write, for the confirmation prompt.
@@ -162,7 +183,7 @@ module AgentDemo
     [
       Tool.new(
         "list_directory",
-        "List the files and subdirectories in a directory. Paths are relative to the workspace root.",
+        "List the files and subdirectories in a directory. Paths are relative to the workspace root; an absolute path outside it needs the user to approve that location once.",
         [ToolParam.new("path", "string", "Directory path to list (default: current directory).")]
       ) do |args|
         raw = (args["path"]? || "").strip
@@ -179,7 +200,7 @@ module AgentDemo
       end,
       Tool.new(
         "read_file",
-        "Read the contents of a text file (truncated if very large). Binary files are refused. Paths are relative to the workspace root.",
+        "Read the contents of a text file (truncated if very large). Binary files are refused. Paths are relative to the workspace root; an absolute path outside it needs the user to approve that location once.",
         [ToolParam.new("path", "string", "File path to read.")]
       ) do |args|
         path, err = AgentDemo.safe_path(args["path"]?)
@@ -245,7 +266,7 @@ module AgentDemo
       end,
       Tool.new(
         "write_file",
-        "Create a NEW text file. An existing file is refused: use apply_patch or edit_file to change one. Paths are relative to the workspace root.",
+        "Create a NEW text file. An existing file is refused: use apply_patch or edit_file to change one. Paths are relative to the workspace root; an absolute path outside it needs the user to approve that location once.",
         [ToolParam.new("path", "string", "File path to write."),
          ToolParam.new("content", "string", "Full file content.")]
       ) do |args|
@@ -271,7 +292,7 @@ module AgentDemo
       end,
       Tool.new(
         "edit_file",
-        "Replace an exact string in a file. 'find' must match EXACTLY ONE occurrence, including whitespace; include surrounding context to make it unique. Paths are relative to the workspace root.",
+        "Replace an exact string in a file. 'find' must match EXACTLY ONE occurrence, including whitespace; include surrounding context to make it unique. Paths are relative to the workspace root; an absolute path outside it needs the user to approve that location once.",
         [ToolParam.new("path", "string", "File path to edit."),
          ToolParam.new("find", "string", "Exact text to find (must be unique in the file)."),
          ToolParam.new("replace", "string", "Replacement text.")]
@@ -321,7 +342,7 @@ module AgentDemo
           *** Delete File: path/to/old-file
           *** End Patch
 
-          Rules: ' ' prefix = context, '-' = remove, '+' = add. Include ~3 context lines around each change. Use @@ anchors when the context is not unique.
+          Rules: ' ' prefix = context, '-' = remove, '+' = add. Include ~3 context lines around each change. Use @@ anchors when the context is not unique. All patch paths must be INSIDE the workspace: unlike read_file and edit_file, a patch cannot reach an approved outside location, so use edit_file for those.
           DESC
         [ToolParam.new("patch", "string", "Full patch in V4A format, including the *** Begin Patch / *** End Patch markers.")]
       ) do |args|
@@ -978,10 +999,15 @@ loop do
     next
   when "/ask"
     # The way back from answering "a". Without this, one keystroke silently approves every
-    # write and shell command for the rest of the session with no way to reconsider.
-    if AgentDemo.allow_all?
+    # write and shell command for the rest of the session with no way to reconsider. It also
+    # forgets approved out-of-workspace locations, since those were granted by the same
+    # keystroke and leaving them behind would make the revocation only partly true.
+    outside = AgentDemo::WorkspacePath.approved_outside_count
+    if AgentDemo.allow_all? || outside > 0
       AgentDemo.allow_all = false
-      STDERR.puts "  will confirm each tool call again".colorize(:dark_gray)
+      AgentDemo::WorkspacePath.reset_outside_approvals!
+      note = outside > 0 ? " (also forgot #{outside} approved path(s) outside the workspace)" : ""
+      STDERR.puts "  will confirm each tool call again#{note}".colorize(:dark_gray)
     else
       STDERR.puts "  already confirming each tool call".colorize(:dark_gray)
     end
