@@ -101,6 +101,144 @@ module SHAInet
       {dst, s}
     end
 
+    # One head's worth of the gated delta rule, a whole chunk at a time.
+    #
+    # Mathematically identical to `recurrent` but reorganized into matrix products, which is
+    # what makes prefill viable: the sequential form is a dependency chain of length seq_len
+    # doing tiny per-step work, while this is a handful of [C, C] and [C, d] products per
+    # chunk.
+    #
+    # From arXiv:2412.06464 section 3.3, with the WY representation extended by the gating
+    # terms (their appendix A). Writing g^r for the cumulative product of alpha within the
+    # chunk, and G for the decay matrix G_ij = g^i/g^j when i >= j and 0 otherwise:
+    #
+    #   T = [I + strictLower(diag(b) (G .* K K^T))]^-1 diag(b)
+    #   U = T V,   W = T K
+    #   Z = U - (g .* W) S^T
+    #   O = (g .* Q) S^T + ((Q K^T) .* G) Z
+    #   S_new = g^C S + Z^T ((g^C / g) .* K)
+    #
+    # NOTE the second term of O uses the DECAY-AWARE mask G, not the plain causal mask M that
+    # section 3.3 prints. G already zeroes the upper triangle, so it subsumes M, and the decay
+    # is required: expanding the recurrence gives G_r q_r = sum_i (g^r/g^i) u_i (k_i . q_r),
+    # which is exactly a G-weighted sum, and the correction term agrees too because
+    # G_ri (g^i w_i) = g^r w_i. With a plain M the intra-chunk contributions would carry no
+    # decay and the two forms would disagree for any alpha < 1 -- which is precisely what the
+    # equivalence spec against `recurrent` catches.
+    #
+    # Arguments and the state carry match `recurrent` exactly, so the two are drop-in
+    # substitutable and can be diffed directly. That is the entire reason `recurrent` exists.
+    def self.chunked(q : SimpleMatrix, k : SimpleMatrix, v : SimpleMatrix,
+                     alpha : Array(Float64), beta : Array(Float64),
+                     state : SimpleMatrix? = nil, chunk : Int32 = 64) : {SimpleMatrix, SimpleMatrix}
+      seq = q.rows
+      d_k = k.cols
+      d_v = v.cols
+      raise ArgumentError.new("chunk must be positive, got #{chunk}") unless chunk > 0
+      raise ArgumentError.new("alpha size #{alpha.size} != seq #{seq}") unless alpha.size == seq
+      raise ArgumentError.new("beta size #{beta.size} != seq #{seq}") unless beta.size == seq
+
+      s = state || SimpleMatrix.new(d_v, d_k, 0.0)
+      raise ArgumentError.new("state must be [#{d_v}, #{d_k}], got [#{s.rows}, #{s.cols}]") unless s.rows == d_v && s.cols == d_k
+
+      dst = SimpleMatrix.new(seq, d_v, 0.0)
+
+      base = 0
+      while base < seq
+        c = Math.min(chunk, seq - base)
+
+        # g[r] is the decay from the chunk start through position r inclusive.
+        g = Array(Float64).new(c, 1.0)
+        run = 1.0
+        c.times do |r|
+          run *= alpha[base + r]
+          g[r] = run
+        end
+        g_last = run
+
+        kk = Array(Array(Float64)).new(c) { Array(Float64).new(c, 0.0) }
+        c.times do |i|
+          (i + 1).times do |j|
+            acc = 0.0
+            d_k.times { |d| acc += k[base + i, d] * k[base + j, d] }
+            kk[i][j] = acc
+          end
+        end
+
+        # Solve for U and W by forward substitution. Exact for a unit lower triangular system,
+        # and avoids forming an inverse. Rows are produced in order so one pass yields both.
+        #
+        # U and W use DIFFERENT coefficients, which is the subtle part.
+        #
+        # W represents P_r = prod_i (I - b_i k_i k_i^T), the ungated Householder product, whose
+        # WY vectors use the PLAIN Gram matrix. The gating factors out of it entirely, because
+        # F_r = prod_i a_i (I - b_i k_i k_i^T) = (prod_i a_i) prod_i (I - b_i k_i k_i^T) --
+        # the alphas are scalars, so they leave as g^r and P_r is left ungated.
+        #
+        # U carries the writes and DOES need the decay, since a value written at j must be
+        # decayed by g^i/g^j to reach position i (appendix A).
+        #
+        # Weighting W like U was a real bug here, and one that hides from cold: W is only ever
+        # used against the incoming state, so a single chunk starting from S = 0 gives the
+        # right answer either way. It showed up only as multi-token chunks CARRYING state --
+        # measured 1.4e-2 error at chunk 8 against 6e-8 at chunk 1.
+        u = Array(Array(Float64)).new(c) { Array(Float64).new(d_v, 0.0) }
+        w = Array(Array(Float64)).new(c) { Array(Float64).new(d_k, 0.0) }
+        c.times do |i|
+          b = beta[base + i]
+          d_v.times { |d| u[i][d] = b * v[base + i, d] }
+          d_k.times { |d| w[i][d] = b * k[base + i, d] }
+          i.times do |j|
+            gram = b * kk[i][j]
+            next if gram == 0.0
+            decayed = gram * (g[i] / g[j])
+            d_v.times { |d| u[i][d] -= decayed * u[j][d] }
+            d_k.times { |d| w[i][d] -= gram * w[j][d] }
+          end
+        end
+
+        # Z = U - (g .* W) S^T: the chunk's writes with the incoming state's own contribution
+        # already subtracted, so the same Z serves both the output and the new state.
+        z = Array(Array(Float64)).new(c) { Array(Float64).new(d_v, 0.0) }
+        c.times do |i|
+          d_v.times do |dv|
+            acc = 0.0
+            d_k.times { |dk| acc += w[i][dk] * s[dv, dk] }
+            z[i][dv] = u[i][dv] - g[i] * acc
+          end
+        end
+
+        # O = (g .* Q) S^T + ((Q K^T) .* G) Z
+        c.times do |r|
+          d_v.times do |dv|
+            acc = 0.0
+            d_k.times { |dk| acc += q[base + r, dk] * s[dv, dk] }
+            dst[base + r, dv] = g[r] * acc
+          end
+          (r + 1).times do |i|
+            qk = 0.0
+            d_k.times { |d| qk += q[base + r, d] * k[base + i, d] }
+            coef = qk * (g[r] / g[i])
+            next if coef == 0.0
+            d_v.times { |dv| dst[base + r, dv] += coef * z[i][dv] }
+          end
+        end
+
+        # S_new = g^C S + Z^T ((g^C / g) .* K)
+        d_v.times do |dv|
+          d_k.times do |dk|
+            acc = g_last * s[dv, dk]
+            c.times { |i| acc += z[i][dv] * (g_last / g[i]) * k[base + i, dk] }
+            s[dv, dk] = acc
+          end
+        end
+
+        base += c
+      end
+
+      {dst, s}
+    end
+
     # L2-normalize each row in place, as the q/k paths require.
     #
     # Guards a zero row rather than dividing by zero: a short convolution followed by SiLU can
