@@ -184,8 +184,8 @@ describe "HFLoader qwen3_5 config" do
       end
       msg = ex.message.to_s
       msg.should contain("qwen3_5")
-      msg.should contain("not runnable yet")
-      msg.should contain("6 are linear_attention")
+      msg.should contain("cannot be loaded from weights")
+      msg.should contain("6 linear_attention")
       msg.should contain("GatedDeltaNet")
     end
   end

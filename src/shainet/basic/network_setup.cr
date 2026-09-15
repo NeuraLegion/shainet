@@ -103,7 +103,7 @@ module SHAInet
     # l_type is: :input, :hidden or :output
     # l_size = size of the layer
     # n_type = advanced option for layer types
-    def add_layer(l_type : Symbol | String, l_size : Int32, activation_function : ActivationFunction = SHAInet.sigmoid, num_heads : Int32 = 1, ff_hidden : Int32 = l_size*4, drop_percent : Int32 = 0, blocks : Int32 = 1, *, vocab_size : Int32 = 0, num_kv_heads : Int32 = num_heads, eps : Float64 = 1e-5, head_dim : Int32? = nil, moe_experts : Int32? = nil, moe_top_k : Int32 = 8, moe_norm_topk : Bool = true, moe_ff_hidden : Int32? = nil, moe_offload : Bool = false)
+    def add_layer(l_type : Symbol | String, l_size : Int32, activation_function : ActivationFunction = SHAInet.sigmoid, num_heads : Int32 = 1, ff_hidden : Int32 = l_size*4, drop_percent : Int32 = 0, blocks : Int32 = 1, *, vocab_size : Int32 = 0, num_kv_heads : Int32 = num_heads, eps : Float64 = 1e-5, head_dim : Int32? = nil, moe_experts : Int32? = nil, moe_top_k : Int32 = 8, moe_norm_topk : Bool = true, moe_ff_hidden : Int32? = nil, moe_offload : Bool = false, linear_conv_kernel : Int32 = 4)
       if l_type.to_s == "transformer" && blocks > 1
         blocks.times do
           add_layer(l_type, l_size, activation_function, num_heads, ff_hidden, drop_percent, 1)
@@ -119,6 +119,18 @@ module SHAInet
               when "llama"
                 LlamaBlock.new(l_size, num_heads, ff_hidden, eps, 10000.0, num_kv_heads, head_dim,
                   moe_experts, moe_top_k, moe_norm_topk, moe_ff_hidden, moe_offload)
+              when "gated_deltanet"
+                # The linear-attention layer type of a hybrid qwen3_5 stack. Interchangeable
+                # with "llama" in a stack, so a caller walking a layer_types list just picks
+                # one name or the other per layer.
+                #
+                # num_heads carries the VALUE head count and num_kv_heads the KEY head count,
+                # mirroring how attention uses them, so the existing keyword arguments describe
+                # a linear layer without inventing parallel ones. head_dim, when given, sets
+                # both key and value head dimensions -- Qwen3.5 uses 128 for each.
+                hd = head_dim || 128
+                GatedDeltaNetBlock.new(l_size, ff_hidden, num_heads, num_kv_heads, hd, hd,
+                  linear_conv_kernel, eps)
               else
                 MatrixLayer.new(l_size, activation_function)
               end
@@ -137,6 +149,20 @@ module SHAInet
       when "llama"
         @hidden_layers << layer
         @transformer_layers << layer.as(LlamaLayer)
+      when "gated_deltanet"
+        # NOT added to @transformer_layers, deliberately and temporarily.
+        #
+        # That collection is typed Array(TransformerLayer | LlamaLayer) and is read from 24
+        # sites, several on the hot inference path, so widening the union is a change that
+        # deserves its own audit rather than a drive-by. The consequence is concrete and worth
+        # knowing: Network#clear_cache! walks @transformer_layers, so it does NOT reach a
+        # gated_deltanet block, and a hand-built hybrid stack must call the block's own
+        # clear_cache! between sequences. There is a spec pinning exactly that, so the gap
+        # cannot go quiet.
+        #
+        # Nothing user-facing depends on it yet: the loader still refuses to build one of these
+        # from a checkpoint, so the only way to get one is to construct it deliberately.
+        @hidden_layers << layer
       when "output"
         if @output_layers.empty?
           @output_layers << layer
