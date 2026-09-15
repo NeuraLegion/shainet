@@ -19,7 +19,22 @@ require "colorize"
 
 module AgentDemo
   MAX_READ_BYTES = 64_000
-  MAX_TOOL_STEPS =      8
+
+  # Tool-calling iterations allowed per user turn, before the agent hands control back.
+  #
+  # A runaway guard, not a work budget: without it a model that keeps emitting tool calls
+  # never returns to the prompt. The number was 8, chosen when a turn's prefill cost minutes
+  # and a runaway was expensive. Prefill is now ~29 s at 4096 with KV prefix reuse making
+  # turn 2+ about a second, so 8 stopped being a runaway guard and started truncating
+  # ordinary work -- reading four files and grepping twice already exceeds it.
+  #
+  # 40 is high enough that hitting it means something is actually looping.
+  # AGENT_MAX_TOOL_STEPS overrides it, clamped to at least 1: a 0 would break out before
+  # generating anything and every turn would answer with silence.
+  MAX_TOOL_STEPS = begin
+    n = (ENV["AGENT_MAX_TOOL_STEPS"]? || "40").to_i
+    n < 1 ? 1 : n
+  end
 
   record ToolParam, name : String, type : String, description : String, required : Bool = true
   # `ids` holds the EXACT tokens the model produced for an assistant turn, when they are
@@ -589,9 +604,21 @@ module AgentDemo
       step = 0
       loop do
         step += 1
+        # The LAST allowed step still generates, it just may not call tools. Breaking before
+        # generation (which is what this did) threw the turn away: the user got the cap
+        # message and no answer, after the agent had already done the work. So tell the model
+        # its budget is gone and let it write a closing reply from what it has.
+        last_step = step >= MAX_TOOL_STEPS
         if step > MAX_TOOL_STEPS
-          STDERR.puts "[agent] max tool steps reached; stopping"
           break
+        end
+        if last_step
+          STDERR.puts "  [agent] tool budget reached (#{MAX_TOOL_STEPS} steps); asking for a final answer".colorize(:dark_gray)
+          STDERR.puts "  (raise it with AGENT_MAX_TOOL_STEPS)".colorize(:dark_gray)
+          @messages << Message.new("user",
+            "You have used all #{MAX_TOOL_STEPS} tool steps for this turn. Do not call any " \
+            "more tools. Answer now with what you already have, and say plainly what you " \
+            "could not finish.")
         end
 
         # Keep the prompt within the context budget (compact to 75% to leave room
@@ -617,6 +644,9 @@ module AgentDemo
         # Keep the assistant's output (incl. any tool_call markup) verbatim.
         @messages << Message.new("assistant", text.strip, text_ids)
         break if calls.empty?
+        # On the final step the reply IS the answer. Running its tool calls would spend the
+        # results and then break on the next iteration, throwing them away unanswered.
+        break if last_step
 
         calls.each do |c|
           STDERR.puts "  #{"⚒ #{c.name}".colorize(:yellow)}(#{c.args.map { |k, v| "#{k}=#{v.inspect}" }.join(", ")})".colorize(:dark_gray)
