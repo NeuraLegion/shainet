@@ -66,7 +66,15 @@ module SHAInet
 
       @norm1 = RMSNorm.new(@d_model, eps)
       @norm2 = RMSNorm.new(@d_model, eps)
-      @out_norm = RMSNorm.new(@num_v_heads * @head_v, eps)
+      # PER-HEAD output norm, over head_v rather than over the concatenated v_dim.
+      #
+      # Established from the real checkpoint, not from the paper: Qwen3.5-9B's
+      # linear_attn.norm.weight is [128], which is head_v, against a v_dim of 4096. One weight
+      # vector is shared across all 32 value heads and applied to each head's slice
+      # independently. Normalizing the whole concatenation instead would couple the heads
+      # through one shared RMS and silently change every output -- a wrong-but-plausible design
+      # that no shape check would have caught.
+      @out_norm = RMSNorm.new(@head_v, eps)
       @ffn = SwiGLUFF.new(@d_model, ff_hidden)
 
       k_dim = @num_k_heads * @head_k
@@ -216,8 +224,19 @@ module SHAInet
         seq.times { |t| @head_v.times { |j| mixed[t, h * @head_v + j] = out_h[t, j] } }
       end
 
-      # Output norm, then the SiLU gate, then project back to d_model.
-      normed_mix = @out_norm.forward(mixed)
+      # Output norm PER HEAD, then the SiLU gate, then project back to d_model.
+      #
+      # Each head's head_v slice is normalized on its own with the shared weight, matching the
+      # checkpoint's [head_v] norm tensor. Doing it over the whole v_dim would make one head's
+      # magnitude affect every other head's output.
+      normed_mix = SimpleMatrix.new(seq, v_dim, 0.0)
+      @num_v_heads.times do |h|
+        slice = SimpleMatrix.new(seq, @head_v, 0.0)
+        seq.times { |t| @head_v.times { |j| slice[t, j] = mixed[t, h * @head_v + j] } }
+        normed_slice = @out_norm.forward(slice)
+        seq.times { |t| @head_v.times { |j| normed_mix[t, h * @head_v + j] = normed_slice[t, j] } }
+      end
+
       gate = project(normed, @w_gate, v_dim)
       seq.times do |t|
         v_dim.times { |j| normed_mix[t, j] = normed_mix[t, j].to_f64 * silu(gate[t, j].to_f64) }

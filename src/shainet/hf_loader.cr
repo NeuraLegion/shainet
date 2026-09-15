@@ -265,6 +265,80 @@ module SHAInet
       linear_num_key_heads : Int32 = 16,
       linear_num_value_heads : Int32 = 32
 
+    # Tensor-name prefixes in a qwen3_5 checkpoint that a TEXT-ONLY load must skip.
+    #
+    # These are real tensors, not junk: "mtp." is a multi-token-prediction head and the vision
+    # entries are the image/video tower. Both are dead weight for text generation, and both
+    # would otherwise look like unmapped tensors and mask a genuine mapping gap.
+    QWEN35_SKIP_PREFIXES = ["mtp.", "model.visual.", "model.vision_tower.", "visual."]
+
+    def self.qwen35_skip?(name : String) : Bool
+      QWEN35_SKIP_PREFIXES.any? { |p| name.starts_with?(p) }
+    end
+
+    # The tensor names this loader expects for one qwen3_5 layer, given its type.
+    #
+    # Kept as data rather than buried in the load loop so it can be diffed against a real
+    # checkpoint's index without touching a single weight -- which is how the layout was
+    # established in the first place. Guessing these names risks loading the wrong tensor into a
+    # correctly shaped slot, which produces fluent nonsense rather than an error.
+    #
+    # The prefix is "model.language_model." and NOT "model.", because the text backbone sits
+    # beside a vision tower. Every other architecture here uses "model.".
+    def self.qwen35_layer_tensors(index : Int32, layer_type : String) : Array(String)
+      p = "model.language_model.layers.#{index}."
+      common = [
+        "#{p}input_layernorm.weight",
+        "#{p}post_attention_layernorm.weight",
+        "#{p}mlp.gate_proj.weight",
+        "#{p}mlp.up_proj.weight",
+        "#{p}mlp.down_proj.weight",
+      ]
+      case layer_type
+      when "linear_attention"
+        common + [
+          # One fused projection carrying q, k and v: [q_dim + k_dim + v_dim, d_model].
+          "#{p}linear_attn.in_proj_qkv.weight",
+          # Alpha and beta, one row per VALUE head.
+          "#{p}linear_attn.in_proj_a.weight",
+          "#{p}linear_attn.in_proj_b.weight",
+          # The output gate, which the paper calls a SiLU gate on the output path.
+          "#{p}linear_attn.in_proj_z.weight",
+          # One depthwise conv over ALL fused qkv channels: [q+k+v, 1, kernel].
+          "#{p}linear_attn.conv1d.weight",
+          # Mamba2's per-head decay parameters. Their presence is what confirms the gate
+          # parameterization that the paper leaves unstated.
+          "#{p}linear_attn.A_log",
+          "#{p}linear_attn.dt_bias",
+          # Per-head output norm, sized head_v rather than the concatenated v_dim.
+          "#{p}linear_attn.norm.weight",
+          "#{p}linear_attn.out_proj.weight",
+        ]
+      when "full_attention"
+        common + [
+          "#{p}self_attn.q_proj.weight",
+          "#{p}self_attn.k_proj.weight",
+          "#{p}self_attn.v_proj.weight",
+          "#{p}self_attn.o_proj.weight",
+          # Qwen3-style per-head QK norms, sized head_dim.
+          "#{p}self_attn.q_norm.weight",
+          "#{p}self_attn.k_norm.weight",
+        ]
+      else
+        raise ArgumentError.new("unknown layer_type #{layer_type.inspect}")
+      end
+    end
+
+    # Every text tensor a qwen3_5 load needs, in layer order, plus the embedding and head.
+    def self.qwen35_tensor_plan(config : LlamaConfig) : Array(String)
+      types = config.layer_types || default_layer_types(config.num_hidden_layers)
+      names = ["model.language_model.embed_tokens.weight"]
+      types.each_with_index { |t, i| names.concat(qwen35_layer_tensors(i, t)) }
+      names << "model.language_model.norm.weight"
+      names << "lm_head.weight" unless config.tie_word_embeddings
+      names
+    end
+
     # Number of linear-attention layers per full-attention layer when a qwen3_5 config does not
     # spell out layer_types. Transformers generates the list from config values in that case,
     # and the published stack is 3:1 -- three Gated DeltaNet layers for every one Gated

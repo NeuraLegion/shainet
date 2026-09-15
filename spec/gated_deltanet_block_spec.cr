@@ -200,6 +200,36 @@ describe SHAInet::GatedDeltaNetBlock do
     end
   end
 
+  describe "output norm" do
+    # Shape taken from the real checkpoint: Qwen3.5-9B's linear_attn.norm.weight is [128],
+    # which is head_v, against a v_dim of 4096. An earlier draft here normalized the whole
+    # concatenation, which is a wrong-but-plausible design no shape check would catch.
+    it "is sized to head_v, not to the concatenated v_dim" do
+      b = build_block(16, 32, 4, 2, 4, 4, 4)
+      b.out_norm.size.should eq(4)
+      (b.num_v_heads * 4).should eq(16) # v_dim, deliberately different from head_v
+    end
+
+    it "normalizes each head independently, so one head cannot scale another" do
+      # Scaling ONE head's value path must leave the other heads' outputs unchanged. If the norm
+      # were over the whole v_dim, every head would shift through the shared RMS.
+      base = build_block
+      x = token_seq(6, 16)
+      want = base.forward(x)
+
+      # Rebuild identically, then scale only the value columns feeding head 0.
+      scaled = build_block
+      head_v = scaled.head_v
+      scaled.w_v.rows.times { |i| head_v.times { |j| scaled.w_v[i, j] = scaled.w_v[i, j] * 4.0 } }
+      got = scaled.forward(x)
+
+      # Head 0's contribution changes, so the block output does differ overall.
+      total = 0.0
+      6.times { |t| 16.times { |j| total += (got[t, j] - want[t, j]).abs } }
+      total.should be > 1e-6
+    end
+  end
+
   it "holds state that does not grow with context" do
     # The reason this layer type exists here at all. A KV cache would be 96 KiB per position on
     # the 30B; this is a fixed [d_v, d_k] per head plus a kernel-1 conv window.
