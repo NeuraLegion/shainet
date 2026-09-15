@@ -64,6 +64,26 @@ module SHAInet
         load_gpt2(model_dir)
       when "llama", "mistral", "qwen2", "qwen3", "qwen3_moe"
         load_llama(model_dir, quantize: quantize, bits: bits)
+      when "qwen3_5"
+        # The config PARSES (nested text_config, layer_types, the linear_* head dims) and the
+        # gated delta rule operator exists, but the hybrid block is not wired yet.
+        #
+        # Refusing is deliberate. Falling through to load_llama would build full attention for
+        # every layer, including the three quarters that are linear_attention, and the weight
+        # names would not even match -- so it would either crash confusingly or, worse, produce
+        # fluent nonsense from a model that looked like it loaded fine. Say what is missing.
+        config = load_llama_config(::File.join(model_dir, "config.json"))
+        types = config.layer_types || [] of String
+        linear = types.count("linear_attention")
+        raise "model_type 'qwen3_5' (Qwen3.5 / Qwen3.6) is not runnable yet. Its config parses " \
+              "here: #{config.num_hidden_layers} layers, of which #{linear} are linear_attention " \
+              "and #{types.count("full_attention")} are full_attention, with " \
+              "linear_key_head_dim=#{config.linear_key_head_dim}, " \
+              "linear_num_value_heads=#{config.linear_num_value_heads}, " \
+              "linear_conv_kernel_dim=#{config.linear_conv_kernel_dim}. What is missing is the " \
+              "hybrid block: short conv + SiLU + output gate around SHAInet::GatedDeltaNet, and " \
+              "per-layer dispatch on layer_types. Loading it as plain attention would produce " \
+              "wrong output silently, so it is refused instead."
       else
         raise "Unsupported model_type: '#{model_type}'. Supported: #{SUPPORTED_MODELS.join(", ")}"
       end
@@ -232,10 +252,48 @@ module SHAInet
       num_experts : Int32? = nil,
       num_experts_per_tok : Int32 = 8,
       norm_topk_prob : Bool = true,
-      moe_intermediate_size : Int32? = nil
+      moe_intermediate_size : Int32? = nil,
+      # Hybrid linear-attention fields, present on qwen3_5 (Qwen3.5 / Qwen3.6) and absent on
+      # every other architecture here. nil layer_types means "every layer is full attention",
+      # which is what all the older Qwen and LLaMA configs mean by saying nothing.
+      layer_types : Array(String)? = nil,
+      linear_conv_kernel_dim : Int32 = 4,
+      linear_key_head_dim : Int32 = 128,
+      linear_value_head_dim : Int32 = 128,
+      linear_num_key_heads : Int32 = 16,
+      linear_num_value_heads : Int32 = 32
+
+    # Number of linear-attention layers per full-attention layer when a qwen3_5 config does not
+    # spell out layer_types. Transformers generates the list from config values in that case,
+    # and the published stack is 3:1 -- three Gated DeltaNet layers for every one Gated
+    # Attention layer.
+    HYBRID_LINEAR_PER_FULL = 3
+
+    # Build the default 3:1 layer pattern, full attention every fourth layer.
+    #
+    # The LAST layer of each group is the full-attention one, matching the published design
+    # where a group of linear layers is followed by an attention layer that can look back over
+    # the whole context.
+    def self.default_layer_types(num_layers : Int32) : Array(String)
+      Array(String).new(num_layers) do |i|
+        ((i + 1) % (HYBRID_LINEAR_PER_FULL + 1) == 0) ? "full_attention" : "linear_attention"
+      end
+    end
 
     def self.load_llama_config(path : String) : LlamaConfig
-      json = JSON.parse(::File.read(path))
+      root = JSON.parse(::File.read(path))
+      # qwen3_5 is natively multimodal, so its text hyperparameters live under text_config with
+      # a sibling vision_config, where every older architecture here puts them at the top
+      # level. Read through the nesting when it is present rather than duplicating the parser.
+      json = root["text_config"]? || root
+
+      layer_types = json["layer_types"]?.try(&.as_a.map(&.as_s))
+      # A qwen3_5 config with no explicit list still means a hybrid stack, so synthesize the
+      # pattern rather than silently treating every layer as full attention.
+      if layer_types.nil? && (root["model_type"]?.try(&.as_s) == "qwen3_5")
+        layer_types = default_layer_types(json["num_hidden_layers"].as_i)
+      end
+
       LlamaConfig.new(
         vocab_size: json["vocab_size"].as_i,
         hidden_size: json["hidden_size"].as_i,
@@ -251,7 +309,13 @@ module SHAInet
         num_experts: (json["num_experts"]?.try(&.as_i) || json["num_local_experts"]?.try(&.as_i)),
         num_experts_per_tok: (json["num_experts_per_tok"]?.try(&.as_i) || 8),
         norm_topk_prob: (json.as_h.has_key?("norm_topk_prob") ? json["norm_topk_prob"].as_bool : true),
-        moe_intermediate_size: json["moe_intermediate_size"]?.try(&.as_i)
+        moe_intermediate_size: json["moe_intermediate_size"]?.try(&.as_i),
+        layer_types: layer_types,
+        linear_conv_kernel_dim: (json["linear_conv_kernel_dim"]?.try(&.as_i) || 4),
+        linear_key_head_dim: (json["linear_key_head_dim"]?.try(&.as_i) || 128),
+        linear_value_head_dim: (json["linear_value_head_dim"]?.try(&.as_i) || 128),
+        linear_num_key_heads: (json["linear_num_key_heads"]?.try(&.as_i) || 16),
+        linear_num_value_heads: (json["linear_num_value_heads"]?.try(&.as_i) || 32)
       )
     end
 
