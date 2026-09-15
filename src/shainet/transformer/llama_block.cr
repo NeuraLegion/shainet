@@ -32,6 +32,16 @@ module SHAInet
     property w_v : SimpleMatrix | CudaMatrix | QuantizedWeight
     property w_o : SimpleMatrix | CudaMatrix | QuantizedWeight
 
+    # Optional attention output gate, for Qwen3.5's "Gated Attention" full-attention layers.
+    #
+    # Those layers pack q and the gate into ONE q_proj of [2 * q_dim, d_model]: the checkpoint's
+    # q_proj is [8192, 4096] where num_attention_heads * head_dim is only 4096. The gate
+    # multiplies the attention output element-wise (through SiLU) before w_o projects it down,
+    # mirroring what in_proj_z does in the linear-attention block.
+    #
+    # nil for every other architecture, where attention is ungated and this costs one nil check.
+    property w_gate_attn : SimpleMatrix?
+
     # Optional Q/K/V projection biases. Qwen2-style architectures add a bias to
     # the query/key/value projections; LLaMA/Mistral do not. Kept as host-side
     # fp32 vectors and added to the projection output before RoPE, so they work
@@ -489,6 +499,26 @@ module SHAInet
     end
 
     # --- CPU attention with full recompute ---
+    # Multiply the attention output by SiLU(x * w_gate_attn), in place.
+    #
+    # No-op unless the layer is gated, so every other architecture pays one nil check. The gate
+    # is computed from the NORMED block input, the same source as q/k/v, because it arrives fused
+    # into the same projection.
+    private def apply_attn_gate!(output : SimpleMatrix, x : SimpleMatrix, row_offset : Int32) : Nil
+      wg = @w_gate_attn
+      return if wg.nil?
+      rows = output.rows
+      cols = output.cols
+      raise "attention gate is [#{wg.rows}, #{wg.cols}], expected [#{x.cols}, #{cols}]" unless wg.rows == x.cols && wg.cols == cols
+      rows.times do |t|
+        cols.times do |j|
+          acc = 0.0
+          x.cols.times { |i| acc += x[row_offset + t, i].to_f64 * wg[i, j].to_f64 }
+          output[t, j] = output[t, j].to_f64 * (acc / (1.0 + Math.exp(-acc)))
+        end
+      end
+    end
+
     private def attention_full_cpu(x : SimpleMatrix) : SimpleMatrix
       seq_len = x.rows
       head_dim = @head_dim
@@ -522,6 +552,7 @@ module SHAInet
         causal_attention!(output, q_h, k_h, v_h, q_col, scale)
       end
 
+      apply_attn_gate!(output, x, 0)
       gpu_matmul(output, @w_o)
     end
 
@@ -593,6 +624,7 @@ module SHAInet
         attention_heads_cpu(q_full, output, new_tokens, start_pos, total_len, scale)
       end
 
+      apply_attn_gate!(output, x, 0)
       gpu_matmul(output, @w_o)
     end
 
