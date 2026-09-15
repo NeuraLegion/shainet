@@ -158,13 +158,68 @@ module SHAInet
       end
 
       # Read tensor into a 2D SimpleMatrix (row-major)
+      # Read a tensor already transposed, allocating ONLY the destination.
+      #
+      # `read_matrix(name).transpose` holds both orientations at once, and on this codebase every
+      # HF weight needs transposing ([out, in] on disk, [in, out] for x * W). That doubling is
+      # what OOM-killed a 9B fp32 load: Boehm's heap does not shrink, so each tensor's discarded
+      # intermediate raises the high-water mark permanently even with a collect after every
+      # layer. Streaming bf16 straight from the read buffer into the transposed destination keeps
+      # per-tensor churn to one matrix plus one byte buffer.
+      def read_matrix_transposed(name : String) : SimpleMatrix
+        info = @tensors[name]? || raise "Tensor '#{name}' not found"
+        shape = info.shape
+        return read_matrix(name) if shape.size == 1
+
+        rows = shape[0].to_i32
+        cols = (shape.size == 3 && shape[1] == 1) ? shape[2].to_i32 : shape[1].to_i32
+        dst = SimpleMatrix.new(cols, rows)
+        byte_count = (info.data_offset_end - info.data_offset_start).to_i32
+        @io.seek(@data_offset + info.data_offset_start)
+        raw = Bytes.new(byte_count)
+        @io.read_fully(raw)
+
+        case info.dtype
+        when .f32?
+          ptr = raw.to_unsafe.as(Pointer(Float32))
+          rows.times { |i| cols.times { |j| dst[j, i] = ptr[i * cols + j] } }
+        when .bf16?
+          ptr = raw.to_unsafe.as(Pointer(UInt16))
+          rows.times do |i|
+            cols.times do |j|
+              bits = ptr[i * cols + j].to_u32 << 16
+              dst[j, i] = pointerof(bits).as(Pointer(Float32)).value
+            end
+          end
+        when .f16?
+          ptr = raw.to_unsafe.as(Pointer(UInt16))
+          rows.times { |i| cols.times { |j| dst[j, i] = f16_to_f32(ptr[i * cols + j]) } }
+        else
+          # Uncommon dtypes fall back to the general reader; correctness over peak memory.
+          src = read_matrix(name)
+          src.rows.times { |i| src.cols.times { |j| dst[j, i] = src[i, j] } }
+        end
+        dst
+      end
+
       def read_matrix(name : String) : SimpleMatrix
         info = @tensors[name]? || raise "Tensor '#{name}' not found"
         shape = info.shape
 
-        rows = shape.size == 1 ? 1 : shape[0].to_i32
-        cols = shape.size == 1 ? shape[0].to_i32 : shape[1].to_i32
-        raise "Cannot read tensor '#{name}' with #{shape.size}D shape as matrix" if shape.size > 2
+        # A depthwise convolution weight is stored [channels, 1, kernel] -- three dimensions,
+        # but the middle one is a singleton (its in-channels-per-group), so the tensor holds
+        # exactly channels * kernel contiguous values and IS a [channels, kernel] matrix.
+        # Squeezing it here rather than at every call site keeps the special case in one place.
+        # A 3-D shape whose middle dimension is not 1 is still refused: that would be a real
+        # tensor this reader cannot represent, and silently folding it would corrupt the layout.
+        if shape.size == 3 && shape[1] == 1
+          rows = shape[0].to_i32
+          cols = shape[2].to_i32
+        else
+          rows = shape.size == 1 ? 1 : shape[0].to_i32
+          cols = shape.size == 1 ? shape[0].to_i32 : shape[1].to_i32
+          raise "Cannot read tensor '#{name}' with #{shape.size}D shape as matrix" if shape.size > 2
+        end
 
         m = SimpleMatrix.new(rows, cols)
         count = rows * cols
@@ -262,6 +317,10 @@ module SHAInet
 
       def read_matrix(name : String) : SimpleMatrix
         (@owner[name]? || raise "Tensor '#{name}' not found in any shard").read_matrix(name)
+      end
+
+      def read_matrix_transposed(name : String) : SimpleMatrix
+        (@owner[name]? || raise "Tensor '#{name}' not found in any shard").read_matrix_transposed(name)
       end
 
       def close

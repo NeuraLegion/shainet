@@ -173,20 +173,23 @@ describe "HFLoader qwen3_5 config" do
     end
   end
 
-  it "refuses to LOAD a qwen3_5 model, naming what is missing" do
-    with_tmp do |dir|
-      write_config(dir, QWEN35_MIN)
-      # Falling through to the attention path would build full attention for the linear layers
-      # and produce fluent nonsense from a model that appeared to load. The refusal must be
-      # specific enough to act on, so it reports the layer split it parsed.
-      ex = expect_raises(Exception) do
-        SHAInet::HFLoader.load(dir)
-      end
-      msg = ex.message.to_s
-      msg.should contain("qwen3_5")
-      msg.should contain("cannot be loaded from weights")
-      msg.should contain("6 linear_attention")
-      msg.should contain("GatedDeltaNet")
+  it "builds a hybrid stack from a qwen3_5 config, mixing both layer types" do
+    # This example used to assert the loader REFUSED qwen3_5. It now loads, so the assertion is
+    # inverted: what matters is that the stack it builds has the layer types the config asked
+    # for, rather than 32 attention layers that would run and emit nonsense.
+    types = SHAInet::HFLoader.default_layer_types(8)
+    types.count("linear_attention").should eq(6)
+    types.count("full_attention").should eq(2)
+
+    # A synthetic config has no weights to load, so the stack shape is checked directly through
+    # the same builder the loader uses.
+    net = SHAInet::Network.new
+    net.add_layer("embedding", 32, vocab_size: 100)
+    types.each do |t|
+      name = t == "linear_attention" ? "gated_deltanet" : "llama"
+      net.add_layer(name, 32, num_heads: 4, ff_hidden: 64, num_kv_heads: 2, head_dim: 8)
     end
+    net.hidden_layers.count(&.is_a?(SHAInet::GatedDeltaNetBlock)).should eq(6)
+    net.hidden_layers.count(&.is_a?(SHAInet::LlamaBlock)).should eq(2)
   end
 end

@@ -65,27 +65,7 @@ module SHAInet
       when "llama", "mistral", "qwen2", "qwen3", "qwen3_moe"
         load_llama(model_dir, quantize: quantize, bits: bits)
       when "qwen3_5"
-        # The config parses, the gated delta rule exists in both forms, and the hybrid block is
-        # built and specified. What is still missing is the WEIGHT MAPPING: the tensor names for
-        # the linear-attention layers (q/k/v/alpha/beta projections, the three short-conv
-        # kernels, the output gate, a_log and dt_bias) cannot be confirmed without a real
-        # checkpoint on disk, and guessing them would either crash on a missing key or, worse,
-        # load the wrong tensor into the right shape and produce fluent nonsense.
-        #
-        # Refusing until then is deliberate. A caller who wants to build a hybrid stack by hand
-        # can already do so with add_layer("gated_deltanet", ...).
-        config = load_llama_config(::File.join(model_dir, "config.json"))
-        types = config.layer_types || [] of String
-        linear = types.count("linear_attention")
-        raise "model_type 'qwen3_5' (Qwen3.5 / Qwen3.6) parses but cannot be loaded from weights " \
-              "yet: #{config.num_hidden_layers} layers, #{linear} linear_attention and " \
-              "#{types.count("full_attention")} full_attention, linear_key_head_dim=" \
-              "#{config.linear_key_head_dim}, linear_num_value_heads=#{config.linear_num_value_heads}, " \
-              "linear_conv_kernel_dim=#{config.linear_conv_kernel_dim}. The operator " \
-              "(SHAInet::GatedDeltaNet) and the block (SHAInet::GatedDeltaNetBlock) are " \
-              "implemented; what is missing is the safetensors name mapping for the " \
-              "linear-attention tensors, which needs a checkpoint to confirm rather than guess. " \
-              "Build a hybrid stack by hand with add_layer(\"gated_deltanet\", ...) meanwhile."
+        load_qwen35(model_dir)
       else
         raise "Unsupported model_type: '#{model_type}'. Supported: #{SUPPORTED_MODELS.join(", ")}"
       end
@@ -337,6 +317,204 @@ module SHAInet
       names << "model.language_model.norm.weight"
       names << "lm_head.weight" unless config.tie_word_embeddings
       names
+    end
+
+    # Load a qwen3_5 (Qwen3.5 / Qwen3.6) hybrid stack.
+    #
+    # Differs from load_llama in four ways, every one of them established by reading a real
+    # Qwen3.5-9B checkpoint rather than inferred:
+    #
+    #   * tensors live under "model.language_model.", not "model.", because the text backbone
+    #     sits beside a vision tower
+    #   * the stack is hybrid, so each layer is built from layer_types
+    #   * a linear layer's q/k/v arrive FUSED in one in_proj_qkv, and its three short-conv
+    #     kernels arrive fused in one conv1d
+    #   * the output norm is per-head, sized head_v
+    #
+    # Text-only: the vision tower and the multi-token-prediction head are skipped.
+    #
+    # max_layers truncates the stack, which exists for verification rather than for use. A full
+    # fp32 host load of the 9B needs 33.4 GiB resident (embedding 3.79, lm_head 3.79, and 32
+    # layers), which does not reliably fit 62 GiB of RAM alongside anything else -- the first
+    # attempt was OOM-killed at 45 GiB. A truncated stack loads the same code paths against the
+    # same tensors at a fraction of the memory, so the weight mapping can be exercised before
+    # the GPU mixer exists. A truncated model does NOT produce meaningful text.
+    def self.load_qwen35(model_dir : String, max_layers : Int32? = nil) : Network
+      config_path = ::File.join(model_dir, "config.json")
+      raise "config.json not found in #{model_dir}" unless ::File.exists?(config_path)
+      config = load_llama_config(config_path)
+      types = config.layer_types || default_layer_types(config.num_hidden_layers)
+      types = types[0, max_layers] if max_layers && max_layers < types.size
+      sf = open_safetensors(model_dir)
+
+      begin
+        d = config.hidden_size
+        ff = config.intermediate_size
+        eps = config.rms_norm_eps
+        head_dim = config.head_dim || (d // config.num_attention_heads)
+
+        net = Network.new
+        net.add_layer(:input, 1)
+        net.add_layer(:embedding, d, vocab_size: config.vocab_size)
+        types.each do |t|
+          if t == "linear_attention"
+            net.add_layer("gated_deltanet", d, num_heads: config.linear_num_value_heads,
+              ff_hidden: ff, num_kv_heads: config.linear_num_key_heads,
+              eps: eps, head_dim: config.linear_key_head_dim,
+              linear_conv_kernel: config.linear_conv_kernel_dim)
+          else
+            net.add_layer(:llama, d, num_heads: config.num_attention_heads, ff_hidden: ff,
+              num_kv_heads: config.num_key_value_heads, eps: eps, head_dim: config.head_dim)
+          end
+        end
+        net.add_layer(:output, config.vocab_size, activation_function: SHAInet.identity)
+        net.fully_connect
+
+        emb_layer = net.hidden_layers.find(&.is_a?(EmbeddingLayer)).as(EmbeddingLayer)
+        # Scoped so the read buffer is collectable immediately. Holding it for a tied-weights
+        # check would pin 3.79 GiB across the entire load, and this architecture ships an
+        # explicit lm_head anyway.
+        begin
+          embed = sf.read_matrix("model.language_model.embed_tokens.weight")
+          config.vocab_size.times { |i| d.times { |j| emb_layer.embeddings[i, j] = embed[i, j] } }
+        end
+        GC.collect
+        Log.info { "qwen3_5: embedding loaded (#{config.vocab_size}x#{d})" }
+
+        # The blocks in stack order. gated_deltanet layers are not in @transformer_layers (see
+        # network_setup), so walk @hidden_layers and skip the embedding.
+        blocks = net.hidden_layers.reject(EmbeddingLayer)
+
+        types.each_with_index do |t, idx|
+          p = "model.language_model.layers.#{idx}."
+          if t == "linear_attention"
+            load_qwen35_linear_layer(sf, blocks[idx].as(GatedDeltaNetBlock), p, config)
+          else
+            block = blocks[idx].as(LlamaBlock)
+            block.rope_theta = config.rope_theta
+            block.rope_freqs = compute_rope_freqs(config, head_dim)
+            # Qwen3.5's full-attention layers are GATED: q_proj packs q and the output gate
+            # into one [2 * q_dim, d_model] tensor. Measured on Qwen3.5-9B, q_proj is
+            # [8192, 4096] while num_attention_heads * head_dim is 4096.
+            #
+            # Assigning that straight to w_q silently produced a [4096, 8192] weight in a slot
+            # the block believes is [4096, 4096] -- no error, just wrong output. Hence the
+            # explicit split and the assertions below.
+            q_dim = config.num_attention_heads * head_dim
+            qp = sf.read_matrix_transposed("#{p}self_attn.q_proj.weight")
+            case qp.cols
+            when q_dim
+              block.w_q = qp
+            when 2 * q_dim
+              wq = SimpleMatrix.new(qp.rows, q_dim)
+              wg = SimpleMatrix.new(qp.rows, q_dim)
+              qp.rows.times do |i|
+                q_dim.times do |j|
+                  wq[i, j] = qp[i, j]
+                  wg[i, j] = qp[i, q_dim + j]
+                end
+              end
+              block.w_q = wq
+              block.w_gate_attn = wg
+            else
+              raise "#{p}self_attn.q_proj.weight gives #{qp.cols} columns, expected #{q_dim} (ungated) or #{2 * q_dim} (gated)"
+            end
+            kv_dim = config.num_key_value_heads * head_dim
+            wk = sf.read_matrix_transposed("#{p}self_attn.k_proj.weight")
+            wv = sf.read_matrix_transposed("#{p}self_attn.v_proj.weight")
+            raise "#{p}self_attn.k_proj.weight gives #{wk.cols} columns, expected #{kv_dim}" unless wk.cols == kv_dim
+            raise "#{p}self_attn.v_proj.weight gives #{wv.cols} columns, expected #{kv_dim}" unless wv.cols == kv_dim
+            block.w_k = wk
+            block.w_v = wv
+            wo = sf.read_matrix_transposed("#{p}self_attn.o_proj.weight")
+            raise "#{p}self_attn.o_proj.weight gives #{wo.rows}x#{wo.cols}, expected #{q_dim}x#{d}" unless wo.rows == q_dim && wo.cols == d
+            block.w_o = wo
+            qn = sf.read_matrix("#{p}self_attn.q_norm.weight")
+            kn = sf.read_matrix("#{p}self_attn.k_norm.weight")
+            block.q_norm = Array(Float32).new(qn.cols) { |i| qn[0, i].to_f32 }
+            block.k_norm = Array(Float32).new(kn.cols) { |i| kn[0, i].to_f32 }
+            ffn = block.ffn.as(SwiGLUFF)
+            ffn.gate_proj = sf.read_matrix_transposed("#{p}mlp.gate_proj.weight")
+            ffn.up_proj = sf.read_matrix_transposed("#{p}mlp.up_proj.weight")
+            ffn.down_proj = sf.read_matrix_transposed("#{p}mlp.down_proj.weight")
+            block.norm1.gamma = sf.read_matrix("#{p}input_layernorm.weight")
+            block.norm2.gamma = sf.read_matrix("#{p}post_attention_layernorm.weight")
+          end
+          # Collect EVERY layer: a 9B's resident fp32 footprint is 33.4 GiB, so a few hundred
+          # MB of retained read transients per layer is the difference between fitting and being
+          # OOM-killed. Measured twice on this machine before this was tightened.
+          GC.collect
+          if idx % 4 == 3 || idx == types.size - 1
+            Log.info { "qwen3_5: layer #{idx + 1}/#{types.size} loaded" }
+          end
+        end
+
+        final_norm = RMSNorm.new(d, eps)
+        final_norm.gamma = sf.read_matrix("model.language_model.norm.weight")
+        net.final_norm = final_norm
+
+        output_layer = net.output_layers.first
+        head_name = config.tie_word_embeddings ? "model.language_model.embed_tokens.weight" : "lm_head.weight"
+        output_layer.weights = sf.read_matrix_transposed(head_name)
+
+        net
+      ensure
+        sf.close
+      end
+    end
+
+    # One linear-attention layer's weights, unpacking the fused tensors.
+    private def self.load_qwen35_linear_layer(sf, block : GatedDeltaNetBlock, p : String, config : LlamaConfig)
+      k_dim = config.linear_num_key_heads * config.linear_key_head_dim
+      v_dim = config.linear_num_value_heads * config.linear_value_head_dim
+
+      # in_proj_qkv is [q_dim + k_dim + v_dim, d_model] with q_dim == k_dim (q uses the KEY head
+      # count, not the value head count). Transposed once, then sliced by column range.
+      qkv = sf.read_matrix_transposed("#{p}linear_attn.in_proj_qkv.weight") # [d_model, 2*k_dim + v_dim]
+      expected = 2 * k_dim + v_dim
+      raise "#{p}linear_attn.in_proj_qkv.weight has #{qkv.cols} columns, expected #{expected}" unless qkv.cols == expected
+      copy_cols(qkv, block.w_q, 0, k_dim)
+      copy_cols(qkv, block.w_k, k_dim, k_dim)
+      copy_cols(qkv, block.w_v, 2 * k_dim, v_dim)
+
+      # One depthwise conv over ALL fused qkv channels, in the same q, k, v order. Split into the
+      # block's three ShortConvs, whose channel counts sum to exactly this tensor's rows.
+      conv = sf.read_matrix("#{p}linear_attn.conv1d.weight") # [2*k_dim + v_dim, kernel]
+      raise "#{p}linear_attn.conv1d.weight has #{conv.rows} rows, expected #{expected}" unless conv.rows == expected
+      copy_rows(conv, block.conv_q.weight, 0)
+      copy_rows(conv, block.conv_k.weight, k_dim)
+      copy_rows(conv, block.conv_v.weight, 2 * k_dim)
+
+      block.w_alpha = sf.read_matrix_transposed("#{p}linear_attn.in_proj_a.weight")
+      block.w_beta = sf.read_matrix_transposed("#{p}linear_attn.in_proj_b.weight")
+      block.w_gate = sf.read_matrix_transposed("#{p}linear_attn.in_proj_z.weight")
+      block.w_o = sf.read_matrix_transposed("#{p}linear_attn.out_proj.weight")
+
+      a_log = sf.read_matrix("#{p}linear_attn.A_log")
+      dt_bias = sf.read_matrix("#{p}linear_attn.dt_bias")
+      config.linear_num_value_heads.times do |h|
+        block.a_log[h] = a_log[0, h].to_f64
+        block.dt_bias[h] = dt_bias[0, h].to_f64
+      end
+
+      block.out_norm.gamma = sf.read_matrix("#{p}linear_attn.norm.weight")
+      block.norm1.gamma = sf.read_matrix("#{p}input_layernorm.weight")
+      block.norm2.gamma = sf.read_matrix("#{p}post_attention_layernorm.weight")
+
+      ffn = block.ffn
+      ffn.gate_proj = sf.read_matrix_transposed("#{p}mlp.gate_proj.weight")
+      ffn.up_proj = sf.read_matrix_transposed("#{p}mlp.up_proj.weight")
+      ffn.down_proj = sf.read_matrix_transposed("#{p}mlp.down_proj.weight")
+    end
+
+    private def self.copy_cols(src : SimpleMatrix, dst : SimpleMatrix, offset : Int32, width : Int32)
+      raise "copy_cols shape: dst #{dst.rows}x#{dst.cols}, src #{src.rows} rows, width #{width}" unless dst.rows == src.rows && dst.cols == width
+      src.rows.times { |i| width.times { |j| dst[i, j] = src[i, offset + j] } }
+    end
+
+    private def self.copy_rows(src : SimpleMatrix, dst : SimpleMatrix, offset : Int32)
+      raise "copy_rows shape: dst cols #{dst.cols} != src cols #{src.cols}" unless dst.cols == src.cols
+      dst.rows.times { |i| src.cols.times { |j| dst[i, j] = src[offset + i, j] } }
     end
 
     # Number of linear-attention layers per full-attention layer when a qwen3_5 config does not

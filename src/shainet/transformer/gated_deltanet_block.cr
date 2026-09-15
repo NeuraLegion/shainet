@@ -40,13 +40,13 @@ module SHAInet
     getter out_norm : RMSNorm
     getter ffn : SwiGLUFF
 
-    getter w_q : SimpleMatrix
-    getter w_k : SimpleMatrix
-    getter w_v : SimpleMatrix
-    getter w_o : SimpleMatrix
-    getter w_gate : SimpleMatrix
-    getter w_alpha : SimpleMatrix
-    getter w_beta : SimpleMatrix
+    property w_q : SimpleMatrix
+    property w_k : SimpleMatrix
+    property w_v : SimpleMatrix
+    property w_o : SimpleMatrix
+    property w_gate : SimpleMatrix
+    property w_alpha : SimpleMatrix
+    property w_beta : SimpleMatrix
     # Mamba2's per-head decay parameters. a_log is stored in log space because the decay must
     # stay in (0,1) for the state to be stable, and exp(-exp(a_log)*dt) is in (0,1) for any
     # real a_log and any dt > 0 -- no clamping needed.
