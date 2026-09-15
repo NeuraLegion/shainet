@@ -19,7 +19,22 @@ require "colorize"
 
 module AgentDemo
   MAX_READ_BYTES = 64_000
-  MAX_TOOL_STEPS =      8
+
+  # Tool-calling iterations allowed per user turn, before the agent hands control back.
+  #
+  # A runaway guard, not a work budget: without it a model that keeps emitting tool calls
+  # never returns to the prompt. The number was 8, chosen when a turn's prefill cost minutes
+  # and a runaway was expensive. Prefill is now ~29 s at 4096 with KV prefix reuse making
+  # turn 2+ about a second, so 8 stopped being a runaway guard and started truncating
+  # ordinary work -- reading four files and grepping twice already exceeds it.
+  #
+  # 40 is high enough that hitting it means something is actually looping.
+  # AGENT_MAX_TOOL_STEPS overrides it, clamped to at least 1: a 0 would break out before
+  # generating anything and every turn would answer with silence.
+  MAX_TOOL_STEPS = begin
+    n = (ENV["AGENT_MAX_TOOL_STEPS"]? || "40").to_i
+    n < 1 ? 1 : n
+  end
 
   record ToolParam, name : String, type : String, description : String, required : Bool = true
   # `ids` holds the EXACT tokens the model produced for an assistant turn, when they are
@@ -43,13 +58,47 @@ module AgentDemo
     end
   end
 
-  # Confirmation gate for mutating/executing tools (skipped with SHAINET_AGENT_YOLO=1).
+  # Set by answering "a" at a confirmation prompt: allow every later mutating tool call for
+  # the rest of the process, without re-asking.
+  #
+  # Deliberately in-memory and process-scoped, not persisted: a blanket approval that
+  # outlived the session would be a much bigger promise than the one the user made at the
+  # prompt. SHAINET_AGENT_YOLO=1 is the same thing chosen up front.
+  @@allow_all = false
+
+  def self.allow_all? : Bool
+    @@allow_all
+  end
+
+  def self.allow_all=(value : Bool)
+    @@allow_all = value
+  end
+
+  # Confirmation gate for mutating/executing tools.
+  #
+  #   y  allow this call
+  #   n  deny this call (the default, so a bare Enter is safe)
+  #   a  allow this and every later call this session
+  #
+  # Skipped entirely with SHAINET_AGENT_YOLO=1.
   def self.confirm?(desc : String) : Bool
     return true if ENV.fetch("SHAINET_AGENT_YOLO", "0") == "1"
-    STDERR.print "  #{"⚠ allow".colorize(:yellow)} #{desc}? [y/N] "
+    return true if @@allow_all
+    STDERR.print "  #{"⚠ allow".colorize(:yellow)} #{desc}? [y/N/a=all] "
     STDERR.flush
     ans = gets
-    !!(ans && ans.strip.downcase.starts_with?("y"))
+    # EOF (piped input, closed stdin) must not read as approval.
+    return false unless ans
+    case ans.strip.downcase
+    when "a", "all"
+      @@allow_all = true
+      STDERR.puts "  #{"⚠ approving all further tool calls this session".colorize(:yellow)}"
+      true
+    when .starts_with?("y")
+      true
+    else
+      false
+    end
   end
 
   # Basic code-agent tools. Read-only ones run freely; write/edit/run ask for
@@ -589,9 +638,21 @@ module AgentDemo
       step = 0
       loop do
         step += 1
+        # The LAST allowed step still generates, it just may not call tools. Breaking before
+        # generation (which is what this did) threw the turn away: the user got the cap
+        # message and no answer, after the agent had already done the work. So tell the model
+        # its budget is gone and let it write a closing reply from what it has.
+        last_step = step >= MAX_TOOL_STEPS
         if step > MAX_TOOL_STEPS
-          STDERR.puts "[agent] max tool steps reached; stopping"
           break
+        end
+        if last_step
+          STDERR.puts "  [agent] tool budget reached (#{MAX_TOOL_STEPS} steps); asking for a final answer".colorize(:dark_gray)
+          STDERR.puts "  (raise it with AGENT_MAX_TOOL_STEPS)".colorize(:dark_gray)
+          @messages << Message.new("user",
+            "You have used all #{MAX_TOOL_STEPS} tool steps for this turn. Do not call any " \
+            "more tools. Answer now with what you already have, and say plainly what you " \
+            "could not finish.")
         end
 
         # Keep the prompt within the context budget (compact to 75% to leave room
@@ -617,6 +678,9 @@ module AgentDemo
         # Keep the assistant's output (incl. any tool_call markup) verbatim.
         @messages << Message.new("assistant", text.strip, text_ids)
         break if calls.empty?
+        # On the final step the reply IS the answer. Running its tool calls would spend the
+        # results and then break on the next iteration, throwing them away unanswered.
+        break if last_step
 
         calls.each do |c|
           STDERR.puts "  #{"⚒ #{c.name}".colorize(:yellow)}(#{c.args.map { |k, v| "#{k}=#{v.inspect}" }.join(", ")})".colorize(:dark_gray)
@@ -749,7 +813,7 @@ end
 
 agent = AgentDemo::Agent.new(net, tokenizer, AgentDemo.build_tools, max_context)
 STDERR.puts "Ready · tools: #{AgentDemo.build_tools.map(&.name).join(", ")} · max context #{max_context} tok".colorize(:green)
-STDERR.puts "Commands: /context  /compact  /clear  /help   (Ctrl-D to exit)".colorize(:dark_gray)
+STDERR.puts "Commands: /context  /compact  /clear  /ask  /help   (Ctrl-D to exit)".colorize(:dark_gray)
 
 loop do
   STDERR.print "\n#{"You".colorize(:light_green).bold} ❯ "
@@ -763,7 +827,18 @@ loop do
     STDERR.puts "  /context  show context size, VRAM and cache usage".colorize(:dark_gray)
     STDERR.puts "  /compact  summarize + trim the conversation history now".colorize(:dark_gray)
     STDERR.puts "  /clear    reset the conversation".colorize(:dark_gray)
+    STDERR.puts "  /ask      revoke 'allow all' and confirm each tool call again".colorize(:dark_gray)
     STDERR.puts "  /help     this message".colorize(:dark_gray)
+    next
+  when "/ask"
+    # The way back from answering "a". Without this, one keystroke silently approves every
+    # write and shell command for the rest of the session with no way to reconsider.
+    if AgentDemo.allow_all?
+      AgentDemo.allow_all = false
+      STDERR.puts "  will confirm each tool call again".colorize(:dark_gray)
+    else
+      STDERR.puts "  already confirming each tool call".colorize(:dark_gray)
+    end
     next
   when "/context"
     STDERR.puts "  #{agent.status}".colorize(:dark_gray)
