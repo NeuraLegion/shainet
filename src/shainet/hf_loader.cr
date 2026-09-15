@@ -65,25 +65,27 @@ module SHAInet
       when "llama", "mistral", "qwen2", "qwen3", "qwen3_moe"
         load_llama(model_dir, quantize: quantize, bits: bits)
       when "qwen3_5"
-        # The config PARSES (nested text_config, layer_types, the linear_* head dims) and the
-        # gated delta rule operator exists, but the hybrid block is not wired yet.
+        # The config parses, the gated delta rule exists in both forms, and the hybrid block is
+        # built and specified. What is still missing is the WEIGHT MAPPING: the tensor names for
+        # the linear-attention layers (q/k/v/alpha/beta projections, the three short-conv
+        # kernels, the output gate, a_log and dt_bias) cannot be confirmed without a real
+        # checkpoint on disk, and guessing them would either crash on a missing key or, worse,
+        # load the wrong tensor into the right shape and produce fluent nonsense.
         #
-        # Refusing is deliberate. Falling through to load_llama would build full attention for
-        # every layer, including the three quarters that are linear_attention, and the weight
-        # names would not even match -- so it would either crash confusingly or, worse, produce
-        # fluent nonsense from a model that looked like it loaded fine. Say what is missing.
+        # Refusing until then is deliberate. A caller who wants to build a hybrid stack by hand
+        # can already do so with add_layer("gated_deltanet", ...).
         config = load_llama_config(::File.join(model_dir, "config.json"))
         types = config.layer_types || [] of String
         linear = types.count("linear_attention")
-        raise "model_type 'qwen3_5' (Qwen3.5 / Qwen3.6) is not runnable yet. Its config parses " \
-              "here: #{config.num_hidden_layers} layers, of which #{linear} are linear_attention " \
-              "and #{types.count("full_attention")} are full_attention, with " \
-              "linear_key_head_dim=#{config.linear_key_head_dim}, " \
-              "linear_num_value_heads=#{config.linear_num_value_heads}, " \
-              "linear_conv_kernel_dim=#{config.linear_conv_kernel_dim}. What is missing is the " \
-              "hybrid block: short conv + SiLU + output gate around SHAInet::GatedDeltaNet, and " \
-              "per-layer dispatch on layer_types. Loading it as plain attention would produce " \
-              "wrong output silently, so it is refused instead."
+        raise "model_type 'qwen3_5' (Qwen3.5 / Qwen3.6) parses but cannot be loaded from weights " \
+              "yet: #{config.num_hidden_layers} layers, #{linear} linear_attention and " \
+              "#{types.count("full_attention")} full_attention, linear_key_head_dim=" \
+              "#{config.linear_key_head_dim}, linear_num_value_heads=#{config.linear_num_value_heads}, " \
+              "linear_conv_kernel_dim=#{config.linear_conv_kernel_dim}. The operator " \
+              "(SHAInet::GatedDeltaNet) and the block (SHAInet::GatedDeltaNetBlock) are " \
+              "implemented; what is missing is the safetensors name mapping for the " \
+              "linear-attention tensors, which needs a checkpoint to confirm rather than guess. " \
+              "Build a hybrid stack by hand with add_layer(\"gated_deltanet\", ...) meanwhile."
       else
         raise "Unsupported model_type: '#{model_type}'. Supported: #{SUPPORTED_MODELS.join(", ")}"
       end
