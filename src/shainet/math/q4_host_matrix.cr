@@ -193,10 +193,25 @@ module SHAInet
       end
     end
 
+    # The PCIe cost of a cache miss.
+    #
+    # NOTE this phase NESTS inside ffn.dev_gate_up and ffn.dev_down, which wrap the expert
+    # GEMV that resolves the weight. It is therefore the one phase that breaks the module's
+    # partition rule, and the report's total over-counts by exactly this much: measured,
+    # phases summed to 98.28 ms/step against 68.33 ms of wall time, and 98.28 - 32.57 is
+    # 65.71, which reconciles. Read it as a SUBSET of the expert GEMV phases, never as a
+    # sibling of them.
+    #
+    # It is worth that inconvenience because it splits transfer from arithmetic inside the
+    # expert path, and that split is decode's whole question: 8 experts across 48 layers is
+    # 384 weight resolutions per token, and measured 283 of them miss, making decode
+    # transfer-bound rather than compute-bound.
     private def upload_to(s : Q4CudaMatrix)
-      CUDA.memcpy(s.q_ptr.as(Pointer(Void)), @q_ptr.as(Pointer(Void)), @q_bytes, CUDA::MemcpyKind::HostToDevice)
-      CUDA.memcpy(s.d_ptr.as(Pointer(Void)), @s_ptr.as(Pointer(Void)), @s_bytes, CUDA::MemcpyKind::HostToDevice)
-      CUDA.memcpy(s.sub_ptr.as(Pointer(Void)), @sub_ptr.as(Pointer(Void)), @sub_bytes, CUDA::MemcpyKind::HostToDevice)
+      Profile.measure("expert.h2d(nested)") do
+        CUDA.memcpy(s.q_ptr.as(Pointer(Void)), @q_ptr.as(Pointer(Void)), @q_bytes, CUDA::MemcpyKind::HostToDevice)
+        CUDA.memcpy(s.d_ptr.as(Pointer(Void)), @s_ptr.as(Pointer(Void)), @s_bytes, CUDA::MemcpyKind::HostToDevice)
+        CUDA.memcpy(s.sub_ptr.as(Pointer(Void)), @sub_ptr.as(Pointer(Void)), @sub_bytes, CUDA::MemcpyKind::HostToDevice)
+      end
     end
 
     private def scratch : Q4CudaMatrix
@@ -227,7 +242,19 @@ module SHAInet
 
       @@misses += 1
       @@freq[self] += 1
-      if @@freq[self] >= PROMOTE_THRESHOLD && admit?
+      # Promote on FIRST touch when this weight fits without evicting anything, and only
+      # then fall back to the frequency gate.
+      #
+      # PROMOTE_THRESHOLD exists so a cold one-off does not displace a hot weight. That is
+      # a statement about CONTENTION, and it was being applied unconditionally -- so with
+      # VRAM to spare a rarely-touched weight stayed on the streaming path forever, paying
+      # PCIe on every single touch while the budget sat idle. Measured on the 30B at a
+      # 12000 MB budget: the whole touched working set (7932 MB) was resident with 4068 MB
+      # unused, yet 246 of 1152 resolutions per step still missed, costing 33.88 ms of a
+      # 64.82 ms step. Nothing needed evicting; the gate was simply refusing free wins.
+      #
+      # With headroom there is no victim, so the threshold protects nothing and only costs.
+      if fits_without_eviction? || (@@freq[self] >= PROMOTE_THRESHOLD && admit?)
         if promoted = promote
           return promoted
         end
@@ -253,6 +280,63 @@ module SHAInet
       nil
     end
 
+    # VRAM that first-touch promotion must leave on the device, over and above the budget.
+    #
+    # Needed because this change made the budget HONEST. Before it, the frequency gate meant
+    # the cache only ever reached the touched working set -- measured 7932 MB against a
+    # 12000 MB budget -- so an over-large budget was safe by accident. Filling it on first
+    # touch removes that accident: a 12000 MB budget on a 16 GB card duly consumed 12000 MB
+    # and the next KV/workspace allocation failed with cudaMalloc result 2.
+    #
+    # The budget is the user's declared ceiling, but nothing else on the device gets a vote
+    # in it, and the KV cache is allocated AFTER the weights, growing with context. So this
+    # is a floor on free VRAM, checked against the device rather than against the budget.
+    # SHAINET_EXPERT_CACHE_RESERVE_MB overrides it.
+    RESERVE_MB_DEFAULT = 768
+
+    @@reserve_bytes : UInt64? = nil
+
+    def self.reserve_bytes : UInt64
+      v = @@reserve_bytes
+      return v if v
+      mb = (ENV["SHAINET_EXPERT_CACHE_RESERVE_MB"]? || RESERVE_MB_DEFAULT.to_s).to_i
+      mb = 0 if mb < 0
+      v = mb.to_u64 * 1024_u64 * 1024_u64
+      @@reserve_bytes = v
+      v
+    end
+
+    def self.reserve_bytes=(bytes : UInt64?)
+      @@reserve_bytes = bytes
+    end
+
+    # Would a resident copy fit in the remaining budget WITHOUT evicting anything, and
+    # without eating into the device reserve?
+    #
+    # Deliberately side-effect free, unlike `admit?`, which evicts to make room. That split
+    # is what lets the caller distinguish "free win" from "contended", and treat only the
+    # contended case as needing a frequency gate.
+    private def fits_without_eviction? : Bool
+      need = Q4CudaMatrix.device_bytes_for(@rows, @cols)
+      return false if @@used_bytes + need > Q4HostMatrix.budget_bytes
+      device_has_room?(need)
+    end
+
+    # Is there room on the DEVICE for `need` more bytes, keeping the reserve intact?
+    #
+    # Asks the device rather than the budget, because everything else competing for VRAM --
+    # the KV cache, prefill workspaces, another process -- is invisible to the budget
+    # arithmetic. Applied on BOTH promotion paths: gating only first touch would leave the
+    # hole that a weight touched twice still promotes into the reserve.
+    private def device_has_room?(need : UInt64) : Bool
+      reserve = Q4HostMatrix.reserve_bytes
+      return true if reserve == 0
+      if info = CUDA.memory_info
+        return info[:free] >= need + reserve
+      end
+      true
+    end
+
     # Make room for a resident copy of this weight within budget by evicting the
     # least-recently-used residents. Returns false if it can never fit.
     private def admit? : Bool
@@ -266,7 +350,9 @@ module SHAInet
         @@used_bytes -= victim_v.device_bytes
         victim_v.free! # reclaim VRAM immediately, don't wait for GC
       end
-      @@used_bytes + need <= budget
+      # Checked AFTER the evictions above, which call free! immediately, so the device query
+      # sees the VRAM they returned rather than a stale reading.
+      @@used_bytes + need <= budget && device_has_room?(need)
     end
 
     def gemv(x : CudaMatrix) : CudaMatrix
