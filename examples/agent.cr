@@ -1,6 +1,8 @@
 require "../src/shainet"
 require "json"
 require "colorize"
+require "./agent_workspace"
+require "./agent_v4a"
 
 # Agentic chat demo: a multi-turn conversation with a growing context and a
 # tool-calling loop, built entirely on Network#run. Think of it as a very light
@@ -58,6 +60,80 @@ module AgentDemo
     end
   end
 
+  # Root that every file tool is confined to: the directory the agent was launched in, unless
+  # AGENT_WORKSPACE says otherwise.
+  #
+  # Resolved once at startup rather than per call, so nothing can widen its own sandbox by
+  # chdir-ing partway through a turn.
+  @@workspace = File.realpath(ENV["AGENT_WORKSPACE"]? || Dir.current)
+
+  def self.workspace : String
+    @@workspace
+  end
+
+  # Resolve a model-supplied path. Returns {path, ""} on success and {nil, error_text} on
+  # refusal, so a tool body stays a single line and the model gets told WHY.
+  #
+  # Inside the workspace needs no approval. OUTSIDE it, the path is negotiable rather than
+  # forbidden: the user is asked once per location and the answer is remembered, so working on
+  # a file elsewhere costs one prompt instead of one per tool call. An approval is per PATH on
+  # purpose -- approving a model config should not also hand over ~/.ssh/id_rsa. Answering "a"
+  # still opens everything, matching the prompt's existing meaning.
+  def self.safe_path(raw : String?) : {String?, String}
+    {WorkspacePath.resolve(@@workspace, raw || ""), ""}
+  rescue WorkspaceEscapeError
+    outside_path(raw || "")
+  rescue ex : WorkspacePathError
+    {nil, "Error: #{ex.message}."}
+  end
+
+  private def self.outside_path(raw : String) : {String?, String}
+    resolved = WorkspacePath.resolve_anywhere(@@workspace, raw)
+    return {resolved, ""} if allow_all? || WorkspacePath.approved_outside?(resolved)
+    unless confirm?("access #{resolved} — OUTSIDE the workspace (#{@@workspace})")
+      return {nil, "Error: #{raw} is outside the workspace and the user declined access. " \
+                   "Work within #{@@workspace} instead."}
+    end
+    # Remembered, so the next tool call on this file does not ask again.
+    WorkspacePath.approve_outside(resolved)
+    {resolved, ""}
+  rescue ex : WorkspacePathError
+    {nil, "Error: #{ex.message}."}
+  end
+
+  # A unified-ish diff of a proposed whole-file write, for the confirmation prompt.
+  #
+  # Approving "write 4182 bytes to x.cr" says nothing about what actually changes, which is
+  # the real problem with a blanket approval: allow-all is only reasonable if each prompt
+  # showed enough to judge. Capped on purpose -- a 3000-line rewrite scrolling past defeats
+  # the point as thoroughly as showing nothing.
+  def self.preview_diff(path : String, new_content : String, max_lines : Int32 = 40) : String
+    old_lines = File.exists?(path) ? File.read(path).lines : [] of String
+    new_lines = new_content.lines
+    # Trim the common head and tail, so the window shown is the change and not the file.
+    head = 0
+    while head < old_lines.size && head < new_lines.size && old_lines[head] == new_lines[head]
+      head += 1
+    end
+    tail = 0
+    while tail < (old_lines.size - head) && tail < (new_lines.size - head) &&
+          old_lines[old_lines.size - 1 - tail] == new_lines[new_lines.size - 1 - tail]
+      tail += 1
+    end
+    removed = old_lines[head, old_lines.size - head - tail]
+    added = new_lines[head, new_lines.size - head - tail]
+    return "  (no textual change)" if removed.empty? && added.empty?
+
+    half = max_lines // 2
+    out = [] of String
+    out << "  @@ line #{head + 1} @@"
+    removed.first(half).each { |l| out << "  -#{l}" }
+    out << "  ... #{removed.size - half} more removed" if removed.size > half
+    added.first(half).each { |l| out << "  +#{l}" }
+    out << "  ... #{added.size - half} more added" if added.size > half
+    out.join("\n")
+  end
+
   # Set by answering "a" at a confirmation prompt: allow every later mutating tool call for
   # the rest of the process, without re-asking.
   #
@@ -107,25 +183,32 @@ module AgentDemo
     [
       Tool.new(
         "list_directory",
-        "List the files and subdirectories in a directory.",
+        "List the files and subdirectories in a directory. Paths are relative to the workspace root; an absolute path outside it needs the user to approve that location once.",
         [ToolParam.new("path", "string", "Directory path to list (default: current directory).")]
       ) do |args|
-        path = (args["path"]? || "").strip
-        path = "." if path.empty?
+        raw = (args["path"]? || "").strip
+        raw = "." if raw.empty?
+        path, err = AgentDemo.safe_path(raw)
+        if path.nil?
+          next err
+        end
         if Dir.exists?(path)
           Dir.children(path).sort.map { |e| Dir.exists?(File.join(path, e)) ? "#{e}/" : e }.join("\n")
         else
-          "Error: not a directory: #{path}"
+          "Error: not a directory: #{raw}"
         end
       end,
       Tool.new(
         "read_file",
-        "Read the contents of a text file (truncated if very large). Binary files are refused.",
+        "Read the contents of a text file (truncated if very large). Binary files are refused. Paths are relative to the workspace root; an absolute path outside it needs the user to approve that location once.",
         [ToolParam.new("path", "string", "File path to read.")]
       ) do |args|
-        path = args["path"]? || ""
-        if path.empty? || Dir.exists?(path) || !File.exists?(path)
-          "Error: not a file: #{path}"
+        path, err = AgentDemo.safe_path(args["path"]?)
+        if path.nil?
+          next err
+        end
+        if Dir.exists?(path) || !File.exists?(path)
+          "Error: not a file: #{args["path"]?}"
         else
           c = File.read(path)
           # Refuse binaries outright. A model asked to inspect a directory will happily try
@@ -151,7 +234,10 @@ module AgentDemo
       ) do |args|
         pat = args["pattern"]? || ""
         next "Error: empty pattern" if pat.empty?
-        root = args["path"]? || "."
+        root, err = AgentDemo.safe_path(args["path"]? || ".")
+        if root.nil?
+          next err
+        end
         begin
           re = Regex.new(pat)
         rescue ex
@@ -165,7 +251,10 @@ module AgentDemo
           begin
             File.read_lines(f).each_with_index do |line, i|
               if re.matches?(line)
-                results << "#{f}:#{i + 1}: #{line.strip}"
+                # Report paths relative to the workspace: absolute ones leak the host layout
+                # into the transcript and are not what the model may pass back.
+                rel = f.starts_with?("#{AgentDemo.workspace}/") ? f[(AgentDemo.workspace.size + 1)..] : f
+                results << "#{rel}:#{i + 1}: #{line.strip}"
                 break if results.size >= 100
               end
             end
@@ -177,35 +266,113 @@ module AgentDemo
       end,
       Tool.new(
         "write_file",
-        "Create or overwrite a text file with the given content.",
+        "Create a NEW text file. An existing file is refused: use apply_patch or edit_file to change one. Paths are relative to the workspace root; an absolute path outside it needs the user to approve that location once.",
         [ToolParam.new("path", "string", "File path to write."),
          ToolParam.new("content", "string", "Full file content.")]
       ) do |args|
-        path = args["path"]? || ""
-        next "Error: empty path" if path.empty?
+        path, err = AgentDemo.safe_path(args["path"]?)
+        if path.nil?
+          next err
+        end
+        # Refuse to clobber. A model that means to change three lines will cheerfully pass a
+        # whole-file rewrite, and any part it did not remember is silently gone. Making it
+        # patch or edit instead keeps the rest of the file out of the blast radius.
+        if File.exists?(path)
+          next "Error: #{args["path"]?} already exists. Use apply_patch or edit_file to modify it, " \
+               "or delete it first with run_command if replacing it wholesale is really intended."
+        end
         content = args["content"]? || ""
-        next "Declined by user." unless AgentDemo.confirm?("write #{content.bytesize} bytes to #{path}")
+        rel = args["path"]?
+        STDERR.puts AgentDemo.preview_diff(path, content) unless AgentDemo.allow_all?
+        next "Declined by user." unless AgentDemo.confirm?("create #{rel} (#{content.bytesize} bytes)")
+        # mkdir -p the parents: otherwise a new file in a new directory needs a shell call.
+        Dir.mkdir_p(File.dirname(path))
         File.write(path, content)
-        "Wrote #{content.bytesize} bytes to #{path}"
+        "Wrote #{content.bytesize} bytes to #{rel}"
       end,
       Tool.new(
         "edit_file",
-        "Replace exact text in a file. Replaces all literal occurrences of 'find' with 'replace'.",
+        "Replace an exact string in a file. 'find' must match EXACTLY ONE occurrence, including whitespace; include surrounding context to make it unique. Paths are relative to the workspace root; an absolute path outside it needs the user to approve that location once.",
         [ToolParam.new("path", "string", "File path to edit."),
-         ToolParam.new("find", "string", "Exact text to find."),
+         ToolParam.new("find", "string", "Exact text to find (must be unique in the file)."),
          ToolParam.new("replace", "string", "Replacement text.")]
       ) do |args|
-        path = args["path"]? || ""
-        next "Error: not a file: #{path}" if path.empty? || Dir.exists?(path) || !File.exists?(path)
+        path, err = AgentDemo.safe_path(args["path"]?)
+        if path.nil?
+          next err
+        end
+        next "Error: not a file: #{args["path"]?}" if Dir.exists?(path) || !File.exists?(path)
         find = args["find"]? || ""
         next "Error: empty 'find'" if find.empty?
         replace = args["replace"]? || ""
         content = File.read(path)
         count = content.scan(find).size
-        next "No occurrences of the given text in #{path}" if count == 0
-        next "Declined by user." unless AgentDemo.confirm?("replace #{count} occurrence(s) in #{path}")
-        File.write(path, content.gsub(find, replace))
-        "Replaced #{count} occurrence(s) in #{path}"
+        next "No occurrences of the given text in #{args["path"]?}" if count == 0
+        # Refuse a non-unique match instead of replacing every one of them.
+        #
+        # This used to gsub. A model asked to change one `end` rewrote every `end` in the
+        # file, and the only hint was a count buried in the confirmation line, which an
+        # approved-all session never shows. Ambiguity is the model's to resolve, not ours to
+        # guess at, so hand it back and say how to fix it.
+        if count > 1
+          next "Error: 'find' matches #{count} times in #{args["path"]?}. Include more " \
+               "surrounding context so it matches exactly once, or use apply_patch for a " \
+               "multi-hunk change."
+        end
+        updated = content.sub(find, replace)
+        STDERR.puts AgentDemo.preview_diff(path, updated) unless AgentDemo.allow_all?
+        next "Declined by user." unless AgentDemo.confirm?("edit #{args["path"]?}")
+        File.write(path, updated)
+        "Edited #{args["path"]?} (replaced #{find.size} chars with #{replace.size} chars)"
+      end,
+      Tool.new(
+        "apply_patch",
+        <<-DESC,
+          Apply a V4A context-diff patch to one or more files. PREFERRED for all file edits: it supports multi-file, multi-hunk changes in a single call, and edits are located by surrounding context rather than line numbers, so they survive minor drift. Read the file first so your context lines match.
+
+          Format:
+          *** Begin Patch
+          *** Update File: path/to/file
+          @@ optional anchor (e.g. a function name)
+           unchanged context line
+          -removed line
+          +added line
+          *** Add File: path/to/new-file
+          +line 1
+          *** Delete File: path/to/old-file
+          *** End Patch
+
+          Rules: ' ' prefix = context, '-' = remove, '+' = add. Include ~3 context lines around each change. Use @@ anchors when the context is not unique. All patch paths must be INSIDE the workspace: unlike read_file and edit_file, a patch cannot reach an approved outside location, so use edit_file for those.
+          DESC
+        [ToolParam.new("patch", "string", "Full patch in V4A format, including the *** Begin Patch / *** End Patch markers.")]
+      ) do |args|
+        patch = args["patch"]? || ""
+        next "Error: empty patch" if patch.empty?
+        # Show which files the patch touches BEFORE asking: the patch body is the diff, so a
+        # separate preview would just repeat it, but the file list is what the approval is
+        # actually about.
+        targets = patch.lines.compact_map do |l|
+          m = l.match(/^\*\*\* (Update|Add|Delete) File: (.+)$/)
+          "#{m[1].downcase} #{m[2].strip}" if m
+        end
+        next "Error: no *** Update/Add/Delete File: directives found in the patch" if targets.empty?
+        next "Declined by user." unless AgentDemo.confirm?("apply patch to #{targets.size} file(s): #{targets.join(", ")}")
+        begin
+          result = AgentDemo::V4A.apply(AgentDemo.workspace, patch)
+        rescue ex : AgentDemo::V4A::PatchParseError
+          next "Error: patch does not parse: #{ex.message}"
+        rescue ex : AgentDemo::WorkspacePathError
+          next "Error: #{ex.message}. Paths must be relative to the workspace."
+        rescue ex
+          next "Error applying patch: #{ex.message}"
+        end
+        lines = [] of String
+        lines << "Applied: #{result[:applied].join(", ")}" unless result[:applied].empty?
+        # Report partial success honestly: some hunks landing and others not is the normal
+        # failure mode of context matching, and the model must know which is which to retry.
+        lines << "Failed: #{result[:errors].join("; ")}" unless result[:errors].empty?
+        lines << "Patch matched nothing." if lines.empty?
+        lines.join("\n")
       end,
       Tool.new(
         "run_command",
@@ -832,10 +999,15 @@ loop do
     next
   when "/ask"
     # The way back from answering "a". Without this, one keystroke silently approves every
-    # write and shell command for the rest of the session with no way to reconsider.
-    if AgentDemo.allow_all?
+    # write and shell command for the rest of the session with no way to reconsider. It also
+    # forgets approved out-of-workspace locations, since those were granted by the same
+    # keystroke and leaving them behind would make the revocation only partly true.
+    outside = AgentDemo::WorkspacePath.approved_outside_count
+    if AgentDemo.allow_all? || outside > 0
       AgentDemo.allow_all = false
-      STDERR.puts "  will confirm each tool call again".colorize(:dark_gray)
+      AgentDemo::WorkspacePath.reset_outside_approvals!
+      note = outside > 0 ? " (also forgot #{outside} approved path(s) outside the workspace)" : ""
+      STDERR.puts "  will confirm each tool call again#{note}".colorize(:dark_gray)
     else
       STDERR.puts "  already confirming each tool call".colorize(:dark_gray)
     end
