@@ -782,8 +782,11 @@ module SHAInet
             block.norm1.to_gpu!
             block.norm2.to_gpu!
             block.out_norm.to_gpu!
-            block.ffn.to_gpu!(true, 4)
-            # FFN from cache
+            # FFN from cache. Assign the pre-quantized Q4 weights directly -- do NOT call
+            # ffn.to_gpu!(true, 4) first: it would quantize the placeholder FFN weights the layer
+            # was created with (a full Q4 pack of a 5120x17408 matrix, ~4.9 s/layer) only to have
+            # them overwritten on the next three lines. That quantize-then-discard was the entire
+            # cache-load bottleneck (~240 s of the ~290 s across 48 linear-attention layers).
             ffn = block.ffn
             ffn.gate_proj = load_q4_cached(cache_dir, "layer.#{idx}.ffn.gate", manifest, cache_offload).not_nil!
             ffn.up_proj = load_q4_cached(cache_dir, "layer.#{idx}.ffn.up", manifest, cache_offload).not_nil!
