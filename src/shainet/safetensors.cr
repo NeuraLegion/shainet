@@ -163,6 +163,19 @@ module SHAInet
       # `read_matrix(name).transpose` holds both orientations at once, and on this codebase every
       # HF weight needs transposing ([out, in] on disk, [in, out] for x * W). That doubling is
       # what OOM-killed a 9B fp32 load: Boehm's heap does not shrink, so each tensor's discarded
+      # Read `size` bytes into `ptr` in chunks, avoiding Crystal IO#read_fully's Int32 overflow
+      # on buffers > 2 GB. The 27B's embedding and lm_head are both 2.54 GB bf16.
+      private def read_fully_large(ptr : Pointer(UInt8), size : Int64)
+        remaining = size
+        offset = 0_i64
+        while remaining > 0
+          n = Math.min(remaining, 1_073_741_824_i64).to_i32
+          @io.read_fully(Slice.new(ptr + offset, n))
+          offset += n
+          remaining -= n
+        end
+      end
+
       # intermediate raises the high-water mark permanently even with a collect after every
       # layer. Streaming bf16 straight from the read buffer into the transposed destination keeps
       # per-tensor churn to one matrix plus one byte buffer.
@@ -176,15 +189,15 @@ module SHAInet
         dst = SimpleMatrix.new(cols, rows)
         byte_count = (info.data_offset_end - info.data_offset_start).to_i64
         @io.seek(@data_offset + info.data_offset_start)
-        raw = Bytes.new(byte_count)
-        @io.read_fully(raw)
+        raw = Pointer(UInt8).malloc(byte_count)
+        read_fully_large(raw, byte_count)
 
         case info.dtype
         when .f32?
-          ptr = raw.to_unsafe.as(Pointer(Float32))
+          ptr = raw.as(Pointer(Float32))
           rows.times { |i| cols.times { |j| dst[j, i] = ptr[i * cols + j] } }
         when .bf16?
-          ptr = raw.to_unsafe.as(Pointer(UInt16))
+          ptr = raw.as(Pointer(UInt16))
           rows.times do |i|
             cols.times do |j|
               bits = ptr[i * cols + j].to_u32 << 16
@@ -192,7 +205,7 @@ module SHAInet
             end
           end
         when .f16?
-          ptr = raw.to_unsafe.as(Pointer(UInt16))
+          ptr = raw.as(Pointer(UInt16))
           rows.times { |i| cols.times { |j| dst[j, i] = f16_to_f32(ptr[i * cols + j]) } }
         else
           # Uncommon dtypes fall back to the general reader; correctness over peak memory.
@@ -226,15 +239,40 @@ module SHAInet
         byte_count = (info.data_offset_end - info.data_offset_start).to_i64
         @io.seek(@data_offset + info.data_offset_start)
 
-        if info.dtype.f32?
-          # Fast path: raw memcpy (F32 LE on disk → F32 LE in memory)
+        case info.dtype
+        when .f32?
+          # Fast path: raw memcpy (F32 LE on disk -> F32 LE in memory)
           expected = count.to_i64 * 4
           raise "SafeTensors: tensor '#{name}' byte_count #{byte_count} != expected #{expected}" if byte_count != expected
-          raw = Bytes.new(byte_count)
-          @io.read_fully(raw)
-          raw.to_unsafe.copy_to(m.data.to_unsafe.as(Pointer(UInt8)), byte_count)
+          raw_ptr = Pointer(UInt8).malloc(byte_count)
+          read_fully_large(raw_ptr, byte_count)
+          raw_ptr.copy_to(m.data.to_unsafe.as(Pointer(UInt8)), byte_count)
+        when .bf16?
+          # Stream bf16 -> fp32 in chunks to avoid a single 2.5 GB Bytes allocation.
+          # Crystal's Bytes.new and IO#read_fully overflow on > 2 GB because the GC allocation
+          # and the read loop use Int32 internally.
+          chunk_elems = 1_048_576 # 1M elements = 2 MB bf16 per chunk
+          chunk_buf = Bytes.new(chunk_elems * 2)
+          offset = 0
+          remaining = count
+          while remaining > 0
+            n = Math.min(remaining, chunk_elems)
+            @io.read_fully(chunk_buf[0, n * 2])
+            ptr = chunk_buf.to_unsafe.as(Pointer(UInt16))
+            n.times do |i|
+              bits = ptr[i].to_u32 << 16
+              m.data[offset + i] = pointerof(bits).as(Pointer(Float32)).value
+            end
+            offset += n
+            remaining -= n
+          end
+        when .f16?
+          raw_ptr = Pointer(UInt8).malloc(byte_count)
+          read_fully_large(raw_ptr, byte_count)
+          ptr = raw_ptr.as(Pointer(UInt16))
+          count.times { |i| m.data[i] = f16_to_f32(ptr[i]) }
         else
-          # Slow path: convert from other dtypes
+          # Remaining dtypes (f64 etc.) through the general reader.
           data = read_f32(name)
           data.size.times { |i| m.data[i] = data[i] }
         end
