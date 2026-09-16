@@ -505,19 +505,39 @@ module SHAInet
     # No-op unless the layer is gated, so every other architecture pays one nil check. The gate
     # is computed from the NORMED block input, the same source as q/k/v, because it arrives fused
     # into the same projection.
+    # Multiply the attention output by its gate, elementwise, before w_o.
+    #
+    # SIGMOID, not SiLU. HF's gated attention applies `attn_output * torch.sigmoid(gate)`, and
+    # SiLU(g) = g * sigmoid(g) carries an extra factor of the pre-activation, which is unbounded.
+    # Measured on Qwen3.5-9B: with SiLU the model scored 12.06 nats against 12.42 for chance and
+    # its top logits sat near 5.5, while simply DELETING the gate scored 10.01 with logits near
+    # 14.4 -- a gate that made the model worse than no gate at all is how the extra factor showed
+    # up. The control model's healthy logits are 16-19, for scale.
+    #
+    # SHAINET_ATTN_GATE_ACT=silu restores the old behaviour, which is how the A/B was taken.
     private def apply_attn_gate!(output : SimpleMatrix, x : SimpleMatrix, row_offset : Int32) : Nil
       wg = @w_gate_attn
       return if wg.nil?
       rows = output.rows
       cols = output.cols
       raise "attention gate is [#{wg.rows}, #{wg.cols}], expected [#{x.cols}, #{cols}]" unless wg.rows == x.cols && wg.cols == cols
+      silu = self.class.attn_gate_silu?
       rows.times do |t|
         cols.times do |j|
           acc = 0.0
           x.cols.times { |i| acc += x[row_offset + t, i].to_f64 * wg[i, j].to_f64 }
-          output[t, j] = output[t, j].to_f64 * (acc / (1.0 + Math.exp(-acc)))
+          g = 1.0 / (1.0 + Math.exp(-acc))
+          output[t, j] = output[t, j].to_f64 * (silu ? acc * g : g)
         end
       end
+    end
+
+    @@attn_gate_silu : Bool? = nil
+
+    def self.attn_gate_silu? : Bool
+      flag = @@attn_gate_silu
+      return flag unless flag.nil?
+      @@attn_gate_silu = ENV.fetch("SHAINET_ATTN_GATE_ACT", "sigmoid") == "silu"
     end
 
     private def attention_full_cpu(x : SimpleMatrix) : SimpleMatrix

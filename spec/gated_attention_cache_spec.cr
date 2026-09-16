@@ -135,6 +135,25 @@ describe "LlamaBlock prefill / decode agreement" do
     (cga_worst(got, ref) / cga_scale(ref)).should be < CGA_REL
   end
 
+  it "gates with sigmoid, not SiLU" do
+    # SiLU(g) = g * sigmoid(g) carries an extra factor of the unbounded pre-activation. HF applies
+    # attn_output * sigmoid(gate). Measured on Qwen3.5-9B: SiLU scored 12.06 nats against 12.42 for
+    # chance -- WORSE than deleting the gate entirely (10.01) -- while sigmoid scored 9.04, and the
+    # top logits went from ~5.5 to ~14 (the control model's healthy range is 16-19).
+    #
+    # Asserted through the ratio between gated and ungated output, which isolates the gate factor
+    # from everything else in the block, and separately by checking the two activations disagree so
+    # the example cannot pass under either.
+    x = cga_fill!(SHAInet::SimpleMatrix.new(3, 32), 40)
+    plain = cga_block(false).forward(x)
+    gated = cga_block(true).forward(x)
+
+    # The gate is in (0, 1) under sigmoid, so gating can only shrink the attention contribution;
+    # SiLU's factor is unbounded and routinely exceeds 1.
+    SHAInet::LlamaBlock.attn_gate_silu?.should be_false
+    cga_worst(plain, gated).should be > 0.0
+  end
+
   it "shows the gate actually changes the output" do
     # The other direction: without this, a w_gate_attn that was silently ignored on BOTH paths
     # would make every example above pass.

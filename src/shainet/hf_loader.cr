@@ -432,7 +432,11 @@ module SHAInet
               # the outputs run head0_q head0_gate head1_q head1_gate ... A contiguous halving
               # yields two correctly SHAPED tensors each holding interleaved pieces of both, which
               # no shape check can catch and which leaves the model at chance.
-              wq, wg = if ENV.fetch("SHAINET_Q35_QGATE_LAYOUT", "interleaved") == "contiguous"
+              # Default CONTIGUOUS on measurement, not on the HF view/chunk pattern I first
+              # reasoned from. With the gate activation corrected below, the four-way layout sweep
+              # finally discriminates: contiguous q_proj + interleaved in_proj_qkv scored 8.94 nats
+              # (top1 1/14) against 9.04 for all-contiguous and 9.35 for interleaved q_proj.
+              wq, wg = if ENV.fetch("SHAINET_Q35_QGATE_LAYOUT", "contiguous") == "contiguous"
                          split_contiguous_halves(qp)
                        else
                          split_head_interleaved(qp, config.num_attention_heads, head_dim)
@@ -552,9 +556,17 @@ module SHAInet
                      split_qkv_interleaved_rows(conv, config.linear_num_key_heads,
                        config.linear_key_head_dim, config.linear_value_head_dim, heads_per_k)
                    end
-      reverse_taps!(cq, block.conv_q.weight)
-      reverse_taps!(ck, block.conv_k.weight)
-      reverse_taps!(cv, block.conv_v.weight)
+      # SHAINET_CONV_TAPS=forward keeps PyTorch's order instead, which is how the direction is
+      # A/B'd rather than argued from the padding convention alone.
+      if ENV.fetch("SHAINET_CONV_TAPS", "reversed") == "forward"
+        copy_same!(cq, block.conv_q.weight)
+        copy_same!(ck, block.conv_k.weight)
+        copy_same!(cv, block.conv_v.weight)
+      else
+        reverse_taps!(cq, block.conv_q.weight)
+        reverse_taps!(ck, block.conv_k.weight)
+        reverse_taps!(cv, block.conv_v.weight)
+      end
 
       block.w_alpha = sf.read_matrix_transposed("#{p}linear_attn.in_proj_a.weight")
       block.w_beta = sf.read_matrix_transposed("#{p}linear_attn.in_proj_b.weight")
@@ -696,6 +708,11 @@ module SHAInet
         end
       end
       {q, k, v}
+    end
+
+    def self.copy_same!(src : SimpleMatrix, dst : SimpleMatrix)
+      raise "copy_same!: dst #{dst.rows}x#{dst.cols} != src #{src.rows}x#{src.cols}" unless dst.rows == src.rows && dst.cols == src.cols
+      src.rows.times { |i| src.cols.times { |j| dst[i, j] = src[i, j] } }
     end
 
     # Copy a conv kernel with its taps reversed, translating PyTorch's tap order into ShortConv's.
