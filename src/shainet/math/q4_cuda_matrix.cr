@@ -197,6 +197,22 @@ module SHAInet
     end
 
     # Copy host 4-bit weights, super-block scales and byte sub-scales to device.
+    # Load a pre-quantized weight from three raw files on disk, skipping the fp32 intermediate
+    # and the Q4 packing entirely. This is what makes the second load fast.
+    def self.from_files(rows : Int32, cols : Int32, q_path : String, d_path : String, sub_path : String) : Q4CudaMatrix
+      qm = new(rows, cols)
+      q_bytes = File.read(q_path).to_slice
+      d_bytes = File.read(d_path).to_slice
+      sub_bytes = File.read(sub_path).to_slice
+      raise "q size mismatch: #{q_bytes.size} vs #{qm.@q_bytes}" unless q_bytes.size.to_u64 == qm.@q_bytes
+      raise "d size mismatch: #{d_bytes.size} vs #{qm.@d_bytes}" unless d_bytes.size.to_u64 == qm.@d_bytes
+      raise "sub size mismatch: #{sub_bytes.size} vs #{qm.@sub_bytes}" unless sub_bytes.size.to_u64 == qm.@sub_bytes
+      CUDA.memcpy(qm.q_ptr.as(Pointer(Void)), q_bytes.to_unsafe.as(Pointer(Void)), qm.@q_bytes, CUDA::MemcpyKind::HostToDevice)
+      CUDA.memcpy(qm.d_ptr.as(Pointer(Void)), d_bytes.to_unsafe.as(Pointer(Void)), qm.@d_bytes, CUDA::MemcpyKind::HostToDevice)
+      CUDA.memcpy(qm.sub_ptr.as(Pointer(Void)), sub_bytes.to_unsafe.as(Pointer(Void)), qm.@sub_bytes, CUDA::MemcpyKind::HostToDevice)
+      qm
+    end
+
     def upload(q_host : Array(UInt8), d_host : Array(Float32), sub_host : Array(UInt8))
       raise ArgumentError.new("q size mismatch") unless q_host.size.to_u64 == @q_bytes
       raise ArgumentError.new("d size mismatch") unless (d_host.size.to_u64 * 4_u64) == @d_bytes

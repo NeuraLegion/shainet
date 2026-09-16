@@ -365,6 +365,14 @@ module SHAInet
         eps = config.rms_norm_eps
         head_dim = config.head_dim || (d // config.num_attention_heads)
         do_quant = quantize && CUDA.fully_available?
+
+        # Fast path: if a .q4 cache exists from a previous load, read the pre-packed Q4 weights
+        # directly, skipping the bf16->fp32->Q4 pipeline that takes ~295 s on a 9B.
+        cache_dir = File.join(model_dir, ".q4")
+        cache_manifest_path = File.join(cache_dir, "manifest.json")
+        if do_quant && bits == 4 && File.exists?(cache_manifest_path)
+          return load_qwen35_from_cache(model_dir, config, types, cache_dir, cache_manifest_path)
+        end
         Log.warn { "qwen3_5: quantize requested but CUDA kernels are unavailable, staying fp32 (a 9B needs 33.9 GiB of host RAM this way)" } if quantize && !do_quant
         dense_offload = ENV.fetch("SHAINET_DENSE_OFFLOAD", "0") == "1"
         if dense_offload && !(do_quant && bits == 4)
@@ -521,6 +529,13 @@ module SHAInet
           emb_layer.to_host! if ENV.fetch("SHAINET_EMBED_HOST", "1") != "0"
           GC.collect
           Log.info { "qwen3_5: quantized to #{bits}-bit#{dense_offload ? " (dense offload)" : ""}" }
+
+          # Export the Q4 weights so the next load skips the bf16->fp32->Q4 pipeline.
+          # Saves ~5 GiB to disk (vs 19 GiB bf16) and cuts subsequent loads from ~295 s to seconds.
+          cache_dir = File.join(model_dir, ".q4")
+          unless File.exists?(File.join(cache_dir, "manifest.json"))
+            export_q4_cache(net, cache_dir)
+          end
         end
 
         net
@@ -649,6 +664,224 @@ module SHAInet
     private def self.rms_gamma_offset(m : SimpleMatrix) : SimpleMatrix
       m.rows.times { |i| m.cols.times { |j| m[i, j] = m[i, j].to_f64 + 1.0 } }
       m
+    end
+
+    # Load from a .q4 cache: build the same network structure, but read pre-packed Q4 bytes
+    # instead of going through bf16 -> fp32 -> Q4. The embedding and 1-D weights (norms, biases,
+    # a_log, dt_bias, conv kernels) still come from the original safetensors since they are tiny
+    # and not quantized.
+    private def self.load_qwen35_from_cache(model_dir : String, config : LlamaConfig,
+                                            types : Array(String), cache_dir : String,
+                                            manifest_path : String) : Network
+      manifest = Hash(String, JSON::Any).from_json(File.read(manifest_path))
+      sf = open_safetensors(model_dir)
+      begin
+        d = config.hidden_size
+        ff = config.intermediate_size
+        eps = config.rms_norm_eps
+        head_dim = config.head_dim || (d // config.num_attention_heads)
+
+        net = Network.new
+        net.add_layer(:input, 1)
+        net.add_layer(:embedding, d, vocab_size: config.vocab_size)
+        emb_layer = net.hidden_layers.find(&.is_a?(EmbeddingLayer)).as(EmbeddingLayer)
+        embed = sf.read_matrix("model.language_model.embed_tokens.weight")
+        config.vocab_size.times { |i| d.times { |j| emb_layer.embeddings[i, j] = embed[i, j] } }
+        GC.collect
+        @@progress.try &.call(0, types.size)
+
+        types.each_with_index do |t, idx|
+          p = "model.language_model.layers.#{idx}."
+          if t == "linear_attention"
+            net.add_layer("gated_deltanet", d, num_heads: config.linear_num_value_heads,
+              ff_hidden: ff, num_kv_heads: config.linear_num_key_heads,
+              eps: eps, head_dim: config.linear_key_head_dim,
+              linear_conv_kernel: config.linear_conv_kernel_dim)
+            block = net.hidden_layers.last.as(GatedDeltaNetBlock)
+            # Q4 weights from cache
+            block.w_q = load_q4_cached(cache_dir, "layer.#{idx}.w_q", manifest).not_nil!
+            block.w_k = load_q4_cached(cache_dir, "layer.#{idx}.w_k", manifest).not_nil!
+            block.w_v = load_q4_cached(cache_dir, "layer.#{idx}.w_v", manifest).not_nil!
+            block.w_o = load_q4_cached(cache_dir, "layer.#{idx}.w_o", manifest).not_nil!
+            block.w_gate = load_q4_cached(cache_dir, "layer.#{idx}.w_gate", manifest).not_nil!
+            # Small fp32 weights from the checkpoint
+            block.w_alpha = sf.read_matrix_transposed("#{p}linear_attn.in_proj_a.weight")
+            block.w_beta = sf.read_matrix_transposed("#{p}linear_attn.in_proj_b.weight")
+            block.w_alpha = block.w_alpha.as(SimpleMatrix).to_cuda if CUDA.fully_available?
+            block.w_beta = block.w_beta.as(SimpleMatrix).to_cuda if CUDA.fully_available?
+            a_log = sf.read_matrix("#{p}linear_attn.A_log")
+            dt_bias = sf.read_matrix("#{p}linear_attn.dt_bias")
+            config.linear_num_value_heads.times do |h|
+              block.a_log[h] = a_log[0, h].to_f64
+              block.dt_bias[h] = dt_bias[0, h].to_f64
+            end
+            # Conv kernels (tiny, not quantized)
+            k_dim = config.linear_num_key_heads * config.linear_key_head_dim
+            v_dim = config.linear_num_value_heads * config.linear_value_head_dim
+            conv = sf.read_matrix("#{p}linear_attn.conv1d.weight")
+            cq, ck, cv = split_qkv_contiguous_rows(conv, k_dim, v_dim)
+            reverse_taps!(cq, block.conv_q.weight)
+            reverse_taps!(ck, block.conv_k.weight)
+            reverse_taps!(cv, block.conv_v.weight)
+            block.out_norm.gamma = sf.read_matrix("#{p}linear_attn.norm.weight")
+            block.norm1.gamma = rms_gamma_offset(sf.read_matrix("#{p}input_layernorm.weight"))
+            block.norm2.gamma = rms_gamma_offset(sf.read_matrix("#{p}post_attention_layernorm.weight"))
+            block.norm1.to_gpu!
+            block.norm2.to_gpu!
+            block.out_norm.to_gpu!
+            block.ffn.to_gpu!(true, 4)
+            # FFN from cache
+            ffn = block.ffn
+            ffn.gate_proj = load_q4_cached(cache_dir, "layer.#{idx}.ffn.gate", manifest).not_nil!
+            ffn.up_proj = load_q4_cached(cache_dir, "layer.#{idx}.ffn.up", manifest).not_nil!
+            ffn.down_proj = load_q4_cached(cache_dir, "layer.#{idx}.ffn.down", manifest).not_nil!
+          else
+            net.add_layer(:llama, d, num_heads: config.num_attention_heads, ff_hidden: ff,
+              num_kv_heads: config.num_key_value_heads, eps: eps, head_dim: config.head_dim)
+            block = net.hidden_layers.last.as(LlamaBlock)
+            block.rope_theta = config.rope_theta
+            block.rope_freqs = compute_rope_freqs(config, head_dim)
+            block.rotary_dim = (head_dim * config.partial_rotary_factor).round.to_i if config.partial_rotary_factor < 1.0
+            # Q4 weights from cache
+            block.w_q = load_q4_cached(cache_dir, "layer.#{idx}.w_q", manifest).not_nil!
+            block.w_k = load_q4_cached(cache_dir, "layer.#{idx}.w_k", manifest).not_nil!
+            block.w_v = load_q4_cached(cache_dir, "layer.#{idx}.w_v", manifest).not_nil!
+            block.w_o = load_q4_cached(cache_dir, "layer.#{idx}.w_o", manifest).not_nil!
+            if cached_gate = load_q4_cached(cache_dir, "layer.#{idx}.w_gate_attn", manifest)
+              block.w_gate_attn = cached_gate
+            end
+            # Small fp32 weights from the checkpoint
+            qn = rms_gamma_offset(sf.read_matrix("#{p}self_attn.q_norm.weight"))
+            kn = rms_gamma_offset(sf.read_matrix("#{p}self_attn.k_norm.weight"))
+            block.q_norm = Array(Float32).new(qn.cols) { |i| qn[0, i].to_f32 }
+            block.k_norm = Array(Float32).new(kn.cols) { |i| kn[0, i].to_f32 }
+            block.norm1.gamma = rms_gamma_offset(sf.read_matrix("#{p}input_layernorm.weight"))
+            block.norm2.gamma = rms_gamma_offset(sf.read_matrix("#{p}post_attention_layernorm.weight"))
+            block.norm1.to_gpu!
+            block.norm2.to_gpu!
+            ffn = block.ffn.as(SwiGLUFF)
+            ffn.gate_proj = load_q4_cached(cache_dir, "layer.#{idx}.ffn.gate", manifest).not_nil!
+            ffn.up_proj = load_q4_cached(cache_dir, "layer.#{idx}.ffn.up", manifest).not_nil!
+            ffn.down_proj = load_q4_cached(cache_dir, "layer.#{idx}.ffn.down", manifest).not_nil!
+          end
+          @@progress.try &.call(idx + 1, types.size)
+        end
+
+        net.add_layer(:output, config.vocab_size, activation_function: SHAInet.identity)
+        net.fully_connect
+
+        final_norm = RMSNorm.new(d, eps)
+        final_norm.gamma = rms_gamma_offset(sf.read_matrix("model.language_model.norm.weight"))
+        net.final_norm = final_norm
+
+        output_layer = net.output_layers.first
+        output_layer.biases = SimpleMatrix.new(1, config.vocab_size)
+        # lm_head from cache
+        if cached_head = load_q4_cached(cache_dir, "lm_head", manifest)
+          net.lm_head_q = cached_head
+        else
+          head_name = config.tie_word_embeddings ? "model.language_model.embed_tokens.weight" : "lm_head.weight"
+          output_layer.weights = sf.read_matrix_transposed(head_name)
+          net.quantize!(4)
+        end
+        net.quantize_weights = true
+        emb_layer.to_host! if ENV.fetch("SHAINET_EMBED_HOST", "1") != "0"
+        Log.info { "qwen3_5: loaded from Q4 cache (#{cache_dir})" }
+        net
+      ensure
+        sf.close
+      end
+    end
+
+    # Export every Q4 weight in a loaded network to a cache directory.
+    def self.export_q4_cache(net : Network, cache_dir : String)
+      Dir.mkdir_p(cache_dir)
+      manifest = Hash(String, Hash(String, Int64)).new
+      count = 0
+
+      net.hidden_layers.each_with_index do |layer, idx|
+        weights = case layer
+                  when LlamaBlock
+                    b = layer.as(LlamaBlock)
+                    pairs = [{"w_q", b.w_q}, {"w_k", b.w_k}, {"w_v", b.w_v}, {"w_o", b.w_o}]
+                    if wg = b.w_gate_attn
+                      pairs << {"w_gate_attn", wg}
+                    end
+                    if (f = b.ffn).is_a?(SwiGLUFF)
+                      pairs << {"ffn.gate", f.gate_proj}
+                      pairs << {"ffn.up", f.up_proj}
+                      pairs << {"ffn.down", f.down_proj}
+                    end
+                    pairs
+                  when GatedDeltaNetBlock
+                    b = layer.as(GatedDeltaNetBlock)
+                    [{"w_q", b.w_q}, {"w_k", b.w_k}, {"w_v", b.w_v}, {"w_o", b.w_o}, {"w_gate", b.w_gate}].tap do |pairs|
+                      if (f = b.ffn).is_a?(SwiGLUFF)
+                        pairs << {"ffn.gate", f.gate_proj}
+                        pairs << {"ffn.up", f.up_proj}
+                        pairs << {"ffn.down", f.down_proj}
+                      end
+                    end
+                  else
+                    [] of {String, SimpleMatrix | CudaMatrix | QuantizedWeight}
+                  end
+
+        weights.each do |name, w|
+          next unless w.is_a?(Q4CudaMatrix)
+          key = "layer.#{idx}.#{name}"
+          q_host = Bytes.new(w.@q_bytes)
+          d_host = Bytes.new(w.@d_bytes)
+          sub_host = Bytes.new(w.@sub_bytes)
+          CUDA.memcpy(q_host.to_unsafe.as(Pointer(Void)), w.q_ptr.as(Pointer(Void)), w.@q_bytes, CUDA::MemcpyKind::DeviceToHost)
+          CUDA.memcpy(d_host.to_unsafe.as(Pointer(Void)), w.d_ptr.as(Pointer(Void)), w.@d_bytes, CUDA::MemcpyKind::DeviceToHost)
+          CUDA.memcpy(sub_host.to_unsafe.as(Pointer(Void)), w.sub_ptr.as(Pointer(Void)), w.@sub_bytes, CUDA::MemcpyKind::DeviceToHost)
+          base = key.gsub(".", "__")
+          File.write(File.join(cache_dir, "#{base}.q"), q_host)
+          File.write(File.join(cache_dir, "#{base}.d"), d_host)
+          File.write(File.join(cache_dir, "#{base}.sub"), sub_host)
+          manifest[key] = {"rows" => w.rows.to_i64, "cols" => w.cols.to_i64,
+                           "q_size" => q_host.size.to_i64, "d_size" => (d_host.size // 4).to_i64,
+                           "sub_size" => sub_host.size.to_i64}
+          count += 1
+        end
+      end
+
+      # lm_head
+      if (lq = net.@lm_head_q) && lq.is_a?(Q4CudaMatrix)
+        w = lq.as(Q4CudaMatrix)
+        q_host = Bytes.new(w.@q_bytes)
+        d_host = Bytes.new(w.@d_bytes)
+        sub_host = Bytes.new(w.@sub_bytes)
+        CUDA.memcpy(q_host.to_unsafe.as(Pointer(Void)), w.q_ptr.as(Pointer(Void)), w.@q_bytes, CUDA::MemcpyKind::DeviceToHost)
+        CUDA.memcpy(d_host.to_unsafe.as(Pointer(Void)), w.d_ptr.as(Pointer(Void)), w.@d_bytes, CUDA::MemcpyKind::DeviceToHost)
+        CUDA.memcpy(sub_host.to_unsafe.as(Pointer(Void)), w.sub_ptr.as(Pointer(Void)), w.@sub_bytes, CUDA::MemcpyKind::DeviceToHost)
+        File.write(File.join(cache_dir, "lm_head.q"), q_host)
+        File.write(File.join(cache_dir, "lm_head.d"), d_host)
+        File.write(File.join(cache_dir, "lm_head.sub"), sub_host)
+        manifest["lm_head"] = {"rows" => w.rows.to_i64, "cols" => w.cols.to_i64,
+                               "q_size" => q_host.size.to_i64, "d_size" => (d_host.size // 4).to_i64,
+                               "sub_size" => sub_host.size.to_i64}
+        count += 1
+      end
+
+      File.write(File.join(cache_dir, "manifest.json"), manifest.to_json)
+      total = Dir.children(cache_dir).sum { |f| File.size(File.join(cache_dir, f)) }
+      Log.info { "qwen3_5: exported #{count} Q4 weights to #{cache_dir} (#{"%.2f" % (total / 1_073_741_824.0)} GiB)" }
+    end
+
+    # Read a pre-quantized weight from the .q4 cache, returning nil if the cache does not have it.
+    # The quantize_model.cr script writes these files, and this is the read side.
+    def self.load_q4_cached(cache_dir : String, name : String, manifest : Hash(String, JSON::Any)) : Q4CudaMatrix?
+      entry = manifest[name]?
+      return unless entry
+      rows = entry["rows"].as_i
+      cols = entry["cols"].as_i
+      base = name.gsub(".", "__")
+      q_path = File.join(cache_dir, "#{base}.q")
+      d_path = File.join(cache_dir, "#{base}.d")
+      sub_path = File.join(cache_dir, "#{base}.sub")
+      return unless File.exists?(q_path) && File.exists?(d_path) && File.exists?(sub_path)
+      Q4CudaMatrix.from_files(rows, cols, q_path, d_path, sub_path)
     end
 
     def self.split_contiguous_halves(src : SimpleMatrix) : {SimpleMatrix, SimpleMatrix}
