@@ -90,7 +90,7 @@ module SHAInet
       # Read a tensor as Float32 array (handles F32 and F16 conversion)
       def read_f32(name : String) : Array(Float32)
         info = @tensors[name]? || raise "Tensor '#{name}' not found"
-        byte_count = (info.data_offset_end - info.data_offset_start).to_i32
+        byte_count = (info.data_offset_end - info.data_offset_start).to_i64
 
         @io.seek(@data_offset + info.data_offset_start)
         raw = Bytes.new(byte_count)
@@ -98,22 +98,22 @@ module SHAInet
 
         case info.dtype
         when .f32?
-          count = byte_count // 4
+          count = (byte_count // 4).to_i32
           Array(Float32).new(count) do |i|
             IO::ByteFormat::LittleEndian.decode(Float32, raw[i * 4, 4])
           end
         when .f16?
-          count = byte_count // 2
+          count = (byte_count // 2).to_i32
           Array(Float32).new(count) do |i|
             f16_to_f32(IO::ByteFormat::LittleEndian.decode(UInt16, raw[i * 2, 2]))
           end
         when .bf16?
-          count = byte_count // 2
+          count = (byte_count // 2).to_i32
           Array(Float32).new(count) do |i|
             bf16_to_f32(IO::ByteFormat::LittleEndian.decode(UInt16, raw[i * 2, 2]))
           end
         when .f64?
-          count = byte_count // 8
+          count = (byte_count // 8).to_i32
           Array(Float32).new(count) do |i|
             IO::ByteFormat::LittleEndian.decode(Float64, raw[i * 8, 8]).to_f32
           end
@@ -125,7 +125,7 @@ module SHAInet
       # Read a tensor as Float64 array
       def read_f64(name : String) : Array(Float64)
         info = @tensors[name]? || raise "Tensor '#{name}' not found"
-        byte_count = (info.data_offset_end - info.data_offset_start).to_i32
+        byte_count = (info.data_offset_end - info.data_offset_start).to_i64
 
         @io.seek(@data_offset + info.data_offset_start)
         raw = Bytes.new(byte_count)
@@ -133,22 +133,22 @@ module SHAInet
 
         case info.dtype
         when .f32?
-          count = byte_count // 4
+          count = (byte_count // 4).to_i32
           Array(Float64).new(count) do |i|
             IO::ByteFormat::LittleEndian.decode(Float32, raw[i * 4, 4]).to_f64
           end
         when .f64?
-          count = byte_count // 8
+          count = (byte_count // 8).to_i32
           Array(Float64).new(count) do |i|
             IO::ByteFormat::LittleEndian.decode(Float64, raw[i * 8, 8])
           end
         when .f16?
-          count = byte_count // 2
+          count = (byte_count // 2).to_i32
           Array(Float64).new(count) do |i|
             f16_to_f32(IO::ByteFormat::LittleEndian.decode(UInt16, raw[i * 2, 2])).to_f64
           end
         when .bf16?
-          count = byte_count // 2
+          count = (byte_count // 2).to_i32
           Array(Float64).new(count) do |i|
             bf16_to_f32(IO::ByteFormat::LittleEndian.decode(UInt16, raw[i * 2, 2])).to_f64
           end
@@ -174,7 +174,7 @@ module SHAInet
         rows = shape[0].to_i32
         cols = (shape.size == 3 && shape[1] == 1) ? shape[2].to_i32 : shape[1].to_i32
         dst = SimpleMatrix.new(cols, rows)
-        byte_count = (info.data_offset_end - info.data_offset_start).to_i32
+        byte_count = (info.data_offset_end - info.data_offset_start).to_i64
         @io.seek(@data_offset + info.data_offset_start)
         raw = Bytes.new(byte_count)
         @io.read_fully(raw)
@@ -223,12 +223,12 @@ module SHAInet
 
         m = SimpleMatrix.new(rows, cols)
         count = rows * cols
-        byte_count = (info.data_offset_end - info.data_offset_start).to_i32
+        byte_count = (info.data_offset_end - info.data_offset_start).to_i64
         @io.seek(@data_offset + info.data_offset_start)
 
         if info.dtype.f32?
           # Fast path: raw memcpy (F32 LE on disk → F32 LE in memory)
-          expected = count * 4
+          expected = count.to_i64 * 4
           raise "SafeTensors: tensor '#{name}' byte_count #{byte_count} != expected #{expected}" if byte_count != expected
           raw = Bytes.new(byte_count)
           @io.read_fully(raw)
