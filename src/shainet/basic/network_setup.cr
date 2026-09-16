@@ -40,7 +40,7 @@ module SHAInet
     # Quantized lm_head weight (populated by quantize! when CUDA is available).
     # Readable so callers and specs can inspect its residency (a Q4HostMatrix
     # reports device_bytes 0; a Q4CudaMatrix reports its real VRAM footprint).
-    getter lm_head_q : QuantizedWeight?
+    property lm_head_q : QuantizedWeight?
     # Persistent decode buffers for the quantized lm_head GEMV (reused per token).
     @lm_head_x : CudaMatrix?
     @lm_head_r : CudaMatrix?
