@@ -59,6 +59,16 @@ module SHAInet
       json = JSON.parse(::File.read(config_path))
       model_type = json["model_type"]?.try(&.as_s) || raise "No model_type in config.json"
 
+      # If model_dir IS a .q4 cache directory (has manifest.json), load from it directly.
+      # This lets the user point the agent at the cache after deleting the original bf16 files:
+      #   ./agent ~/models/Qwen3.5-9B/.q4
+      manifest_path = File.join(model_dir, "manifest.json")
+      if File.exists?(manifest_path) && model_type == "qwen3_5"
+        config = load_llama_config(config_path)
+        types = config.layer_types || default_layer_types(config.num_hidden_layers)
+        return load_qwen35_from_cache(model_dir, config, types, model_dir, manifest_path)
+      end
+
       case model_type
       when "gpt2"
         load_gpt2(model_dir)
@@ -217,7 +227,7 @@ module SHAInet
 
         net
       ensure
-        sf.close
+        sf.try(&.close)
       end
     end
 
@@ -477,16 +487,21 @@ module SHAInet
             raise "#{p}self_attn.o_proj.weight gives #{wo.rows}x#{wo.cols}, expected #{q_dim}x#{d}" unless wo.rows == q_dim && wo.cols == d
             block.w_o = wo
             # q_norm / k_norm are standard Qwen3_5RMSNorm, so they carry the +1 offset too.
-            qn = rms_gamma_offset(sf.read_matrix("#{p}self_attn.q_norm.weight"))
-            kn = rms_gamma_offset(sf.read_matrix("#{p}self_attn.k_norm.weight"))
+            attn_hd = config.head_dim || (d // config.num_attention_heads)
+            qn = rms_gamma_offset(read_small(sf, cache_dir, idx, "q_norm.bin",
+              "#{p}self_attn.q_norm.weight", 1, attn_hd))
+            kn = rms_gamma_offset(read_small(sf, cache_dir, idx, "k_norm.bin",
+              "#{p}self_attn.k_norm.weight", 1, attn_hd))
             block.q_norm = Array(Float32).new(qn.cols) { |i| qn[0, i].to_f32 }
             block.k_norm = Array(Float32).new(kn.cols) { |i| kn[0, i].to_f32 }
             ffn = block.ffn.as(SwiGLUFF)
             ffn.gate_proj = sf.read_matrix_transposed("#{p}mlp.gate_proj.weight")
             ffn.up_proj = sf.read_matrix_transposed("#{p}mlp.up_proj.weight")
             ffn.down_proj = sf.read_matrix_transposed("#{p}mlp.down_proj.weight")
-            block.norm1.gamma = rms_gamma_offset(sf.read_matrix("#{p}input_layernorm.weight"))
-            block.norm2.gamma = rms_gamma_offset(sf.read_matrix("#{p}post_attention_layernorm.weight"))
+            block.norm1.gamma = rms_gamma_offset(read_small(sf, cache_dir, idx, "norm1.bin",
+              "#{p}input_layernorm.weight", 1, d))
+            block.norm2.gamma = rms_gamma_offset(read_small(sf, cache_dir, idx, "norm2.bin",
+              "#{p}post_attention_layernorm.weight", 1, d))
           end
           # Quantize BEFORE the next layer is read, so at most one layer's fp32 weights are
           # live at a time. Deferring to a post-load net.quantize! would need the whole fp32
@@ -532,9 +547,18 @@ module SHAInet
 
           # Export the Q4 weights so the next load skips the bf16->fp32->Q4 pipeline.
           # Saves ~5 GiB to disk (vs 19 GiB bf16) and cuts subsequent loads from ~295 s to seconds.
+          # The cache is standalone: it includes config.json, tokenizer.json and the embedding,
+          # so the original bf16 safetensors can be deleted afterward.
           cache_dir = File.join(model_dir, ".q4")
           unless File.exists?(File.join(cache_dir, "manifest.json"))
             export_q4_cache(net, cache_dir)
+            # Copy the config and tokenizer so the cache is loadable on its own.
+            ["config.json", "tokenizer.json", "tokenizer_config.json", "generation_config.json"].each do |fname|
+              src = File.join(model_dir, fname)
+              File.copy(src, File.join(cache_dir, fname)) if File.exists?(src)
+            end
+            # Save the small per-layer fp32 weights that the cache loader needs.
+            export_small_weights(sf, cache_dir, types, config)
           end
         end
 
@@ -674,7 +698,10 @@ module SHAInet
                                             types : Array(String), cache_dir : String,
                                             manifest_path : String) : Network
       manifest = Hash(String, JSON::Any).from_json(File.read(manifest_path))
-      sf = open_safetensors(model_dir)
+      # If the cache has config.json, it is standalone and we can load without the safetensors.
+      # Otherwise fall back to the originals for the small weights.
+      standalone = File.exists?(File.join(cache_dir, "config.json"))
+      sf = standalone ? nil : open_safetensors(model_dir)
       begin
         d = config.hidden_size
         ff = config.intermediate_size
@@ -685,8 +712,17 @@ module SHAInet
         net.add_layer(:input, 1)
         net.add_layer(:embedding, d, vocab_size: config.vocab_size)
         emb_layer = net.hidden_layers.find(&.is_a?(EmbeddingLayer)).as(EmbeddingLayer)
-        embed = sf.read_matrix("model.language_model.embed_tokens.weight")
-        config.vocab_size.times { |i| d.times { |j| emb_layer.embeddings[i, j] = embed[i, j] } }
+        emb_bin = File.join(cache_dir, "embedding.bin")
+        if File.exists?(emb_bin)
+          File.open(emb_bin, "r") do |f|
+            f.read(emb_layer.embeddings.as(SHAInet::SimpleMatrix).data.to_unsafe.as(Pointer(UInt8)).to_slice(config.vocab_size * d * 4))
+          end
+        elsif sf
+          embed = sf.read_matrix("model.language_model.embed_tokens.weight")
+          config.vocab_size.times { |i| d.times { |j| emb_layer.embeddings[i, j] = embed[i, j] } }
+        else
+          raise "standalone Q4 cache missing #{emb_bin}"
+        end
         GC.collect
         @@progress.try &.call(0, types.size)
 
@@ -705,12 +741,14 @@ module SHAInet
             block.w_o = load_q4_cached(cache_dir, "layer.#{idx}.w_o", manifest).not_nil!
             block.w_gate = load_q4_cached(cache_dir, "layer.#{idx}.w_gate", manifest).not_nil!
             # Small fp32 weights from the checkpoint
-            block.w_alpha = sf.read_matrix_transposed("#{p}linear_attn.in_proj_a.weight")
-            block.w_beta = sf.read_matrix_transposed("#{p}linear_attn.in_proj_b.weight")
+            block.w_alpha = read_small_transposed(sf, cache_dir, idx, "w_alpha.bin",
+              "#{p}linear_attn.in_proj_a.weight", d, config.linear_num_value_heads)
+            block.w_beta = read_small_transposed(sf, cache_dir, idx, "w_beta.bin",
+              "#{p}linear_attn.in_proj_b.weight", d, config.linear_num_value_heads)
             block.w_alpha = block.w_alpha.as(SimpleMatrix).to_cuda if CUDA.fully_available?
             block.w_beta = block.w_beta.as(SimpleMatrix).to_cuda if CUDA.fully_available?
-            a_log = sf.read_matrix("#{p}linear_attn.A_log")
-            dt_bias = sf.read_matrix("#{p}linear_attn.dt_bias")
+            a_log = read_small(sf, cache_dir, idx, "a_log.bin", "#{p}linear_attn.A_log", 1, config.linear_num_value_heads)
+            dt_bias = read_small(sf, cache_dir, idx, "dt_bias.bin", "#{p}linear_attn.dt_bias", 1, config.linear_num_value_heads)
             config.linear_num_value_heads.times do |h|
               block.a_log[h] = a_log[0, h].to_f64
               block.dt_bias[h] = dt_bias[0, h].to_f64
@@ -718,14 +756,18 @@ module SHAInet
             # Conv kernels (tiny, not quantized)
             k_dim = config.linear_num_key_heads * config.linear_key_head_dim
             v_dim = config.linear_num_value_heads * config.linear_value_head_dim
-            conv = sf.read_matrix("#{p}linear_attn.conv1d.weight")
+            conv = read_small(sf, cache_dir, idx, "conv.bin", "#{p}linear_attn.conv1d.weight",
+              2 * k_dim + v_dim, config.linear_conv_kernel_dim)
             cq, ck, cv = split_qkv_contiguous_rows(conv, k_dim, v_dim)
             reverse_taps!(cq, block.conv_q.weight)
             reverse_taps!(ck, block.conv_k.weight)
             reverse_taps!(cv, block.conv_v.weight)
-            block.out_norm.gamma = sf.read_matrix("#{p}linear_attn.norm.weight")
-            block.norm1.gamma = rms_gamma_offset(sf.read_matrix("#{p}input_layernorm.weight"))
-            block.norm2.gamma = rms_gamma_offset(sf.read_matrix("#{p}post_attention_layernorm.weight"))
+            block.out_norm.gamma = read_small(sf, cache_dir, idx, "out_norm.bin",
+              "#{p}linear_attn.norm.weight", 1, config.linear_value_head_dim)
+            block.norm1.gamma = rms_gamma_offset(read_small(sf, cache_dir, idx, "norm1.bin",
+              "#{p}input_layernorm.weight", 1, d))
+            block.norm2.gamma = rms_gamma_offset(read_small(sf, cache_dir, idx, "norm2.bin",
+              "#{p}post_attention_layernorm.weight", 1, d))
             block.norm1.to_gpu!
             block.norm2.to_gpu!
             block.out_norm.to_gpu!
@@ -751,12 +793,17 @@ module SHAInet
               block.w_gate_attn = cached_gate
             end
             # Small fp32 weights from the checkpoint
-            qn = rms_gamma_offset(sf.read_matrix("#{p}self_attn.q_norm.weight"))
-            kn = rms_gamma_offset(sf.read_matrix("#{p}self_attn.k_norm.weight"))
+            attn_hd = config.head_dim || (d // config.num_attention_heads)
+            qn = rms_gamma_offset(read_small(sf, cache_dir, idx, "q_norm.bin",
+              "#{p}self_attn.q_norm.weight", 1, attn_hd))
+            kn = rms_gamma_offset(read_small(sf, cache_dir, idx, "k_norm.bin",
+              "#{p}self_attn.k_norm.weight", 1, attn_hd))
             block.q_norm = Array(Float32).new(qn.cols) { |i| qn[0, i].to_f32 }
             block.k_norm = Array(Float32).new(kn.cols) { |i| kn[0, i].to_f32 }
-            block.norm1.gamma = rms_gamma_offset(sf.read_matrix("#{p}input_layernorm.weight"))
-            block.norm2.gamma = rms_gamma_offset(sf.read_matrix("#{p}post_attention_layernorm.weight"))
+            block.norm1.gamma = rms_gamma_offset(read_small(sf, cache_dir, idx, "norm1.bin",
+              "#{p}input_layernorm.weight", 1, d))
+            block.norm2.gamma = rms_gamma_offset(read_small(sf, cache_dir, idx, "norm2.bin",
+              "#{p}post_attention_layernorm.weight", 1, d))
             block.norm1.to_gpu!
             block.norm2.to_gpu!
             ffn = block.ffn.as(SwiGLUFF)
@@ -771,7 +818,14 @@ module SHAInet
         net.fully_connect
 
         final_norm = RMSNorm.new(d, eps)
-        final_norm.gamma = rms_gamma_offset(sf.read_matrix("model.language_model.norm.weight"))
+        fn_bin = File.join(cache_dir, "final_norm.bin")
+        final_norm.gamma = if File.exists?(fn_bin)
+                             rms_gamma_offset(load_vector(fn_bin, d))
+                           elsif sf
+                             rms_gamma_offset(sf.read_matrix("model.language_model.norm.weight"))
+                           else
+                             raise "standalone Q4 cache missing #{fn_bin}"
+                           end
         net.final_norm = final_norm
 
         output_layer = net.output_layers.first
@@ -781,6 +835,7 @@ module SHAInet
           net.lm_head_q = cached_head
         else
           head_name = config.tie_word_embeddings ? "model.language_model.embed_tokens.weight" : "lm_head.weight"
+          raise "standalone Q4 cache missing lm_head" unless sf
           output_layer.weights = sf.read_matrix_transposed(head_name)
           net.quantize!(4)
         end
@@ -789,7 +844,7 @@ module SHAInet
         Log.info { "qwen3_5: loaded from Q4 cache (#{cache_dir})" }
         net
       ensure
-        sf.close
+        sf.try(&.close)
       end
     end
 
@@ -865,8 +920,83 @@ module SHAInet
       end
 
       File.write(File.join(cache_dir, "manifest.json"), manifest.to_json)
+
+      # Save the embedding as raw fp32 so the cache is self-contained.
+      emb = net.hidden_layers.find(&.is_a?(EmbeddingLayer))
+      if emb
+        e = emb.as(EmbeddingLayer).embeddings.as(SimpleMatrix)
+        File.open(File.join(cache_dir, "embedding.bin"), "w") do |f|
+          f.write(e.data.to_unsafe.as(Pointer(UInt8)).to_slice(e.rows * e.cols * 4))
+        end
+      end
+
       total = Dir.children(cache_dir).sum { |f| File.size(File.join(cache_dir, f)) }
       Log.info { "qwen3_5: exported #{count} Q4 weights to #{cache_dir} (#{"%.2f" % (total / 1_073_741_824.0)} GiB)" }
+    end
+
+    # Save the small per-layer fp32 weights (norms, conv kernels, a_log, dt_bias, etc.) as raw
+    # binary so the cache is self-contained and the original safetensors can be deleted.
+    private def self.export_small_weights(sf, cache_dir : String, types : Array(String), config : LlamaConfig)
+      types.each_with_index do |t, idx|
+        pre = "model.language_model.layers.#{idx}."
+        dir = File.join(cache_dir, "layer_#{idx}")
+        Dir.mkdir_p(dir)
+        if t == "linear_attention"
+          save_matrix(sf.read_matrix_transposed("#{pre}linear_attn.in_proj_a.weight"), File.join(dir, "w_alpha.bin"))
+          save_matrix(sf.read_matrix_transposed("#{pre}linear_attn.in_proj_b.weight"), File.join(dir, "w_beta.bin"))
+          save_matrix(sf.read_matrix("#{pre}linear_attn.A_log"), File.join(dir, "a_log.bin"))
+          save_matrix(sf.read_matrix("#{pre}linear_attn.dt_bias"), File.join(dir, "dt_bias.bin"))
+          save_matrix(sf.read_matrix("#{pre}linear_attn.conv1d.weight"), File.join(dir, "conv.bin"))
+          save_matrix(sf.read_matrix("#{pre}linear_attn.norm.weight"), File.join(dir, "out_norm.bin"))
+          save_matrix(sf.read_matrix("#{pre}input_layernorm.weight"), File.join(dir, "norm1.bin"))
+          save_matrix(sf.read_matrix("#{pre}post_attention_layernorm.weight"), File.join(dir, "norm2.bin"))
+        else
+          save_matrix(sf.read_matrix("#{pre}self_attn.q_norm.weight"), File.join(dir, "q_norm.bin"))
+          save_matrix(sf.read_matrix("#{pre}self_attn.k_norm.weight"), File.join(dir, "k_norm.bin"))
+          save_matrix(sf.read_matrix("#{pre}input_layernorm.weight"), File.join(dir, "norm1.bin"))
+          save_matrix(sf.read_matrix("#{pre}post_attention_layernorm.weight"), File.join(dir, "norm2.bin"))
+        end
+      end
+      save_matrix(sf.read_matrix("model.language_model.norm.weight"), File.join(cache_dir, "final_norm.bin"))
+    end
+
+    private def self.save_matrix(m : SimpleMatrix, path : String)
+      File.open(path, "w") { |f| f.write(m.data.to_unsafe.as(Pointer(UInt8)).to_slice(m.rows * m.cols * 4)) }
+    end
+
+    private def self.load_matrix(path : String, rows : Int32, cols : Int32) : SimpleMatrix
+      m = SimpleMatrix.new(rows, cols)
+      File.open(path, "r") { |f| f.read(m.data.to_unsafe.as(Pointer(UInt8)).to_slice(rows * cols * 4)) }
+      m
+    end
+
+    private def self.load_vector(path : String, size : Int32) : SimpleMatrix
+      load_matrix(path, 1, size)
+    end
+
+    # Read a small weight from the cache's binary files if standalone, otherwise from safetensors.
+    private def self.read_small(sf, cache_dir : String, idx : Int32, fname : String,
+                                hf_name : String, rows : Int32, cols : Int32) : SimpleMatrix
+      bin = File.join(cache_dir, "layer_#{idx}", fname)
+      if File.exists?(bin)
+        load_matrix(bin, rows, cols)
+      elsif sf
+        sf.read_matrix(hf_name)
+      else
+        raise "standalone Q4 cache missing #{bin}"
+      end
+    end
+
+    private def self.read_small_transposed(sf, cache_dir : String, idx : Int32, fname : String,
+                                           hf_name : String, rows : Int32, cols : Int32) : SimpleMatrix
+      bin = File.join(cache_dir, "layer_#{idx}", fname)
+      if File.exists?(bin)
+        load_matrix(bin, rows, cols)
+      elsif sf
+        sf.read_matrix_transposed(hf_name)
+      else
+        raise "standalone Q4 cache missing #{bin}"
+      end
     end
 
     # Read a pre-quantized weight from the .q4 cache, returning nil if the cache does not have it.
