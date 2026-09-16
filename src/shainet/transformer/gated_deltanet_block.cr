@@ -220,6 +220,22 @@ module SHAInet
         # the recurrence's stability depends on ||k|| = 1.
         GatedDeltaNet.l2_normalize!(qh)
         GatedDeltaNet.l2_normalize!(khm)
+        # Then scale q by 1/sqrt(head_k), as the reference kernel does unconditionally:
+        #
+        #   query = query / (query.shape[-1] ** 0.5)
+        #
+        # This is NOT cosmetic and it is NOT removed by the output norm, which is what I first
+        # assumed. RMSNorm is scale-invariant only while the variance dominates its epsilon, and
+        # here it does not: with the scale applied the core output's variance is ~1.9e-6 against an
+        # eps of 1e-6, so eps is about half of it. Dropping the scale makes the state 128x larger in
+        # variance, moves it out of the epsilon-dominated regime the trained weights expect, and
+        # changes every value the norm produces.
+        #
+        # Measured against a numpy transcription of the reference on the real checkpoint, layer 0:
+        # core rms 0.015739 without the scale against 0.001391 with it, a ratio of 11.31 = sqrt(128),
+        # which is how the missing factor was identified.
+        inv = 1.0 / Math.sqrt(@head_k.to_f64)
+        seq.times { |t| @head_k.times { |j| qh[t, j] = qh[t, j].to_f64 * inv } }
 
         out_h, st = if chunk > 1
                       GatedDeltaNet.chunked(qh, khm, vh, alpha[h], beta[h], @state[h], chunk: chunk)

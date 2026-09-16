@@ -432,11 +432,20 @@ module SHAInet
               # the outputs run head0_q head0_gate head1_q head1_gate ... A contiguous halving
               # yields two correctly SHAPED tensors each holding interleaved pieces of both, which
               # no shape check can catch and which leaves the model at chance.
-              # Default CONTIGUOUS on measurement, not on the HF view/chunk pattern I first
-              # reasoned from. With the gate activation corrected below, the four-way layout sweep
-              # finally discriminates: contiguous q_proj + interleaved in_proj_qkv scored 8.94 nats
-              # (top1 1/14) against 9.04 for all-contiguous and 9.35 for interleaved q_proj.
-              wq, wg = if ENV.fetch("SHAINET_Q35_QGATE_LAYOUT", "contiguous") == "contiguous"
+              # INTERLEAVED per head, from the reference implementation:
+              #
+              #   query, gate = torch.chunk(
+              #       self.q_proj(hidden_states).view(*input_shape, -1, self.head_dim * 2), 2, dim=-1)
+              #
+              # The view is (heads, 2 * head_dim) and the chunk is on the LAST dim, so the outputs
+              # run head0_q head0_gate head1_q head1_gate ...
+              #
+              # An earlier revision defaulted this to contiguous on the strength of an NLL sweep
+              # (8.94 nats contiguous against 9.35 interleaved). That was reading noise as signal:
+              # the spread was a few tenths of a nat on a model still 7 nats from the control, and
+              # the reference settles it. Keep the measurement subordinate to the reference when the
+              # reference exists.
+              wq, wg = if ENV.fetch("SHAINET_Q35_QGATE_LAYOUT", "interleaved") == "contiguous"
                          split_contiguous_halves(qp)
                        else
                          split_head_interleaved(qp, config.num_attention_heads, head_dim)
@@ -456,16 +465,17 @@ module SHAInet
             wo = sf.read_matrix_transposed("#{p}self_attn.o_proj.weight")
             raise "#{p}self_attn.o_proj.weight gives #{wo.rows}x#{wo.cols}, expected #{q_dim}x#{d}" unless wo.rows == q_dim && wo.cols == d
             block.w_o = wo
-            qn = sf.read_matrix("#{p}self_attn.q_norm.weight")
-            kn = sf.read_matrix("#{p}self_attn.k_norm.weight")
+            # q_norm / k_norm are standard Qwen3_5RMSNorm, so they carry the +1 offset too.
+            qn = rms_gamma_offset(sf.read_matrix("#{p}self_attn.q_norm.weight"))
+            kn = rms_gamma_offset(sf.read_matrix("#{p}self_attn.k_norm.weight"))
             block.q_norm = Array(Float32).new(qn.cols) { |i| qn[0, i].to_f32 }
             block.k_norm = Array(Float32).new(kn.cols) { |i| kn[0, i].to_f32 }
             ffn = block.ffn.as(SwiGLUFF)
             ffn.gate_proj = sf.read_matrix_transposed("#{p}mlp.gate_proj.weight")
             ffn.up_proj = sf.read_matrix_transposed("#{p}mlp.up_proj.weight")
             ffn.down_proj = sf.read_matrix_transposed("#{p}mlp.down_proj.weight")
-            block.norm1.gamma = sf.read_matrix("#{p}input_layernorm.weight")
-            block.norm2.gamma = sf.read_matrix("#{p}post_attention_layernorm.weight")
+            block.norm1.gamma = rms_gamma_offset(sf.read_matrix("#{p}input_layernorm.weight"))
+            block.norm2.gamma = rms_gamma_offset(sf.read_matrix("#{p}post_attention_layernorm.weight"))
           end
           # Quantize BEFORE the next layer is read, so at most one layer's fp32 weights are
           # live at a time. Deferring to a post-load net.quantize! would need the whole fp32
@@ -489,7 +499,7 @@ module SHAInet
         net.fully_connect
 
         final_norm = RMSNorm.new(d, eps)
-        final_norm.gamma = sf.read_matrix("model.language_model.norm.weight")
+        final_norm.gamma = rms_gamma_offset(sf.read_matrix("model.language_model.norm.weight"))
         net.final_norm = final_norm
 
         output_layer = net.output_layers.first
@@ -533,7 +543,13 @@ module SHAInet
       expected = 2 * k_dim + v_dim
       raise "#{p}linear_attn.in_proj_qkv.weight has #{qkv.cols} columns, expected #{expected}" unless qkv.cols == expected
       heads_per_k = config.linear_num_value_heads // config.linear_num_key_heads
-      wq, wk, wv = if ENV.fetch("SHAINET_Q35_QKV_LAYOUT", "interleaved") == "contiguous"
+      # CONTIGUOUS, from the reference implementation:
+      #
+      #   query, key, value = torch.split(mixed_qkv, [key_dim, key_dim, value_dim], dim=-1)
+      #
+      # A plain three-way split, NOT the per-key-head interleaving Qwen3-Next uses for its fused
+      # in_proj_qkvz. This checkpoint keeps z in a separate tensor, and the split follows.
+      wq, wk, wv = if ENV.fetch("SHAINET_Q35_QKV_LAYOUT", "contiguous") == "contiguous"
                      split_qkv_contiguous(qkv, k_dim, v_dim)
                    else
                      split_qkv_interleaved(qkv, config.linear_num_key_heads,
@@ -550,7 +566,8 @@ module SHAInet
       # weight[c, j] as the tap j positions BACK, making j = 0 current.
       conv = sf.read_matrix("#{p}linear_attn.conv1d.weight") # [2*k_dim + v_dim, kernel]
       raise "#{p}linear_attn.conv1d.weight has #{conv.rows} rows, expected #{expected}" unless conv.rows == expected
-      cq, ck, cv = if ENV.fetch("SHAINET_Q35_QKV_LAYOUT", "interleaved") == "contiguous"
+      # Same layout as in_proj_qkv, since conv1d runs over those channels in that order.
+      cq, ck, cv = if ENV.fetch("SHAINET_Q35_QKV_LAYOUT", "contiguous") == "contiguous"
                      split_qkv_contiguous_rows(conv, k_dim, v_dim)
                    else
                      split_qkv_interleaved_rows(conv, config.linear_num_key_heads,
@@ -580,9 +597,11 @@ module SHAInet
         block.dt_bias[h] = dt_bias[0, h].to_f64
       end
 
+      # out_norm is Qwen3_5RMSNormGated, which initializes to ONES and multiplies directly -- NOT
+      # offset. The two conventions sit side by side in the same layer.
       block.out_norm.gamma = sf.read_matrix("#{p}linear_attn.norm.weight")
-      block.norm1.gamma = sf.read_matrix("#{p}input_layernorm.weight")
-      block.norm2.gamma = sf.read_matrix("#{p}post_attention_layernorm.weight")
+      block.norm1.gamma = rms_gamma_offset(sf.read_matrix("#{p}input_layernorm.weight"))
+      block.norm2.gamma = rms_gamma_offset(sf.read_matrix("#{p}post_attention_layernorm.weight"))
 
       ffn = block.ffn
       ffn.gate_proj = sf.read_matrix_transposed("#{p}mlp.gate_proj.weight")
@@ -609,6 +628,26 @@ module SHAInet
     # rather than argued: on a 26-token English sentence both layouts measured at chance
     # (contiguous 12.19 nats, interleaved 12.50, against ln(248320) = 12.42), which says the
     # dominant fault is elsewhere and neither choice is yet evidence-backed.
+    # Qwen3.5 stores every STANDARD RMSNorm weight as an offset from one.
+    #
+    #   class Qwen3_5RMSNorm:
+    #       self.weight = nn.Parameter(torch.zeros(dim))     # zeros, not ones
+    #       output = self._norm(x) * (1.0 + self.weight)
+    #
+    # So a checkpoint gamma near 0 means "leave the normalized value alone", and reading it as a
+    # plain multiplier scales the whole residual stream toward zero. Measured on Qwen3.5-9B against
+    # the real transformers implementation: input_layernorm output rms 0.116 read plainly against
+    # 1.090 with the offset applied -- a factor of 9.4 at the FIRST norm of the FIRST layer, which
+    # then compounds through 32 layers and 5 norms each.
+    #
+    # Qwen3_5RMSNormGated is the exception: it initializes to ONES and applies `weight * x`
+    # directly, so linear_attn.norm must NOT be offset. That difference is visible in the
+    # checkpoint itself -- the gated norm ships as F32 while the layernorms ship as BF16.
+    private def self.rms_gamma_offset(m : SimpleMatrix) : SimpleMatrix
+      m.rows.times { |i| m.cols.times { |j| m[i, j] = m[i, j].to_f64 + 1.0 } }
+      m
+    end
+
     def self.split_contiguous_halves(src : SimpleMatrix) : {SimpleMatrix, SimpleMatrix}
       raise "split_contiguous_halves: odd width #{src.cols}" unless src.cols.even?
       half = src.cols // 2
