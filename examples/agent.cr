@@ -689,7 +689,7 @@ module AgentDemo
       end
       if ENV.fetch("SHAINET_MOE_OFFLOAD", "0") == "1" && SHAInet::CUDA.fully_available?
         cs = SHAInet::Q4HostMatrix.cache_stats
-        if cs[:total] > 0
+        if cs[:hits] + cs[:misses] > 0
           parts << "cache #{(cs[:hit_rate] * 100).round}% hit"
         end
       end
