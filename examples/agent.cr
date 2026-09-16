@@ -689,7 +689,9 @@ module AgentDemo
       end
       if ENV.fetch("SHAINET_MOE_OFFLOAD", "0") == "1" && SHAInet::CUDA.fully_available?
         cs = SHAInet::Q4HostMatrix.cache_stats
-        parts << "cache #{(cs[:hit_rate] * 100).round}% hit"
+        if cs[:total] > 0
+          parts << "cache #{(cs[:hit_rate] * 100).round}% hit"
+        end
       end
       "[#{parts.join(" · ")}]"
     end
@@ -947,16 +949,22 @@ ENV["SHAINET_MOE_OFFLOAD"] = "1" unless ENV.has_key?("SHAINET_MOE_OFFLOAD")
 quantize = SHAInet::CUDA.fully_available? && !ENV["SHAINET_FP32"]?
 bits = ENV.fetch("SHAINET_Q8", "0") == "1" ? 8 : 4
 offload = ENV.fetch("SHAINET_MOE_OFFLOAD", "0") == "1"
-STDERR.puts "  Mode: #{ENV["SHAINET_FP32"]? ? "fp32" : "Q#{bits}"}#{offload ? " (MoE offload)" : ""}"
 net = SHAInet::HFLoader.load(model_dir, quantize: quantize, bits: bits)
 net.use_kv_cache = true
 tokenizer = SHAInet::BPETokenizer.from_hf(File.join(model_dir, "tokenizer.json"))
-STDERR.puts "Loaded in #{(Time.monotonic - t0).total_seconds.round(1)}s (vocab #{tokenizer.vocab.size})"
+has_moe = net.hidden_layers.any? { |l| l.is_a?(SHAInet::LlamaBlock) && l.as(SHAInet::LlamaBlock).ffn.is_a?(SHAInet::MoEFF) }
+mode = ENV["SHAINET_FP32"]? ? "fp32" : "Q#{bits}"
+mode += " (MoE offload)" if offload && has_moe
+STDERR.puts "Loaded in #{(Time.monotonic - t0).total_seconds.round(1)}s · #{mode} (vocab #{tokenizer.vocab.size})"
 
 # Size the expert cache to leave headroom for the model + prefill activations.
-# (cudaMalloc now GC-reclaims dead GPU buffers on pressure, so this only needs a
-# modest reserve.) Override with SHAINET_EXPERT_CACHE_MB (0 disables).
+# Only relevant for MoE models, where a fraction of experts are active per token and the rest
+# are cached in VRAM for reuse. Dense models (Qwen3.5, Qwen3-0.6B) have no experts to cache,
+# so reserving VRAM for this wastes 2+ GB that could serve KV context instead.
+# Override with SHAINET_EXPERT_CACHE_MB (0 disables).
 max_context = (ENV["SHAINET_AGENT_CONTEXT"]? || "16384").to_i
+
+has_moe = net.hidden_layers.any? { |l| l.is_a?(SHAInet::LlamaBlock) && l.as(SHAInet::LlamaBlock).ffn.is_a?(SHAInet::MoEFF) }
 
 # The reserve has to cover what GROWS with context -- the KV cache above all -- not just a
 # flat allowance. Measured on Qwen3-Coder-30B-A3B: with a fixed 6 GB reserve the cache took
@@ -968,7 +976,7 @@ max_context = (ENV["SHAINET_AGENT_CONTEXT"]? || "16384").to_i
 # KiB/token, and the slack covers the prefill workspaces. A smaller model over-reserves,
 # which costs it cache it did not need anyway since it is not near the VRAM limit.
 # SHAINET_EXPERT_CACHE_MB overrides the whole calculation (0 disables the cache).
-if offload && !ENV["SHAINET_EXPERT_CACHE_MB"]? && (info = SHAInet::CUDA.memory_info)
+if has_moe && offload && !ENV["SHAINET_EXPERT_CACHE_MB"]? && (info = SHAInet::CUDA.memory_info)
   kv_reserve = max_context.to_u64 * 128_u64 * 1024_u64
   reserve = 6_u64 * 1024 * 1024 * 1024 + kv_reserve
   free = info[:free]
