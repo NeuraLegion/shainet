@@ -28,6 +28,8 @@ module SHAInet
   # exact gate formula needs a real Qwen3.5 checkpoint to confirm, which is why the loader still
   # refuses to build one of these from weights.
   class GatedDeltaNetBlock < MatrixLayer
+    include QuantizedProjection
+
     getter d_model : Int32
     getter num_v_heads : Int32
     getter num_k_heads : Int32
@@ -40,11 +42,15 @@ module SHAInet
     getter out_norm : RMSNorm
     getter ffn : SwiGLUFF
 
-    property w_q : SimpleMatrix
-    property w_k : SimpleMatrix
-    property w_v : SimpleMatrix
-    property w_o : SimpleMatrix
-    property w_gate : SimpleMatrix
+    # The five large projections carry the block's whole parameter cost, so they are the only
+    # ones that can be quantized or moved to the device. w_alpha and w_beta stay fp32 host: they
+    # are [d_model, num_v_heads] (4096x32 on the 9B, 0.5 MB against 100 MB for the rest), and the
+    # gate maths that consumes them is scalar per head per position, not a GEMM.
+    property w_q : SimpleMatrix | CudaMatrix | QuantizedWeight
+    property w_k : SimpleMatrix | CudaMatrix | QuantizedWeight
+    property w_v : SimpleMatrix | CudaMatrix | QuantizedWeight
+    property w_o : SimpleMatrix | CudaMatrix | QuantizedWeight
+    property w_gate : SimpleMatrix | CudaMatrix | QuantizedWeight
     property w_alpha : SimpleMatrix
     property w_beta : SimpleMatrix
     # Mamba2's per-head decay parameters. a_log is stored in log space because the decay must
@@ -244,15 +250,45 @@ module SHAInet
       project(normed_mix, @w_o, @d_model)
     end
 
-    private def project(x : SimpleMatrix, w : SimpleMatrix, out_dim : Int32) : SimpleMatrix
-      dst = SimpleMatrix.new(x.rows, out_dim, 0.0)
-      x.rows.times do |t|
-        out_dim.times do |o|
-          acc = 0.0
-          x.cols.times { |i| acc += x[t, i].to_f64 * w[i, o].to_f64 }
-          dst[t, o] = acc
-        end
+    # Move the block's projections to the device, optionally quantized.
+    #
+    # The mixer's recurrence stays on the host deliberately. Per token it is ~2M FLOP (32 heads
+    # over a 128x128 state) against ~600M for the projections, so a device kernel for it would
+    # chase 0.3% of the work while the GEMMs are what make the block unusable in fp32. Quantizing
+    # the projections is also what lets a hybrid stack load at all: they are 100 MB per layer
+    # against 0.5 MB for everything else here.
+    def to_gpu!(quantize : Bool = false, bits : Int32 = 8, offload : Bool = false)
+      return unless CUDA.fully_available?
+      if quantize
+        @w_q = to_quant(@w_q, bits, offload)
+        @w_k = to_quant(@w_k, bits, offload)
+        @w_v = to_quant(@w_v, bits, offload)
+        @w_o = to_quant(@w_o, bits, offload)
+        @w_gate = to_quant(@w_gate, bits, offload)
+      else
+        raise ArgumentError.new("dense offload requires quantization (offload is Q4-only)") if offload
+        @w_q = @w_q.as(SimpleMatrix).to_cuda if @w_q.is_a?(SimpleMatrix)
+        @w_k = @w_k.as(SimpleMatrix).to_cuda if @w_k.is_a?(SimpleMatrix)
+        @w_v = @w_v.as(SimpleMatrix).to_cuda if @w_v.is_a?(SimpleMatrix)
+        @w_o = @w_o.as(SimpleMatrix).to_cuda if @w_o.is_a?(SimpleMatrix)
+        @w_gate = @w_gate.as(SimpleMatrix).to_cuda if @w_gate.is_a?(SimpleMatrix)
       end
+      @norm1.to_gpu!
+      @norm2.to_gpu!
+      @out_norm.to_gpu!
+      @ffn.to_gpu!(quantize, bits, offload)
+    end
+
+    # True once the projections are quantized, so a caller can tell a loaded-and-quantized block
+    # from one still holding fp32 without inspecting weight types itself.
+    def quantized? : Bool
+      @w_q.is_a?(QuantizedWeight) && @w_k.is_a?(QuantizedWeight) && @w_v.is_a?(QuantizedWeight) &&
+        @w_o.is_a?(QuantizedWeight) && @w_gate.is_a?(QuantizedWeight)
+    end
+
+    private def project(x : SimpleMatrix, w : SimpleMatrix | CudaMatrix | QuantizedWeight, out_dim : Int32) : SimpleMatrix
+      dst = gpu_matmul(x, w)
+      raise "projection produced #{dst.cols} columns, expected #{out_dim}" unless dst.cols == out_dim
       dst
     end
 

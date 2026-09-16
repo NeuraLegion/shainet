@@ -54,7 +54,11 @@ describe "hybrid layer stack" do
     # add_layer leaves the weights at zero, and with w_v zero NOTHING is ever written to the
     # recurrent state, so the output would be state-independent and this example would pass
     # vacuously. Give it real weights first.
-    [block.w_q, block.w_k, block.w_v, block.w_o, block.w_gate, block.w_alpha, block.w_beta,
+    # The five large projections now hold a union (they can be quantized or device-resident), so
+    # they are cast back to the host form a freshly built block still has.
+    [block.w_q.as(SHAInet::SimpleMatrix), block.w_k.as(SHAInet::SimpleMatrix),
+     block.w_v.as(SHAInet::SimpleMatrix), block.w_o.as(SHAInet::SimpleMatrix),
+     block.w_gate.as(SHAInet::SimpleMatrix), block.w_alpha, block.w_beta,
      block.conv_q.weight, block.conv_k.weight, block.conv_v.weight].each_with_index do |m, idx|
       m.rows.times do |i|
         m.cols.times { |j| m[i, j] = 0.08 * Math.sin((i * 7 + j * 13 + idx * 3) * 0.37) }

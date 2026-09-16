@@ -13,11 +13,11 @@ end
 
 def build_block(d_model = 16, ff = 32, v_heads = 4, k_heads = 2, hk = 4, hv = 4, kernel = 4)
   b = SHAInet::GatedDeltaNetBlock.new(d_model, ff, v_heads, k_heads, hk, hv, kernel)
-  fill!(b.w_q, 0.09, 0.1)
-  fill!(b.w_k, 0.08, 0.2)
-  fill!(b.w_v, 0.07, 0.3)
-  fill!(b.w_o, 0.06, 0.4)
-  fill!(b.w_gate, 0.05, 0.5)
+  fill!(b.w_q.as(SHAInet::SimpleMatrix), 0.09, 0.1)
+  fill!(b.w_k.as(SHAInet::SimpleMatrix), 0.08, 0.2)
+  fill!(b.w_v.as(SHAInet::SimpleMatrix), 0.07, 0.3)
+  fill!(b.w_o.as(SHAInet::SimpleMatrix), 0.06, 0.4)
+  fill!(b.w_gate.as(SHAInet::SimpleMatrix), 0.05, 0.5)
   fill!(b.w_alpha, 0.04, 0.6)
   fill!(b.w_beta, 0.03, 0.7)
   fill!(b.conv_q.weight, 0.3, 0.8)
@@ -220,7 +220,7 @@ describe SHAInet::GatedDeltaNetBlock do
       # Rebuild identically, then scale only the value columns feeding head 0.
       scaled = build_block
       head_v = scaled.head_v
-      scaled.w_v.rows.times { |i| head_v.times { |j| scaled.w_v[i, j] = scaled.w_v[i, j] * 4.0 } }
+      scaled.w_v.as(SHAInet::SimpleMatrix).rows.times { |i| head_v.times { |j| scaled.w_v.as(SHAInet::SimpleMatrix)[i, j] = scaled.w_v.as(SHAInet::SimpleMatrix)[i, j] * 4.0 } }
       got = scaled.forward(x)
 
       # Head 0's contribution changes, so the block output does differ overall.
