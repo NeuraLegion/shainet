@@ -54,7 +54,7 @@ module SHAInet
     # mirroring what in_proj_z does in the linear-attention block.
     #
     # nil for every other architecture, where attention is ungated and this costs one nil check.
-    property w_gate_attn : SimpleMatrix?
+    property w_gate_attn : (SimpleMatrix | CudaMatrix | QuantizedWeight)?
 
     # Optional Q/K/V projection biases. Qwen2-style architectures add a bias to
     # the query/key/value projections; LLaMA/Mistral do not. Kept as host-side
@@ -196,6 +196,12 @@ module SHAInet
         @w_k = to_quant(@w_k, bits, offload)
         @w_v = to_quant(@w_v, bits, offload)
         @w_o = to_quant(@w_o, bits, offload)
+        # The output gate is a full [d_model, q_dim] projection, so it is quantized with the rest.
+        # Keeping it on the host forced gated attention layers off the device prefill path, which
+        # measured 269.4 s per layer at a 1216-token prefill against 0.384 s on it.
+        if wg = @w_gate_attn
+          @w_gate_attn = to_quant(wg, bits, offload)
+        end
       else
         raise ArgumentError.new("dense offload requires quantization (offload is Q4-only)") if offload
         # Only promote host weights; leave existing CudaMatrix/QuantizedWeight as-is.
@@ -520,12 +526,22 @@ module SHAInet
       return if wg.nil?
       rows = output.rows
       cols = output.cols
-      raise "attention gate is [#{wg.rows}, #{wg.cols}], expected [#{x.cols}, #{cols}]" unless wg.rows == x.cols && wg.cols == cols
+      # The gate is a full projection and is quantized with the other weights, so it goes through
+      # the shared dispatcher rather than being indexed directly. row_offset selects this call's
+      # slice of x when the caller is working on a window of a longer sequence.
+      xs = if row_offset == 0 && x.rows == rows
+             x
+           else
+             slice = SimpleMatrix.new(rows, x.cols)
+             rows.times { |t| x.cols.times { |i| slice[t, i] = x[row_offset + t, i] } }
+             slice
+           end
+      gate = gpu_matmul(xs, wg)
+      raise "attention gate produced #{gate.cols} columns, expected #{cols}" unless gate.cols == cols
       silu = self.class.attn_gate_silu?
       rows.times do |t|
         cols.times do |j|
-          acc = 0.0
-          x.cols.times { |i| acc += x[row_offset + t, i].to_f64 * wg[i, j].to_f64 }
+          acc = gate[t, j].to_f64
           g = 1.0 / (1.0 + Math.exp(-acc))
           output[t, j] = output[t, j].to_f64 * (silu ? acc * g : g)
         end
@@ -697,12 +713,14 @@ module SHAInet
       return unless self.class.prefill_attn_device_enabled?
       return unless gpu_attention?
       return unless CUDA.prefill_attn_kernels_available?
-      # A gated attention layer (Qwen3.5) must decline: this path applies w_o itself and returns
-      # early, so apply_attn_gate! in the caller never runs and the output gate is silently
-      # dropped. It is reachable ONLY with quantized weights, which is why the fp32 equivalence
-      # examples passed while the Q4 ones diverged by 1.25 relative -- and why the real 9B's first
-      # attention layer diverged 71% between its cached and uncached paths.
-      return unless @w_gate_attn.nil?
+      # A gated attention layer is allowed here: the gate is applied to the attention output before
+      # w_o by apply_device_attn_gate!, which both callers invoke. It must NOT be skipped -- doing so
+      # diverged the real 9B's first attention layer by 71% between its cached and uncached paths --
+      # so a gate that cannot be applied on the device makes this decline instead.
+      if wg = @w_gate_attn
+        return unless wg.is_a?(QuantizedWeight) || wg.is_a?(CudaMatrix)
+        return unless CUDA.mul_sigmoid_available?
+      end
       wq = @w_q
       wk = @w_k
       wv = @w_v
@@ -833,6 +851,7 @@ module SHAInet
       end
       aq = attention_prefill_device_core(xd)
       return unless aq
+      return unless apply_device_attn_gate!(xd, aq)
 
       ao = attn_ws(@@attn_ws_o, aq.rows, @d_model)
       Profile.measure("attn.dev_wo") { wo.gemv_into(aq, ao) }
@@ -848,7 +867,38 @@ module SHAInet
       return false unless wo.is_a?(QuantizedWeight)
       aq = attention_prefill_device_core(xd)
       return false unless aq
+      return false unless apply_device_attn_gate!(xd, aq)
       Profile.measure("attn.dev_wo") { wo.gemv_into(aq, dst) }
+      true
+    end
+
+    # attn_out *= sigmoid(x * w_gate_attn), on the device, before w_o.
+    #
+    # Returns false when a gate exists but cannot be applied here, so the caller declines the whole
+    # device path rather than silently returning ungated attention. That silent drop is the bug this
+    # replaces: reachable only with quantized weights, so every fp32 equivalence check passed while
+    # the Q4 ones diverged by 1.25 relative.
+    private def apply_device_attn_gate!(xd : CudaMatrix, aq : CudaMatrix) : Bool
+      wg = @w_gate_attn
+      return true if wg.nil?
+      return false unless CUDA.mul_sigmoid_available?
+      gd = attn_ws(@@attn_ws_gate, aq.rows, aq.cols)
+      case wg
+      when QuantizedWeight then wg.gemv_into(xd, gd)
+      when CudaMatrix
+        return false unless wg.rows == xd.cols && wg.cols == aq.cols
+        prod = xd * wg
+        CUDA.copy_device_to_device(gd.device_ptr.not_nil!, prod.device_ptr.not_nil!,
+          (aq.rows.to_u64 * aq.cols.to_u64 * 4_u64))
+        gd.mark_device_dirty!
+        prod.free!
+      else
+        return false
+      end
+      Profile.measure("attn.dev_gate") do
+        CUDA.mul_sigmoid(aq.device_ptr.not_nil!, gd.device_ptr.not_nil!, aq.rows * aq.cols)
+        aq.mark_device_dirty!
+      end
       true
     end
 
@@ -1004,10 +1054,15 @@ module SHAInet
     # chain hands to the residual add.
     @@attn_ws_o = Hash(Tuple(Int32, Int32), CudaMatrix).new
 
+    # Qwen3.5's attention output gate, q_dim wide. Same shape set as attn_ws_aq, so it is bounded by
+    # the architecture rather than by how long the process runs, and it is counted and released with
+    # the rest.
+    @@attn_ws_gate = Hash(Tuple(Int32, Int32), CudaMatrix).new
+
     # Total VRAM held by the shared attention workspaces, so the bound is assertable.
     def self.attn_workspace_bytes : UInt64
       total = 0_u64
-      [@@attn_ws_x, @@attn_ws_q, @@attn_ws_k, @@attn_ws_v, @@attn_ws_aq, @@attn_ws_o,
+      [@@attn_ws_x, @@attn_ws_q, @@attn_ws_k, @@attn_ws_v, @@attn_ws_aq, @@attn_ws_o, @@attn_ws_gate,
        @@blk_ws_x, @@blk_ws_n1, @@blk_ws_n2, @@blk_ws_attn, @@blk_ws_h, @@blk_ws_ff].each do |cache|
         cache.each_value { |m| total += (m.rows.to_u64 * m.cols.to_u64 * 4_u64) }
       end
@@ -1015,7 +1070,7 @@ module SHAInet
     end
 
     def self.release_attn_workspaces! : Nil
-      [@@attn_ws_x, @@attn_ws_q, @@attn_ws_k, @@attn_ws_v, @@attn_ws_aq, @@attn_ws_o,
+      [@@attn_ws_x, @@attn_ws_q, @@attn_ws_k, @@attn_ws_v, @@attn_ws_aq, @@attn_ws_o, @@attn_ws_gate,
        @@blk_ws_x, @@blk_ws_n1, @@blk_ws_n2, @@blk_ws_attn, @@blk_ws_h, @@blk_ws_ff].each do |cache|
         cache.each_value(&.free!)
         cache.clear

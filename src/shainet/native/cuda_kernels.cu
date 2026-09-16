@@ -1492,4 +1492,167 @@ void attention_kv_f16(const float* q, const unsigned short* kc, const unsigned s
     }
 }
 
+// ---------------------------------------------------------------------------
+// Gated delta rule (Qwen3.5 linear attention), whole sequence in ONE launch.
+//
+// One CUDA block per VALUE head, with that head's [dk, dv] recurrent state resident in shared
+// memory for the entire sequence, and the token loop INSIDE the kernel. That is the point: the
+// recurrence is sequential, so a kernel per step would pay a launch per token per layer (29k
+// launches for a 1216-token prefill over 24 layers), and the host implementation it replaces spent
+// 4.4 s per layer -- 114 s for a prefill -- in scalar matrix products.
+//
+// The state is dk*dv floats = 64 KB at Qwen3.5's 128x128, which exceeds the 48 KB default limit,
+// so the launcher opts in to the larger dynamic allocation (sm_80+ allows ~100 KB). Occupancy is
+// one block per SM by construction; with only nv=32 blocks against 76 SMs that costs nothing.
+//
+// L2 normalization of q and k, and the 1/sqrt(dk) scale on q, are done HERE rather than on the
+// host, which removes the per-head slicing and copying that cost as much as the arithmetic.
+//
+// q and k are indexed by KEY head (kh = h / heads_per_k), matching grouped-query attention: several
+// value heads share one key head's projection, as the reference's repeat_interleave expresses.
+__global__ void gated_delta_rule_kernel(
+    const float* __restrict__ q, const float* __restrict__ k, const float* __restrict__ v,
+    const float* __restrict__ alpha, const float* __restrict__ beta,
+    float* __restrict__ state, float* __restrict__ out,
+    int seq, int nv, int nk, int dk, int dv, int heads_per_k, float q_scale)
+{
+    extern __shared__ float sh[];
+    const int h = blockIdx.x;
+    if (h >= nv) return;
+    const int kh = h / heads_per_k;
+    const int tid = threadIdx.x;
+    const int nthr = blockDim.x;
+
+    float* S   = sh;                 // [dk, dv], row-major in dk
+    float* qs  = S + (size_t)dk * dv;
+    float* ks  = qs + dk;
+    float* kvm = ks + dk;            // [dv] readout of the decayed state
+    float* red = kvm + dv;           // [nthr] reduction scratch
+
+    for (int idx = tid; idx < dk * dv; idx += nthr) {
+        S[idx] = state[(size_t)h * dk * dv + idx];
+    }
+    __syncthreads();
+
+    const size_t kstride = (size_t)nk * dk;
+    const size_t vstride = (size_t)nv * dv;
+
+    for (int t = 0; t < seq; ++t) {
+        // Load this position's q/k for the shared key head.
+        for (int i = tid; i < dk; i += nthr) {
+            qs[i] = q[(size_t)t * kstride + (size_t)kh * dk + i];
+            ks[i] = k[(size_t)t * kstride + (size_t)kh * dk + i];
+        }
+        __syncthreads();
+
+        // L2 norms, one block reduction each.
+        float lq = 0.0f, lk = 0.0f;
+        for (int i = tid; i < dk; i += nthr) { lq += qs[i] * qs[i]; lk += ks[i] * ks[i]; }
+        red[tid] = lq;
+        __syncthreads();
+        for (int off = nthr / 2; off > 0; off >>= 1) {
+            if (tid < off) red[tid] += red[tid + off];
+            __syncthreads();
+        }
+        const float nq = rsqrtf(fmaxf(red[0], 1e-12f));
+        __syncthreads();
+        red[tid] = lk;
+        __syncthreads();
+        for (int off = nthr / 2; off > 0; off >>= 1) {
+            if (tid < off) red[tid] += red[tid + off];
+            __syncthreads();
+        }
+        const float nk_inv = rsqrtf(fmaxf(red[0], 1e-12f));
+        __syncthreads();
+
+        for (int i = tid; i < dk; i += nthr) {
+            qs[i] = qs[i] * nq * q_scale;
+            ks[i] = ks[i] * nk_inv;
+        }
+        const float a = alpha[(size_t)t * nv + h];
+        const float b = beta[(size_t)t * nv + h];
+        __syncthreads();
+
+        // Decay the state, then read it out with k. Order matters: the reference computes kv_mem
+        // from the ALREADY DECAYED state.
+        for (int idx = tid; idx < dk * dv; idx += nthr) S[idx] *= a;
+        __syncthreads();
+
+        for (int c = tid; c < dv; c += nthr) {
+            float acc = 0.0f;
+            for (int i = 0; i < dk; ++i) acc += S[(size_t)i * dv + c] * ks[i];
+            kvm[c] = acc;
+        }
+        __syncthreads();
+
+        // S += k (x) beta*(v - kv_mem), then out = q^T S.
+        for (int c = tid; c < dv; c += nthr) {
+            const float delta = (v[(size_t)t * vstride + (size_t)h * dv + c] - kvm[c]) * b;
+            for (int i = 0; i < dk; ++i) S[(size_t)i * dv + c] += ks[i] * delta;
+        }
+        __syncthreads();
+
+        for (int c = tid; c < dv; c += nthr) {
+            float acc = 0.0f;
+            for (int i = 0; i < dk; ++i) acc += S[(size_t)i * dv + c] * qs[i];
+            out[(size_t)t * vstride + (size_t)h * dv + c] = acc;
+        }
+        __syncthreads();
+    }
+
+    for (int idx = tid; idx < dk * dv; idx += nthr) {
+        state[(size_t)h * dk * dv + idx] = S[idx];
+    }
+}
+
+void gated_delta_rule(const float* q, const float* k, const float* v,
+                      const float* alpha, const float* beta,
+                      float* state, float* out,
+                      int seq, int nv, int nk, int dk, int dv, int heads_per_k, float q_scale) {
+    if (seq <= 0 || nv <= 0) return;
+    int threads = 128;
+    if (dv < threads) threads = dv < 32 ? 32 : dv;
+    // Round to a power of two: the reduction loop halves nthr.
+    int p = 32;
+    while (p * 2 <= threads) p *= 2;
+    threads = p;
+
+    size_t shmem = ((size_t)dk * dv + 2 * (size_t)dk + (size_t)dv + (size_t)threads) * sizeof(float);
+    // 64 KB of state exceeds the 48 KB default cap, so opt in explicitly. Without this the launch
+    // fails with invalid argument rather than falling back.
+    cudaFuncSetAttribute(gated_delta_rule_kernel,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shmem);
+    gated_delta_rule_kernel<<<nv, threads, shmem>>>(q, k, v, alpha, beta, state, out,
+                                                    seq, nv, nk, dk, dv, heads_per_k, q_scale);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in gated_delta_rule: %s (shmem=%zu threads=%d)\n",
+               cudaGetErrorString(err), shmem, threads);
+    }
+}
+
+// out[i] *= sigmoid(gate[i]). Qwen3.5's attention output gate.
+//
+// SIGMOID, not SiLU: HF applies `attn_output * torch.sigmoid(gate)`, and SiLU carries an extra
+// factor of the unbounded pre-activation. Exists so a gated attention layer can keep the
+// device prefill path -- applying the gate on the host instead meant declining that path, which
+// measured 259.9 s per layer at a 1216-token prefill against 0.384 s on the device.
+__global__ void mul_sigmoid_kernel(float* out, const float* gate, int size) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < size) {
+        out[i] = out[i] * (1.0f / (1.0f + __expf(-gate[i])));
+    }
+}
+
+void mul_sigmoid(float* out, const float* gate, int size) {
+    if (size <= 0) return;
+    int threads = 256;
+    int blocks = (size + threads - 1) / threads;
+    mul_sigmoid_kernel<<<blocks, threads>>>(out, gate, size);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in mul_sigmoid: %s\n", cudaGetErrorString(err));
+    }
+}
+
 } // extern "C"

@@ -15,8 +15,8 @@ def qhs_block(d = 32, ff = 64)
   qhs_fill!(b.w_v.as(SHAInet::SimpleMatrix), 3)
   qhs_fill!(b.w_o.as(SHAInet::SimpleMatrix), 4)
   qhs_fill!(b.w_gate.as(SHAInet::SimpleMatrix), 5)
-  qhs_fill!(b.w_alpha, 6)
-  qhs_fill!(b.w_beta, 7)
+  qhs_fill!(b.w_alpha.as(SHAInet::SimpleMatrix), 6)
+  qhs_fill!(b.w_beta.as(SHAInet::SimpleMatrix), 7)
   qhs_fill!(b.conv_q.weight, 8)
   qhs_fill!(b.conv_k.weight, 9)
   qhs_fill!(b.conv_v.weight, 10)
@@ -36,10 +36,11 @@ describe "quantized hybrid stack" do
     b = qhs_block
     b.to_gpu!(quantize: true, bits: 4)
     b.quantized?.should be_true
-    # w_alpha and w_beta are [d_model, num_v_heads] and are consumed scalar-wise per head, not
-    # through a GEMM, so quantizing them would cost accuracy for no memory worth having.
-    b.w_alpha.should be_a(SHAInet::SimpleMatrix)
-    b.w_beta.should be_a(SHAInet::SimpleMatrix)
+    # w_alpha and w_beta move to the device as fp32 rather than being quantized: they are
+    # [d_model, num_v_heads], 0.5 MB against 100 MB for the rest, and alpha feeds
+    # exp(-exp(a_log) * softplus(...)) where a Q4 rounding would move the decay itself.
+    b.w_alpha.should_not be_a(SHAInet::QuantizedWeight)
+    b.w_beta.should_not be_a(SHAInet::QuantizedWeight)
   end
 
   it "keeps the mixer's output close to fp32 after 4-bit quantization" do

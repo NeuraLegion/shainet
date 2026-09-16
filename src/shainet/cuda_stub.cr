@@ -130,6 +130,22 @@ module SHAInet
       raise "CUDA disabled"
     end
 
+    def mul_sigmoid(*args)
+      raise "CUDA disabled"
+    end
+
+    def mul_sigmoid_available?
+      false
+    end
+
+    def gated_delta_rule(*args)
+      raise "CUDA disabled"
+    end
+
+    def gated_delta_rule_available?
+      false
+    end
+
     def head_rmsnorm_rows(*args)
       raise "CUDA disabled"
     end
