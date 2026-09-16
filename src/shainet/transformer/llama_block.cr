@@ -4,6 +4,8 @@ module SHAInet
   # LLaMA-style transformer block with KV cache for efficient generation.
   # Supports Grouped Query Attention (GQA).
   class LlamaBlock < MatrixLayer
+    include QuantizedProjection
+
     getter norm1 : RMSNorm
     getter norm2 : RMSNorm
     getter ffn : SwiGLUFF | MoEFF
@@ -26,6 +28,18 @@ module SHAInet
     # these override the default theta^(-2i/d) computation (used for LLaMA 3
     # rope_scaling). nil means use the default.
     property rope_freqs : Array(Float32)?
+
+    # How many leading dimensions of each head RoPE rotates. nil means all of head_dim, which is
+    # every architecture supported before Qwen3.5.
+    #
+    # Qwen3.5 sets partial_rotary_factor 0.25 on a head_dim of 256: only the first 64 dimensions
+    # are rotated and the other 192 pass through unrotated. Rotating all 256 is not a small error
+    # -- it applies position-dependent phases to 192 dimensions that were trained to carry
+    # position-independent content, and it changes the inverse-frequency spacing for the 64 that
+    # should be rotated. Measured effect: the 9B produced fluent-magnitude logits whose argmax was
+    # uniformly rare tokens, with a perfectly healthy residual stream, so nothing but the output
+    # text showed it.
+    property rotary_dim : Int32?
 
     property w_q : SimpleMatrix | CudaMatrix | QuantizedWeight
     property w_k : SimpleMatrix | CudaMatrix | QuantizedWeight
@@ -151,8 +165,6 @@ module SHAInet
     # Persistent single-row GEMV workspaces for decode (M=1), keyed by width.
     # Reused across tokens to avoid per-call cudaMalloc/cudaFree churn. Never
     # freed during inference, so they cannot be GC-collected mid-GEMM.
-    @q8_in_bufs = Hash(Int32, CudaMatrix).new
-    @q8_out_bufs = Hash(Int32, CudaMatrix).new
 
     def clear_cache!
       @k_cache.each(&.clear)
@@ -200,25 +212,6 @@ module SHAInet
       case f = @ffn
       when SwiGLUFF then f.to_gpu!(quantize, bits, offload)
       else               f.to_gpu!(quantize, bits)
-      end
-    end
-
-    # Quantize a weight to the requested bit width: bits == 4 -> Q4, bits == 8 ->
-    # Q8. When offload is true the (Q4-only) weight is kept in host RAM as a
-    # Q4HostMatrix and streamed on demand. Already-quantized weights are returned
-    # unchanged (we quantize once during load, so the format is never switched in
-    # place).
-    private def to_quant(w : SimpleMatrix | CudaMatrix | QuantizedWeight, bits : Int32, offload : Bool = false) : QuantizedWeight
-      raise ArgumentError.new("unsupported quantization bits: #{bits} (expected 8 or 4)") unless bits == 8 || bits == 4
-      raise ArgumentError.new("dense offload currently supports 4-bit only (got #{bits}-bit)") if offload && bits != 4
-      case w
-      when QuantizedWeight then w
-      when CudaMatrix
-        sm = w.to_simple
-        offload ? Q4HostMatrix.from_simple(sm) : (bits == 4 ? Q4CudaMatrix.from_simple(sm) : QuantizedCudaMatrix.from_simple(sm))
-      else
-        sm = w.as(SimpleMatrix)
-        offload ? Q4HostMatrix.from_simple(sm) : (bits == 4 ? Q4CudaMatrix.from_simple(sm) : QuantizedCudaMatrix.from_simple(sm))
       end
     end
 
@@ -287,6 +280,11 @@ module SHAInet
       return false unless @norm1.device_capable? && @norm2.device_capable?
       return false unless @w_q.is_a?(QuantizedWeight) && @w_k.is_a?(QuantizedWeight) &&
                           @w_v.is_a?(QuantizedWeight) && @w_o.is_a?(QuantizedWeight)
+      # A gated attention layer (Qwen3.5) must decline: apply_attn_gate! is wired into the two
+      # HOST paths only, so the device path would silently drop the gate. It did exactly that,
+      # and the symptom was that a kv-cached generation disagreed with the same prompt run
+      # uncached -- visible only by comparing the two, since each looked plausible alone.
+      return false unless @w_gate_attn.nil?
       return false unless gpu_attention?
       ffn = @ffn
       case ffn
@@ -386,7 +384,10 @@ module SHAInet
     private def dev_inv_freq_ptr : Pointer(Float32)
       m = @dev_inv_freq
       unless m
-        half = @head_dim // 2
+        # Sized to the ROTARY width: the kernel reads inv_freq[0, rot_dim/2), so a head_dim-sized
+        # buffer would be right by accident here and wrong if the two ever diverge in the other
+        # direction.
+        half = rot_dim // 2
         freqs = Array(Float32).new(half) { |i| inv_freq(i) }
         m = upload_vec(freqs)
         @dev_inv_freq = m
@@ -446,8 +447,8 @@ module SHAInet
             @num_kv_heads, head_dim, @qk_norm_eps.to_f32)
         end
         ifr = dev_inv_freq_ptr
-        CUDA.rope_forward(qd.device_ptr.not_nil!, ifr, pos, @num_heads, head_dim)
-        CUDA.rope_forward(kd.device_ptr.not_nil!, ifr, pos, @num_kv_heads, head_dim)
+        CUDA.rope_forward(qd.device_ptr.not_nil!, ifr, pos, @num_heads, head_dim, rot_dim)
+        CUDA.rope_forward(kd.device_ptr.not_nil!, ifr, pos, @num_kv_heads, head_dim, rot_dim)
       end
 
       # Staging and workspace sized for a single query token.
@@ -504,19 +505,39 @@ module SHAInet
     # No-op unless the layer is gated, so every other architecture pays one nil check. The gate
     # is computed from the NORMED block input, the same source as q/k/v, because it arrives fused
     # into the same projection.
+    # Multiply the attention output by its gate, elementwise, before w_o.
+    #
+    # SIGMOID, not SiLU. HF's gated attention applies `attn_output * torch.sigmoid(gate)`, and
+    # SiLU(g) = g * sigmoid(g) carries an extra factor of the pre-activation, which is unbounded.
+    # Measured on Qwen3.5-9B: with SiLU the model scored 12.06 nats against 12.42 for chance and
+    # its top logits sat near 5.5, while simply DELETING the gate scored 10.01 with logits near
+    # 14.4 -- a gate that made the model worse than no gate at all is how the extra factor showed
+    # up. The control model's healthy logits are 16-19, for scale.
+    #
+    # SHAINET_ATTN_GATE_ACT=silu restores the old behaviour, which is how the A/B was taken.
     private def apply_attn_gate!(output : SimpleMatrix, x : SimpleMatrix, row_offset : Int32) : Nil
       wg = @w_gate_attn
       return if wg.nil?
       rows = output.rows
       cols = output.cols
       raise "attention gate is [#{wg.rows}, #{wg.cols}], expected [#{x.cols}, #{cols}]" unless wg.rows == x.cols && wg.cols == cols
+      silu = self.class.attn_gate_silu?
       rows.times do |t|
         cols.times do |j|
           acc = 0.0
           x.cols.times { |i| acc += x[row_offset + t, i].to_f64 * wg[i, j].to_f64 }
-          output[t, j] = output[t, j].to_f64 * (acc / (1.0 + Math.exp(-acc)))
+          g = 1.0 / (1.0 + Math.exp(-acc))
+          output[t, j] = output[t, j].to_f64 * (silu ? acc * g : g)
         end
       end
+    end
+
+    @@attn_gate_silu : Bool? = nil
+
+    def self.attn_gate_silu? : Bool
+      flag = @@attn_gate_silu
+      return flag unless flag.nil?
+      @@attn_gate_silu = ENV.fetch("SHAINET_ATTN_GATE_ACT", "sigmoid") == "silu"
     end
 
     private def attention_full_cpu(x : SimpleMatrix) : SimpleMatrix
@@ -585,7 +606,11 @@ module SHAInet
       apply_head_rmsnorm!(k_new, @num_kv_heads, @k_norm)
 
       # Apply RoPE to new K at insert time (HF half-split), then append to cache.
-      half = head_dim // 2
+      #
+      # rot_dim, not head_dim: this inline copy of apply_rope! has to honour partial rotary too,
+      # or a Qwen3.5 layer rotates its cached K over all 256 dimensions while its Q is rotated
+      # over 64. Nothing downstream can detect that -- the shapes are identical either way.
+      half = rot_dim // 2
       # This is the only path that populates the host mirror, so it is where the
       # reservation belongs: the device paths never read it and must not pay for it.
       if budget = kv_max_context
@@ -672,6 +697,12 @@ module SHAInet
       return unless self.class.prefill_attn_device_enabled?
       return unless gpu_attention?
       return unless CUDA.prefill_attn_kernels_available?
+      # A gated attention layer (Qwen3.5) must decline: this path applies w_o itself and returns
+      # early, so apply_attn_gate! in the caller never runs and the output gate is silently
+      # dropped. It is reachable ONLY with quantized weights, which is why the fp32 equivalence
+      # examples passed while the Q4 ones diverged by 1.25 relative -- and why the real 9B's first
+      # attention layer diverged 71% between its cached and uncached paths.
+      return unless @w_gate_attn.nil?
       wq = @w_q
       wk = @w_k
       wv = @w_v
@@ -723,8 +754,8 @@ module SHAInet
         end
 
         ifr = dev_inv_freq_ptr
-        CUDA.rope_forward_rows(qd.device_ptr.not_nil!, ifr, start_pos, n, @num_heads, head_dim)
-        CUDA.rope_forward_rows(kd.device_ptr.not_nil!, ifr, start_pos, n, @num_kv_heads, head_dim)
+        CUDA.rope_forward_rows(qd.device_ptr.not_nil!, ifr, start_pos, n, @num_heads, head_dim, rot_dim)
+        CUDA.rope_forward_rows(kd.device_ptr.not_nil!, ifr, start_pos, n, @num_kv_heads, head_dim, rot_dim)
         qd.mark_device_dirty!
         kd.mark_device_dirty!
         vd.mark_device_dirty!
@@ -1022,7 +1053,9 @@ module SHAInet
       head_dim = @head_dim
       heads_per_kv = @num_heads // @num_kv_heads
 
-      half = head_dim // 2
+      # rot_dim, not head_dim: Q must be rotated over the same width as the cached K, or a
+      # partial-rotary layer rotates 256 dimensions of Q against 64 of K.
+      half = rot_dim // 2
       dm = @q_dim
       qptr = q_full.data.to_unsafe
       optr = output.data.to_unsafe
@@ -1134,7 +1167,9 @@ module SHAInet
       end
       head_dim = @head_dim
       dm = @q_dim
-      half = head_dim // 2
+      # rot_dim, not head_dim: Q must be rotated over the same width as the cached K, or a
+      # partial-rotary layer rotates 256 dimensions of Q against 64 of K.
+      half = rot_dim // 2
       heads_per_kv = @num_heads // @num_kv_heads
 
       # Prefill is processed in bounded chunks of query tokens. The attention
@@ -1633,17 +1668,27 @@ module SHAInet
     end
 
     # --- Helper: inverse frequency for rotation index i (0..head_dim/2) ---
+    # Dimensions actually rotated, clamped to head_dim and to an even count (RoPE rotates pairs).
+    private def rot_dim : Int32
+      rd = @rotary_dim
+      return @head_dim if rd.nil? || rd <= 0 || rd > @head_dim
+      rd - (rd % 2)
+    end
+
     private def inv_freq(i : Int32) : Float32
       if freqs = @rope_freqs
         freqs[i]
       else
-        (1.0 / (@rope_theta ** (2.0 * i / @head_dim))).to_f32
+        # The exponent denominator is the ROTARY width, not head_dim: HF computes inv_freq over
+        # the rotated slice, so using head_dim here would space the frequencies wrongly even if
+        # the right dimensions were rotated.
+        (1.0 / (@rope_theta ** (2.0 * i / rot_dim))).to_f32
       end
     end
 
     # --- Helper: apply RoPE in-place (HF half-split convention) ---
     private def apply_rope!(m : SimpleMatrix, start_pos : Int32)
-      half = @head_dim // 2
+      half = rot_dim // 2
       m.rows.times do |pos|
         actual_pos = pos + start_pos
         half.times do |i|
@@ -1687,55 +1732,6 @@ module SHAInet
       m = SimpleMatrix.new(rows, cols)
       rows.times { |r| cols.times { |c| m[r, c] = cache[r * cols + c] } }
       m
-    end
-
-    # --- Helper: matmul using GPU SGEMM if weights are CudaMatrix ---
-    private def gpu_matmul(x : SimpleMatrix, w : SimpleMatrix | CudaMatrix | QuantizedWeight) : SimpleMatrix
-      if w.is_a?(QuantizedWeight)
-        if x.rows == 1
-          # Decode (M=1): reuse persistent device buffers, no per-call alloc/free.
-          xb = (@q8_in_bufs[x.cols] ||= CudaMatrix.new(1, x.cols))
-          Profile.measure("gemm.in_h2d") do
-            xb.raw_data.to_unsafe.copy_from(x.data.to_unsafe, x.cols)
-            xb.mark_host_modified!
-            xb.sync_to_device!("q8_gemm_in")
-          end
-          ob = (@q8_out_bufs[w.cols] ||= CudaMatrix.new(1, w.cols))
-          Profile.measure("gemm.kernel") { w.gemv_into(xb, ob) }
-          Profile.measure("gemm.out_d2h") { ob.sync_from_device!("q8_gemm_out") if ob.device_dirty? }
-          result = SimpleMatrix.new(1, w.cols)
-          Profile.measure("gemm.result_copy") do
-            result.data.to_unsafe.copy_from(ob.raw_data.to_unsafe, w.cols)
-          end
-          result
-        else
-          # Prefill / batch (M>1): one-off allocation.
-          x_gpu = CudaMatrix.new(x.rows, x.cols)
-          x_gpu.raw_data.to_unsafe.copy_from(x.data.to_unsafe, x.rows * x.cols)
-          x_gpu.sync_to_device!("q8_gemm_in")
-          result_gpu = w.gemv(x_gpu)
-          result_gpu.sync_from_device!("q8_gemm_out") if result_gpu.device_dirty?
-          result = SimpleMatrix.new(result_gpu.rows, result_gpu.cols)
-          result.data.to_unsafe.copy_from(result_gpu.raw_data.to_unsafe, result_gpu.rows * result_gpu.cols)
-          x_gpu.free!
-          result_gpu.free!
-          result
-        end
-      elsif w.is_a?(CudaMatrix)
-        # Convert input to GPU, GEMM, bring back
-        x_gpu = CudaMatrix.new(x.rows, x.cols)
-        x.rows.times { |r| x.cols.times { |c| x_gpu[r, c] = x[r, c] } }
-        x_gpu.sync_to_device!("gemm_in")
-        result_gpu = x_gpu * w # cuBLAS SGEMM
-        result_gpu.sync_from_device!("gemm_out") if result_gpu.device_dirty?
-        result = SimpleMatrix.new(result_gpu.rows, result_gpu.cols)
-        result_gpu.rows.times { |r| result_gpu.cols.times { |c| result[r, c] = result_gpu[r, c].to_f32 } }
-        x_gpu.free!
-        result_gpu.free!
-        result
-      else
-        x * w
-      end
     end
   end
 

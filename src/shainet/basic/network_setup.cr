@@ -209,6 +209,12 @@ module SHAInet
       @transformer_layers.each do |l|
         l.as(LlamaBlock).to_gpu!(quantize: true, bits: bits, offload: offload) if l.is_a?(LlamaBlock)
       end
+      # gated_deltanet blocks are deliberately NOT in @transformer_layers (see add_layer), so
+      # walking only that array would leave a hybrid stack's linear-attention layers in fp32 --
+      # 24 of 32 on Qwen3.5-9B, which is most of the model.
+      @hidden_layers.each do |l|
+        l.as(GatedDeltaNetBlock).to_gpu!(quantize: true, bits: bits, offload: offload) if l.is_a?(GatedDeltaNetBlock)
+      end
 
       # Quantize the output projection (lm_head). Stored separately so the
       # generic MatrixLayer weight union stays fp32/CudaMatrix only. On a large

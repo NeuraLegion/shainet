@@ -308,7 +308,7 @@ module SHAInet
     @@gather_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Int32), Int32, Int32, Void)?
     @@scatter_add_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Int32), Pointer(Float32), Int32, Int32, Void)?
     @@gather_available : Bool? = nil
-    @@rope_forward_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Void)?
+    @@rope_forward_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Void)?
     @@head_rmsnorm_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Float32, Void)?
     @@add_bias_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Void)?
     @@pack_kv_heads_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Void)?
@@ -321,7 +321,7 @@ module SHAInet
     @@rms_norm_forward_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Float32, Void)?
     @@add_inplace_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Void)?
     @@block_device_available : Bool? = nil
-    @@rope_forward_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@rope_forward_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Void)?
     @@head_rmsnorm_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Float32, Void)?
     @@attn_device_available : Bool? = nil
     @@attention_kv_f32_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void)?
@@ -507,14 +507,16 @@ module SHAInet
     end
 
     # Multi-row RoPE for prefill: `rows` tokens at consecutive positions from base_pos.
+    # rot_dim is how many leading dimensions of each head are rotated; it defaults to head_dim,
+    # which is ordinary full rotary. Qwen3.5 rotates only a quarter of a 256-wide head.
     def rope_forward_rows(x : Pointer(Float32), inv_freq : Pointer(Float32), base_pos : Int32,
-                          rows : Int32, heads : Int32, head_dim : Int32)
+                          rows : Int32, heads : Int32, head_dim : Int32, rot_dim : Int32 = 0)
       unless fn = @@rope_forward_rows_proc
         @@rope_forward_rows_proc = fn = load_kernel_proc("rope_forward_rows",
-          Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Void))
+          Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Void))
       end
       raise "CUDA kernels not available" unless fn
-      fn.call(x, inv_freq, base_pos, rows, heads, head_dim)
+      fn.call(x, inv_freq, base_pos, rows, heads, head_dim, rot_dim)
     end
 
     # Multi-row Qwen3 QK-norm for prefill.
@@ -682,7 +684,7 @@ module SHAInet
 
     # Rotary position embedding in place on one token's row, HF half-split.
     def rope_forward(x : Pointer(Float32), inv_freq : Pointer(Float32), pos : Int32,
-                     heads : Int32, head_dim : Int32)
+                     heads : Int32, head_dim : Int32, rot_dim : Int32 = 0)
       unless fn = @@rope_forward_proc
         if @@kernels_handle.null?
           @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
@@ -690,13 +692,13 @@ module SHAInet
         unless @@kernels_handle.null?
           sym = LibC.dlsym(@@kernels_handle, "rope_forward")
           unless sym.null?
-            @@rope_forward_proc = Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Void).new(sym, Pointer(Void).null)
+            @@rope_forward_proc = Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Void).new(sym, Pointer(Void).null)
             fn = @@rope_forward_proc
           end
         end
       end
       raise "CUDA kernels not available" unless fn
-      fn.call(x, inv_freq, pos, heads, head_dim)
+      fn.call(x, inv_freq, pos, heads, head_dim, rot_dim)
     end
 
     # Qwen3 QK-norm: RMSNorm per head slice, in place.

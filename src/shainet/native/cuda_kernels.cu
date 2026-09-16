@@ -479,11 +479,14 @@ void add_inplace(float* dst, const float* src, int size) {
 // kept on the device, so a decode step passes only the position.
 //
 // One block per head, half the head_dim worth of threads doing the pair rotation.
+// rot_dim is the number of leading dimensions that are rotated. Qwen3.5 sets
+// partial_rotary_factor 0.25 on a head_dim of 256, so only the first 64 are rotated and the
+// remaining 192 pass through untouched. rot_dim == head_dim is the ordinary full-rotary case.
 __global__ void rope_forward_kernel(float* x, const float* inv_freq, int pos,
-                                    int heads, int head_dim) {
+                                    int heads, int head_dim, int rot_dim) {
     int head = blockIdx.x;
     if (head >= heads) return;
-    int half = head_dim / 2;
+    int half = rot_dim / 2;
     float* row = x + (size_t)head * (size_t)head_dim;
 
     for (int i = threadIdx.x; i < half; i += blockDim.x) {
@@ -497,9 +500,10 @@ __global__ void rope_forward_kernel(float* x, const float* inv_freq, int pos,
     }
 }
 
-void rope_forward(float* x, const float* inv_freq, int pos, int heads, int head_dim) {
+void rope_forward(float* x, const float* inv_freq, int pos, int heads, int head_dim, int rot_dim) {
     int threads = 128;
-    rope_forward_kernel<<<heads, threads>>>(x, inv_freq, pos, heads, head_dim);
+    if (rot_dim <= 0 || rot_dim > head_dim) rot_dim = head_dim;
+    rope_forward_kernel<<<heads, threads>>>(x, inv_freq, pos, heads, head_dim, rot_dim);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         printf("CUDA Error in rope_forward: %s\n", cudaGetErrorString(err));
@@ -543,11 +547,11 @@ __global__ void head_rmsnorm_kernel(float* x, const float* gamma, int heads,
 // parity with the host path assertable.
 
 __global__ void rope_forward_rows_kernel(float* x, const float* inv_freq, int base_pos,
-                                        int rows, int heads, int head_dim) {
+                                        int rows, int heads, int head_dim, int rot_dim) {
     int head = blockIdx.x;
     int r = blockIdx.y;
     if (head >= heads || r >= rows) return;
-    int half = head_dim / 2;
+    int half = rot_dim / 2;
     int stride = heads * head_dim;
     float* row = x + (size_t)r * (size_t)stride + (size_t)head * (size_t)head_dim;
     float pos = (float)(base_pos + r);
@@ -564,11 +568,12 @@ __global__ void rope_forward_rows_kernel(float* x, const float* inv_freq, int ba
 }
 
 void rope_forward_rows(float* x, const float* inv_freq, int base_pos,
-                       int rows, int heads, int head_dim) {
+                       int rows, int heads, int head_dim, int rot_dim) {
     if (rows <= 0 || heads <= 0) return;
     int threads = 128;
+    if (rot_dim <= 0 || rot_dim > head_dim) rot_dim = head_dim;
     dim3 grid(heads, rows);
-    rope_forward_rows_kernel<<<grid, threads>>>(x, inv_freq, base_pos, rows, heads, head_dim);
+    rope_forward_rows_kernel<<<grid, threads>>>(x, inv_freq, base_pos, rows, heads, head_dim, rot_dim);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         printf("CUDA Error in rope_forward_rows: %s\n", cudaGetErrorString(err));
