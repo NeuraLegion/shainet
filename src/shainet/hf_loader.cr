@@ -530,36 +530,33 @@ module SHAInet
 
         output_layer = net.output_layers.first
         head_name = config.tie_word_embeddings ? "model.language_model.embed_tokens.weight" : "lm_head.weight"
-        output_layer.weights = sf.read_matrix_transposed(head_name)
         output_layer.biases = SimpleMatrix.new(1, config.vocab_size)
 
-        # Quantize the lm_head and set the network's quantized flag. The blocks were already done
-        # inline, and to_quant returns an already-quantized weight untouched, so this pass only
-        # materializes the head. On this vocabulary that is the single biggest tensor in the model
-        # (248320 x 4096, 3.79 GiB fp32), which is why it is read last and quantized immediately.
+        # Quantize the lm_head IMMEDIATELY and drop the fp32, rather than assigning it to
+        # output_layer.weights and quantizing later. On the 27B the head is 248320x5120 = 4.7 GiB
+        # fp32; holding it alive through net.quantize! on top of the resident model was the peak
+        # that OOM-killed a dense-offload load at layer 64. Quantizing in place here keeps the
+        # transient to one matrix.
         if do_quant
-          net.quantize!(bits, offload: dense_offload)
+          head_fp32 = sf.read_matrix_transposed(head_name)
+          net.lm_head_q = dense_offload ? Q4HostMatrix.from_simple(head_fp32) : Q4CudaMatrix.from_simple(head_fp32)
+          head_fp32.data.clear
+          GC.collect
+          # Quantize the blocks (already done inline) and set the flag. The lm_head is done above,
+          # so quantize! only re-confirms the blocks; it does not re-materialize the head.
+          net.quantize_weights = true
           # The embedding table is gather-only, so device residency costs vocab * d * 4 bytes of
-          # VRAM (3.79 GiB here) and buys nothing.
+          # VRAM (4.7 GiB here) and buys nothing.
           emb_layer.to_host! if ENV.fetch("SHAINET_EMBED_HOST", "1") != "0"
           GC.collect
           Log.info { "qwen3_5: quantized to #{bits}-bit#{dense_offload ? " (dense offload)" : ""}" }
-
-          # Export the Q4 weights so the next load skips the bf16->fp32->Q4 pipeline.
-          # Saves ~5 GiB to disk (vs 19 GiB bf16) and cuts subsequent loads from ~295 s to seconds.
-          # The cache is standalone: it includes config.json, tokenizer.json and the embedding,
-          # so the original bf16 safetensors can be deleted afterward.
-          cache_dir = File.join(model_dir, ".q4")
-          unless File.exists?(File.join(cache_dir, "manifest.json"))
-            export_q4_cache(net, cache_dir)
-            # Copy the config and tokenizer so the cache is loadable on its own.
-            ["config.json", "tokenizer.json", "tokenizer_config.json", "generation_config.json"].each do |fname|
-              src = File.join(model_dir, fname)
-              File.copy(src, File.join(cache_dir, fname)) if File.exists?(src)
-            end
-            # Save the small per-layer fp32 weights that the cache loader needs.
-            export_small_weights(sf, cache_dir, types, config)
-          end
+          # To cache this quantization for fast future loads, run:
+          #   crystal run examples/quantize_to_q4.cr --release -Denable_cuda -- <model-dir>
+          # which streams the conversion one tensor at a time (cannot OOM) and writes a standalone
+          # .q4 directory the agent loads directly.
+        else
+          # fp32 load: the head stays as a plain weight matrix.
+          output_layer.weights = sf.read_matrix_transposed(head_name)
         end
 
         net
@@ -698,6 +695,9 @@ module SHAInet
                                             types : Array(String), cache_dir : String,
                                             manifest_path : String) : Network
       manifest = Hash(String, JSON::Any).from_json(File.read(manifest_path))
+      # Dense offload keeps the Q4 weights in host RAM, streamed on demand -- needed when the
+      # quantized weights alone would fill VRAM (the 27B's ~14 GB against a 16 GB card).
+      cache_offload = ENV.fetch("SHAINET_DENSE_OFFLOAD", "0") == "1"
       # If the cache has config.json, it is standalone and we can load without the safetensors.
       # Otherwise fall back to the originals for the small weights.
       standalone = File.exists?(File.join(cache_dir, "config.json"))
@@ -714,9 +714,20 @@ module SHAInet
         emb_layer = net.hidden_layers.find(&.is_a?(EmbeddingLayer)).as(EmbeddingLayer)
         emb_bin = File.join(cache_dir, "embedding.bin")
         if File.exists?(emb_bin)
+          # Read into a host SimpleMatrix in chunks: vocab*d*4 overflows Int32 for the 27B (5 GB),
+          # and the embedding may be a CudaMatrix that must be replaced with the host copy.
+          host_emb = SimpleMatrix.new(config.vocab_size, d)
+          ptr = host_emb.data.to_unsafe.as(Pointer(UInt8))
+          byte_total = config.vocab_size.to_i64 * d.to_i64 * 4
           File.open(emb_bin, "r") do |f|
-            f.read(emb_layer.embeddings.as(SHAInet::SimpleMatrix).data.to_unsafe.as(Pointer(UInt8)).to_slice(config.vocab_size * d * 4))
+            read = 0_i64
+            while read < byte_total
+              n = Math.min(byte_total - read, 1_073_741_824_i64).to_i32
+              f.read_fully(Slice.new(ptr + read, n))
+              read += n
+            end
           end
+          emb_layer.embeddings = host_emb
         elsif sf
           embed = sf.read_matrix("model.language_model.embed_tokens.weight")
           config.vocab_size.times { |i| d.times { |j| emb_layer.embeddings[i, j] = embed[i, j] } }
@@ -735,11 +746,11 @@ module SHAInet
               linear_conv_kernel: config.linear_conv_kernel_dim)
             block = net.hidden_layers.last.as(GatedDeltaNetBlock)
             # Q4 weights from cache
-            block.w_q = load_q4_cached(cache_dir, "layer.#{idx}.w_q", manifest).not_nil!
-            block.w_k = load_q4_cached(cache_dir, "layer.#{idx}.w_k", manifest).not_nil!
-            block.w_v = load_q4_cached(cache_dir, "layer.#{idx}.w_v", manifest).not_nil!
-            block.w_o = load_q4_cached(cache_dir, "layer.#{idx}.w_o", manifest).not_nil!
-            block.w_gate = load_q4_cached(cache_dir, "layer.#{idx}.w_gate", manifest).not_nil!
+            block.w_q = load_q4_cached(cache_dir, "layer.#{idx}.w_q", manifest, cache_offload).not_nil!
+            block.w_k = load_q4_cached(cache_dir, "layer.#{idx}.w_k", manifest, cache_offload).not_nil!
+            block.w_v = load_q4_cached(cache_dir, "layer.#{idx}.w_v", manifest, cache_offload).not_nil!
+            block.w_o = load_q4_cached(cache_dir, "layer.#{idx}.w_o", manifest, cache_offload).not_nil!
+            block.w_gate = load_q4_cached(cache_dir, "layer.#{idx}.w_gate", manifest, cache_offload).not_nil!
             # Small fp32 weights from the checkpoint
             block.w_alpha = read_small_transposed(sf, cache_dir, idx, "w_alpha.bin",
               "#{p}linear_attn.in_proj_a.weight", d, config.linear_num_value_heads)
@@ -774,9 +785,9 @@ module SHAInet
             block.ffn.to_gpu!(true, 4)
             # FFN from cache
             ffn = block.ffn
-            ffn.gate_proj = load_q4_cached(cache_dir, "layer.#{idx}.ffn.gate", manifest).not_nil!
-            ffn.up_proj = load_q4_cached(cache_dir, "layer.#{idx}.ffn.up", manifest).not_nil!
-            ffn.down_proj = load_q4_cached(cache_dir, "layer.#{idx}.ffn.down", manifest).not_nil!
+            ffn.gate_proj = load_q4_cached(cache_dir, "layer.#{idx}.ffn.gate", manifest, cache_offload).not_nil!
+            ffn.up_proj = load_q4_cached(cache_dir, "layer.#{idx}.ffn.up", manifest, cache_offload).not_nil!
+            ffn.down_proj = load_q4_cached(cache_dir, "layer.#{idx}.ffn.down", manifest, cache_offload).not_nil!
           else
             net.add_layer(:llama, d, num_heads: config.num_attention_heads, ff_hidden: ff,
               num_kv_heads: config.num_key_value_heads, eps: eps, head_dim: config.head_dim)
@@ -785,11 +796,11 @@ module SHAInet
             block.rope_freqs = compute_rope_freqs(config, head_dim)
             block.rotary_dim = (head_dim * config.partial_rotary_factor).round.to_i if config.partial_rotary_factor < 1.0
             # Q4 weights from cache
-            block.w_q = load_q4_cached(cache_dir, "layer.#{idx}.w_q", manifest).not_nil!
-            block.w_k = load_q4_cached(cache_dir, "layer.#{idx}.w_k", manifest).not_nil!
-            block.w_v = load_q4_cached(cache_dir, "layer.#{idx}.w_v", manifest).not_nil!
-            block.w_o = load_q4_cached(cache_dir, "layer.#{idx}.w_o", manifest).not_nil!
-            if cached_gate = load_q4_cached(cache_dir, "layer.#{idx}.w_gate_attn", manifest)
+            block.w_q = load_q4_cached(cache_dir, "layer.#{idx}.w_q", manifest, cache_offload).not_nil!
+            block.w_k = load_q4_cached(cache_dir, "layer.#{idx}.w_k", manifest, cache_offload).not_nil!
+            block.w_v = load_q4_cached(cache_dir, "layer.#{idx}.w_v", manifest, cache_offload).not_nil!
+            block.w_o = load_q4_cached(cache_dir, "layer.#{idx}.w_o", manifest, cache_offload).not_nil!
+            if cached_gate = load_q4_cached(cache_dir, "layer.#{idx}.w_gate_attn", manifest, cache_offload)
               block.w_gate_attn = cached_gate
             end
             # Small fp32 weights from the checkpoint
@@ -807,9 +818,9 @@ module SHAInet
             block.norm1.to_gpu!
             block.norm2.to_gpu!
             ffn = block.ffn.as(SwiGLUFF)
-            ffn.gate_proj = load_q4_cached(cache_dir, "layer.#{idx}.ffn.gate", manifest).not_nil!
-            ffn.up_proj = load_q4_cached(cache_dir, "layer.#{idx}.ffn.up", manifest).not_nil!
-            ffn.down_proj = load_q4_cached(cache_dir, "layer.#{idx}.ffn.down", manifest).not_nil!
+            ffn.gate_proj = load_q4_cached(cache_dir, "layer.#{idx}.ffn.gate", manifest, cache_offload).not_nil!
+            ffn.up_proj = load_q4_cached(cache_dir, "layer.#{idx}.ffn.up", manifest, cache_offload).not_nil!
+            ffn.down_proj = load_q4_cached(cache_dir, "layer.#{idx}.ffn.down", manifest, cache_offload).not_nil!
           end
           @@progress.try &.call(idx + 1, types.size)
         end
@@ -831,7 +842,7 @@ module SHAInet
         output_layer = net.output_layers.first
         output_layer.biases = SimpleMatrix.new(1, config.vocab_size)
         # lm_head from cache
-        if cached_head = load_q4_cached(cache_dir, "lm_head", manifest)
+        if cached_head = load_q4_cached(cache_dir, "lm_head", manifest, cache_offload)
           net.lm_head_q = cached_head
         else
           head_name = config.tie_word_embeddings ? "model.language_model.embed_tokens.weight" : "lm_head.weight"
@@ -846,122 +857,6 @@ module SHAInet
       ensure
         sf.try(&.close)
       end
-    end
-
-    # Export every Q4 weight in a loaded network to a cache directory.
-    def self.export_q4_cache(net : Network, cache_dir : String)
-      Dir.mkdir_p(cache_dir)
-      manifest = Hash(String, Hash(String, Int64)).new
-      count = 0
-
-      net.hidden_layers.each_with_index do |layer, idx|
-        weights = case layer
-                  when LlamaBlock
-                    b = layer.as(LlamaBlock)
-                    pairs = [{"w_q", b.w_q}, {"w_k", b.w_k}, {"w_v", b.w_v}, {"w_o", b.w_o}]
-                    if wg = b.w_gate_attn
-                      pairs << {"w_gate_attn", wg}
-                    end
-                    if (f = b.ffn).is_a?(SwiGLUFF)
-                      pairs << {"ffn.gate", f.gate_proj}
-                      pairs << {"ffn.up", f.up_proj}
-                      pairs << {"ffn.down", f.down_proj}
-                    end
-                    pairs
-                  when GatedDeltaNetBlock
-                    b = layer.as(GatedDeltaNetBlock)
-                    [{"w_q", b.w_q}, {"w_k", b.w_k}, {"w_v", b.w_v}, {"w_o", b.w_o}, {"w_gate", b.w_gate}].tap do |pairs|
-                      if (f = b.ffn).is_a?(SwiGLUFF)
-                        pairs << {"ffn.gate", f.gate_proj}
-                        pairs << {"ffn.up", f.up_proj}
-                        pairs << {"ffn.down", f.down_proj}
-                      end
-                    end
-                  else
-                    [] of {String, SimpleMatrix | CudaMatrix | QuantizedWeight}
-                  end
-
-        weights.each do |name, w|
-          next unless w.is_a?(Q4CudaMatrix)
-          key = "layer.#{idx}.#{name}"
-          q_host = Bytes.new(w.@q_bytes)
-          d_host = Bytes.new(w.@d_bytes)
-          sub_host = Bytes.new(w.@sub_bytes)
-          CUDA.memcpy(q_host.to_unsafe.as(Pointer(Void)), w.q_ptr.as(Pointer(Void)), w.@q_bytes, CUDA::MemcpyKind::DeviceToHost)
-          CUDA.memcpy(d_host.to_unsafe.as(Pointer(Void)), w.d_ptr.as(Pointer(Void)), w.@d_bytes, CUDA::MemcpyKind::DeviceToHost)
-          CUDA.memcpy(sub_host.to_unsafe.as(Pointer(Void)), w.sub_ptr.as(Pointer(Void)), w.@sub_bytes, CUDA::MemcpyKind::DeviceToHost)
-          base = key.gsub(".", "__")
-          File.write(File.join(cache_dir, "#{base}.q"), q_host)
-          File.write(File.join(cache_dir, "#{base}.d"), d_host)
-          File.write(File.join(cache_dir, "#{base}.sub"), sub_host)
-          manifest[key] = {"rows" => w.rows.to_i64, "cols" => w.cols.to_i64,
-                           "q_size" => q_host.size.to_i64, "d_size" => (d_host.size // 4).to_i64,
-                           "sub_size" => sub_host.size.to_i64}
-          count += 1
-        end
-      end
-
-      # lm_head
-      if (lq = net.@lm_head_q) && lq.is_a?(Q4CudaMatrix)
-        w = lq.as(Q4CudaMatrix)
-        q_host = Bytes.new(w.@q_bytes)
-        d_host = Bytes.new(w.@d_bytes)
-        sub_host = Bytes.new(w.@sub_bytes)
-        CUDA.memcpy(q_host.to_unsafe.as(Pointer(Void)), w.q_ptr.as(Pointer(Void)), w.@q_bytes, CUDA::MemcpyKind::DeviceToHost)
-        CUDA.memcpy(d_host.to_unsafe.as(Pointer(Void)), w.d_ptr.as(Pointer(Void)), w.@d_bytes, CUDA::MemcpyKind::DeviceToHost)
-        CUDA.memcpy(sub_host.to_unsafe.as(Pointer(Void)), w.sub_ptr.as(Pointer(Void)), w.@sub_bytes, CUDA::MemcpyKind::DeviceToHost)
-        File.write(File.join(cache_dir, "lm_head.q"), q_host)
-        File.write(File.join(cache_dir, "lm_head.d"), d_host)
-        File.write(File.join(cache_dir, "lm_head.sub"), sub_host)
-        manifest["lm_head"] = {"rows" => w.rows.to_i64, "cols" => w.cols.to_i64,
-                               "q_size" => q_host.size.to_i64, "d_size" => (d_host.size // 4).to_i64,
-                               "sub_size" => sub_host.size.to_i64}
-        count += 1
-      end
-
-      File.write(File.join(cache_dir, "manifest.json"), manifest.to_json)
-
-      # Save the embedding as raw fp32 so the cache is self-contained.
-      emb = net.hidden_layers.find(&.is_a?(EmbeddingLayer))
-      if emb
-        e = emb.as(EmbeddingLayer).embeddings.as(SimpleMatrix)
-        File.open(File.join(cache_dir, "embedding.bin"), "w") do |f|
-          f.write(e.data.to_unsafe.as(Pointer(UInt8)).to_slice(e.rows * e.cols * 4))
-        end
-      end
-
-      total = Dir.children(cache_dir).sum { |f| File.size(File.join(cache_dir, f)) }
-      Log.info { "qwen3_5: exported #{count} Q4 weights to #{cache_dir} (#{"%.2f" % (total / 1_073_741_824.0)} GiB)" }
-    end
-
-    # Save the small per-layer fp32 weights (norms, conv kernels, a_log, dt_bias, etc.) as raw
-    # binary so the cache is self-contained and the original safetensors can be deleted.
-    private def self.export_small_weights(sf, cache_dir : String, types : Array(String), config : LlamaConfig)
-      types.each_with_index do |t, idx|
-        pre = "model.language_model.layers.#{idx}."
-        dir = File.join(cache_dir, "layer_#{idx}")
-        Dir.mkdir_p(dir)
-        if t == "linear_attention"
-          save_matrix(sf.read_matrix_transposed("#{pre}linear_attn.in_proj_a.weight"), File.join(dir, "w_alpha.bin"))
-          save_matrix(sf.read_matrix_transposed("#{pre}linear_attn.in_proj_b.weight"), File.join(dir, "w_beta.bin"))
-          save_matrix(sf.read_matrix("#{pre}linear_attn.A_log"), File.join(dir, "a_log.bin"))
-          save_matrix(sf.read_matrix("#{pre}linear_attn.dt_bias"), File.join(dir, "dt_bias.bin"))
-          save_matrix(sf.read_matrix("#{pre}linear_attn.conv1d.weight"), File.join(dir, "conv.bin"))
-          save_matrix(sf.read_matrix("#{pre}linear_attn.norm.weight"), File.join(dir, "out_norm.bin"))
-          save_matrix(sf.read_matrix("#{pre}input_layernorm.weight"), File.join(dir, "norm1.bin"))
-          save_matrix(sf.read_matrix("#{pre}post_attention_layernorm.weight"), File.join(dir, "norm2.bin"))
-        else
-          save_matrix(sf.read_matrix("#{pre}self_attn.q_norm.weight"), File.join(dir, "q_norm.bin"))
-          save_matrix(sf.read_matrix("#{pre}self_attn.k_norm.weight"), File.join(dir, "k_norm.bin"))
-          save_matrix(sf.read_matrix("#{pre}input_layernorm.weight"), File.join(dir, "norm1.bin"))
-          save_matrix(sf.read_matrix("#{pre}post_attention_layernorm.weight"), File.join(dir, "norm2.bin"))
-        end
-      end
-      save_matrix(sf.read_matrix("model.language_model.norm.weight"), File.join(cache_dir, "final_norm.bin"))
-    end
-
-    private def self.save_matrix(m : SimpleMatrix, path : String)
-      File.open(path, "w") { |f| f.write(m.data.to_unsafe.as(Pointer(UInt8)).to_slice(m.rows * m.cols * 4)) }
     end
 
     private def self.load_matrix(path : String, rows : Int32, cols : Int32) : SimpleMatrix
@@ -1001,7 +896,7 @@ module SHAInet
 
     # Read a pre-quantized weight from the .q4 cache, returning nil if the cache does not have it.
     # The quantize_model.cr script writes these files, and this is the read side.
-    def self.load_q4_cached(cache_dir : String, name : String, manifest : Hash(String, JSON::Any)) : Q4CudaMatrix?
+    def self.load_q4_cached(cache_dir : String, name : String, manifest : Hash(String, JSON::Any), offload : Bool = false) : QuantizedWeight?
       entry = manifest[name]?
       return unless entry
       rows = entry["rows"].as_i
@@ -1011,7 +906,11 @@ module SHAInet
       d_path = File.join(cache_dir, "#{base}.d")
       sub_path = File.join(cache_dir, "#{base}.sub")
       return unless File.exists?(q_path) && File.exists?(d_path) && File.exists?(sub_path)
-      Q4CudaMatrix.from_files(rows, cols, q_path, d_path, sub_path)
+      if offload
+        Q4HostMatrix.from_files(rows, cols, q_path, d_path, sub_path)
+      else
+        Q4CudaMatrix.from_files(rows, cols, q_path, d_path, sub_path)
+      end
     end
 
     def self.split_contiguous_halves(src : SimpleMatrix) : {SimpleMatrix, SimpleMatrix}

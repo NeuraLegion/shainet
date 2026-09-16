@@ -128,6 +128,18 @@ module SHAInet
       new(w.rows, w.cols, q_host, s_host, sub_host)
     end
 
+    # Load a pre-quantized weight from the three raw cache files, host-resident (streamed to the
+    # device on demand). The dense-offload counterpart to Q4CudaMatrix.from_files.
+    def self.from_files(rows : Int32, cols : Int32, q_path : String, d_path : String, sub_path : String) : Q4HostMatrix
+      q_bytes = File.read(q_path).to_slice
+      d_bytes = File.read(d_path).to_slice
+      sub_bytes = File.read(sub_path).to_slice
+      q_host = Array(UInt8).new(q_bytes.size) { |i| q_bytes[i] }
+      s_host = Array(Float32).new(d_bytes.size // 4) { |i| IO::ByteFormat::LittleEndian.decode(Float32, d_bytes[i * 4, 4]) }
+      sub_host = Array(UInt8).new(sub_bytes.size) { |i| sub_bytes[i] }
+      new(rows, cols, q_host, s_host, sub_host)
+    end
+
     # Host memory footprint in bytes (4-bit weights + super-block scales + sub-scales).
     def host_bytes : UInt64
       @q_bytes + @s_bytes + @sub_bytes
