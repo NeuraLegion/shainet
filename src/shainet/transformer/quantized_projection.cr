@@ -71,12 +71,17 @@ module SHAInet
         end
       elsif w.is_a?(CudaMatrix)
         x_gpu = CudaMatrix.new(x.rows, x.cols)
-        x.rows.times { |r| x.cols.times { |c| x_gpu[r, c] = x[r, c] } }
+        # Bulk copy, not element-by-element. The quantized branch above already did this; this one
+        # walked `x_gpu[r, c] = x[r, c]`, which for a [1216, 4096] activation is 5M scalar accessor
+        # calls. That made the Gated DeltaNet gate projections cost 0.329 s per layer -- more than the
+        # recurrence they feed -- for a GEMM cuBLAS finishes in milliseconds.
+        x_gpu.raw_data.to_unsafe.copy_from(x.data.to_unsafe, x.rows * x.cols)
+        x_gpu.mark_host_modified!
         x_gpu.sync_to_device!("gemm_in")
         result_gpu = x_gpu * w # cuBLAS SGEMM
         result_gpu.sync_from_device!("gemm_out") if result_gpu.device_dirty?
         result = SimpleMatrix.new(result_gpu.rows, result_gpu.cols)
-        result_gpu.rows.times { |r| result_gpu.cols.times { |c| result[r, c] = result_gpu[r, c].to_f32 } }
+        result.data.to_unsafe.copy_from(result_gpu.raw_data.to_unsafe, result_gpu.rows * result_gpu.cols)
         x_gpu.free!
         result_gpu.free!
         result

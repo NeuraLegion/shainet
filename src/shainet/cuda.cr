@@ -308,6 +308,8 @@ module SHAInet
     @@gather_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Int32), Int32, Int32, Void)?
     @@scatter_add_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Int32), Pointer(Float32), Int32, Int32, Void)?
     @@gather_available : Bool? = nil
+    @@mul_sigmoid_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Void)?
+    @@gated_delta_rule_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void)?
     @@rope_forward_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Void)?
     @@head_rmsnorm_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Float32, Void)?
     @@add_bias_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Void)?
@@ -517,6 +519,55 @@ module SHAInet
       end
       raise "CUDA kernels not available" unless fn
       fn.call(x, inv_freq, base_pos, rows, heads, head_dim, rot_dim)
+    end
+
+    # out[i] *= sigmoid(gate[i]), for Qwen3.5's attention output gate.
+    def mul_sigmoid(out_ptr : Pointer(Float32), gate : Pointer(Float32), size : Int32)
+      unless fn = @@mul_sigmoid_proc
+        @@mul_sigmoid_proc = fn = load_kernel_proc("mul_sigmoid",
+          Proc(Pointer(Float32), Pointer(Float32), Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(out_ptr, gate, size)
+    end
+
+    def mul_sigmoid_available? : Bool
+      return false unless fully_available?
+      if @@kernels_handle.null?
+        @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+      end
+      return false if @@kernels_handle.null?
+      !LibC.dlsym(@@kernels_handle, "mul_sigmoid").null?
+    end
+
+    # Gated delta rule (Qwen3.5 linear attention) over a whole sequence in one launch.
+    #
+    # `state` is [nv, dk, dv] and is read AND written: pass the carried state for a continued
+    # sequence, or a zeroed buffer for a fresh one. q and k are indexed by KEY head, so nk may be
+    # smaller than nv (grouped-query sharing). L2 normalization of q/k and the q_scale are applied
+    # inside the kernel.
+    def gated_delta_rule(q : Pointer(Float32), k : Pointer(Float32), v : Pointer(Float32),
+                         alpha : Pointer(Float32), beta : Pointer(Float32),
+                         state : Pointer(Float32), out_ptr : Pointer(Float32),
+                         seq : Int32, nv : Int32, nk : Int32, dk : Int32, dv : Int32,
+                         heads_per_k : Int32, q_scale : Float32)
+      unless fn = @@gated_delta_rule_proc
+        @@gated_delta_rule_proc = fn = load_kernel_proc("gated_delta_rule",
+          Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32),
+               Pointer(Float32), Pointer(Float32), Pointer(Float32),
+               Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(q, k, v, alpha, beta, state, out_ptr, seq, nv, nk, dk, dv, heads_per_k, q_scale)
+    end
+
+    def gated_delta_rule_available? : Bool
+      return false unless fully_available?
+      if @@kernels_handle.null?
+        @@kernels_handle = LibC.dlopen("libshainet_cuda_kernels.so", LibC::RTLD_LAZY)
+      end
+      return false if @@kernels_handle.null?
+      !LibC.dlsym(@@kernels_handle, "gated_delta_rule").null?
     end
 
     # Multi-row Qwen3 QK-norm for prefill.
