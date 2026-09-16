@@ -383,7 +383,7 @@ module SHAInet
           config.vocab_size.times { |i| d.times { |j| emb_layer.embeddings[i, j] = embed[i, j] } }
         end
         GC.collect
-        Log.info { "qwen3_5: embedding loaded (#{config.vocab_size}x#{d})" }
+        @@progress.try &.call(0, types.size)
 
         # Construct, load and quantize ONE layer at a time.
         #
@@ -493,9 +493,9 @@ module SHAInet
           # MB of retained read transients per layer is the difference between fitting and being
           # OOM-killed. Measured twice on this machine before this was tightened.
           GC.collect
-          if idx % 4 == 3 || idx == types.size - 1
-            Log.info { "qwen3_5: layer #{idx + 1}/#{types.size} loaded" }
-          end
+          # Use the same progress callback the agent's UI registers, so the loading bar renders
+          # instead of raw Log.info lines.
+          @@progress.try &.call(idx + 1, types.size)
         end
 
         net.add_layer(:output, config.vocab_size, activation_function: SHAInet.identity)
