@@ -11,7 +11,9 @@ SHAInet (Super Human Artificial Intelligence Network) is a neural network librar
 - Various training algorithms (SGD, Adam, iRprop+, etc.)
 - Streaming data support for large datasets
 - HuggingFace model import via SafeTensors (no Python required)
-- LLM inference: GPT-2, LLaMA, Mistral, Qwen2, Qwen3, and Qwen3-MoE
+- LLM inference: GPT-2, LLaMA, Mistral, Qwen2, Qwen3, Qwen3-MoE, and Qwen3.5
+  (Qwen3.5's Gated DeltaNet hybrid stack runs, but its mixer is host-side: usable for
+  short prompts, not yet for an interactive agent -- see below)
 - KV-cache decoding, Q8/Q4 weight quantization, and MoE expert offload
   (run large Mixture-of-Experts models on small GPUs)
 
@@ -121,14 +123,14 @@ the model's `config.json`:
 ```crystal
 require "shainet"
 
-# Auto-detects the architecture (gpt2 / llama / mistral / qwen2 / qwen3 / qwen3_moe)
+# Auto-detects the architecture (gpt2 / llama / mistral / qwen2 / qwen3 / qwen3_moe / qwen3_5)
 net = SHAInet::HFLoader.load("/path/to/model-dir")
 
 # Optionally quantize weights to int8 at load time (Q8):
 net = SHAInet::HFLoader.load("/path/to/model-dir", quantize: true, bits: 8)
 ```
 
-Supported architectures: **GPT-2, LLaMA, Mistral, Qwen2, Qwen3, Qwen3-MoE**.
+Supported architectures: **GPT-2, LLaMA, Mistral, Qwen2, Qwen3, Qwen3-MoE, Qwen3.5**.
 Supported tensor dtypes: F16, BF16, F32, F64.
 
 For a full chat loop (tokenizer, KV-cache decoding, sampling) see

@@ -5,7 +5,7 @@ module SHAInet
   # Load a GPT-2 model directly from a HuggingFace SafeTensors file.
   # No Python, no PyTorch — pure Crystal.
   module HFLoader
-    SUPPORTED_MODELS = ["gpt2", "llama", "mistral", "qwen2", "qwen3", "qwen3_moe"]
+    SUPPORTED_MODELS = ["gpt2", "llama", "mistral", "qwen2", "qwen3", "qwen3_moe", "qwen3_5"]
 
     # Optional progress reporting for the layer loop. A 30B takes about nine minutes to
     # load and quantize, which is indistinguishable from a hang without this. Set to nil to
@@ -65,7 +65,10 @@ module SHAInet
       when "llama", "mistral", "qwen2", "qwen3", "qwen3_moe"
         load_llama(model_dir, quantize: quantize, bits: bits)
       when "qwen3_5"
-        load_qwen35(model_dir)
+        # quantize/bits MUST be forwarded. Dropping them silently gave a caller that asked for Q4 a
+        # full fp32 load instead: 33.9 GiB resident for a 9B, which the OOM killer ends on a 62 GB
+        # machine. examples/agent.cr goes through this path.
+        load_qwen35(model_dir, quantize: quantize, bits: bits)
       else
         raise "Unsupported model_type: '#{model_type}'. Supported: #{SUPPORTED_MODELS.join(", ")}"
       end
