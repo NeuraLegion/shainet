@@ -227,6 +227,17 @@ module SHAInet
         # trip per layer. nil means the activation is currently the host `matrix`.
         dev_act : CudaMatrix? = nil
 
+        # Prefill boost: uncap the hot-weight cache budget during multi-token passes
+        # so that weights promoted layer-by-layer fill the available VRAM instead of
+        # being evicted by the normal decode-safe budget. The device_has_room? check
+        # is the real guard; the budget is just a soft ceiling that causes unnecessary
+        # PCIe streaming during prefill.
+        prefill_boosted = false
+        if input.rows > 1
+          Q4HostMatrix.prefill_boost!
+          prefill_boosted = true
+        end
+
         @hidden_layers.each do |l|
           case l
           when EmbeddingLayer
@@ -300,6 +311,8 @@ module SHAInet
         if da = dev_act
           matrix = device_row_to_host(da)
         end
+
+        Q4HostMatrix.prefill_restore! if prefill_boosted
 
         out_layer = @output_layers.last
         w = out_layer.weights
