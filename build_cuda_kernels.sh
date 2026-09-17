@@ -89,6 +89,26 @@ fi
 
 echo ""
 echo "SHAInet installation completed!"
+
+# ── CPU kernels (AVX2 Q4_K/Q6_K GEMV for offloaded layers) ──────────
+CPU_KERNEL_SRC="src/shainet/native/cpu_kernels.c"
+CPU_OUTPUT_LIB="libshainet_cpu_kernels.so"
+if [ -f "${CPU_KERNEL_SRC}" ]; then
+    echo ""
+    echo "Building CPU AVX2 kernels..."
+    if gcc -O3 -mavx2 -mfma -mf16c -fopenmp -shared -fPIC \
+         -o ${CPU_OUTPUT_LIB} ${CPU_KERNEL_SRC} -lgomp 2>/dev/null; then
+        echo "  ✓ CPU AVX2 kernels built: ${CPU_OUTPUT_LIB} ($(du -h ${CPU_OUTPUT_LIB} | cut -f1))"
+    else
+        # Try without OpenMP
+        if gcc -O3 -mavx2 -mfma -mf16c -shared -fPIC \
+             -o ${CPU_OUTPUT_LIB} ${CPU_KERNEL_SRC} 2>/dev/null; then
+            echo "  ✓ CPU AVX2 kernels built (no OpenMP): ${CPU_OUTPUT_LIB}"
+        else
+            echo "  ⚠ CPU AVX2 kernels failed to build (need gcc + AVX2 support)"
+        fi
+    fi
+fi
 echo ""
 echo "GPU Acceleration Status:"
 if [ -f "${OUTPUT_LIB}" ]; then
