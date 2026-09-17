@@ -748,8 +748,13 @@ module AgentDemo
     # Feed tokens to the model in slices so there is something to show. The KV cache
     # accumulates across calls, so slicing is equivalent to one call.
     private def run_prefill(ids : Array(Int32), already : Int32, total : Int32) : SHAInet::SimpleMatrix
-      slice = 512
-      show = ids.size > slice
+      # With dense offload each weight is streamed host->device once per layer per chunk.
+      # With 14 GB of weights and a 4 GB cache, each layer evicts the previous one's weights,
+      # so N chunks = N * 13 GB of PCIe transfers. A single large chunk cuts that to 1x.
+      # SHAINET_PREFILL_SLICE overrides (0 = full prompt in one call).
+      slice = (ENV["SHAINET_PREFILL_SLICE"]? || "0").to_i
+      slice = ids.size if slice <= 0
+      show = ids.size > 512
       logits = nil
       i = 0
       while i < ids.size
@@ -1037,3 +1042,4 @@ loop do
   STDERR.puts "  #{agent.status}".colorize(:dark_gray)
 end
 STDERR.puts "\nbye 👋".colorize(:cyan)
+SHAInet::Profile.report(STDERR)
