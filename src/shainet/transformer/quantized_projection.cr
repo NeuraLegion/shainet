@@ -86,7 +86,22 @@ module SHAInet
         result_gpu.free!
         result
       else
-        x * w
+        # Host fp32 matmul -- use AVX2+OpenMP C kernel when available
+        m = x.rows
+        k = x.cols
+        n = w.cols
+        if CPUKernels.available? && m * n > 1024
+          c_ptr = Pointer(Float32).malloc(m * n)
+          CPUKernels.sgemm(
+            x.data.to_unsafe, w.data.to_unsafe, c_ptr,
+            m, n, k,
+          )
+          result = SimpleMatrix.new(m, n)
+          result.data.to_unsafe.copy_from(c_ptr, m * n)
+          result
+        else
+          x * w
+        end
       end
     end
 
