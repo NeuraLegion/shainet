@@ -1,0 +1,396 @@
+require "./gguf"
+
+module SHAInet
+  module HFLoader
+    # Load a model from a GGUF file (llama.cpp / Ollama format).
+    #
+    # The GGUF contains everything: architecture metadata, tokenizer, and
+    # pre-quantized weights (Q4_K / Q6_K / F32). No config.json or tokenizer.json
+    # needed. Weights stay in their native k-quant format on the device -- no
+    # transcoding to our Q4 format.
+    #
+    # Supported architectures: qwen35 (Qwen3.5 / Qwen3.8 hybrid stack).
+    def self.load_gguf(path : String) : Network
+      gf = GGUF::File.open(path)
+      begin
+        arch = gf.meta_string("general.architecture") || raise "GGUF missing general.architecture"
+        raise "unsupported GGUF architecture: #{arch} (expected qwen35)" unless arch == "qwen35"
+
+        d = (gf.meta_u32("#{arch}.embedding_length") || raise "missing embedding_length").to_i32
+        n_layers = (gf.meta_u32("#{arch}.block_count") || raise "missing block_count").to_i32
+        ff = (gf.meta_u32("#{arch}.feed_forward_length") || raise "missing feed_forward_length").to_i32
+        n_heads = (gf.meta_u32("#{arch}.attention.head_count") || raise "missing head_count").to_i32
+        n_kv_heads = (gf.meta_u32("#{arch}.attention.head_count_kv") || 4).to_i32
+        head_dim = (gf.meta_u32("#{arch}.attention.key_length") || (d // n_heads)).to_i32
+        eps = (gf.meta_f32("#{arch}.attention.layer_norm_rms_epsilon") || 1e-6_f32).to_f64
+        rope_theta = (gf.meta_f32("#{arch}.rope.freq_base") || 10_000_000.0_f32).to_f64
+        conv_kernel = (gf.meta_u32("#{arch}.ssm.conv_kernel") || 4).to_i32
+        full_attn_interval = (gf.meta_u32("#{arch}.full_attention_interval") || 4).to_i32
+        partial_rotary = (gf.meta_u32("#{arch}.rope.dimension_count") || 64).to_i32
+
+        # The GGUF block_count includes MTP layers; the actual transformer layers are n_layers - nextn
+        nextn = (gf.meta_u32("#{arch}.nextn_predict_layers") || 0).to_i32
+        num_transformer_layers = n_layers - nextn
+
+        # Build the layer type list: every full_attn_interval-th layer is full_attention
+        types = Array(String).new(num_transformer_layers) do |i|
+          (i > 0 && (i + 1) % full_attn_interval == 0) ? "full_attention" : "linear_attention"
+        end
+
+        # SSM (DeltaNet) parameters
+        ssm_heads = (gf.meta_u32("#{arch}.ssm.time_step_rank") || 48).to_i32
+        ssm_state = (gf.meta_u32("#{arch}.ssm.state_size") || 128).to_i32
+        ssm_inner = (gf.meta_u32("#{arch}.ssm.inner_size") || 6144).to_i32
+        ssm_k_heads = (gf.meta_u32("#{arch}.ssm.group_count") || 16).to_i32
+        ssm_head_dim = ssm_inner // ssm_heads
+
+        Log.info { "gguf: #{arch} #{num_transformer_layers} layers, d=#{d}, ff=#{ff}, heads=#{n_heads}/#{n_kv_heads}" }
+
+        net = Network.new
+        net.add_layer(:input, 1)
+        net.add_layer(:embedding, d, vocab_size: 248320) # Qwen3.5 vocab
+
+        # Embedding: may be Q4_K or F32 in GGUF
+        emb_layer = net.hidden_layers.find(&.is_a?(EmbeddingLayer)).as(EmbeddingLayer)
+        emb_info = gf.tensors["token_embd.weight"]
+        load_gguf_embedding(gf, emb_info, emb_layer, d)
+
+        @@progress.try &.call(0, num_transformer_layers)
+
+        # Layer-level GPU/CPU split: fill GPU back-to-front until VRAM budget is met.
+        # Layers that don't fit stay host-resident (dequanted to fp32 SimpleMatrix).
+        # This mirrors Ollama's approach: 45/66 layers on GPU for the 27B.
+        gpu_layers = num_transformer_layers # default: all on GPU
+        reserve_mb = (ENV["SHAINET_GGUF_RESERVE_MB"]? || "2048").to_i
+        if CUDA.fully_available?
+          if info = CUDA.memory_info
+            free_mb = (info[:free] / (1024 * 1024)).to_i32
+            budget_mb = free_mb - reserve_mb
+            # Estimate ~237 MB per layer in native Q4_K/Q6_K + ~535 MB for lm_head
+            lm_head_mb = 535
+            per_layer_mb = 237
+            gpu_layers = Math.max(0, (budget_mb - lm_head_mb) // per_layer_mb)
+            gpu_layers = Math.min(gpu_layers, num_transformer_layers)
+          end
+        end
+        cpu_layers = num_transformer_layers - gpu_layers
+        Log.info { "gguf: #{gpu_layers}/#{num_transformer_layers} layers on GPU, #{cpu_layers} on CPU (reserve #{reserve_mb} MB)" }
+
+        types.each_with_index do |t, idx|
+          on_gpu = idx >= cpu_layers # back-to-front: last layers go on GPU first
+          if t == "linear_attention"
+            load_gguf_linear_attn_layer(gf, net, idx, d, ff, eps, ssm_heads, ssm_k_heads,
+              ssm_head_dim, conv_kernel, ssm_state, on_gpu)
+          else
+            load_gguf_full_attn_layer(gf, net, idx, d, ff, eps, n_heads, n_kv_heads,
+              head_dim, rope_theta, partial_rotary, on_gpu)
+          end
+          GC.collect unless on_gpu
+          @@progress.try &.call(idx + 1, num_transformer_layers)
+        end
+
+        # Output layer
+        net.add_layer(:output, 248320, activation_function: SHAInet.identity)
+        net.fully_connect
+        output_layer = net.output_layers.first
+        output_layer.biases = SimpleMatrix.new(1, 248320)
+
+        # Final norm
+        fn_info = gf.tensors["output_norm.weight"]
+        fn_data = read_gguf_f32_tensor(gf, fn_info)
+        final_norm = RMSNorm.new(d, eps)
+        gamma = SimpleMatrix.new(1, d)
+        d.times { |i| gamma[0, i] = (1.0 + fn_data[i]).to_f32 } # offset-from-one
+        final_norm.gamma = gamma
+        net.final_norm = final_norm
+
+        # lm_head
+        lm_info = gf.tensors["output.weight"]
+        net.lm_head_q = load_gguf_weight_device(gf, lm_info)
+        net.quantize_weights = true
+
+        emb_layer.to_host! if ENV.fetch("SHAINET_EMBED_HOST", "1") != "0"
+        Log.info { "gguf: loaded #{num_transformer_layers} layers from #{path}" }
+        net
+      ensure
+        gf.close
+      end
+    end
+
+    # Load a GGUF tensor as either GGUFMatrix (device) or SimpleMatrix (host dequanted).
+    private def self.load_gguf_weight(gf : GGUF::File, info : GGUF::TensorInfo, on_gpu : Bool = true) : QuantizedWeight | SimpleMatrix | CudaMatrix
+      unless on_gpu
+        # CPU layer: keep the mmap pointer and wrap in a GGUFMatrix that will
+        # stream to GPU on demand via cudaMemcpy. The GGUF file must stay mmap'd
+        # (it does -- it's closed only after the Network is done).
+        # This is zero-copy for the host side: no dequant, no repack, no allocation.
+        if mmap_ptr = gf.tensor_ptr(info)
+          rows = info.shape[0].to_i32
+          cols = info.shape.size > 1 ? info.shape[1].to_i32 : 1
+          return GGUFHostMatrix.new(rows, cols, info.type, mmap_ptr, info.byte_size)
+        end
+        # Fallback if no mmap: read + device upload
+      end
+      load_gguf_weight_device(gf, info)
+    end
+
+    private def self.load_gguf_weight_device(gf : GGUF::File, info : GGUF::TensorInfo) : GGUFMatrix
+      # Use mmap pointer if available (zero-copy from file to GPU)
+      if mmap_ptr = gf.tensor_ptr(info)
+        ptr = mmap_ptr
+      else
+        ptr = gf.read_tensor_raw(info)
+      end
+      rows = info.shape[0].to_i32
+      cols = info.shape.size > 1 ? info.shape[1].to_i32 : 1
+      GGUFMatrix.new(rows, cols, info.type, ptr, info.byte_size)
+    end
+
+    # Read a GGUF F32 tensor into a flat Array(Float32).
+    private def self.read_gguf_f32_tensor(gf : GGUF::File, info : GGUF::TensorInfo) : Array(Float32)
+      count = info.element_count.to_i32
+      if info.type == GGUF::GGMLType::F32
+        buf = Bytes.new(count * 4)
+        gf.read_tensor_data(info, buf)
+        Array(Float32).new(count) { |i| IO::ByteFormat::LittleEndian.decode(Float32, buf[i * 4, 4]) }
+      elsif info.type == GGUF::GGMLType::Q4_K
+        dequant_q4k_host(gf, info)
+      elsif info.type == GGUF::GGMLType::Q6_K
+        dequant_q6k_host(gf, info)
+      else
+        raise "read_gguf_f32_tensor: unsupported type #{info.type} for #{info.name}"
+      end
+    end
+
+    # Host-side Q4_K dequantization (for small tensors only -- embedding lookup, alpha/beta).
+    private def self.dequant_q4k_host(gf : GGUF::File, info : GGUF::TensorInfo) : Array(Float32)
+      raw = Bytes.new(info.byte_size.to_i32)
+      gf.read_tensor_data(info, raw)
+      count = info.element_count.to_i32
+      result = Array(Float32).new(count, 0.0_f32)
+      nblocks = count // 256
+      nblocks.times do |blk|
+        block = raw.to_unsafe + blk * 144
+        d = half_to_f32(block[0].to_u16 | (block[1].to_u16 << 8))
+        dmin = half_to_f32(block[2].to_u16 | (block[3].to_u16 << 8))
+        scales = block + 4
+        qs = block + 16
+        base = blk * 256
+        4.times do |j64|
+          sc0, m0 = get_scale_min_k4_host(j64 * 2, scales)
+          sc1, m1 = get_scale_min_k4_host(j64 * 2 + 1, scales)
+          d1 = d * sc0.to_f32
+          m1_val = dmin * m0.to_f32
+          d2 = d * sc1.to_f32
+          m2_val = dmin * m1.to_f32
+          32.times do |l|
+            result[base + j64 * 64 + l] = d1 * (qs[j64 * 32 + l] & 0xF).to_f32 - m1_val
+            result[base + j64 * 64 + l + 32] = d2 * (qs[j64 * 32 + l] >> 4).to_f32 - m2_val
+          end
+        end
+      end
+      result
+    end
+
+    # Host-side Q6_K dequantization.
+    private def self.dequant_q6k_host(gf : GGUF::File, info : GGUF::TensorInfo) : Array(Float32)
+      raw = Bytes.new(info.byte_size.to_i32)
+      gf.read_tensor_data(info, raw)
+      count = info.element_count.to_i32
+      result = Array(Float32).new(count, 0.0_f32)
+      nblocks = count // 256
+      nblocks.times do |blk|
+        block = raw.to_unsafe + blk * 210
+        ql = block
+        qh = block + 128
+        sc = block + 192
+        d = half_to_f32(block[208].to_u16 | (block[209].to_u16 << 8))
+        base = blk * 256
+        (256 // 128).times do |chunk|
+          ql_c = ql + chunk * 64
+          qh_c = qh + chunk * 32
+          sc_c = sc + chunk * 8
+          32.times do |l|
+            is = l // 16
+            q1 = ((ql_c[l] & 0xF) | (((qh_c[l] >> 0) & 3) << 4)).to_i8 - 32
+            q2 = ((ql_c[l + 32] & 0xF) | (((qh_c[l] >> 2) & 3) << 4)).to_i8 - 32
+            q3 = ((ql_c[l] >> 4) | (((qh_c[l] >> 4) & 3) << 4)).to_i8 - 32
+            q4 = ((ql_c[l + 32] >> 4) | (((qh_c[l] >> 6) & 3) << 4)).to_i8 - 32
+            result[base + chunk * 128 + l] = d * sc_c[is].to_i8!.to_f32 * q1.to_f32
+            result[base + chunk * 128 + l + 32] = d * sc_c[is + 2].to_i8!.to_f32 * q2.to_f32
+            result[base + chunk * 128 + l + 64] = d * sc_c[is + 4].to_i8!.to_f32 * q3.to_f32
+            result[base + chunk * 128 + l + 96] = d * sc_c[is + 6].to_i8!.to_f32 * q4.to_f32
+          end
+        end
+      end
+      result
+    end
+
+    private def self.get_scale_min_k4_host(j : Int32, scales : Pointer(UInt8)) : {UInt8, UInt8}
+      if j < 4
+        {scales[j] & 63_u8, scales[j + 4] & 63_u8}
+      else
+        sc = (scales[j + 4] & 0xF_u8) | ((scales[j - 4] >> 6) << 4)
+        mn = (scales[j + 4] >> 4) | ((scales[j] >> 6) << 4)
+        {sc, mn}
+      end
+    end
+
+    private def self.half_to_f32(bits : UInt16) : Float32
+      sign = (bits >> 15) & 1
+      exp = (bits >> 10) & 0x1F
+      frac = bits & 0x3FF
+      if exp == 0
+        return sign == 1 ? -0.0_f32 : 0.0_f32 if frac == 0
+        # Subnormal
+        val = frac.to_f32 / 1024.0_f32 * (2.0_f32 ** -14)
+        return sign == 1 ? -val : val
+      elsif exp == 31
+        return sign == 1 ? Float32::INFINITY * -1 : Float32::INFINITY if frac == 0
+        return Float32::NAN
+      end
+      val = (1.0_f32 + frac.to_f32 / 1024.0_f32) * (2.0_f32 ** (exp.to_i32 - 15))
+      sign == 1 ? -val : val
+    end
+
+    # Read a GGUF F32 tensor into a SimpleMatrix.
+    private def self.read_gguf_f32_matrix(gf : GGUF::File, info : GGUF::TensorInfo, rows : Int32, cols : Int32) : SimpleMatrix
+      data = read_gguf_f32_tensor(gf, info)
+      m = SimpleMatrix.new(rows, cols)
+      rows.times { |r| cols.times { |c| m[r, c] = data[r * cols + c].to_f64 } }
+      m
+    end
+
+    private def self.load_gguf_embedding(gf : GGUF::File, info : GGUF::TensorInfo,
+                                         emb_layer : EmbeddingLayer, d : Int32)
+      vocab = info.shape[1].to_i32
+      # Dequant to fp32 regardless of source type -- embedding lookup is index-based,
+      # not a GEMV. read_gguf_f32_tensor handles F32, Q4_K, and Q6_K.
+      data = read_gguf_f32_tensor(gf, info)
+      host_emb = SimpleMatrix.new(vocab, d)
+      vocab.times { |v| d.times { |j| host_emb[v, j] = data[v * d + j].to_f64 } }
+      emb_layer.embeddings = host_emb
+    end
+
+    private def self.load_gguf_linear_attn_layer(gf : GGUF::File, net : Network, idx : Int32,
+                                                 d : Int32, ff : Int32, eps : Float64,
+                                                 num_v_heads : Int32, num_k_heads : Int32,
+                                                 head_dim : Int32, conv_kernel : Int32,
+                                                 state_size : Int32, on_gpu : Bool)
+      net.add_layer("gated_deltanet", d, num_heads: num_v_heads,
+        ff_hidden: ff, num_kv_heads: num_k_heads,
+        eps: eps, head_dim: head_dim,
+        linear_conv_kernel: conv_kernel)
+      block = net.hidden_layers.last.as(GatedDeltaNetBlock)
+
+      # Fused QKV: blk.N.attn_qkv.weight [d, qkv_dim]
+      qkv_info = gf.tensors["blk.#{idx}.attn_qkv.weight"]
+      block.w_q = load_gguf_weight(gf, qkv_info, on_gpu) # TODO: split fused QKV
+
+      # Gate (z projection): blk.N.attn_gate.weight [d, gate_dim]
+      gate_info = gf.tensors["blk.#{idx}.attn_gate.weight"]
+      block.w_gate = load_gguf_weight(gf, gate_info, on_gpu)
+
+      # Output: blk.N.ssm_out.weight [ssm_inner, d]
+      out_info = gf.tensors["blk.#{idx}.ssm_out.weight"]
+      block.w_o = load_gguf_weight(gf, out_info, on_gpu)
+
+      # Alpha/Beta: dequant to fp32 (small matrices, block expects SimpleMatrix | CudaMatrix)
+      alpha_info = gf.tensors["blk.#{idx}.ssm_alpha.weight"]
+      beta_info = gf.tensors["blk.#{idx}.ssm_beta.weight"]
+      alpha_r = alpha_info.shape[0].to_i32
+      alpha_c = alpha_info.shape.size > 1 ? alpha_info.shape[1].to_i32 : 1
+      block.w_alpha = read_gguf_f32_matrix(gf, alpha_info, alpha_r, alpha_c)
+      block.w_beta = read_gguf_f32_matrix(gf, beta_info, alpha_r, alpha_c)
+      block.w_alpha = block.w_alpha.as(SimpleMatrix).to_cuda if CUDA.fully_available?
+      block.w_beta = block.w_beta.as(SimpleMatrix).to_cuda if CUDA.fully_available?
+
+      # A_log and dt_bias (tiny F32 vectors)
+      a_log_info = gf.tensors["blk.#{idx}.ssm_a"]
+      dt_info = gf.tensors["blk.#{idx}.ssm_dt.bias"]
+      a_log = read_gguf_f32_tensor(gf, a_log_info)
+      dt_bias = read_gguf_f32_tensor(gf, dt_info)
+      num_v_heads.times do |h|
+        block.a_log[h] = a_log[h].to_f64
+        block.dt_bias[h] = dt_bias[h].to_f64
+      end
+
+      # Conv1d (F32)
+      conv_info = gf.tensors["blk.#{idx}.ssm_conv1d.weight"]
+      conv_data = read_gguf_f32_tensor(gf, conv_info)
+      k_dim = num_k_heads * head_dim
+      v_dim = num_v_heads * head_dim
+      # Conv shape: [conv_kernel, 2*k_dim + v_dim] -- fill conv_q/k/v
+      total_ch = 2 * k_dim + v_dim
+      conv_m = SimpleMatrix.new(total_ch, conv_kernel)
+      total_ch.times { |c| conv_kernel.times { |t| conv_m[c, t] = conv_data[t * total_ch + c].to_f64 } }
+      # Split into q, k, v and reverse taps
+      cq = SimpleMatrix.new(k_dim, conv_kernel)
+      ck = SimpleMatrix.new(k_dim, conv_kernel)
+      cv = SimpleMatrix.new(v_dim, conv_kernel)
+      k_dim.times { |i| conv_kernel.times { |t| cq[i, t] = conv_m[i, t] } }
+      k_dim.times { |i| conv_kernel.times { |t| ck[i, t] = conv_m[k_dim + i, t] } }
+      v_dim.times { |i| conv_kernel.times { |t| cv[i, t] = conv_m[2 * k_dim + i, t] } }
+      reverse_taps!(cq, block.conv_q.weight)
+      reverse_taps!(ck, block.conv_k.weight)
+      reverse_taps!(cv, block.conv_v.weight)
+
+      # Output norm (SSM norm)
+      norm_info = gf.tensors["blk.#{idx}.ssm_norm.weight"]
+      block.out_norm.gamma = read_gguf_f32_matrix(gf, norm_info, 1, state_size)
+
+      # Layer norms (offset-from-one for qwen3.5 RMSNorm)
+      n1_info = gf.tensors["blk.#{idx}.attn_norm.weight"]
+      n2_info = gf.tensors["blk.#{idx}.post_attention_norm.weight"]
+      block.norm1.gamma = rms_gamma_offset(read_gguf_f32_matrix(gf, n1_info, 1, d))
+      block.norm2.gamma = rms_gamma_offset(read_gguf_f32_matrix(gf, n2_info, 1, d))
+      block.norm1.to_gpu!
+      block.norm2.to_gpu!
+      block.out_norm.to_gpu!
+
+      # FFN
+      ffn = block.ffn
+      ffn.gate_proj = load_gguf_weight(gf, gf.tensors["blk.#{idx}.ffn_gate.weight"], on_gpu)
+      ffn.up_proj = load_gguf_weight(gf, gf.tensors["blk.#{idx}.ffn_up.weight"], on_gpu)
+      ffn.down_proj = load_gguf_weight(gf, gf.tensors["blk.#{idx}.ffn_down.weight"], on_gpu)
+    end
+
+    private def self.load_gguf_full_attn_layer(gf : GGUF::File, net : Network, idx : Int32,
+                                               d : Int32, ff : Int32, eps : Float64,
+                                               n_heads : Int32, n_kv_heads : Int32,
+                                               head_dim : Int32, rope_theta : Float64,
+                                               partial_rotary : Int32, on_gpu : Bool)
+      net.add_layer(:llama, d, num_heads: n_heads, ff_hidden: ff,
+        num_kv_heads: n_kv_heads, eps: eps, head_dim: head_dim)
+      block = net.hidden_layers.last.as(LlamaBlock)
+      block.rope_theta = rope_theta
+      block.rotary_dim = partial_rotary if partial_rotary < head_dim
+
+      # Separate Q/K/V/O for full attention layers
+      block.w_q = load_gguf_weight(gf, gf.tensors["blk.#{idx}.attn_q.weight"], on_gpu)
+      block.w_k = load_gguf_weight(gf, gf.tensors["blk.#{idx}.attn_k.weight"], on_gpu)
+      block.w_v = load_gguf_weight(gf, gf.tensors["blk.#{idx}.attn_v.weight"], on_gpu)
+      block.w_o = load_gguf_weight(gf, gf.tensors["blk.#{idx}.attn_output.weight"], on_gpu)
+
+      # Q/K norms (offset-from-one for qwen3.5 RMSNorm)
+      qn_data = read_gguf_f32_tensor(gf, gf.tensors["blk.#{idx}.attn_q_norm.weight"])
+      kn_data = read_gguf_f32_tensor(gf, gf.tensors["blk.#{idx}.attn_k_norm.weight"])
+      block.q_norm = Array(Float32).new(qn_data.size) { |i| (1.0_f32 + qn_data[i]) }
+      block.k_norm = Array(Float32).new(kn_data.size) { |i| (1.0_f32 + kn_data[i]) }
+
+      # Layer norms
+      n1_info = gf.tensors["blk.#{idx}.attn_norm.weight"]
+      n2_info = gf.tensors["blk.#{idx}.post_attention_norm.weight"]
+      block.norm1.gamma = rms_gamma_offset(read_gguf_f32_matrix(gf, n1_info, 1, d))
+      block.norm2.gamma = rms_gamma_offset(read_gguf_f32_matrix(gf, n2_info, 1, d))
+      block.norm1.to_gpu!
+      block.norm2.to_gpu!
+
+      # FFN
+      ffn = block.ffn.as(SwiGLUFF)
+      ffn.gate_proj = load_gguf_weight(gf, gf.tensors["blk.#{idx}.ffn_gate.weight"], on_gpu)
+      ffn.up_proj = load_gguf_weight(gf, gf.tensors["blk.#{idx}.ffn_up.weight"], on_gpu)
+      ffn.down_proj = load_gguf_weight(gf, gf.tensors["blk.#{idx}.ffn_down.weight"], on_gpu)
+    end
+  end
+end
