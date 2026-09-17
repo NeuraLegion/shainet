@@ -748,25 +748,21 @@ module AgentDemo
     # Feed tokens to the model in slices so there is something to show. The KV cache
     # accumulates across calls, so slicing is equivalent to one call.
     private def run_prefill(ids : Array(Int32), already : Int32, total : Int32) : SHAInet::SimpleMatrix
-      # With dense offload each weight is streamed host->device once per layer per chunk.
-      # With 14 GB of weights and a 4 GB cache, each layer evicts the previous one's weights,
-      # so N chunks = N * 13 GB of PCIe transfers. A single large chunk cuts that to 1x.
-      # SHAINET_PREFILL_SLICE overrides (0 = full prompt in one call).
       slice = (ENV["SHAINET_PREFILL_SLICE"]? || "0").to_i
       slice = ids.size if slice <= 0
-      show = ids.size > 512
       logits = nil
       i = 0
+      t0 = Time.monotonic
       while i < ids.size
         n = Math.min(slice, ids.size - i)
         logits = @net.run(ids[i, n], stealth: true, return_matrix: true).as(SHAInet::SimpleMatrix)
         i += n
-        if show
-          done = already + i
-          STDERR.print "\r  prefill #{done}/#{total} tok (#{done * 100 // total}%)".colorize(:dark_gray)
-        end
+        done = already + i
+        elapsed = (Time.monotonic - t0).total_seconds
+        STDERR.print "\r  prefill #{done}/#{total} tok (#{done * 100 // total}%) · #{elapsed.round(0).to_i}s".colorize(:dark_gray)
+        STDERR.flush
       end
-      STDERR.print "\r\033[K" if show
+      STDERR.print "\r\033[K"
       logits.not_nil!
     end
 
@@ -848,6 +844,12 @@ module AgentDemo
         end
         STDERR.puts ""
         calls = AgentDemo.parse_tool_calls(text)
+
+        # If the model generated only think tags or whitespace, the user sees nothing.
+        visible = text.gsub(/<think>.*?<\/think>/m, "").gsub(/<tool_call>.*?<\/tool_call>/m, "").strip
+        if visible.empty? && calls.empty?
+          STDERR.puts "  [agent] model returned no visible text".colorize(:dark_gray)
+        end
 
         # Keep the assistant's output (incl. any tool_call markup) verbatim.
         @messages << Message.new("assistant", text.strip, text_ids)

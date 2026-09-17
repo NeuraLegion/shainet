@@ -208,6 +208,20 @@ module SHAInet
         if r = @@saved_reserve
           @@reserve_bytes = r
           @@saved_reserve = nil
+          # Evict the least-recently-used weights until the device has enough free
+          # VRAM for the restored reserve (decode workspaces + KV cache). The budget
+          # is NOT the eviction target: we WANT the prefill-promoted weights to stay
+          # resident as long as possible, and only shed enough to leave decode headroom.
+          if info = CUDA.memory_info
+            while info[:free] < r && !@@resident.empty?
+              victim_k, victim_v = @@resident.first
+              @@resident.delete(victim_k)
+              freed = victim_v.device_bytes
+              @@used_bytes = @@used_bytes > freed ? @@used_bytes - freed : 0_u64
+              victim_v.free!
+              info = CUDA.memory_info || info
+            end
+          end
         end
       end
     end
