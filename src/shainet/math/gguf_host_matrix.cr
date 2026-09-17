@@ -38,6 +38,8 @@ module SHAInet
     end
 
     def gemv_into(x : CudaMatrix, result : CudaMatrix) : CudaMatrix
+      STDERR.puts "  [gguf host gemv] #{@ggml_type} M=#{x.rows} N=#{@cols} K=#{@rows} bytes=#{@byte_size}" if ENV["SHAINET_DEBUG"]? == "1"
+      STDERR.flush if ENV["SHAINET_DEBUG"]? == "1"
       @@gpu_mutex.synchronize do
         # Get or create a device scratch buffer for this weight shape
         key = {@rows, @cols, @ggml_type}

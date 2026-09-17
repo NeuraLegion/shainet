@@ -114,7 +114,7 @@ module SHAInet
       getter tensor_data_offset : UInt64
 
       # mmap state
-      @mmap_ptr : Pointer(UInt8)? = nil
+      getter mmap_ptr : Pointer(UInt8)? = nil
       @mmap_size : UInt64 = 0
       @io : ::IO::FileDescriptor
 
@@ -248,12 +248,12 @@ module SHAInet
       # All header/metadata parsing uses these, so the 500K tokenizer
       # strings are read via pointer arithmetic, not IO syscalls.
 
-      private def mmap_ptr! : Pointer(UInt8)
+      private def mmap_ptr_bang! : Pointer(UInt8)
         @mmap_ptr || raise "GGUF: mmap not available for parsing"
       end
 
       private def parse_u8 : UInt8
-        ptr = mmap_ptr!
+        ptr = mmap_ptr_bang!
         v = ptr[@parse_pos]
         @parse_pos += 1
         v
@@ -264,7 +264,7 @@ module SHAInet
       end
 
       private def parse_u16 : UInt16
-        ptr = mmap_ptr!
+        ptr = mmap_ptr_bang!
         v = (ptr + @parse_pos).as(Pointer(UInt16)).value
         @parse_pos += 2
         v
@@ -275,7 +275,7 @@ module SHAInet
       end
 
       private def parse_u32 : UInt32
-        ptr = mmap_ptr!
+        ptr = mmap_ptr_bang!
         v = (ptr + @parse_pos).as(Pointer(UInt32)).value
         @parse_pos += 4
         v
@@ -286,7 +286,7 @@ module SHAInet
       end
 
       private def parse_u64 : UInt64
-        ptr = mmap_ptr!
+        ptr = mmap_ptr_bang!
         v = (ptr + @parse_pos).as(Pointer(UInt64)).value
         @parse_pos += 8
         v
@@ -297,14 +297,14 @@ module SHAInet
       end
 
       private def parse_f32 : Float32
-        ptr = mmap_ptr!
+        ptr = mmap_ptr_bang!
         v = (ptr + @parse_pos).as(Pointer(Float32)).value
         @parse_pos += 4
         v
       end
 
       private def parse_f64 : Float64
-        ptr = mmap_ptr!
+        ptr = mmap_ptr_bang!
         v = (ptr + @parse_pos).as(Pointer(Float64)).value
         @parse_pos += 8
         v
@@ -316,7 +316,7 @@ module SHAInet
 
       private def parse_string : String
         len = parse_u64
-        ptr = mmap_ptr!
+        ptr = mmap_ptr_bang!
         s = String.new(Slice.new(ptr + @parse_pos, len.to_i32))
         @parse_pos += len
         s
@@ -491,6 +491,92 @@ module SHAInet
         type = GGMLType.new(read_u32)
         offset = read_u64
         @tensors[name] = TensorInfo.new(name, shape, type, offset)
+      end
+    end
+  end
+end
+
+module SHAInet
+  module GGUF
+    # Extract a BPE tokenizer from a GGUF file's metadata.
+    # This re-parses ONLY the tokenizer KV pairs (tokens + merges) from the
+    # mmap'd buffer, building the BPETokenizer directly. Faster than parsing
+    # all metadata because it skips non-tokenizer keys.
+    def self.extract_tokenizer(path : String) : BPETokenizer
+      gf = File.open(path, mmap: true)
+      begin
+        tok = BPETokenizer.new
+        tok.hf_mode = true
+
+        # Re-parse the KV section to extract tokenizer data.
+        # We need: tokenizer.ggml.tokens, tokenizer.ggml.merges
+        ptr = gf.mmap_ptr.not_nil!
+        pos = 12_u64 # skip magic(4) + version(4) + tensor_count(8) -- wait, version is u32
+        # Actually reparse from scratch using the mmap
+        pos = 0_u64
+        _magic = (ptr + pos).as(Pointer(UInt32)).value; pos += 4
+        _version = (ptr + pos).as(Pointer(UInt32)).value; pos += 4
+        _tensor_count = (ptr + pos).as(Pointer(UInt64)).value; pos += 8
+        kv_count = (ptr + pos).as(Pointer(UInt64)).value; pos += 8
+
+        kv_count.times do
+          # Read key string
+          key_len = (ptr + pos).as(Pointer(UInt64)).value; pos += 8
+          key = String.new(Slice.new(ptr + pos, key_len.to_i32)); pos += key_len
+          vtype = (ptr + pos).as(Pointer(UInt32)).value; pos += 4
+
+          if key == "tokenizer.ggml.tokens" && vtype == 9 # ARRAY
+            _elem_type = (ptr + pos).as(Pointer(UInt32)).value; pos += 4
+            arr_len = (ptr + pos).as(Pointer(UInt64)).value; pos += 8
+            max_id = 0
+            arr_len.times do |i|
+              slen = (ptr + pos).as(Pointer(UInt64)).value; pos += 8
+              token = String.new(Slice.new(ptr + pos, slen.to_i32)); pos += slen
+              tok.vocab[token] = i.to_i32
+              max_id = i.to_i32 if i.to_i32 > max_id
+            end
+            tok.inv_vocab.concat(Array(String).new(max_id + 1, ""))
+            tok.vocab.each { |t, id| tok.inv_vocab[id] = t }
+          elsif key == "tokenizer.ggml.merges" && vtype == 9
+            _elem_type = (ptr + pos).as(Pointer(UInt32)).value; pos += 4
+            arr_len = (ptr + pos).as(Pointer(UInt64)).value; pos += 8
+            arr_len.times do |rank|
+              slen = (ptr + pos).as(Pointer(UInt64)).value; pos += 8
+              merge_str = String.new(Slice.new(ptr + pos, slen.to_i32)); pos += slen
+              parts = merge_str.split(' ', 2)
+              next unless parts.size == 2
+              pair = {parts[0], parts[1]}
+              merged = parts[0] + parts[1]
+              tok.merges << pair
+              tok.merges_map[pair] = merged
+              tok.merges_rank[pair] = rank.to_i32
+            end
+          else
+            # Skip this value
+            skip_gguf_value(ptr, pointerof(pos), vtype)
+          end
+        end
+
+        tok
+      ensure
+        gf.close
+      end
+    end
+
+    # Skip a GGUF metadata value by advancing pos past it.
+    private def self.skip_gguf_value(ptr : Pointer(UInt8), pos : Pointer(UInt64), vtype : UInt32)
+      case vtype
+      when 0, 1, 7    then pos.value += 1 # u8, i8, bool
+      when 2, 3       then pos.value += 2 # u16, i16
+      when 4, 5, 6    then pos.value += 4 # u32, i32, f32
+      when 10, 11, 12 then pos.value += 8 # u64, i64, f64
+      when 8                              # string
+        len = (ptr + pos.value).as(Pointer(UInt64)).value; pos.value += 8
+        pos.value += len
+      when 9 # array
+        elem_type = (ptr + pos.value).as(Pointer(UInt32)).value; pos.value += 4
+        arr_len = (ptr + pos.value).as(Pointer(UInt64)).value; pos.value += 8
+        arr_len.times { skip_gguf_value(ptr, pos, elem_type) }
       end
     end
   end
