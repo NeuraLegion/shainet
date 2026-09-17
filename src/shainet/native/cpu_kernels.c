@@ -244,3 +244,36 @@ void gemv_q6k_cpu(const float *x, const uint8_t *W, float *y,
         }
     }
 }
+
+/* ──────────────────────── fp32 SGEMM (AVX2 + OpenMP) ──────────────── */
+/*
+ * sgemm_cpu: C[M, N] = A[M, K] * B[K, N], row-major fp32.
+ *
+ * Used for the dequanted fp32 Q+gate weights in full-attention layers
+ * that otherwise go through Crystal's single-threaded matmul.
+ */
+void sgemm_cpu(const float *A, const float *B, float *C,
+               int M, int N, int K) {
+    #pragma omp parallel for schedule(static)
+    for (int m = 0; m < M; m++) {
+        const float *arow = A + m * K;
+        float *crow = C + m * N;
+        memset(crow, 0, N * sizeof(float));
+
+        for (int k = 0; k < K; k++) {
+            float a_val = arow[k];
+            __m256 va = _mm256_set1_ps(a_val);
+            const float *brow = B + k * N;
+            int n = 0;
+            for (; n + 8 <= N; n += 8) {
+                __m256 vc = _mm256_loadu_ps(crow + n);
+                __m256 vb = _mm256_loadu_ps(brow + n);
+                vc = _mm256_fmadd_ps(va, vb, vc);
+                _mm256_storeu_ps(crow + n, vc);
+            }
+            for (; n < N; n++) {
+                crow[n] += a_val * brow[n];
+            }
+        }
+    }
+}
