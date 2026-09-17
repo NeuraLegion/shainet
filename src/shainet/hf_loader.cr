@@ -53,6 +53,17 @@ module SHAInet
     # Generic entry point — reads config.json and dispatches to the right loader.
     def self.load(model_dir : String, quantize : Bool = false, bits : Int32 = 8) : Network
       raise ArgumentError.new("unsupported quantization bits: #{bits} (expected 8 or 4)") unless bits == 8 || bits == 4
+
+      # GGUF file: a single file (not a directory) -- load directly.
+      if ::File.file?(model_dir)
+        # Peek at the magic bytes to confirm it's GGUF
+        magic = ::File.open(model_dir, "r") { |f| buf = Bytes.new(4); f.read_fully(buf); IO::ByteFormat::LittleEndian.decode(UInt32, buf) }
+        if magic == GGUF::MAGIC
+          return load_gguf(model_dir)
+        end
+        raise "#{model_dir} is a file but not a GGUF (magic: #{magic.to_s(16)})"
+      end
+
       config_path = ::File.join(model_dir, "config.json")
       raise "config.json not found in #{model_dir}" unless ::File.exists?(config_path)
 
