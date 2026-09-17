@@ -178,6 +178,40 @@ module SHAInet
       bytes
     end
 
+    # Temporarily uncap the budget for a prefill pass. During prefill every weight is touched
+    # exactly once per layer in order, so the LRU fills optimally. The device_has_room? check
+    # and the promote rescue are the real guards against over-allocation; the budget is just a
+    # soft ceiling that causes unnecessary eviction/streaming during prefill.
+    #
+    # Call prefill_boost! before the prefill pass, prefill_restore! after. Also lowers the
+    # reserve (the floor of free VRAM below which promotion is refused) to a prefill-safe
+    # minimum, since prefill workspaces are small and transient.
+    @@saved_budget : UInt64? = nil
+    @@saved_reserve : UInt64? = nil
+    PREFILL_RESERVE_MB = 1024
+
+    def self.prefill_boost!
+      @@gpu_mutex.synchronize do
+        @@saved_budget = @@budget_bytes
+        @@saved_reserve = @@reserve_bytes
+        @@budget_bytes = UInt64::MAX
+        @@reserve_bytes = PREFILL_RESERVE_MB.to_u64 * 1024_u64 * 1024_u64
+      end
+    end
+
+    def self.prefill_restore!
+      @@gpu_mutex.synchronize do
+        if b = @@saved_budget
+          @@budget_bytes = b
+          @@saved_budget = nil
+        end
+        if r = @@saved_reserve
+          @@reserve_bytes = r
+          @@saved_reserve = nil
+        end
+      end
+    end
+
     # Evict every resident copy and drop the shared scratch, returning that VRAM
     # to the device. The cache is otherwise held for the life of the process.
     def self.release_cache!
