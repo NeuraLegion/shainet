@@ -88,6 +88,9 @@ module SHAInet
       raise ArgumentError.new("result shape mismatch") unless result.rows == x.rows && result.cols == @cols
       raise RuntimeError.new("GGUF gemv requires a valid device pointer") if @dev_ptr.null?
 
+      STDERR.puts "  [gguf gemv] #{@ggml_type} M=#{x.rows} N=#{@cols} K=#{@rows} bytes=#{@byte_size} pool=#{@pool_owned}" if ENV["SHAINET_DEBUG"]? == "1"
+      STDERR.flush if ENV["SHAINET_DEBUG"]? == "1"
+
       # Ensure activation is resident on device (cheap no-op when already synced).
       x.sync_to_device!("gguf_gemv_in") unless x.device_dirty?
 

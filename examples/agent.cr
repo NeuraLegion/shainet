@@ -922,14 +922,28 @@ end
 # Entry point
 # ----------------------------------------------------------------------------
 model_dir = ARGV[0]?
-# Per-response generation ceiling. This is a safety bound, not a target — the
-# model stops itself on <|im_end|>. It must be large enough that a tool call
-# writing a whole file isn't truncated before its closing </tool_call> tag
-# (which would make the call unparseable). KV cache grows ~linearly with it.
 max_tokens = (ARGV[1]? || ENV["SHAINET_AGENT_MAX_TOKENS"]? || "4096").to_i
-unless model_dir && Dir.exists?(model_dir)
-  STDERR.puts "Usage: agent <model-dir> [max_tokens]"
-  STDERR.puts "  (point at an already-downloaded model, e.g. ~/models/Qwen3-Coder-30B-A3B-Instruct)"
+
+# Resolve the model path: Ollama name ("qwen3.8:27b"), GGUF file, or directory.
+gguf_mode = false
+if model_dir && SHAInet::OllamaResolve.ollama_name?(model_dir)
+  resolved = SHAInet::OllamaResolve.resolve(model_dir)
+  if resolved
+    STDERR.puts "Resolved Ollama '#{model_dir}' -> #{resolved}"
+    model_dir = resolved
+    gguf_mode = true
+  else
+    STDERR.puts "Ollama model '#{model_dir}' not found. Is it pulled?"
+    exit 1
+  end
+elsif model_dir && File.file?(model_dir)
+  gguf_mode = true
+end
+
+unless model_dir && (Dir.exists?(model_dir) || File.file?(model_dir.not_nil!))
+  STDERR.puts "Usage: agent <model | gguf-file | ollama-name> [max_tokens]"
+  STDERR.puts "  agent ~/models/Qwen3.8-27B/.q4"
+  STDERR.puts "  agent qwen3.8:27b"
   exit 1
 end
 
@@ -958,7 +972,19 @@ bits = ENV.fetch("SHAINET_Q8", "0") == "1" ? 8 : 4
 offload = ENV.fetch("SHAINET_MOE_OFFLOAD", "0") == "1"
 net = SHAInet::HFLoader.load(model_dir, quantize: quantize, bits: bits)
 net.use_kv_cache = true
-tokenizer = SHAInet::BPETokenizer.from_hf(File.join(model_dir, "tokenizer.json"))
+if gguf_mode
+  STDERR.print "Extracting tokenizer from GGUF... ".colorize(:dark_gray)
+  STDERR.flush
+  tokenizer = SHAInet::GGUF.extract_tokenizer(model_dir)
+  STDERR.puts "#{tokenizer.vocab.size} tokens".colorize(:dark_gray)
+else
+  tokenizer_path = ENV["SHAINET_TOKENIZER_PATH"]? || File.join(model_dir, "tokenizer.json")
+  unless File.exists?(tokenizer_path)
+    STDERR.puts "Error: tokenizer.json not found."
+    exit 1
+  end
+  tokenizer = SHAInet::BPETokenizer.from_hf(tokenizer_path)
+end
 has_moe = net.hidden_layers.any? { |l| l.is_a?(SHAInet::LlamaBlock) && l.as(SHAInet::LlamaBlock).ffn.is_a?(SHAInet::MoEFF) }
 mode = ENV["SHAINET_FP32"]? ? "fp32" : "Q#{bits}"
 mode += " (MoE offload)" if offload && has_moe

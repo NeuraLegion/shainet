@@ -161,8 +161,10 @@ module SHAInet
         emb_layer.to_host! if ENV.fetch("SHAINET_EMBED_HOST", "1") != "0"
         Log.info { "gguf: loaded #{num_transformer_layers} layers from #{path}" }
         net
-      ensure
-        gf.close
+        # NOTE: gf is NOT closed here. The mmap must stay alive for the model's lifetime
+        # because the Q4_K embedding pointer and GGUFHostMatrix pointers point directly
+        # into the mmap'd region. Closing it would munmap and SIGSEGV on first access.
+        # The OS reclaims the mapping when the process exits.
       end
     end
 
@@ -357,9 +359,20 @@ module SHAInet
         eps: eps, head_dim: head_dim,
         linear_conv_kernel: conv_kernel)
       block = net.hidden_layers.last.as(GatedDeltaNetBlock)
-      # Fused QKV: blk.N.attn_qkv.weight [d, qkv_dim]
+      # Fused QKV: blk.N.attn_qkv.weight [d, q_out + k_out + v_out]
+      # Split into separate Q, K, V by creating sub-views into the device buffer.
       qkv_info = gf.tensors["blk.#{idx}.attn_qkv.weight"]
-      block.w_q = load_gguf_weight(gf, qkv_info, on_gpu, gpu_pool, pool_map) # TODO: split fused QKV
+      k_dim = num_k_heads * head_dim
+      v_dim = num_v_heads * head_dim
+      q_out = k_dim                     # Q output dim = k_dim (key-dimension queries)
+      k_out = k_dim                     # K output dim = k_dim
+      v_out = v_dim                     # V output dim = v_dim
+      in_dim = qkv_info.shape[0].to_i32 # d
+      q_w, k_w, v_w = split_gguf_qkv(gf, qkv_info, in_dim, q_out, k_out, v_out,
+        on_gpu, gpu_pool, pool_map)
+      block.w_q = q_w
+      block.w_k = k_w
+      block.w_v = v_w
 
       # Gate (z projection): blk.N.attn_gate.weight [d, gate_dim]
       gate_info = gf.tensors["blk.#{idx}.attn_gate.weight"]
@@ -510,6 +523,45 @@ module SHAInet
           end
         end
         col += 256
+      end
+    end
+  end
+end
+
+module SHAInet
+  module HFLoader
+    # Split a fused QKV tensor into separate Q, K, V weight matrices.
+    # The fused tensor [in_dim, q_out + k_out + v_out] is stored as rows of k-quant blocks.
+    # Each output neuron is one row. Q occupies the first q_out rows, then K, then V.
+    private def self.split_gguf_qkv(gf : GGUF::File, info : GGUF::TensorInfo,
+                                    in_dim : Int32, q_out : Int32, k_out : Int32, v_out : Int32,
+                                    on_gpu : Bool,
+                                    gpu_pool : Pointer(UInt8),
+                                    pool_map : Hash(UInt64, UInt64)) : {QuantizedWeight | SimpleMatrix | CudaMatrix, QuantizedWeight | SimpleMatrix | CudaMatrix, QuantizedWeight | SimpleMatrix | CudaMatrix}
+      bs, vs = GGUF::BLOCK_SIZE[info.type]
+      blocks_per_row = (in_dim.to_u64 + vs.to_u64 - 1) // vs.to_u64
+      bytes_per_row = blocks_per_row * bs.to_u64
+
+      q_bytes = q_out.to_u64 * bytes_per_row
+      k_bytes = k_out.to_u64 * bytes_per_row
+      v_bytes = v_out.to_u64 * bytes_per_row
+
+      if !gpu_pool.null? && (pool_off = pool_map[info.offset]?)
+        # Device pool: create sub-views
+        base = gpu_pool + pool_off
+        q = GGUFMatrix.from_pool(in_dim, q_out, info.type, base, q_bytes)
+        k = GGUFMatrix.from_pool(in_dim, k_out, info.type, base + q_bytes, k_bytes)
+        v = GGUFMatrix.from_pool(in_dim, v_out, info.type, base + q_bytes + k_bytes, v_bytes)
+        {q, k, v}
+      elsif !on_gpu && (mmap_ptr = gf.tensor_ptr(info))
+        # Host mmap: sub-views
+        q = GGUFHostMatrix.new(in_dim, q_out, info.type, mmap_ptr, q_bytes)
+        k = GGUFHostMatrix.new(in_dim, k_out, info.type, mmap_ptr + q_bytes, k_bytes)
+        v = GGUFHostMatrix.new(in_dim, v_out, info.type, mmap_ptr + q_bytes + k_bytes, v_bytes)
+        {q, k, v}
+      else
+        # Fallback: load the whole tensor and split
+        raise "split_gguf_qkv: no pool or mmap available"
       end
     end
   end
