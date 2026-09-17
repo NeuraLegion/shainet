@@ -154,6 +154,14 @@ module SHAInet
       raise "CUDA disabled"
     end
 
+    def gemv_q4k(*args)
+      raise "CUDA disabled"
+    end
+
+    def gemv_q6k(*args)
+      raise "CUDA disabled"
+    end
+
     def pack_kv_heads(*args)
       raise "CUDA disabled"
     end

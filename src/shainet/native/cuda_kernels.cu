@@ -1655,4 +1655,196 @@ void mul_sigmoid(float* out, const float* gate, int size) {
     }
 }
 
+// ---- GGUF k-quant GEMV: Q4_K and Q6_K ----
+// These operate on llama.cpp's quantization block layouts directly, so GGUF
+// tensors can be loaded and used without transcoding to our own Q4 format.
+//
+// Q4_K block (144 bytes, QK_K=256 values, 8 groups of 32):
+//   fp16 d, fp16 dmin, uint8 scales[12], uint8 qs[128]
+//   Asymmetric: val = d * group_scale * nibble - dmin * group_min
+//
+// Q6_K block (210 bytes, QK_K=256 values, 16 groups of 16):
+//   uint8 ql[128], uint8 qh[64], int8 scales[16], fp16 d
+//   Symmetric: val = d * scale * (6-bit value - 32)
+
+#define GGUF_QK_K 256
+#define GGUF_Q4K_BLOCK_BYTES 144
+#define GGUF_Q6K_BLOCK_BYTES 210
+
+// Unpack 6-bit scale and min from the 12-byte packed scales array.
+__device__ __forceinline__ void get_scale_min_k4(int j, const unsigned char* scales,
+                                                  unsigned char* sc, unsigned char* m) {
+    if (j < 4) {
+        *sc = scales[j] & 63;
+        *m  = scales[j + 4] & 63;
+    } else {
+        *sc = (scales[j + 4] & 0xF) | ((scales[j - 4] >> 6) << 4);
+        *m  = (scales[j + 4] >> 4)  | ((scales[j]     >> 6) << 4);
+    }
+}
+
+// Q4_K GEMV: y[m, n] = x[m, K] * dequant(W_q4k[n, K])
+// One block per (n, m) pair; threads stride over K.
+__global__ void gemv_q4k_kernel(const float* __restrict__ x,
+                                const unsigned char* __restrict__ w,
+                                float* __restrict__ y,
+                                int M, int N, int K) {
+    int n = blockIdx.x;
+    int m = blockIdx.y;
+    if (n >= N || m >= M) return;
+
+    int nblocks = K / GGUF_QK_K;
+    long row_bytes = (long)nblocks * GGUF_Q4K_BLOCK_BYTES;
+    const unsigned char* wrow = w + (long)n * row_bytes;
+    const float* xrow = x + (long)m * K;
+
+    int tid = threadIdx.x;
+    int nthreads = blockDim.x;
+    float partial = 0.0f;
+
+    for (int blk = 0; blk < nblocks; ++blk) {
+        const unsigned char* block = wrow + (long)blk * GGUF_Q4K_BLOCK_BYTES;
+        // d and dmin are fp16 at offset 0 and 2
+        float d    = __half2float(*((const __half*)(block + 0)));
+        float dmin = __half2float(*((const __half*)(block + 2)));
+        const unsigned char* scales = block + 4;
+        const unsigned char* qs     = block + 16;  // 4 + 12 = 16
+
+        int base_k = blk * GGUF_QK_K;
+
+        // Each thread processes a subset of the 256 values in this block.
+        for (int k = tid; k < GGUF_QK_K; k += nthreads) {
+            int group = k / 32;
+            unsigned char sc, mn;
+            get_scale_min_k4(group, scales, &sc, &mn);
+
+            // qs layout: 2 nibbles per byte, interleaved in groups of 64.
+            // For k in [0..63]: low nibble = k, high nibble = k+32
+            // Repeated for k in [64..127], [128..191], [192..255]
+            int byte_idx = (k < 128) ? (k % 64) : (64 + k % 64);
+            if (k < 128) byte_idx = k / 2;
+            // Actually, the layout from dequantize_row_q4_K:
+            //   for j in [0..QK_K) step 64:
+            //     for l in [0..32): val_low  = qs[l] & 0xF   (at j+l)
+            //                       val_high = qs[l] >> 4     (at j+l+32)
+            //     qs += 32
+            int block_of_64 = k / 64;
+            int offset_in_64 = k % 64;
+            int nibble_val;
+            if (offset_in_64 < 32) {
+                nibble_val = qs[block_of_64 * 32 + offset_in_64] & 0xF;
+            } else {
+                nibble_val = qs[block_of_64 * 32 + (offset_in_64 - 32)] >> 4;
+            }
+            float val = d * (float)sc * (float)nibble_val - dmin * (float)mn;
+            partial += val * xrow[base_k + k];
+        }
+    }
+
+    // Warp reduction
+    extern __shared__ float sdata[];
+    sdata[tid] = partial;
+    __syncthreads();
+    for (int stride = nthreads >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) sdata[tid] += sdata[tid + stride];
+        __syncthreads();
+    }
+    if (tid == 0) y[(long)m * N + n] = sdata[0];
+}
+
+// Q6_K GEMV: y[m, n] = x[m, K] * dequant(W_q6k[n, K])
+__global__ void gemv_q6k_kernel(const float* __restrict__ x,
+                                const unsigned char* __restrict__ w,
+                                float* __restrict__ y,
+                                int M, int N, int K) {
+    int n = blockIdx.x;
+    int m = blockIdx.y;
+    if (n >= N || m >= M) return;
+
+    int nblocks = K / GGUF_QK_K;
+    long row_bytes = (long)nblocks * GGUF_Q6K_BLOCK_BYTES;
+    const unsigned char* wrow = w + (long)n * row_bytes;
+    const float* xrow = x + (long)m * K;
+
+    int tid = threadIdx.x;
+    int nthreads = blockDim.x;
+    float partial = 0.0f;
+
+    for (int blk = 0; blk < nblocks; ++blk) {
+        const unsigned char* block = wrow + (long)blk * GGUF_Q6K_BLOCK_BYTES;
+        // Q6_K layout: ql[128], qh[64], scales[16], d(fp16)
+        const unsigned char* ql = block;
+        const unsigned char* qh = block + 128;
+        const signed char* sc   = (const signed char*)(block + 192);
+        float d = __half2float(*((const __half*)(block + 208)));
+
+        int base_k = blk * GGUF_QK_K;
+
+        for (int k = tid; k < GGUF_QK_K; k += nthreads) {
+            // Unpack 6-bit value from ql and qh
+            // Layout from dequantize_row_q6_K:
+            //   For each 128-value chunk (n in [0, 128, ...]):
+            //     for l in [0..32):
+            //       q1 = (ql[l]    & 0xF) | (((qh[l] >> 0) & 3) << 4) - 32
+            //       q2 = (ql[l+32] & 0xF) | (((qh[l] >> 2) & 3) << 4) - 32
+            //       q3 = (ql[l]    >> 4)   | (((qh[l] >> 4) & 3) << 4) - 32
+            //       q4 = (ql[l+32] >> 4)   | (((qh[l] >> 6) & 3) << 4) - 32
+            //       y[l]    = d * sc[is+0] * q1  (is = l/16)
+            //       y[l+32] = d * sc[is+2] * q2
+            //       y[l+64] = d * sc[is+4] * q3
+            //       y[l+96] = d * sc[is+6] * q4
+            //     ql += 64, qh += 32, sc += 8
+            int chunk = k / 128;
+            int local = k % 128;
+            const unsigned char* ql_c = ql + chunk * 64;
+            const unsigned char* qh_c = qh + chunk * 32;
+            const signed char* sc_c   = sc + chunk * 8;
+
+            int sub = local / 32;  // 0..3
+            int l   = local % 32;
+            int qval;
+            switch (sub) {
+                case 0: qval = (int)((ql_c[l]      & 0xF) | (((qh_c[l] >> 0) & 3) << 4)) - 32; break;
+                case 1: qval = (int)((ql_c[l + 32]  & 0xF) | (((qh_c[l] >> 2) & 3) << 4)) - 32; break;
+                case 2: qval = (int)((ql_c[l]       >> 4)  | (((qh_c[l] >> 4) & 3) << 4)) - 32; break;
+                default: qval = (int)((ql_c[l + 32]  >> 4)  | (((qh_c[l] >> 6) & 3) << 4)) - 32; break;
+            }
+            int is = l / 16;
+            int scale_idx = is + sub * 2;
+            float val = d * (float)sc_c[scale_idx] * (float)qval;
+            partial += val * xrow[base_k + k];
+        }
+    }
+
+    extern __shared__ float sdata[];
+    sdata[tid] = partial;
+    __syncthreads();
+    for (int stride = nthreads >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) sdata[tid] += sdata[tid + stride];
+        __syncthreads();
+    }
+    if (tid == 0) y[(long)m * N + n] = sdata[0];
+}
+
+// C entry points
+void gemv_q4k(const float* x, const unsigned char* w, float* y, int M, int N, int K) {
+    int threads = 128;
+    dim3 grid(N, M);
+    gemv_q4k_kernel<<<grid, threads, threads * sizeof(float)>>>(x, w, y, M, N, K);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in gemv_q4k: %s\n", cudaGetErrorString(err));
+    }
+}
+
+void gemv_q6k(const float* x, const unsigned char* w, float* y, int M, int N, int K) {
+    int threads = 128;
+    dim3 grid(N, M);
+    gemv_q6k_kernel<<<grid, threads, threads * sizeof(float)>>>(x, w, y, M, N, K);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in gemv_q6k: %s\n", cudaGetErrorString(err));
+    }
+}
+
 } // extern "C"

@@ -312,6 +312,9 @@ module SHAInet
     @@gated_delta_rule_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void)?
     @@rope_forward_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Void)?
     @@head_rmsnorm_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Float32, Void)?
+    # GGUF k-quant GEMV
+    @@gemv_q4k_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@gemv_q6k_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@add_bias_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Void)?
     @@pack_kv_heads_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@prefill_attn_available : Bool? = nil
@@ -589,6 +592,29 @@ module SHAInet
       end
       raise "CUDA kernels not available" unless fn
       fn.call(x, bias, rows, cols)
+    end
+
+    # GGUF k-quant GEMV: y[M, N] = x[M, K] * dequant(W[N, K]).
+    # W is in raw Q4_K format (144-byte blocks, K must be a multiple of 256).
+    def gemv_q4k(x : Pointer(Float32), w : Pointer(UInt8), y : Pointer(Float32),
+                 m : Int32, n : Int32, k : Int32)
+      unless fn = @@gemv_q4k_proc
+        @@gemv_q4k_proc = fn = load_kernel_proc("gemv_q4k",
+          Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(x, w, y, m, n, k)
+    end
+
+    # GGUF k-quant GEMV for Q6_K format (210-byte blocks, K must be a multiple of 256).
+    def gemv_q6k(x : Pointer(Float32), w : Pointer(UInt8), y : Pointer(Float32),
+                 m : Int32, n : Int32, k : Int32)
+      unless fn = @@gemv_q6k_proc
+        @@gemv_q6k_proc = fn = load_kernel_proc("gemv_q6k",
+          Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(x, w, y, m, n, k)
     end
 
     # Token-major [rows, kv_heads * head_dim] -> kv-head-major, the layout the KV append
