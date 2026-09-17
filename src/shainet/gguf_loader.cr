@@ -324,10 +324,13 @@ module SHAInet
     end
 
     # Read a GGUF F32 tensor into a SimpleMatrix.
+    # GGUF flat data: ne1 groups of ne0 values (ne0 fastest).
+    # For a weight [ne0, ne1] used as y = x @ W where W is [rows=ne0, cols=ne1],
+    # the flat data has cols groups of rows values.
     private def self.read_gguf_f32_matrix(gf : GGUF::File, info : GGUF::TensorInfo, rows : Int32, cols : Int32) : SimpleMatrix
       data = read_gguf_f32_tensor(gf, info)
       m = SimpleMatrix.new(rows, cols)
-      rows.times { |r| cols.times { |c| m[r, c] = data[r * cols + c].to_f64 } }
+      cols.times { |c| rows.times { |r| m[r, c] = data[c * rows + r].to_f64 } }
       m
     end
 
@@ -408,10 +411,11 @@ module SHAInet
       conv_data = read_gguf_f32_tensor(gf, conv_info)
       k_dim = num_k_heads * head_dim
       v_dim = num_v_heads * head_dim
-      # Conv shape: [conv_kernel, 2*k_dim + v_dim] -- fill conv_q/k/v
+      # Conv shape: GGUF [conv_kernel, total_ch] with ne0=conv_kernel fastest.
+      # Data: ne1=total_ch groups of ne0=conv_kernel values.
       total_ch = 2 * k_dim + v_dim
       conv_m = SimpleMatrix.new(total_ch, conv_kernel)
-      total_ch.times { |c| conv_kernel.times { |t| conv_m[c, t] = conv_data[t * total_ch + c].to_f64 } }
+      total_ch.times { |c| conv_kernel.times { |t| conv_m[c, t] = conv_data[t + c * conv_kernel].to_f64 } }
       # Split into q, k, v and reverse taps
       cq = SimpleMatrix.new(k_dim, conv_kernel)
       ck = SimpleMatrix.new(k_dim, conv_kernel)
