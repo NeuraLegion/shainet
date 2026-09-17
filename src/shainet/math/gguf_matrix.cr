@@ -42,6 +42,23 @@ module SHAInet
         @byte_size, CUDA::MemcpyKind::HostToDevice)
     end
 
+    # Create a GGUFMatrix that points into a pre-allocated device buffer.
+    # No CUDA.malloc or memcpy -- the data is already on the device in the bulk pool.
+    # The pool owns the memory; this matrix must NOT free it.
+    def self.from_pool(rows : Int32, cols : Int32, ggml_type : GGUF::GGMLType,
+                       dev_ptr : Pointer(UInt8), byte_size : UInt64) : GGUFMatrix
+      m = GGUFMatrix.allocate
+      m.init_from_pool(rows, cols, ggml_type, dev_ptr, byte_size)
+      m
+    end
+
+    protected def init_from_pool(@rows : Int32, @cols : Int32, @ggml_type : GGUF::GGMLType,
+                                 @dev_ptr : Pointer(UInt8), @byte_size : UInt64)
+      @pool_owned = true
+    end
+
+    @pool_owned : Bool = false
+
     # Allocate device memory only (no upload). Used by GGUFHostMatrix for its
     # shared scratch buffer -- the data is uploaded per-GEMV via cudaMemcpy.
     def self.new_empty(rows : Int32, cols : Int32, ggml_type : GGUF::GGMLType, byte_size : UInt64) : GGUFMatrix
@@ -97,7 +114,7 @@ module SHAInet
 
     # Free the device allocation if not already freed.
     def free!
-      unless @dev_ptr.null?
+      unless @dev_ptr.null? || @pool_owned
         CUDA.free(@dev_ptr.as(Pointer(Void)))
         @dev_ptr = Pointer(UInt8).null
       end

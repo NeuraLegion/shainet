@@ -116,51 +116,57 @@ module SHAInet
       # mmap state
       @mmap_ptr : Pointer(UInt8)? = nil
       @mmap_size : UInt64 = 0
+      @io : ::IO::FileDescriptor
+
+      # Parse position within the mmap'd buffer (used during initialization).
+      @parse_pos : UInt64 = 0
 
       def initialize(@io : ::IO::FileDescriptor)
         @metadata = Hash(String, MetaValue).new
         @tensors = Hash(String, TensorInfo).new
+        @version = 0_u32
+        @alignment = 32_u32
+        @tensor_data_offset = 0_u64
+      end
 
-        magic = read_u32
+      # Parse the GGUF header and metadata. Called after mmap is set up so the
+      # entire parse runs on the mmap'd buffer (pointer arithmetic, no IO calls).
+      # This is what makes the 500K tokenizer strings fast.
+      protected def set_mmap(ptr : Pointer(UInt8), size : UInt64)
+        @mmap_ptr = ptr
+        @mmap_size = size
+      end
+
+      protected def parse!
+        magic = parse_u32
         raise "not a GGUF file (magic #{magic.to_s(16)})" unless magic == MAGIC
-        @version = read_u32
+        @version = parse_u32
         raise "unsupported GGUF version #{@version} (expected 2 or 3)" unless @version >= 2
 
-        tensor_count = read_u64
-        kv_count = read_u64
+        tensor_count = parse_u64
+        kv_count = parse_u64
 
-        kv_count.times { read_kv }
+        kv_count.times { parse_kv }
         @alignment = (metadata["general.alignment"]?.try(&.as(UInt32)) || 32_u32)
 
-        tensor_count.times { read_tensor_info }
-
-        # Tensor data starts at the next alignment boundary after the header + tensor infos.
-        pos = @io.pos.to_u64
-        @tensor_data_offset = align(pos)
+        tensor_count.times { parse_tensor_info }
+        @tensor_data_offset = align(@parse_pos)
       end
 
       def self.open(path : String, mmap : Bool = true) : File
         io = ::File.open(path, "r")
         f = new(io)
-        if mmap
-          f.setup_mmap(path)
-        end
-        f
-      end
-
-      # Set up memory mapping of the entire file.
-      protected def setup_mmap(path : String)
         size = ::File.size(path).to_u64
-        fd = @io.fd
-        ptr = LibC.mmap(Pointer(Void).null, size, LibC::PROT_READ, LibC::MAP_PRIVATE, fd, 0_i64)
-        if ptr == LibC::MAP_FAILED
-          Log.warn { "gguf: mmap failed, falling back to read-based IO" }
-          return
+        if mmap
+          fd = io.fd
+          ptr = LibC.mmap(Pointer(Void).null, size, LibC::PROT_READ, LibC::MAP_PRIVATE, fd, 0_i64)
+          if ptr != LibC::MAP_FAILED
+            LibC.madvise(ptr, size, LibC::POSIX_MADV_SEQUENTIAL)
+            f.set_mmap(ptr.as(Pointer(UInt8)), size)
+          end
         end
-        # Advise the kernel we'll read sequentially during load
-        LibC.madvise(ptr, size, LibC::POSIX_MADV_SEQUENTIAL)
-        @mmap_ptr = ptr.as(Pointer(UInt8))
-        @mmap_size = size
+        f.parse!
+        f
       end
 
       def mmap? : Bool
@@ -237,7 +243,149 @@ module SHAInet
         end
       end
 
-      # --- private readers ---
+      # --- mmap-based parsers (used during initialization) ---
+      # These read from the mmap'd buffer at @parse_pos, advancing it.
+      # All header/metadata parsing uses these, so the 500K tokenizer
+      # strings are read via pointer arithmetic, not IO syscalls.
+
+      private def mmap_ptr! : Pointer(UInt8)
+        @mmap_ptr || raise "GGUF: mmap not available for parsing"
+      end
+
+      private def parse_u8 : UInt8
+        ptr = mmap_ptr!
+        v = ptr[@parse_pos]
+        @parse_pos += 1
+        v
+      end
+
+      private def parse_i8 : Int8
+        parse_u8.to_i8!
+      end
+
+      private def parse_u16 : UInt16
+        ptr = mmap_ptr!
+        v = (ptr + @parse_pos).as(Pointer(UInt16)).value
+        @parse_pos += 2
+        v
+      end
+
+      private def parse_i16 : Int16
+        parse_u16.to_i16!
+      end
+
+      private def parse_u32 : UInt32
+        ptr = mmap_ptr!
+        v = (ptr + @parse_pos).as(Pointer(UInt32)).value
+        @parse_pos += 4
+        v
+      end
+
+      private def parse_i32 : Int32
+        parse_u32.to_i32!
+      end
+
+      private def parse_u64 : UInt64
+        ptr = mmap_ptr!
+        v = (ptr + @parse_pos).as(Pointer(UInt64)).value
+        @parse_pos += 8
+        v
+      end
+
+      private def parse_i64 : Int64
+        parse_u64.to_i64!
+      end
+
+      private def parse_f32 : Float32
+        ptr = mmap_ptr!
+        v = (ptr + @parse_pos).as(Pointer(Float32)).value
+        @parse_pos += 4
+        v
+      end
+
+      private def parse_f64 : Float64
+        ptr = mmap_ptr!
+        v = (ptr + @parse_pos).as(Pointer(Float64)).value
+        @parse_pos += 8
+        v
+      end
+
+      private def parse_bool : Bool
+        parse_u8 != 0
+      end
+
+      private def parse_string : String
+        len = parse_u64
+        ptr = mmap_ptr!
+        s = String.new(Slice.new(ptr + @parse_pos, len.to_i32))
+        @parse_pos += len
+        s
+      end
+
+      private def parse_value(type : MetaType) : MetaValue
+        case type
+        when .uint8?   then parse_u8
+        when .int8?    then parse_i8
+        when .uint16?  then parse_u16
+        when .int16?   then parse_i16
+        when .uint32?  then parse_u32
+        when .int32?   then parse_i32
+        when .float32? then parse_f32
+        when .bool?    then parse_bool
+        when .string?  then parse_string
+        when .uint64?  then parse_u64
+        when .int64?   then parse_i64
+        when .float64? then parse_f64
+        when .array?
+          elem_type = MetaType.new(parse_u32)
+          len = parse_u64
+          arr = Array(MetaValue).new(len.to_i32)
+          len.times { arr << parse_value(elem_type) }
+          arr
+        else
+          raise "unknown GGUF metadata type #{type.value}"
+        end
+      end
+
+      private def parse_kv
+        key = parse_string
+        vtype = MetaType.new(parse_u32)
+        # Skip large tokenizer arrays (248K strings each) -- they take 2+ min to
+        # allocate as Crystal objects and the agent uses tokenizer.json instead.
+        if key.starts_with?("tokenizer.ggml.") && vtype.array?
+          skip_value(vtype)
+          return
+        end
+        @metadata[key] = parse_value(vtype)
+      end
+
+      # Advance parse_pos past a value without allocating Crystal objects.
+      private def skip_value(type : MetaType)
+        case type
+        when .uint8?, .int8?, .bool?      then @parse_pos += 1
+        when .uint16?, .int16?            then @parse_pos += 2
+        when .uint32?, .int32?, .float32? then @parse_pos += 4
+        when .uint64?, .int64?, .float64? then @parse_pos += 8
+        when .string?
+          len = parse_u64
+          @parse_pos += len
+        when .array?
+          elem_type = MetaType.new(parse_u32)
+          len = parse_u64
+          len.times { skip_value(elem_type) }
+        end
+      end
+
+      private def parse_tensor_info
+        name = parse_string
+        ndim = parse_u32
+        shape = Array(UInt64).new(ndim.to_i32) { parse_u64 }
+        type = GGMLType.new(parse_u32)
+        offset = parse_u64
+        @tensors[name] = TensorInfo.new(name, shape, type, offset)
+      end
+
+      # --- private readers (IO fallback, used by read_tensor_data) ---
 
       private def align(pos : UInt64) : UInt64
         a = @alignment.to_u64

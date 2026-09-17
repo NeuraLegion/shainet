@@ -4,6 +4,11 @@ module SHAInet
   # Simple embedding lookup table. Maps integer token IDs to vectors of floats.
   class EmbeddingLayer < MatrixLayer
     property embeddings : SimpleMatrix | CudaMatrix
+    # Optional Q4_K embedding backed by a raw pointer (mmap'd GGUF data).
+    # When set, embed_cpu dequants only the requested rows instead of the whole
+    # vocab -- turns a 5-minute full dequant into a millisecond per-row lookup.
+    property q4k_embedding : Tuple(Pointer(UInt8), UInt64, Int32, Int32)? = nil
+    # (ptr, byte_size, vocab, d) -- the Q4_K block data, dimensions
 
     # Gradient table is allocated lazily on first access (training only). For
     # inference via Network#run it is never touched, so we avoid a wasteful
@@ -216,6 +221,17 @@ module SHAInet
     # CPU path - retrieve embeddings for multiple ids as a SimpleMatrix
     def embed_cpu(ids : Array(Int32)) : SimpleMatrix
       result = SimpleMatrix.zeros(ids.size, @l_size)
+
+      # Q4_K embedding: dequant only the requested rows (mmap-backed, ~0.01ms/row)
+      if q4k = @q4k_embedding
+        ptr, _byte_size, _vocab, d = q4k
+        ids.each_with_index do |id, row|
+          dst = row * d
+          HFLoader.dequant_q4k_row(ptr, id, d, result.data, dst)
+        end
+        @current_ids.concat(ids)
+        return result
+      end
 
       emb = @embeddings
       if emb.is_a?(SimpleMatrix)
