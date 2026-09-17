@@ -456,7 +456,19 @@ module SHAInet
       block.rotary_dim = partial_rotary if partial_rotary < head_dim
 
       # Separate Q/K/V/O for full attention layers
-      block.w_q = load_gguf_weight(gf, gf.tensors["blk.#{idx}.attn_q.weight"], on_gpu, gpu_pool, pool_map)
+      # Q weight may be [d, q_dim*2] with interleaved Q+gate per head.
+      q_info = gf.tensors["blk.#{idx}.attn_q.weight"]
+      q_out = q_info.shape[1].to_i32
+      q_dim = n_heads * head_dim
+      if q_out == q_dim * 2
+        # Interleaved Q+gate: dequant to fp32, split like safetensors path.
+        q_fp32 = read_gguf_f32_matrix(gf, q_info, q_info.shape[0].to_i32, q_out)
+        wq, wg = split_head_interleaved(q_fp32, n_heads, head_dim)
+        block.w_q = wq
+        block.w_gate_attn = wg
+      else
+        block.w_q = load_gguf_weight(gf, q_info, on_gpu, gpu_pool, pool_map)
+      end
       block.w_k = load_gguf_weight(gf, gf.tensors["blk.#{idx}.attn_k.weight"], on_gpu, gpu_pool, pool_map)
       block.w_v = load_gguf_weight(gf, gf.tensors["blk.#{idx}.attn_v.weight"], on_gpu, gpu_pool, pool_map)
       block.w_o = load_gguf_weight(gf, gf.tensors["blk.#{idx}.attn_output.weight"], on_gpu, gpu_pool, pool_map)
