@@ -57,14 +57,35 @@ module SHAInet
 
         @@progress.try &.call(0, num_transformer_layers)
 
+        # Layer-level GPU/CPU split: fill GPU back-to-front until VRAM budget is met.
+        # Layers that don't fit stay host-resident (dequanted to fp32 SimpleMatrix).
+        # This mirrors Ollama's approach: 45/66 layers on GPU for the 27B.
+        gpu_layers = num_transformer_layers # default: all on GPU
+        reserve_mb = (ENV["SHAINET_GGUF_RESERVE_MB"]? || "2048").to_i
+        if CUDA.fully_available?
+          if info = CUDA.memory_info
+            free_mb = (info[:free] / (1024 * 1024)).to_i32
+            budget_mb = free_mb - reserve_mb
+            # Estimate ~237 MB per layer in native Q4_K/Q6_K + ~535 MB for lm_head
+            lm_head_mb = 535
+            per_layer_mb = 237
+            gpu_layers = Math.max(0, (budget_mb - lm_head_mb) // per_layer_mb)
+            gpu_layers = Math.min(gpu_layers, num_transformer_layers)
+          end
+        end
+        cpu_layers = num_transformer_layers - gpu_layers
+        Log.info { "gguf: #{gpu_layers}/#{num_transformer_layers} layers on GPU, #{cpu_layers} on CPU (reserve #{reserve_mb} MB)" }
+
         types.each_with_index do |t, idx|
+          on_gpu = idx >= cpu_layers # back-to-front: last layers go on GPU first
           if t == "linear_attention"
             load_gguf_linear_attn_layer(gf, net, idx, d, ff, eps, ssm_heads, ssm_k_heads,
-              ssm_head_dim, conv_kernel, ssm_state)
+              ssm_head_dim, conv_kernel, ssm_state, on_gpu)
           else
             load_gguf_full_attn_layer(gf, net, idx, d, ff, eps, n_heads, n_kv_heads,
-              head_dim, rope_theta, partial_rotary)
+              head_dim, rope_theta, partial_rotary, on_gpu)
           end
+          GC.collect unless on_gpu
           @@progress.try &.call(idx + 1, num_transformer_layers)
         end
 
@@ -85,7 +106,7 @@ module SHAInet
 
         # lm_head
         lm_info = gf.tensors["output.weight"]
-        net.lm_head_q = load_gguf_weight(gf, lm_info)
+        net.lm_head_q = load_gguf_weight_device(gf, lm_info)
         net.quantize_weights = true
 
         emb_layer.to_host! if ENV.fetch("SHAINET_EMBED_HOST", "1") != "0"
@@ -96,13 +117,33 @@ module SHAInet
       end
     end
 
-    # Load a GGUF tensor as a GGUFMatrix (device-resident k-quant).
-    private def self.load_gguf_weight(gf : GGUF::File, info : GGUF::TensorInfo) : GGUFMatrix
-      ptr = gf.read_tensor_raw(info)
+    # Load a GGUF tensor as either GGUFMatrix (device) or SimpleMatrix (host dequanted).
+    private def self.load_gguf_weight(gf : GGUF::File, info : GGUF::TensorInfo, on_gpu : Bool = true) : QuantizedWeight | SimpleMatrix | CudaMatrix
+      unless on_gpu
+        # CPU layer: keep the mmap pointer and wrap in a GGUFMatrix that will
+        # stream to GPU on demand via cudaMemcpy. The GGUF file must stay mmap'd
+        # (it does -- it's closed only after the Network is done).
+        # This is zero-copy for the host side: no dequant, no repack, no allocation.
+        if mmap_ptr = gf.tensor_ptr(info)
+          rows = info.shape[0].to_i32
+          cols = info.shape.size > 1 ? info.shape[1].to_i32 : 1
+          return GGUFHostMatrix.new(rows, cols, info.type, mmap_ptr, info.byte_size)
+        end
+        # Fallback if no mmap: read + device upload
+      end
+      load_gguf_weight_device(gf, info)
+    end
+
+    private def self.load_gguf_weight_device(gf : GGUF::File, info : GGUF::TensorInfo) : GGUFMatrix
+      # Use mmap pointer if available (zero-copy from file to GPU)
+      if mmap_ptr = gf.tensor_ptr(info)
+        ptr = mmap_ptr
+      else
+        ptr = gf.read_tensor_raw(info)
+      end
       rows = info.shape[0].to_i32
       cols = info.shape.size > 1 ? info.shape[1].to_i32 : 1
-      mat = GGUFMatrix.new(rows, cols, info.type, ptr, info.byte_size)
-      mat
+      GGUFMatrix.new(rows, cols, info.type, ptr, info.byte_size)
     end
 
     # Read a GGUF F32 tensor into a flat Array(Float32).
@@ -235,7 +276,7 @@ module SHAInet
                                                  d : Int32, ff : Int32, eps : Float64,
                                                  num_v_heads : Int32, num_k_heads : Int32,
                                                  head_dim : Int32, conv_kernel : Int32,
-                                                 state_size : Int32)
+                                                 state_size : Int32, on_gpu : Bool)
       net.add_layer("gated_deltanet", d, num_heads: num_v_heads,
         ff_hidden: ff, num_kv_heads: num_k_heads,
         eps: eps, head_dim: head_dim,
@@ -244,15 +285,15 @@ module SHAInet
 
       # Fused QKV: blk.N.attn_qkv.weight [d, qkv_dim]
       qkv_info = gf.tensors["blk.#{idx}.attn_qkv.weight"]
-      block.w_q = load_gguf_weight(gf, qkv_info) # TODO: split fused QKV
+      block.w_q = load_gguf_weight(gf, qkv_info, on_gpu) # TODO: split fused QKV
 
       # Gate (z projection): blk.N.attn_gate.weight [d, gate_dim]
       gate_info = gf.tensors["blk.#{idx}.attn_gate.weight"]
-      block.w_gate = load_gguf_weight(gf, gate_info)
+      block.w_gate = load_gguf_weight(gf, gate_info, on_gpu)
 
       # Output: blk.N.ssm_out.weight [ssm_inner, d]
       out_info = gf.tensors["blk.#{idx}.ssm_out.weight"]
-      block.w_o = load_gguf_weight(gf, out_info)
+      block.w_o = load_gguf_weight(gf, out_info, on_gpu)
 
       # Alpha/Beta: dequant to fp32 (small matrices, block expects SimpleMatrix | CudaMatrix)
       alpha_info = gf.tensors["blk.#{idx}.ssm_alpha.weight"]
@@ -309,16 +350,16 @@ module SHAInet
 
       # FFN
       ffn = block.ffn
-      ffn.gate_proj = load_gguf_weight(gf, gf.tensors["blk.#{idx}.ffn_gate.weight"])
-      ffn.up_proj = load_gguf_weight(gf, gf.tensors["blk.#{idx}.ffn_up.weight"])
-      ffn.down_proj = load_gguf_weight(gf, gf.tensors["blk.#{idx}.ffn_down.weight"])
+      ffn.gate_proj = load_gguf_weight(gf, gf.tensors["blk.#{idx}.ffn_gate.weight"], on_gpu)
+      ffn.up_proj = load_gguf_weight(gf, gf.tensors["blk.#{idx}.ffn_up.weight"], on_gpu)
+      ffn.down_proj = load_gguf_weight(gf, gf.tensors["blk.#{idx}.ffn_down.weight"], on_gpu)
     end
 
     private def self.load_gguf_full_attn_layer(gf : GGUF::File, net : Network, idx : Int32,
                                                d : Int32, ff : Int32, eps : Float64,
                                                n_heads : Int32, n_kv_heads : Int32,
                                                head_dim : Int32, rope_theta : Float64,
-                                               partial_rotary : Int32)
+                                               partial_rotary : Int32, on_gpu : Bool)
       net.add_layer(:llama, d, num_heads: n_heads, ff_hidden: ff,
         num_kv_heads: n_kv_heads, eps: eps, head_dim: head_dim)
       block = net.hidden_layers.last.as(LlamaBlock)
@@ -326,10 +367,10 @@ module SHAInet
       block.rotary_dim = partial_rotary if partial_rotary < head_dim
 
       # Separate Q/K/V/O for full attention layers
-      block.w_q = load_gguf_weight(gf, gf.tensors["blk.#{idx}.attn_q.weight"])
-      block.w_k = load_gguf_weight(gf, gf.tensors["blk.#{idx}.attn_k.weight"])
-      block.w_v = load_gguf_weight(gf, gf.tensors["blk.#{idx}.attn_v.weight"])
-      block.w_o = load_gguf_weight(gf, gf.tensors["blk.#{idx}.attn_output.weight"])
+      block.w_q = load_gguf_weight(gf, gf.tensors["blk.#{idx}.attn_q.weight"], on_gpu)
+      block.w_k = load_gguf_weight(gf, gf.tensors["blk.#{idx}.attn_k.weight"], on_gpu)
+      block.w_v = load_gguf_weight(gf, gf.tensors["blk.#{idx}.attn_v.weight"], on_gpu)
+      block.w_o = load_gguf_weight(gf, gf.tensors["blk.#{idx}.attn_output.weight"], on_gpu)
 
       # Q/K norms (offset-from-one for qwen3.5 RMSNorm)
       qn_data = read_gguf_f32_tensor(gf, gf.tensors["blk.#{idx}.attn_q_norm.weight"])
@@ -347,9 +388,9 @@ module SHAInet
 
       # FFN
       ffn = block.ffn.as(SwiGLUFF)
-      ffn.gate_proj = load_gguf_weight(gf, gf.tensors["blk.#{idx}.ffn_gate.weight"])
-      ffn.up_proj = load_gguf_weight(gf, gf.tensors["blk.#{idx}.ffn_up.weight"])
-      ffn.down_proj = load_gguf_weight(gf, gf.tensors["blk.#{idx}.ffn_down.weight"])
+      ffn.gate_proj = load_gguf_weight(gf, gf.tensors["blk.#{idx}.ffn_gate.weight"], on_gpu)
+      ffn.up_proj = load_gguf_weight(gf, gf.tensors["blk.#{idx}.ffn_up.weight"], on_gpu)
+      ffn.down_proj = load_gguf_weight(gf, gf.tensors["blk.#{idx}.ffn_down.weight"], on_gpu)
     end
   end
 end

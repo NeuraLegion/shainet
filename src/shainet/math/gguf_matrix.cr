@@ -42,6 +42,24 @@ module SHAInet
         @byte_size, CUDA::MemcpyKind::HostToDevice)
     end
 
+    # Allocate device memory only (no upload). Used by GGUFHostMatrix for its
+    # shared scratch buffer -- the data is uploaded per-GEMV via cudaMemcpy.
+    def self.new_empty(rows : Int32, cols : Int32, ggml_type : GGUF::GGMLType, byte_size : UInt64) : GGUFMatrix
+      m = GGUFMatrix.allocate
+      m.initialize_empty(rows, cols, ggml_type, byte_size)
+      m
+    end
+
+    protected def initialize_empty(@rows : Int32, @cols : Int32, @ggml_type : GGUF::GGMLType, byte_size : UInt64)
+      @byte_size = byte_size
+      unless @ggml_type.q4_k? || @ggml_type.q6_k?
+        raise ArgumentError.new("GGUFMatrix supports only Q4_K and Q6_K, got #{@ggml_type}")
+      end
+      dp = Pointer(UInt8).null
+      CUDA.malloc(pointerof(dp).as(Pointer(Pointer(Void))), @byte_size)
+      @dev_ptr = dp
+    end
+
     def finalize
       free!
     end

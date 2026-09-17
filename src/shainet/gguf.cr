@@ -98,6 +98,12 @@ module SHAInet
 
     # Parsed GGUF file. Metadata is accessible as a Hash; tensor data is read on
     # demand from the IO (the file must stay open).
+    #
+    # When opened with mmap: true (the default), the entire file is memory-mapped
+    # and tensor data is accessed via direct pointer arithmetic into the mapping.
+    # This is how llama.cpp loads GGUF: instant load, zero-copy for CPU layers,
+    # and the OS handles paging. GPU layers are uploaded with cudaMemcpy directly
+    # from the mmap'd region.
     class File
       getter version : UInt32
       getter metadata : Hash(String, MetaValue)
@@ -106,6 +112,10 @@ module SHAInet
 
       # The absolute byte offset where tensor data begins.
       getter tensor_data_offset : UInt64
+
+      # mmap state
+      @mmap_ptr : Pointer(UInt8)? = nil
+      @mmap_size : UInt64 = 0
 
       def initialize(@io : ::IO::FileDescriptor)
         @metadata = Hash(String, MetaValue).new
@@ -129,12 +139,49 @@ module SHAInet
         @tensor_data_offset = align(pos)
       end
 
-      def self.open(path : String) : File
+      def self.open(path : String, mmap : Bool = true) : File
         io = ::File.open(path, "r")
-        new(io)
+        f = new(io)
+        if mmap
+          f.setup_mmap(path)
+        end
+        f
+      end
+
+      # Set up memory mapping of the entire file.
+      protected def setup_mmap(path : String)
+        size = ::File.size(path).to_u64
+        fd = @io.fd
+        ptr = LibC.mmap(Pointer(Void).null, size, LibC::PROT_READ, LibC::MAP_PRIVATE, fd, 0_i64)
+        if ptr == LibC::MAP_FAILED
+          Log.warn { "gguf: mmap failed, falling back to read-based IO" }
+          return
+        end
+        # Advise the kernel we'll read sequentially during load
+        LibC.madvise(ptr, size, LibC::POSIX_MADV_SEQUENTIAL)
+        @mmap_ptr = ptr.as(Pointer(UInt8))
+        @mmap_size = size
+      end
+
+      def mmap? : Bool
+        !@mmap_ptr.nil?
+      end
+
+      # Get a direct pointer to a tensor's data in the mmap'd region.
+      # Returns nil if not mmap'd.
+      def tensor_ptr(info : TensorInfo) : Pointer(UInt8)?
+        if ptr = @mmap_ptr
+          offset = @tensor_data_offset + info.offset
+          raise "tensor offset #{offset} + size #{info.byte_size} exceeds mmap size #{@mmap_size}" if offset + info.byte_size > @mmap_size
+          ptr + offset
+        end
       end
 
       def close
+        if ptr = @mmap_ptr
+          LibC.munmap(ptr.as(Pointer(Void)), @mmap_size)
+          @mmap_ptr = nil
+        end
         @io.close
       end
 
