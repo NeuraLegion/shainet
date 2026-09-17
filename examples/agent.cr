@@ -753,6 +753,14 @@ module AgentDemo
       logits = nil
       i = 0
       t0 = Time.monotonic
+      # Per-layer progress callback
+      @net.prefill_progress = ->(layer_idx : Int32, total_layers : Int32) do
+        elapsed = (Time.monotonic - t0).total_seconds
+        pct = layer_idx * 100 // total_layers
+        STDERR.print "\r  prefill layer #{layer_idx}/#{total_layers} (#{pct}%) · #{elapsed.round(0).to_i}s".colorize(:dark_gray)
+        STDERR.flush
+        nil
+      end
       while i < ids.size
         n = Math.min(slice, ids.size - i)
         logits = @net.run(ids[i, n], stealth: true, return_matrix: true).as(SHAInet::SimpleMatrix)
@@ -762,6 +770,7 @@ module AgentDemo
         STDERR.print "\r  prefill #{done}/#{total} tok (#{done * 100 // total}%) · #{elapsed.round(0).to_i}s".colorize(:dark_gray)
         STDERR.flush
       end
+      @net.prefill_progress = nil
       STDERR.print "\r\033[K"
       logits.not_nil!
     end

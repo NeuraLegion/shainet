@@ -149,7 +149,7 @@ module SHAInet
         fn_data = read_gguf_f32_tensor(gf, fn_info)
         final_norm = RMSNorm.new(d, eps)
         gamma = SimpleMatrix.new(1, d)
-        d.times { |i| gamma[0, i] = (1.0 + fn_data[i]).to_f32 } # offset-from-one
+        d.times { |i| gamma[0, i] = fn_data[i].to_f32 } # GGUF stores final gamma
         final_norm.gamma = gamma
         net.final_norm = final_norm
 
@@ -185,6 +185,7 @@ module SHAInet
     private def self.load_gguf_weight_device(gf : GGUF::File, info : GGUF::TensorInfo,
                                              gpu_pool : Pointer(UInt8) = Pointer(UInt8).null,
                                              pool_map : Hash(UInt64, UInt64) = Hash(UInt64, UInt64).new) : GGUFMatrix
+      # GGUF shape: ne0 = fastest dim (values per row = K), ne1 = rows (N)
       rows = info.shape[0].to_i32
       cols = info.shape.size > 1 ? info.shape[1].to_i32 : 1
       # Use the bulk pool if available (data already on device from one big memcpy)
@@ -426,11 +427,11 @@ module SHAInet
       norm_info = gf.tensors["blk.#{idx}.ssm_norm.weight"]
       block.out_norm.gamma = read_gguf_f32_matrix(gf, norm_info, 1, state_size)
 
-      # Layer norms (offset-from-one for qwen3.5 RMSNorm)
+      # Layer norms (GGUF stores final gamma = 1 + offset, not the raw offset)
       n1_info = gf.tensors["blk.#{idx}.attn_norm.weight"]
       n2_info = gf.tensors["blk.#{idx}.post_attention_norm.weight"]
-      block.norm1.gamma = rms_gamma_offset(read_gguf_f32_matrix(gf, n1_info, 1, d))
-      block.norm2.gamma = rms_gamma_offset(read_gguf_f32_matrix(gf, n2_info, 1, d))
+      block.norm1.gamma = read_gguf_f32_matrix(gf, n1_info, 1, d)
+      block.norm2.gamma = read_gguf_f32_matrix(gf, n2_info, 1, d)
       block.norm1.to_gpu!
       block.norm2.to_gpu!
       block.out_norm.to_gpu!
@@ -476,14 +477,14 @@ module SHAInet
       # Q/K norms (offset-from-one for qwen3.5 RMSNorm)
       qn_data = read_gguf_f32_tensor(gf, gf.tensors["blk.#{idx}.attn_q_norm.weight"])
       kn_data = read_gguf_f32_tensor(gf, gf.tensors["blk.#{idx}.attn_k_norm.weight"])
-      block.q_norm = Array(Float32).new(qn_data.size) { |i| (1.0_f32 + qn_data[i]) }
-      block.k_norm = Array(Float32).new(kn_data.size) { |i| (1.0_f32 + kn_data[i]) }
+      block.q_norm = Array(Float32).new(qn_data.size) { |i| qn_data[i] }
+      block.k_norm = Array(Float32).new(kn_data.size) { |i| kn_data[i] }
 
-      # Layer norms
+      # Layer norms (GGUF stores final gamma, not offset)
       n1_info = gf.tensors["blk.#{idx}.attn_norm.weight"]
       n2_info = gf.tensors["blk.#{idx}.post_attention_norm.weight"]
-      block.norm1.gamma = rms_gamma_offset(read_gguf_f32_matrix(gf, n1_info, 1, d))
-      block.norm2.gamma = rms_gamma_offset(read_gguf_f32_matrix(gf, n2_info, 1, d))
+      block.norm1.gamma = read_gguf_f32_matrix(gf, n1_info, 1, d)
+      block.norm2.gamma = read_gguf_f32_matrix(gf, n2_info, 1, d)
       block.norm1.to_gpu!
       block.norm2.to_gpu!
 

@@ -69,6 +69,7 @@ module SHAInet
       if r_dptr && !r_dptr.null?
         CUDA.memcpy(r_dptr.as(Pointer(Void)), y_host.as(Pointer(Void)),
           (m * n * 4).to_u64, CUDA::MemcpyKind::HostToDevice)
+        result.mark_device_dirty!
       else
         result.raw_data.to_unsafe.copy_from(y_host, m * n)
       end

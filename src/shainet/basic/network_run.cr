@@ -238,7 +238,10 @@ module SHAInet
           prefill_boosted = true
         end
 
-        @hidden_layers.each do |l|
+        @hidden_layers.each_with_index do |l, layer_idx|
+          if input.rows > 1 && @prefill_progress
+            @prefill_progress.try &.call(layer_idx, @hidden_layers.size)
+          end
           case l
           when EmbeddingLayer
             raise NeuralNetRunError.new("Embedding input mismatch") unless matrix.cols == 1
