@@ -1,0 +1,302 @@
+module SHAInet
+  # GGUF file format parser (v3).
+  #
+  # GGUF is a self-contained model format: weights, architecture metadata, and
+  # tokenizer all in one file. Designed for llama.cpp/Ollama inference.
+  #
+  # Reference: https://github.com/ggml-org/ggml/blob/master/docs/gguf.md
+  module GGUF
+    MAGIC = 0x46554747_u32 # "GGUF" in little-endian
+
+    # GGML tensor data types.
+    enum GGMLType : UInt32
+      F32     =  0
+      F16     =  1
+      Q4_0    =  2
+      Q4_1    =  3
+      Q5_0    =  6
+      Q5_1    =  7
+      Q8_0    =  8
+      Q8_1    =  9
+      Q2_K    = 10
+      Q3_K    = 11
+      Q4_K    = 12
+      Q5_K    = 13
+      Q6_K    = 14
+      Q8_K    = 15
+      IQ2_XXS = 16
+      IQ2_XS  = 17
+      IQ3_XXS = 18
+      IQ1_S   = 19
+      IQ4_NL  = 20
+      IQ3_S   = 21
+      IQ2_S   = 22
+      IQ4_XS  = 23
+      I8      = 24
+      I16     = 25
+      I32     = 26
+      I64     = 27
+      F64     = 28
+      IQ1_M   = 29
+      BF16    = 30
+      TQ1_0   = 34
+      TQ2_0   = 35
+    end
+
+    # Bytes per block and values per block for supported quant types.
+    BLOCK_SIZE = {
+      GGMLType::F32  => {4, 1},
+      GGMLType::F16  => {2, 1},
+      GGMLType::BF16 => {2, 1},
+      GGMLType::Q4_0 => {18, 32},
+      GGMLType::Q4_1 => {20, 32},
+      GGMLType::Q5_0 => {22, 32},
+      GGMLType::Q5_1 => {24, 32},
+      GGMLType::Q8_0 => {34, 32},
+      GGMLType::Q8_1 => {36, 32},
+      GGMLType::Q2_K => {84, 256},
+      GGMLType::Q3_K => {110, 256},
+      GGMLType::Q4_K => {144, 256},
+      GGMLType::Q5_K => {176, 256},
+      GGMLType::Q6_K => {210, 256},
+      GGMLType::Q8_K => {292, 256},
+    }
+
+    # Metadata value types.
+    enum MetaType : UInt32
+      UINT8   =  0
+      INT8    =  1
+      UINT16  =  2
+      INT16   =  3
+      UINT32  =  4
+      INT32   =  5
+      FLOAT32 =  6
+      BOOL    =  7
+      STRING  =  8
+      ARRAY   =  9
+      UINT64  = 10
+      INT64   = 11
+      FLOAT64 = 12
+    end
+
+    # A value from the metadata key-value store.
+    alias MetaValue = UInt8 | Int8 | UInt16 | Int16 | UInt32 | Int32 | Float32 |
+                      Bool | String | Array(MetaValue) | UInt64 | Int64 | Float64
+
+    # A tensor descriptor (name, shape, type, byte offset relative to tensor_data).
+    record TensorInfo, name : String, shape : Array(UInt64), type : GGMLType, offset : UInt64 do
+      def element_count : UInt64
+        shape.reduce(1_u64) { |a, b| a * b }
+      end
+
+      def byte_size : UInt64
+        bs, vs = BLOCK_SIZE[type]? || raise "unsupported GGML type #{type} for tensor #{name}"
+        blocks = (element_count + vs.to_u64 - 1) // vs.to_u64
+        blocks * bs.to_u64
+      end
+    end
+
+    # Parsed GGUF file. Metadata is accessible as a Hash; tensor data is read on
+    # demand from the IO (the file must stay open).
+    class File
+      getter version : UInt32
+      getter metadata : Hash(String, MetaValue)
+      getter tensors : Hash(String, TensorInfo)
+      getter alignment : UInt32
+
+      # The absolute byte offset where tensor data begins.
+      getter tensor_data_offset : UInt64
+
+      def initialize(@io : ::IO::FileDescriptor)
+        @metadata = Hash(String, MetaValue).new
+        @tensors = Hash(String, TensorInfo).new
+
+        magic = read_u32
+        raise "not a GGUF file (magic #{magic.to_s(16)})" unless magic == MAGIC
+        @version = read_u32
+        raise "unsupported GGUF version #{@version} (expected 2 or 3)" unless @version >= 2
+
+        tensor_count = read_u64
+        kv_count = read_u64
+
+        kv_count.times { read_kv }
+        @alignment = (metadata["general.alignment"]?.try(&.as(UInt32)) || 32_u32)
+
+        tensor_count.times { read_tensor_info }
+
+        # Tensor data starts at the next alignment boundary after the header + tensor infos.
+        pos = @io.pos.to_u64
+        @tensor_data_offset = align(pos)
+      end
+
+      def self.open(path : String) : File
+        io = ::File.open(path, "r")
+        new(io)
+      end
+
+      def close
+        @io.close
+      end
+
+      # Read raw tensor bytes into a pre-allocated Slice.
+      def read_tensor_data(info : TensorInfo, dst : Slice(UInt8))
+        @io.seek((@tensor_data_offset + info.offset).to_i64)
+        @io.read_fully(dst)
+      end
+
+      # Read raw tensor bytes into a Pointer.
+      def read_tensor_raw(info : TensorInfo) : Pointer(UInt8)
+        size = info.byte_size
+        ptr = Pointer(UInt8).malloc(size)
+        @io.seek((@tensor_data_offset + info.offset).to_i64)
+        # Chunked read for large tensors (IO#read_fully overflow at > 2 GB).
+        read = 0_u64
+        while read < size
+          n = Math.min(size - read, 1_073_741_824_u64).to_i32
+          @io.read_fully(Slice.new(ptr + read, n))
+          read += n
+        end
+        ptr
+      end
+
+      # Convenience: get a metadata string or nil.
+      def meta_string(key : String) : String?
+        metadata[key]?.try(&.as(String))
+      end
+
+      def meta_u32(key : String) : UInt32?
+        v = metadata[key]?
+        case v
+        when UInt32 then v
+        when UInt64 then v.to_u32
+        when Int32  then v.to_u32
+        end
+      end
+
+      def meta_u64(key : String) : UInt64?
+        v = metadata[key]?
+        case v
+        when UInt64 then v
+        when UInt32 then v.to_u64
+        when Int32  then v.to_u64
+        end
+      end
+
+      def meta_f32(key : String) : Float32?
+        v = metadata[key]?
+        case v
+        when Float32 then v
+        when Float64 then v.to_f32
+        end
+      end
+
+      # --- private readers ---
+
+      private def align(pos : UInt64) : UInt64
+        a = @alignment.to_u64
+        pos + (a - (pos % a)) % a
+      end
+
+      private def read_u8 : UInt8
+        @io.read_byte.not_nil!
+      end
+
+      private def read_i8 : Int8
+        read_u8.to_i8!
+      end
+
+      private def read_u16 : UInt16
+        buf = uninitialized UInt8[2]
+        @io.read_fully(buf.to_slice)
+        IO::ByteFormat::LittleEndian.decode(UInt16, buf.to_slice)
+      end
+
+      private def read_i16 : Int16
+        read_u16.to_i16!
+      end
+
+      private def read_u32 : UInt32
+        buf = uninitialized UInt8[4]
+        @io.read_fully(buf.to_slice)
+        IO::ByteFormat::LittleEndian.decode(UInt32, buf.to_slice)
+      end
+
+      private def read_i32 : Int32
+        read_u32.to_i32!
+      end
+
+      private def read_u64 : UInt64
+        buf = uninitialized UInt8[8]
+        @io.read_fully(buf.to_slice)
+        IO::ByteFormat::LittleEndian.decode(UInt64, buf.to_slice)
+      end
+
+      private def read_i64 : Int64
+        read_u64.to_i64!
+      end
+
+      private def read_f32 : Float32
+        buf = uninitialized UInt8[4]
+        @io.read_fully(buf.to_slice)
+        IO::ByteFormat::LittleEndian.decode(Float32, buf.to_slice)
+      end
+
+      private def read_f64 : Float64
+        buf = uninitialized UInt8[8]
+        @io.read_fully(buf.to_slice)
+        IO::ByteFormat::LittleEndian.decode(Float64, buf.to_slice)
+      end
+
+      private def read_bool : Bool
+        read_u8 != 0
+      end
+
+      private def read_string : String
+        len = read_u64
+        buf = Bytes.new(len.to_i32)
+        @io.read_fully(buf)
+        String.new(buf)
+      end
+
+      private def read_value(type : MetaType) : MetaValue
+        case type
+        when .uint8?   then read_u8
+        when .int8?    then read_i8
+        when .uint16?  then read_u16
+        when .int16?   then read_i16
+        when .uint32?  then read_u32
+        when .int32?   then read_i32
+        when .float32? then read_f32
+        when .bool?    then read_bool
+        when .string?  then read_string
+        when .uint64?  then read_u64
+        when .int64?   then read_i64
+        when .float64? then read_f64
+        when .array?
+          elem_type = MetaType.new(read_u32)
+          len = read_u64
+          arr = Array(MetaValue).new(len.to_i32)
+          len.times { arr << read_value(elem_type) }
+          arr
+        else
+          raise "unknown GGUF metadata type #{type.value}"
+        end
+      end
+
+      private def read_kv
+        key = read_string
+        vtype = MetaType.new(read_u32)
+        @metadata[key] = read_value(vtype)
+      end
+
+      private def read_tensor_info
+        name = read_string
+        ndim = read_u32
+        shape = Array(UInt64).new(ndim.to_i32) { read_u64 }
+        type = GGMLType.new(read_u32)
+        offset = read_u64
+        @tensors[name] = TensorInfo.new(name, shape, type, offset)
+      end
+    end
+  end
+end
