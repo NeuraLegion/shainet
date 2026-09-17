@@ -295,7 +295,7 @@ module SHAInet
       result
     end
 
-    private def self.get_scale_min_k4_host(j : Int32, scales : Pointer(UInt8)) : {UInt8, UInt8}
+    def self.get_scale_min_k4_host(j : Int32, scales : Pointer(UInt8)) : {UInt8, UInt8}
       if j < 4
         {scales[j] & 63_u8, scales[j + 4] & 63_u8}
       else
@@ -305,7 +305,7 @@ module SHAInet
       end
     end
 
-    private def self.half_to_f32(bits : UInt16) : Float32
+    def self.half_to_f32(bits : UInt16) : Float32
       sign = (bits >> 15) & 1
       exp = (bits >> 10) & 0x1F
       frac = bits & 0x3FF
