@@ -65,7 +65,7 @@ module SHAInet
     def initialize(@d_model : Int32, ff_hidden : Int32,
                    @num_v_heads : Int32 = 32, @num_k_heads : Int32 = 16,
                    @head_k : Int32 = 128, @head_v : Int32 = 128,
-                   @conv_kernel : Int32 = 4, eps : Float64 = 1e-6)
+                   @conv_kernel : Int32 = 4, eps : Float64 = 1e-6, allocate : Bool = true)
       super(@d_model, SHAInet.none)
       raise ArgumentError.new("num_v_heads must be positive") unless @num_v_heads > 0
       raise ArgumentError.new("num_k_heads must be positive") unless @num_k_heads > 0
@@ -84,17 +84,27 @@ module SHAInet
       # through one shared RMS and silently change every output -- a wrong-but-plausible design
       # that no shape check would have caught.
       @out_norm = RMSNorm.new(@head_v, eps)
-      @ffn = SwiGLUFF.new(@d_model, ff_hidden)
+      @ffn = SwiGLUFF.new(@d_model, ff_hidden, allocate: allocate)
 
       k_dim = @num_k_heads * @head_k
       v_dim = @num_v_heads * @head_v
-      @w_q = SimpleMatrix.new(@d_model, k_dim)
-      @w_k = SimpleMatrix.new(@d_model, k_dim)
-      @w_v = SimpleMatrix.new(@d_model, v_dim)
-      @w_o = SimpleMatrix.new(v_dim, @d_model)
-      @w_gate = SimpleMatrix.new(@d_model, v_dim)
-      @w_alpha = SimpleMatrix.new(@d_model, @num_v_heads)
-      @w_beta = SimpleMatrix.new(@d_model, @num_v_heads)
+      if allocate
+        @w_q = SimpleMatrix.new(@d_model, k_dim)
+        @w_k = SimpleMatrix.new(@d_model, k_dim)
+        @w_v = SimpleMatrix.new(@d_model, v_dim)
+        @w_o = SimpleMatrix.new(v_dim, @d_model)
+        @w_gate = SimpleMatrix.new(@d_model, v_dim)
+        @w_alpha = SimpleMatrix.new(@d_model, @num_v_heads)
+        @w_beta = SimpleMatrix.new(@d_model, @num_v_heads)
+      else
+        @w_q = SimpleMatrix.new(0, 0)
+        @w_k = SimpleMatrix.new(0, 0)
+        @w_v = SimpleMatrix.new(0, 0)
+        @w_o = SimpleMatrix.new(0, 0)
+        @w_gate = SimpleMatrix.new(0, 0)
+        @w_alpha = SimpleMatrix.new(0, 0)
+        @w_beta = SimpleMatrix.new(0, 0)
+      end
       @a_log = Array(Float64).new(@num_v_heads, 0.0)
       @dt_bias = Array(Float64).new(@num_v_heads, 0.0)
 

@@ -122,7 +122,7 @@ module SHAInet
                    num_kv_heads : Int32? = nil, head_dim : Int32? = nil,
                    moe_experts : Int32? = nil, moe_top_k : Int32 = 8,
                    moe_norm_topk : Bool = true, moe_ff_hidden : Int32? = nil,
-                   moe_offload : Bool = false)
+                   moe_offload : Bool = false, allocate : Bool = true)
       super(@d_model, SHAInet.none)
       # num_kv_heads defaults to num_heads (no grouped-query attention). It cannot
       # be written as `@num_kv_heads : Int32 = @num_heads` in the parameter list:
@@ -152,12 +152,19 @@ module SHAInet
       @ffn = if ne = moe_experts
                MoEFF.new(@d_model, moe_ff_hidden || ff_hidden, ne, moe_top_k, moe_norm_topk, moe_offload)
              else
-               SwiGLUFF.new(@d_model, ff_hidden)
+               SwiGLUFF.new(@d_model, ff_hidden, allocate: allocate)
              end
-      @w_q = SimpleMatrix.new(@d_model, @q_dim)
-      @w_k = SimpleMatrix.new(@d_model, kv_dim)
-      @w_v = SimpleMatrix.new(@d_model, kv_dim)
-      @w_o = SimpleMatrix.new(@q_dim, @d_model)
+      if allocate
+        @w_q = SimpleMatrix.new(@d_model, @q_dim)
+        @w_k = SimpleMatrix.new(@d_model, kv_dim)
+        @w_v = SimpleMatrix.new(@d_model, kv_dim)
+        @w_o = SimpleMatrix.new(@q_dim, @d_model)
+      else
+        @w_q = SimpleMatrix.new(0, 0)
+        @w_k = SimpleMatrix.new(0, 0)
+        @w_v = SimpleMatrix.new(0, 0)
+        @w_o = SimpleMatrix.new(0, 0)
+      end
       @k_cache = Array.new(@num_kv_heads) { Array(Float32).new }
       @v_cache = Array.new(@num_kv_heads) { Array(Float32).new }
     end
