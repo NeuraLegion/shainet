@@ -696,7 +696,49 @@ module SHAInet
       @norm1.gamma.is_a?(CudaMatrix) && @norm2.gamma.is_a?(CudaMatrix) && CUDA.kernels_available?
     end
 
+    # How many tokens the resident path processes at once.
+    #
+    # Its workspace is about a dozen buffers scaled by the row count -- at 1400 rows roughly 630 MB
+    # once the SwiGLU trio is counted -- so sizing it to the whole prompt made a long prefill fail
+    # for want of VRAM and forced a larger reserve, which in turn kept layers on the host. The
+    # recurrence already carries its conv and recurrent state across calls, which is exactly what a
+    # decode step relies on, so a chunked prefill computes the same thing as a whole-sequence one.
+    RESIDENT_CHUNK = 256
+
     def forward_cached_device(xd : CudaMatrix) : CudaMatrix?
+      return unless device_chain_capable?
+      seq = xd.rows
+      return forward_cached_device_chunk(xd) if seq <= RESIDENT_CHUNK
+
+      d = @d_model
+      full = resident_buf(:blk_full, seq, d)
+      off = 0
+      while off < seq
+        n = seq - off
+        n = RESIDENT_CHUNK if n > RESIDENT_CHUNK
+        src = resident_buf(:blk_slice, n, d)
+        CUDA.copy_device_to_device(src.device_ptr.not_nil!,
+          xd.device_ptr.not_nil! + off * d, (n.to_u64 * d * 4).to_u64)
+        src.mark_device_dirty!
+        got = forward_cached_device_chunk(src)
+        return unless got
+        CUDA.copy_device_to_device(full.device_ptr.not_nil! + off * d,
+          got.device_ptr.not_nil!, (n.to_u64 * d * 4).to_u64)
+        off += n
+      end
+      full.mark_device_dirty!
+      full
+    end
+
+    # The whole block device-in, device-out for one chunk of at most RESIDENT_CHUNK rows.
+    #
+    # Before this the chain ended at every Gated DeltaNet block: the activation came home, the block
+    # ran, and the next block uploaded it again. In a hybrid stack that is 48 of 64 layers, so the
+    # activation crossed the bus about 96 times per token on top of the mixer's own transfers.
+    #
+    # Returns nil unless every stage can run on the device, so the caller falls back to the host
+    # path and that stays the reference implementation.
+    private def forward_cached_device_chunk(xd : CudaMatrix) : CudaMatrix?
       return unless mixer_resident_capable?
       ffn = @ffn
       return unless ffn.is_a?(SwiGLUFF) && ffn.gate_proj.is_a?(QuantizedWeight)
