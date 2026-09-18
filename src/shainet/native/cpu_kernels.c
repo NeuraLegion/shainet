@@ -594,7 +594,11 @@ void gemv_q4k_cpu(const float *x, const uint8_t *W, float *y,
             int mblk = q8_token_block(K, M);
             for (int m0 = 0; m0 < M; m0 += mblk) {
                 int mcount = (M - m0 < mblk) ? (M - m0) : mblk;
-                #pragma omp parallel for schedule(static)
+                // guided, not static: this is a hybrid CPU (P-cores plus E-cores) and an equal
+                // split makes the whole GEMV wait for the slowest slice. Measured on
+                // blk.0.ffn_down: 34.5 GB/s across 20 threads under static against 44.2 GB/s when
+                // restricted to the 12 P-core threads -- the E-cores were stragglers, not help.
+                #pragma omp parallel for schedule(guided)
                 for (int n = 0; n < N; n++) {
                     const uint8_t *wrow = W + (long long)n * bytes_per_row;
                     for (int mi = 0; mi < mcount; mi++) {
@@ -613,7 +617,7 @@ void gemv_q4k_cpu(const float *x, const uint8_t *W, float *y,
 
     if (M == 1) {
         /* Fused dequant+dot: the row is read once regardless, so no buffer is worth its write. */
-        #pragma omp parallel for schedule(static)
+        #pragma omp parallel for schedule(guided)
         for (int n = 0; n < N; n++) {
             y[n] = dot_q4k_row(x, W + (long long)n * bytes_per_row, K);
         }
@@ -627,7 +631,7 @@ void gemv_q4k_cpu(const float *x, const uint8_t *W, float *y,
     {
         float *wbuf = (float *)malloc((size_t)K * sizeof(float));
         if (wbuf) {
-            #pragma omp for schedule(static)
+            #pragma omp for schedule(guided)
             for (int n = 0; n < N; n++) {
                 dequant_q4k_row_f32(W + (long long)n * bytes_per_row, wbuf, K);
                 apply_row(x, y, wbuf, M, N, K, n);
@@ -649,7 +653,11 @@ void gemv_q6k_cpu(const float *x, const uint8_t *W, float *y,
             int mblk = q8_token_block(K, M);
             for (int m0 = 0; m0 < M; m0 += mblk) {
                 int mcount = (M - m0 < mblk) ? (M - m0) : mblk;
-                #pragma omp parallel for schedule(static)
+                // guided, not static: this is a hybrid CPU (P-cores plus E-cores) and an equal
+                // split makes the whole GEMV wait for the slowest slice. Measured on
+                // blk.0.ffn_down: 34.5 GB/s across 20 threads under static against 44.2 GB/s when
+                // restricted to the 12 P-core threads -- the E-cores were stragglers, not help.
+                #pragma omp parallel for schedule(guided)
                 for (int n = 0; n < N; n++) {
                     const uint8_t *wrow = W + (long long)n * bytes_per_row;
                     for (int mi = 0; mi < mcount; mi++) {
@@ -667,7 +675,7 @@ void gemv_q6k_cpu(const float *x, const uint8_t *W, float *y,
     }
 
     if (M == 1) {
-        #pragma omp parallel for schedule(static)
+        #pragma omp parallel for schedule(guided)
         for (int n = 0; n < N; n++) {
             y[n] = dot_q6k_row(x, W + (long long)n * bytes_per_row, K);
         }
@@ -678,7 +686,7 @@ void gemv_q6k_cpu(const float *x, const uint8_t *W, float *y,
     {
         float *wbuf = (float *)malloc((size_t)K * sizeof(float));
         if (wbuf) {
-            #pragma omp for schedule(static)
+            #pragma omp for schedule(guided)
             for (int n = 0; n < N; n++) {
                 dequant_q6k_row_f32(W + (long long)n * bytes_per_row, wbuf, K);
                 apply_row(x, y, wbuf, M, N, K, n);

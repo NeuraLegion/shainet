@@ -279,7 +279,7 @@ module SHAInet
 
       ap = resident_buf(:ap, seq, @num_v_heads)
       bp = resident_buf(:bp, seq, @num_v_heads)
-      h = (@cublas ||= CUDA.create_handle)
+      h = GatedDeltaNetBlock.shared_cublas
       # ap is row-major [seq, heads], i.e. column-major [heads, seq]; w_alpha is row-major
       # [d_model, heads], i.e. column-major [heads, d_model]. So this is a plain N,N product
       # W'(heads x d_model) * x'(d_model x seq) -- NO transpose. Using the transposed form here
@@ -344,8 +344,16 @@ module SHAInet
     @conv_weight_devs = {} of Symbol => CudaMatrix
     @gate_param_devs = {} of Symbol => CudaMatrix
     @ssm_gamma_dev : CudaMatrix?
-    @cublas : CUDA::LibCUBLAS::Handle?
     @eps : Float64 = 1e-6
+
+    # ONE cuBLAS handle for every block. A handle carries its own workspace, so the per-block
+    # version of this allocated 40+ of them and cublasCreate started failing outright once the
+    # layer split left less VRAM spare -- at a 1024 MB reserve it died on the first mixer call.
+    @@cublas : CUDA::LibCUBLAS::Handle?
+
+    protected def self.shared_cublas : CUDA::LibCUBLAS::Handle
+      @@cublas ||= CUDA.create_handle
+    end
 
     private def conv_state_dev(role : Symbol, channels : Int32) : Pointer(Float32)
       m = @conv_state_devs[role] ||= begin
