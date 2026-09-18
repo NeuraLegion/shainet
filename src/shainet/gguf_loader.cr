@@ -499,6 +499,56 @@ module SHAInet
       ffn.down_proj = load_gguf_weight(gf, gf.tensors["blk.#{idx}.ffn_down.weight"], on_gpu, gpu_pool, pool_map)
     end
 
+    # Split the interleaved Q+gate projection WITHOUT dequantizing it.
+    #
+    # attn_q.weight is [ne0 = in_dim, ne1 = n_heads * head_dim * 2] and the Q/gate interleaving runs
+    # along ne1 -- the OUTPUT rows -- while k-quant blocks run along ne0. Every output row is
+    # therefore quantized independently, so the split is a copy of whole raw rows, not a numeric
+    # operation, and the result is still Q4_K/Q6_K.
+    #
+    # Dequantizing to fp32 first, which is what this replaced, cost 120 MB per matrix and 240 MB per
+    # layer: 3.84 GB across the 16 full-attention layers, for weights that are 17.7 MB each
+    # quantized. It also left both projections on the HOST as plain SimpleMatrix, which is why a
+    # full-attention layer measured 13.8 ms per decode token against 3.98 ms for a device-resident
+    # Gated DeltaNet layer.
+    #
+    # Destination layout matches HFLoader#split_head_interleaved: output row h*head_dim + i comes
+    # from source row h*2*head_dim + i for Q, and + head_dim for the gate.
+    private def self.split_gguf_q_gate(gf : GGUF::File, info : GGUF::TensorInfo,
+                                       n_heads : Int32, head_dim : Int32, on_gpu : Bool)
+      in_dim = info.shape[0].to_i32
+      out_total = info.shape[1].to_i32
+      half = n_heads * head_dim
+      raise "split_gguf_q_gate: #{out_total} outputs is not 2 * #{half}" unless out_total == half * 2
+
+      bs, vs = GGUF::BLOCK_SIZE[info.type]? || raise "unsupported type #{info.type} for Q/gate split"
+      row_bytes = ((in_dim + vs - 1) // vs) * bs
+      src = gf.tensor_ptr(info) || raise "attn_q tensor has no data pointer"
+
+      total = half.to_u64 * row_bytes
+      qbuf = Pointer(UInt8).malloc(total)
+      gbuf = Pointer(UInt8).malloc(total)
+      n_heads.times do |h|
+        head_dim.times do |i|
+          dst = (h * head_dim + i).to_u64 * row_bytes
+          q_off = (h * 2 * head_dim + i).to_u64 * row_bytes
+          g_off = (h * 2 * head_dim + head_dim + i).to_u64 * row_bytes
+          (qbuf + dst).copy_from(src + q_off, row_bytes)
+          (gbuf + dst).copy_from(src + g_off, row_bytes)
+        end
+      end
+
+      if on_gpu && CUDA.fully_available?
+        {GGUFMatrix.new(in_dim, half, info.type, qbuf, total),
+         GGUFMatrix.new(in_dim, half, info.type, gbuf, total)}
+      else
+        # The buffers are GC-allocated rather than mmap-backed, and GGUFHostMatrix keeps only the
+        # raw pointer, so hand it the owning slice as well to pin them for the model's lifetime.
+        {GGUFHostMatrix.new(in_dim, half, info.type, qbuf, total, Bytes.new(qbuf, total)),
+         GGUFHostMatrix.new(in_dim, half, info.type, gbuf, total, Bytes.new(gbuf, total))}
+      end
+    end
+
     private def self.load_gguf_full_attn_layer(gf : GGUF::File, net : Network, idx : Int32,
                                                d : Int32, ff : Int32, eps : Float64,
                                                n_heads : Int32, n_kv_heads : Int32,
@@ -518,9 +568,7 @@ module SHAInet
       q_out = q_info.shape[1].to_i32
       q_dim = n_heads * head_dim
       if q_out == q_dim * 2
-        # Interleaved Q+gate: dequant to fp32, split like safetensors path.
-        q_fp32 = read_gguf_f32_matrix(gf, q_info, q_info.shape[0].to_i32, q_out)
-        wq, wg = split_head_interleaved(q_fp32, n_heads, head_dim)
+        wq, wg = split_gguf_q_gate(gf, q_info, n_heads, head_dim, on_gpu)
         block.w_q = wq
         block.w_gate_attn = wg
       else

@@ -13,8 +13,12 @@ module SHAInet
 
     @host_ptr : Pointer(UInt8)
     @byte_size : UInt64
+    # Set when the bytes are NOT mmap-backed but GC-allocated (the Q/gate split builds its buffers
+    # by copying raw rows). Holding the slice keeps them alive for the matrix's lifetime; without it
+    # only the raw pointer would reference them.
+    @owned : Bytes?
 
-    def initialize(@rows, @cols, @ggml_type, @host_ptr, @byte_size)
+    def initialize(@rows, @cols, @ggml_type, @host_ptr, @byte_size, @owned : Bytes? = nil)
       unless @ggml_type == GGUF::GGMLType::Q4_K || @ggml_type == GGUF::GGMLType::Q6_K
         raise ArgumentError.new("GGUFHostMatrix: unsupported type #{@ggml_type}")
       end
