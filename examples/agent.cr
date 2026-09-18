@@ -43,6 +43,69 @@ module AgentDemo
   REPEAT_CALL_LIMIT  =  2
   RECENT_CALL_MEMORY = 12
 
+  # Turn a failed list_directory into an answer rather than a dead end.
+  #
+  # Three cases, in the order a caller actually hits them:
+  #   - the argument is a shell command, not a path (a model reaching for `ls a b 2>/dev/null`
+  #     because no tool offered "check several paths at once") -- name the right tool;
+  #   - the path is a FILE -- say so and list its parent, which is what was wanted;
+  #   - the path does not exist -- list the nearest existing ancestor and point out entries whose
+  #     names are close, so a typo like "example/" for "examples/" is corrected in one round trip.
+  def self.directory_miss_help(raw : String, resolved : String) : String
+    if raw.matches?(/[;|&><$`]|\*\s|\s2>/)
+      return "Error: '#{raw}' looks like a shell command, not a directory path. list_directory " \
+             "takes ONE directory path. Use run_command to run shell, or call list_directory once " \
+             "per path."
+    end
+
+    if File.exists?(resolved) && !Dir.exists?(resolved)
+      parent = File.dirname(raw)
+      parent = "." if parent.empty?
+      listing = safe_children(File.dirname(resolved))
+      return "Error: #{raw} is a FILE, not a directory (use read_file to read it).\n" \
+             "Contents of #{parent}:\n#{listing}"
+    end
+
+    # Walk up to the nearest ancestor that exists, and list it.
+    rel = raw
+    anc = resolved
+    3.times do
+      break if Dir.exists?(anc)
+      anc = File.dirname(anc)
+      rel = File.dirname(rel)
+    end
+    rel = "." if rel.empty? || rel == "/"
+
+    unless Dir.exists?(anc)
+      return "Error: no such directory: #{raw}"
+    end
+
+    wanted = File.basename(raw)
+    entries = begin
+      Dir.children(anc)
+    rescue
+      [] of String
+    end
+    # "Close" deliberately means a shared prefix rather than an edit distance: the typos that
+    # actually occur here are a missing or extra trailing character (example/ for examples/).
+    near = entries.select do |e|
+      next false if wanted.empty?
+      e.starts_with?(wanted[0, [wanted.size, 3].min]) || wanted.starts_with?(e[0, [e.size, 3].min])
+    end.sort.first(8)
+
+    out = ["Error: no such directory: #{raw}"]
+    out << "Did you mean: #{near.join(", ")}" unless near.empty?
+    out << "Contents of #{rel}:\n#{safe_children(anc)}"
+    out.join("\n")
+  end
+
+  # Directory listing with directories marked, or a readable reason it could not be listed.
+  def self.safe_children(dir : String) : String
+    Dir.children(dir).sort.map { |e| Dir.exists?(File.join(dir, e)) ? "#{e}/" : e }.join("\n")
+  rescue ex
+    "(could not list: #{ex.message})"
+  end
+
   record ToolParam, name : String, type : String, description : String, required : Bool = true
   # `ids` holds the EXACT tokens the model produced for an assistant turn, when they are
   # known. Re-encoding the decoded text does not reliably reproduce them -- a decode,
@@ -200,7 +263,11 @@ module AgentDemo
         if Dir.exists?(path)
           Dir.children(path).sort.map { |e| Dir.exists?(File.join(path, e)) ? "#{e}/" : e }.join("\n")
         else
-          "Error: not a directory: #{raw}"
+          # A miss used to dead-end with just "not a directory", which is what sent a model into a
+          # loop: its real question was "which of these paths exist?", and the error answered
+          # nothing, so it reissued variants -- eventually smuggling a shell command into this
+          # argument. Answer the underlying question instead.
+          AgentDemo.directory_miss_help(raw, path)
         end
       end,
       Tool.new(
