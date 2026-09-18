@@ -83,12 +83,55 @@ module SHAInet
         lm_head_bytes = gf.tensors["output.weight"].byte_size
 
         gpu_layers = num_transformer_layers
-        # The reserve is not slack: it has to cover the KV cache, which grows with the prompt, plus
-        # the activation and GEMM workspaces. On Qwen3.8-27B the KV cache is ~131 KB per token
-        # (16 full-attention layers x 2 x 4 kv_heads x 256 x 4 B), so the 2048 MB default carries
-        # roughly an 8K context. Measured at 1024 MB the model places 56 layers and a 1024-token
-        # prefill finishes with only 198 MB free, so lowering it trades context for layers.
-        reserve_mb = (ENV["SHAINET_GGUF_RESERVE_MB"]? || "2048").to_i
+        # The reserve is not slack: it has to cover everything that is NOT weights, and the parts
+        # that matter scale with CONTEXT. Sizing it as a constant is what made a long conversation
+        # die mid-turn -- 52 layers placed, then an OOM around 8000 tokens on a card that had loaded
+        # the model fine. Derive it from the context we intend to support instead, so the trade is
+        # made once at load (fewer layers, slower per token) rather than as a crash at token 8000.
+        #
+        # Per token, for this model on a 16 GB card:
+        #   KV cache       2 * n_kv_heads * head_dim * 2 B (fp16) * full-attention layers
+        #                  = 2*4*256*2*16 = 64 KB/token -- the 48 GDN layers hold fixed-size SSM
+        #                  state and contribute nothing here
+        #   attention ws   n_heads * ATTN_CHUNK * 4 B = 24*256*4 = 24 KB/token, shared across blocks
+        # plus a fixed part: the activations (bounded by Network.prefill_rows), the host-weight
+        # staging slot, and the dequant scratch.
+        #
+        # Measured at 16384 tokens: 1073 MB KV + 402 MB workspace + ~300 MB fixed = ~1775 MB, against
+        # the 1650 MB that a 52-layer placement actually leaves free. Hence the OOM, and hence placing
+        # fewer layers. The fragmentation margin is not cosmetic: with buffers growing and being freed
+        # as context extends, a 32 MB allocation was observed failing with 333 MB free.
+        max_context = (ENV["SHAINET_MAX_CONTEXT"]? || "16384").to_i
+        full_attn_layers = types.count { |t| t != "linear_attention" }
+        kv_elem_bytes = ENV.fetch("SHAINET_KV_FP16", "1") == "0" ? 4 : 2
+        kv_per_token = 2_i64 * n_kv_heads * head_dim * kv_elem_bytes * full_attn_layers
+        ws_per_token = n_heads.to_i64 * 256 * 4
+        # The fixed term is not a fudge: per-layer SSM state is 3.1 MB (48 heads x 128 x 128 x 4 B)
+        # and there are ~39 GDN layers on the device, the SwiGLU trio at Network.prefill_rows is
+        # ~107 MB, the host-weight staging slot is up to 70 MB, the dequant scratch 20 MB, and the
+        # conv state and resident mixer buffers add more. The 20% on top covers the transient peak
+        # when a growing buffer holds its old and new allocation at once.
+        #
+        # Calibrated against measurement: at 16384 tokens this yields ~2611 MB, which places 50 of 64
+        # layers and completes a full 16016-token conversation. 1987 MB placed 52 layers and died at
+        # ~8000 tokens; 3072 MB placed 48 and also completed, but paid ~11 ms/token more for nothing.
+        fixed_bytes = 768_i64 * 1024 * 1024
+        derived = ((kv_per_token + ws_per_token) * max_context + fixed_bytes)
+        derived = (derived * 120) // 100
+        derived_mb = (derived // (1024 * 1024)).to_i
+
+        # An explicit reserve always wins: it is the escape hatch for trading context for speed.
+        reserve_mb = if env = ENV["SHAINET_GGUF_RESERVE_MB"]?
+                       env.to_i
+                     else
+                       derived_mb
+                     end
+        kv_mb = (kv_per_token * max_context) // (1024 * 1024)
+        ws_mb = (ws_per_token * max_context) // (1024 * 1024)
+        Log.info do
+          "gguf: reserve #{reserve_mb} MB for #{max_context}-token context " \
+          "(KV #{kv_mb} MB + workspace #{ws_mb} MB + fixed/margin)"
+        end
         if CUDA.fully_available?
           if info = CUDA.memory_info
             budget = (info[:free].to_i64) - (reserve_mb.to_i64 * 1024 * 1024)
@@ -190,6 +233,21 @@ module SHAInet
         net.quantize_weights = true
 
         emb_layer.to_host! if ENV.fetch("SHAINET_EMBED_HOST", "1") != "0"
+        # Pin every attention block's KV cache to the context the reserve was sized for, so the cache
+        # is allocated ONCE at that size instead of doubling into it.
+        #
+        # The doubling was the proximate cause of the mid-conversation OOMs, not raw capacity: each
+        # growth allocates the new buffer, copies the old one across device-to-device, and frees the
+        # old, which leaves holes. Observed on a growing conversation, a 32 MB allocation failed with
+        # 333 MB free, and the per-step VRAM deltas swung between +740 MB and -95 MB. With the cache
+        # pinned, the same run completes a full 16016 tokens.
+        #
+        # It also converts an OOM at token 8000 into an ArgumentError at the point the budget is
+        # exceeded, which a caller can act on.
+        net.layers.each do |layer|
+          layer.kv_max_context = max_context if layer.responds_to?(:kv_max_context=)
+        end
+
         Log.info { "gguf: loaded #{num_transformer_layers} layers from #{path}" }
         net
         # NOTE: gf is NOT closed here. The mmap must stay alive for the model's lifetime

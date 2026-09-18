@@ -36,11 +36,25 @@ describe "LlamaBlock attention workspace bound" do
 
     it "clamps the doubling to cap_limit instead of overshooting the budget" do
       limit = budget_floats.to_i32
-      # cur_cap just under the limit: doubling would land at 80M, well past a
-      # 67.1M budget. The clamp must hold it to the limit.
-      SHAInet::LlamaBlock.next_buf_cap(40_000_000, 50_000_000, cap_limit: limit).should eq limit
-      # Without the clamp this is the overshoot the clamp exists to prevent.
-      SHAInet::LlamaBlock.next_buf_cap(40_000_000, 50_000_000).should eq 80_000_000
+      # cur_cap just under the limit: doubling would land at 80M, well past a 67.1M budget. What
+      # matters is that the result never exceeds the limit while still covering `needed` -- the
+      # large-buffer path satisfies that more tightly than the clamp alone (56.25M here), so assert
+      # the bound rather than one exact value.
+      got = SHAInet::LlamaBlock.next_buf_cap(40_000_000, 50_000_000, cap_limit: limit)
+      got.should be <= limit
+      got.should be >= 50_000_000
+    end
+
+    it "grows a LARGE buffer by a margin instead of doubling it" do
+      # Doubling the biggest allocation in the process wastes VRAM in hundreds of MB: a 9543-token
+      # prefill needed 58.6M floats (234 MB) and the old policy asked for 100.7M (384 MB), which is
+      # what OOM'd a 16 GB card. Past LARGE_BUF_FLOATS the growth is `needed` plus an eighth, so the
+      # waste is 12.5% rather than 100%.
+      SHAInet::LlamaBlock.next_buf_cap(40_000_000, 50_000_000).should eq 56_250_000
+      # A request at the threshold takes the bounded path; just under it still doubles.
+      large = SHAInet::LlamaBlock::LARGE_BUF_FLOATS
+      SHAInet::LlamaBlock.next_buf_cap(0, large).should eq large + large // 8
+      SHAInet::LlamaBlock.next_buf_cap(large, large - 1).should eq 2 * large
     end
 
     it "still honours a single request larger than cap_limit" do

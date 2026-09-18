@@ -216,7 +216,59 @@ module SHAInet
       end
     end
 
+    # Rows per prefill pass through the stack. Tunable with SHAINET_PREFILL_ROWS; 0 disables.
+    #
+    # Without this, every activation buffer in the stack is sized to the WHOLE prompt, so peak VRAM
+    # scales with context and a long conversation dies mid-turn. Measured on a 16 GB card with a
+    # 27B model: a 9543-token prefill asked resident_buf for [9543, 5120] (186 MB) and the attention
+    # workspace for 384 MB, and OOM'd -- while the same model prefills 2051 tokens with ~780 MB spare.
+    # Chunking holds those buffers to [PREFILL_ROWS, *] no matter how long the prompt is.
+    #
+    # This is safe because the KV cache already makes a sliced prefill equivalent to a whole one --
+    # it is the same mechanism a chat turn uses when it reuses cached tokens and prefills only the
+    # new ones -- and because the head reduces to the last position anyway (gpu_lm_head_q slices the
+    # final row), so the chunks before the last contribute cache state rather than logits.
+    #
+    # 512 keeps the matmuls comfortably in their batched regime while holding the widest activation
+    # ([rows, 17408] appears three times in the SwiGLU trio) to about 100 MB.
+    DEFAULT_PREFILL_ROWS = 512
+
+    @@prefill_rows : Int32?
+
+    def self.prefill_rows : Int32
+      rows = @@prefill_rows
+      return rows if rows
+      rows = (ENV["SHAINET_PREFILL_ROWS"]?.try(&.to_i?) || DEFAULT_PREFILL_ROWS)
+      @@prefill_rows = rows
+      rows
+    end
+
+    def self.prefill_rows=(rows : Int32)
+      @@prefill_rows = rows
+    end
+
     def run(input : SimpleMatrix, stealth : Bool = false) : SimpleMatrix
+      limit = Network.prefill_rows
+      if limit > 0 && input.rows > limit && use_kv_cache? && !@transformer_layers.empty?
+        result : SimpleMatrix? = nil
+        offset = 0
+        cols = input.cols
+        while offset < input.rows
+          n = Math.min(limit, input.rows - offset)
+          slice = SimpleMatrix.new(n, cols)
+          # Contiguous row-major copy: row `offset + i` of the input is row `i` of the slice.
+          slice.data.to_unsafe.copy_from(input.data.to_unsafe + offset.to_i64 * cols, n.to_i64 * cols)
+          result = run(slice, stealth)
+          offset += n
+        end
+        # The last slice carries the last position, which is the only one the head keeps.
+        return result.not_nil!
+      end
+
+      run_unchunked(input, stealth)
+    end
+
+    private def run_unchunked(input : SimpleMatrix, stealth : Bool = false) : SimpleMatrix
       verify_net_before_train
 
       matrix = input

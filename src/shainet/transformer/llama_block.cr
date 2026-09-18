@@ -1585,6 +1585,16 @@ module SHAInet
       end
     end
 
+    # Past this size, stop doubling and grow by a margin instead (fp32 elements; 16M = 64 MB).
+    #
+    # Doubling is free insurance while a buffer is small, but the attention scratch is the largest
+    # single allocation in the process and doubling it wastes VRAM in hundreds of megabytes. Measured
+    # on a 9543-token prefill: the workspace needed 24 heads x 256 chunk x 9543 = 58.6M floats
+    # (234 MB) and the doubling asked for 100.7M (384 MB), which is the allocation that OOM'd a 16 GB
+    # card. Above the threshold there are only a handful of reallocations over a whole run, so the
+    # churn doubling avoids is not worth paying 2x peak for.
+    LARGE_BUF_FLOATS = 16 * 1024 * 1024
+
     # Pure size policy for grow_dev_buf, split out so it can be asserted directly
     # without allocating anything or driving a GPU.
     #
@@ -1594,6 +1604,13 @@ module SHAInet
     # ceiling 2x the stated one. A single request larger than the limit still
     # wins, since under-allocating would corrupt the kernel's writes.
     def self.next_buf_cap(cur_cap : Int32, needed : Int32, cap_limit : Int32? = nil) : Int32
+      if needed >= LARGE_BUF_FLOATS
+        # An eighth of headroom absorbs the next few token-by-token growths without another
+        # allocation, while capping the waste at 12.5% instead of 100%.
+        grown = needed + needed // 8
+        grown = cap_limit if cap_limit && grown > cap_limit
+        return Math.max(needed, grown)
+      end
       doubled = cur_cap * 2
       doubled = cap_limit if cap_limit && doubled > cap_limit
       Math.max(needed, doubled)
