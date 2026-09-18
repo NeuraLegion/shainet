@@ -206,9 +206,25 @@ module SHAInet
 
       handle = Pointer(LibCUBLAS::Handle).malloc(1)
       raise "cublasCreate failed" unless LibCUBLAS.cublasCreate_v2(handle) == 0
-      # CUBLAS_MATH_DISALLOW_REDUCED_PRECISION_REDUCTION (16): prevent
-      # non-deterministic reduced-precision accumulation in SGEMM on Ada/Ampere.
-      result = LibCUBLAS.cublasSetMathMode(handle.value, 16)
+      # Ask for true fp32 in-process, so callers do not have to remember NVIDIA_TF32_OVERRIDE=0.
+      #
+      # On Ampere and Ada, cuBLAS runs SGEMM on TF32 tensor cores by default, cutting the mantissa
+      # from 23 bits to 10 -- enough to make token generation vary between runs. The documented
+      # workaround is the NVIDIA_TF32_OVERRIDE=0 environment variable, but that has to be set before
+      # the process starts, so it is easy to forget and invisible when missing.
+      # CUBLAS_PEDANTIC_MATH (2) disables the TF32 path for this handle instead, and 16 is
+      # CUBLAS_MATH_DISALLOW_REDUCED_PRECISION_REDUCTION, which additionally prevents
+      # non-deterministic reduced-precision accumulation. Measured on Qwen3.8-27B prefill, TF32 buys
+      # nothing here anyway (18.1 vs 20.1 tok/s, inside run-to-run noise) because the path is
+      # dequant-bandwidth-bound rather than FLOP-bound -- so this costs no speed.
+      #
+      # Older drivers may reject the combined value; fall back to the reduction flag alone rather
+      # than leaving the handle unconfigured. Set SHAINET_CUBLAS_TF32=1 to allow TF32 back.
+      pedantic = ENV.fetch("SHAINET_CUBLAS_TF32", "0") == "1" ? 16 : 18
+      result = LibCUBLAS.cublasSetMathMode(handle.value, pedantic)
+      if result != 0 && pedantic != 16
+        result = LibCUBLAS.cublasSetMathMode(handle.value, 16)
+      end
       Log.warn { "cublasSetMathMode failed (code #{result})" } unless result == 0
       handle.value
     end
