@@ -91,7 +91,7 @@ module AgentDemo
     near = entries.select do |e|
       next false if wanted.empty?
       e.starts_with?(wanted[0, [wanted.size, 3].min]) || wanted.starts_with?(e[0, [e.size, 3].min])
-    end.sort.first(8)
+    end.sort!.first(8)
 
     out = ["Error: no such directory: #{raw}"]
     out << "Did you mean: #{near.join(", ")}" unless near.empty?
