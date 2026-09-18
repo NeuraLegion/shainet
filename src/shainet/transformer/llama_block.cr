@@ -468,11 +468,11 @@ module SHAInet
         CUDA.rope_forward(kd.device_ptr.not_nil!, ifr, pos, @num_kv_heads, head_dim, rot_dim)
       end
 
-      # Staging and workspace sized for a single query token.
+      # Staging and workspace sized for a single query token, for whichever attention path is in use.
       @@gpu_staging, @@gpu_staging_cap = grow_dev_buf(@@gpu_staging, @@gpu_staging_cap, 2 * kv_dim + @q_dim)
       @@gpu_attn_out, @@gpu_attn_out_cap = grow_dev_buf(@@gpu_attn_out, @@gpu_attn_out_cap, @q_dim)
       @@gpu_attn_ws, @@gpu_attn_ws_cap = grow_dev_buf(@@gpu_attn_ws, @@gpu_attn_ws_cap,
-        @num_heads * total_len, cap_limit: ATTN_WS_BUDGET_FLOATS.to_i32)
+        attn_ws_floats(1, total_len), cap_limit: ATTN_WS_BUDGET_FLOATS.to_i32)
       ensure_gpu_cache!(total_len, 1)
 
       Profile.measure("attn.dev_append") do
@@ -820,7 +820,12 @@ module SHAInet
       # through here any more.
       @@gpu_staging, @@gpu_staging_cap = grow_dev_buf(@@gpu_staging, @@gpu_staging_cap, 2 * kv_cap)
       @@gpu_attn_out, @@gpu_attn_out_cap = grow_dev_buf(@@gpu_attn_out, @@gpu_attn_out_cap, q_cap)
-      ws_floats = @num_heads * max_chunk * total_len
+      # Sized for whichever attention path use_split_attn? selects. The split path stores per-split
+      # partials (heads * tokens * splits * (head_dim + 2)) instead of a full score row
+      # (heads * tokens * total_len), which at 24 heads, a 256-token chunk and 16k of context is
+      # ~203 MB rather than ~384 MB -- and the score row was the largest single allocation in the
+      # process, the one that OOM'd a 16 GB card at 9.5k tokens.
+      ws_floats = attn_ws_floats(max_chunk, total_len)
       @@gpu_attn_ws, @@gpu_attn_ws_cap = grow_dev_buf(@@gpu_attn_ws, @@gpu_attn_ws_cap, ws_floats)
       ensure_gpu_cache!(total_len, max_chunk)
 
@@ -1276,7 +1281,7 @@ module SHAInet
       kv_cap = @num_kv_heads * chunk_floats # staging size of K (and of V)
       q_cap = max_chunk * dm
       staging_floats = 2 * kv_cap + q_cap
-      ws_floats = @num_heads * max_chunk * total_len
+      ws_floats = attn_ws_floats(max_chunk, total_len)
 
       @@gpu_staging, @@gpu_staging_cap = grow_dev_buf(@@gpu_staging, @@gpu_staging_cap, staging_floats)
       @@gpu_attn_out, @@gpu_attn_out_cap = grow_dev_buf(@@gpu_attn_out, @@gpu_attn_out_cap, q_cap)
@@ -1571,6 +1576,33 @@ module SHAInet
       end
     end
 
+    # Whether the split-KV attention path is in use, decided ONCE.
+    #
+    # Sizing and dispatch must agree: the split path needs a partials buffer
+    # (heads * tokens * splits * (head_dim + 2)) while the single-block path needs a full score row
+    # (heads * tokens * total_len), and the score row is far larger. If the workspace were sized for
+    # the split path but a later dispatch fell back to the single-block kernel, that kernel would
+    # write past the end of the buffer. So this predicate is the only place the choice is made, and
+    # both the allocation and the launch read it.
+    private def use_split_attn? : Bool
+      flag = @@use_split_attn
+      return flag unless flag.nil?
+      flag = ENV.fetch("SHAINET_SPLIT_ATTN", "1") != "0" && CUDA.attention_split_kv_available?
+      @@use_split_attn = flag
+      flag
+    end
+
+    @@use_split_attn : Bool? = nil
+
+    # Floats the attention workspace needs for the chosen path.
+    private def attn_ws_floats(tokens : Int32, total_len : Int32) : Int32
+      if use_split_attn?
+        need = CUDA.attention_split_ws_floats(tokens, @num_heads, @head_dim, total_len)
+        return need if need > 0
+      end
+      @num_heads * tokens * total_len
+    end
+
     # Dispatch the attention kernel for the active cache dtype.
     #
     # Prefers the split-KV ("flash-decoding") path, which adds the KV length as a grid dimension. The
@@ -1580,26 +1612,23 @@ module SHAInet
     # split path is 1.37x at 1k context rising to 6.87x at 14k, and stays nearly FLAT as context grows
     # (0.298 ms to 0.944 ms across a 14x range) where the single-block kernel scales linearly. With 16
     # attention layers that is ~104 ms of per-token attention at 14k becoming ~15 ms.
-    #
-    # It needs its own workspace size, so it is only taken when the shared scratch is already large
-    # enough; otherwise the single-block path runs and the scratch grows for next time.
     private def attend_kv(q : Pointer(Float32), n : Int32, base_pos : Int32,
                           heads_per_kv : Int32, scale : Float32)
-      total_len = base_pos + n
-      if CUDA.attention_split_kv_available?
-        need = CUDA.attention_split_ws_floats(n, @num_heads, @head_dim, total_len)
-        if need > 0 && @@gpu_attn_ws_cap >= need && !@@gpu_attn_ws.null?
-          ok = if kv_cache_fp16?
-                 CUDA.attention_split_kv_f16(q, @gpu_k_cache.as(Pointer(UInt16)),
-                   @gpu_v_cache.as(Pointer(UInt16)), @@gpu_attn_out, @@gpu_attn_ws,
-                   n, base_pos, @num_heads, heads_per_kv, @head_dim, @gpu_cache_cap, scale)
-               else
-                 CUDA.attention_split_kv_f32(q, @gpu_k_cache.as(Pointer(Float32)),
-                   @gpu_v_cache.as(Pointer(Float32)), @@gpu_attn_out, @@gpu_attn_ws,
-                   n, base_pos, @num_heads, heads_per_kv, @head_dim, @gpu_cache_cap, scale)
-               end
-          return if ok
-        end
+      if use_split_attn?
+        ok = if kv_cache_fp16?
+               CUDA.attention_split_kv_f16(q, @gpu_k_cache.as(Pointer(UInt16)),
+                 @gpu_v_cache.as(Pointer(UInt16)), @@gpu_attn_out, @@gpu_attn_ws,
+                 n, base_pos, @num_heads, heads_per_kv, @head_dim, @gpu_cache_cap, scale)
+             else
+               CUDA.attention_split_kv_f32(q, @gpu_k_cache.as(Pointer(Float32)),
+                 @gpu_v_cache.as(Pointer(Float32)), @@gpu_attn_out, @@gpu_attn_ws,
+                 n, base_pos, @num_heads, heads_per_kv, @head_dim, @gpu_cache_cap, scale)
+             end
+        # The workspace was sized for THIS path, so falling through to the single-block kernel would
+        # overrun it. The predicate already confirmed the kernels load, so a false here is a real
+        # fault rather than a capability miss.
+        raise "split-KV attention kernel failed after reporting available" unless ok
+        return
       end
 
       if kv_cache_fp16?

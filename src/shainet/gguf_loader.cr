@@ -105,7 +105,23 @@ module SHAInet
         full_attn_layers = types.count { |t| t != "linear_attention" }
         kv_elem_bytes = ENV.fetch("SHAINET_KV_FP16", "1") == "0" ? 4 : 2
         kv_per_token = 2_i64 * n_kv_heads * head_dim * kv_elem_bytes * full_attn_layers
-        ws_per_token = n_heads.to_i64 * 256 * 4
+        # The attention workspace term depends on which attention path runs. The single-block kernel
+        # stages a full score row per query token, n_heads * ATTN_CHUNK * 4 B = 24 KB per token of
+        # context. The split-KV path instead stores per-split partials, which scale with the query
+        # chunk and the number of 512-key splits rather than with context x chunk: at 24 heads, a
+        # 256-token chunk and 16k context that is ~203 MB against ~384 MB.
+        #
+        # Budget the smaller figure only when the split kernels are actually present, since the
+        # single-block path would overrun a workspace sized for the split one.
+        split_attn = ENV.fetch("SHAINET_SPLIT_ATTN", "1") != "0" && CUDA.attention_split_kv_available?
+        ws_per_token = if split_attn
+                         # heads * chunk * splits * (head_dim + 2), amortized per context token:
+                         # splits grows as context/512, so the per-token term is
+                         # heads * chunk * (head_dim + 2) / 512 * 4 B.
+                         (n_heads.to_i64 * 256 * (head_dim + 2) * 4) // 512
+                       else
+                         n_heads.to_i64 * 256 * 4
+                       end
         # The fixed term is not a fudge: per-layer SSM state is 3.1 MB (48 heads x 128 x 128 x 4 B)
         # and there are ~39 GDN layers on the device, the SwiGLU trio at Network.prefill_rows is
         # ~107 MB, the host-weight staging slot is up to 70 MB, the dequant scratch 20 MB, and the
