@@ -226,23 +226,28 @@ module SHAInet
       k_dim = @num_k_heads * @head_k
       v_dim = @num_v_heads * @head_v
 
-      q_lin = project(normed, @w_q, k_dim)
-      k_lin = project(normed, @w_k, k_dim)
-      v_lin = project(normed, @w_v, v_dim)
+      q_lin = Profile.measure("gdn.project") { project(normed, @w_q, k_dim) }
+      k_lin = Profile.measure("gdn.project") { project(normed, @w_k, k_dim) }
+      v_lin = Profile.measure("gdn.project") { project(normed, @w_v, v_dim) }
 
-      q_c, @conv_state_q = @conv_q.forward(q_lin, @conv_state_q)
-      k_c, @conv_state_k = @conv_k.forward(k_lin, @conv_state_k)
-      v_c, @conv_state_v = @conv_v.forward(v_lin, @conv_state_v)
-
-      seq.times do |t|
-        k_dim.times { |j| q_c[t, j] = silu(q_c[t, j].to_f64); k_c[t, j] = silu(k_c[t, j].to_f64) }
-        v_dim.times { |j| v_c[t, j] = silu(v_c[t, j].to_f64) }
+      q_c = k_c = v_c = uninitialized SimpleMatrix
+      Profile.measure("gdn.conv") do
+        q_c, @conv_state_q = @conv_q.forward(q_lin, @conv_state_q)
+        k_c, @conv_state_k = @conv_k.forward(k_lin, @conv_state_k)
+        v_c, @conv_state_v = @conv_v.forward(v_lin, @conv_state_v)
       end
 
-      alpha, beta = gates(normed)
+      Profile.measure("gdn.silu") do
+        seq.times do |t|
+          k_dim.times { |j| q_c[t, j] = silu(q_c[t, j].to_f64); k_c[t, j] = silu(k_c[t, j].to_f64) }
+          v_dim.times { |j| v_c[t, j] = silu(v_c[t, j].to_f64) }
+        end
+      end
+
+      alpha, beta = Profile.measure("gdn.gates") { gates(normed) }
       heads_per_k = @num_v_heads // @num_k_heads
 
-      if dev = device_mix(q_c, k_c, v_c, alpha, beta, seq, k_dim, v_dim, heads_per_k)
+      if dev = Profile.measure("gdn.recurrence_dev") { device_mix(q_c, k_c, v_c, alpha, beta, seq, k_dim, v_dim, heads_per_k) }
         mixed = dev
       else
         mixed = SimpleMatrix.new(seq, v_dim, 0.0)
@@ -295,14 +300,16 @@ module SHAInet
       # checkpoint's [head_v] norm tensor. Doing it over the whole v_dim would make one head's
       # magnitude affect every other head's output.
       normed_mix = SimpleMatrix.new(seq, v_dim, 0.0)
-      @num_v_heads.times do |h|
-        slice = SimpleMatrix.new(seq, @head_v, 0.0)
-        seq.times { |t| @head_v.times { |j| slice[t, j] = mixed[t, h * @head_v + j] } }
-        normed_slice = @out_norm.forward(slice)
-        seq.times { |t| @head_v.times { |j| normed_mix[t, h * @head_v + j] = normed_slice[t, j] } }
+      Profile.measure("gdn.out_norm") do
+        @num_v_heads.times do |h|
+          slice = SimpleMatrix.new(seq, @head_v, 0.0)
+          seq.times { |t| @head_v.times { |j| slice[t, j] = mixed[t, h * @head_v + j] } }
+          normed_slice = @out_norm.forward(slice)
+          seq.times { |t| @head_v.times { |j| normed_mix[t, h * @head_v + j] = normed_slice[t, j] } }
+        end
       end
 
-      gate = project(normed, @w_gate, v_dim)
+      gate = Profile.measure("gdn.project") { project(normed, @w_gate, v_dim) }
       seq.times do |t|
         v_dim.times { |j| normed_mix[t, j] = normed_mix[t, j].to_f64 * silu(gate[t, j].to_f64) }
       end

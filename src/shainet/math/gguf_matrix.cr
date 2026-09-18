@@ -94,6 +94,15 @@ module SHAInet
       # Ensure activation is resident on device (cheap no-op when already synced).
       x.sync_to_device!("gguf_gemv_in") unless x.device_dirty?
 
+      # M == 1 (decode) is already optimal as a GEMV: the weight is streamed exactly once. For
+      # M > 1 the GEMV kernel gives each (output, token) pair its own block, so it re-dequantizes
+      # the whole weight per token and reuses nothing -- measured flat at 0.54 ms/token from M=1 to
+      # M=256 on a 47.8 MB Q4_K weight, i.e. 54 GB of reads for a 1200-token prefill of ONE matmul.
+      # Dequantizing once into a scratch tile and letting cuBLAS do the GEMM reads the weight once.
+      if x.rows > 1 && gemm_capable?
+        return gemm_into(x, result)
+      end
+
       case @ggml_type
       when .q4_k?
         CUDA.gemv_q4k(x.device_ptr.not_nil!, @dev_ptr, result.device_ptr.not_nil!,
@@ -113,6 +122,79 @@ module SHAInet
     def gemv(x : CudaMatrix) : CudaMatrix
       result = CudaMatrix.new(x.rows, @cols)
       gemv_into(x, result)
+    end
+
+    # Scratch for the dequantized weight tile, shared across every GGUFMatrix.
+    #
+    # One buffer rather than one per weight: prefill runs the matmuls sequentially, so a single
+    # tile is live at a time, and a per-weight buffer would cost hundreds of MB of VRAM on a card
+    # that is already nearly full with the model.
+    @@scratch : Pointer(Float32) = Pointer(Float32).null
+    @@scratch_floats : Int32 = 0
+    @@gemm_supported : Bool? = nil
+
+    # Rows dequantized per cuBLAS call. 1024 x K=5120 fp32 is 20 MB, which is small next to the
+    # model yet large enough that the GEMM is not launch-bound.
+    SCRATCH_ROWS = 1024
+
+    def self.release_scratch!
+      unless @@scratch.null?
+        CUDA.free(@@scratch.as(Pointer(Void)))
+        @@scratch = Pointer(Float32).null
+        @@scratch_floats = 0
+      end
+    end
+
+    protected def self.scratch(floats : Int32) : Pointer(Float32)
+      if @@scratch_floats < floats
+        release_scratch!
+        p = Pointer(Void).null
+        CUDA.malloc(pointerof(p), (floats.to_u64 * 4))
+        @@scratch = p.as(Pointer(Float32))
+        @@scratch_floats = floats
+      end
+      @@scratch
+    end
+
+    private def gemm_capable? : Bool
+      sup = @@gemm_supported
+      return sup unless sup.nil?
+      @@gemm_supported = sup = CUDA.fully_available? && CUDA.dequant_k_rows_available?
+      sup
+    end
+
+    # Batched matmul for M > 1: dequantize the weight in row chunks and let cuBLAS multiply.
+    #
+    # result[M, N] = x[M, K] * dequant(W[N, K])^T. cuBLAS is column-major, so the row-major
+    # result [M, N] is addressed as a column-major [N, M]: with the dequantized chunk as the
+    # transposed operand and ldc set to the FULL N, each chunk writes straight into its own
+    # columns of the finished result.
+    def gemm_into(x : CudaMatrix, result : CudaMatrix) : CudaMatrix
+      k = @rows
+      chunk = SCRATCH_ROWS > @cols ? @cols : SCRATCH_ROWS
+      buf = GGUFMatrix.scratch(chunk * k)
+      handle = CUDA.create_handle
+      begin
+        xp = x.device_ptr.not_nil!
+        rp = result.device_ptr.not_nil!
+        row0 = 0
+        while row0 < @cols
+          rows = @cols - row0
+          rows = chunk if rows > chunk
+          case @ggml_type
+          when .q4_k? then CUDA.dequant_q4k_rows(@dev_ptr, buf, row0, rows, k)
+          when .q6_k? then CUDA.dequant_q6k_rows(@dev_ptr, buf, row0, rows, k)
+          else             raise ArgumentError.new("unsupported GGUF type for gemm: #{@ggml_type}")
+          end
+          CUDA.gemm_tn(handle, buf, xp, rp + row0,
+            rows, x.rows, k, k, k, @cols)
+          row0 += rows
+        end
+      ensure
+        CUDA.destroy_handle(handle)
+      end
+      result.mark_device_dirty!
+      result
     end
 
     # Free the device allocation if not already freed.

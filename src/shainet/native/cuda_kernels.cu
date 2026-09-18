@@ -1832,6 +1832,110 @@ __global__ void gemv_q6k_kernel(const float* __restrict__ x,
 }
 
 // C entry points
+
+// ---- Dequantize a row range to fp32, so cuBLAS can do the GEMM ----
+//
+// The GEMV kernels above give each (output, token) pair its own block, so every block
+// re-dequantizes the whole weight row and NOTHING is reused across tokens. Measured on
+// blk.0.ffn_up.weight (Q4_K, 5120x17408, 47.8 MB): 0.54 ms per token flat from M=1 to M=256, i.e.
+// the 47.8 MB weight is re-streamed once per token -- 54 GB of traffic for a 1200-token prefill,
+// per matmul, per layer.
+//
+// For M=1 that is optimal (the weight is read exactly once and the result is one vector), so
+// decode keeps using the GEMV. For M>1 the weight should be read once and reused across all M,
+// which is what a GEMM does. Rather than hand-roll a tiled k-quant GEMM, dequantize a chunk of
+// rows into an fp32 scratch buffer and hand it to cuBLAS, which is already tuned for this shape.
+//
+// Output is [n_rows, K] row-major, matching the GGUF row order, so the caller can treat it as a
+// column-major [K, n_rows] operand and reach the whole result with one cublasSgemm.
+
+__global__ void dequant_q4k_rows_kernel(const unsigned char* __restrict__ w,
+                                        float* __restrict__ out,
+                                        int row0, int n_rows, int K) {
+    int r = blockIdx.x;
+    if (r >= n_rows) return;
+
+    int nblocks = K / GGUF_QK_K;
+    long row_bytes = (long)nblocks * GGUF_Q4K_BLOCK_BYTES;
+    const unsigned char* wrow = w + (long)(row0 + r) * row_bytes;
+    float* orow = out + (long)r * K;
+
+    for (int blk = blockIdx.y; blk < nblocks; blk += gridDim.y) {
+        const unsigned char* block = wrow + (long)blk * GGUF_Q4K_BLOCK_BYTES;
+        float d    = __half2float(*((const __half*)(block + 0)));
+        float dmin = __half2float(*((const __half*)(block + 2)));
+        const unsigned char* scales = block + 4;
+        const unsigned char* qs     = block + 16;
+        int base_k = blk * GGUF_QK_K;
+
+        for (int k = threadIdx.x; k < GGUF_QK_K; k += blockDim.x) {
+            unsigned char sc, mn;
+            get_scale_min_k4(k / 32, scales, &sc, &mn);
+            int block_of_64 = k / 64;
+            int offset_in_64 = k % 64;
+            int nibble_val = (offset_in_64 < 32)
+                ? (qs[block_of_64 * 32 + offset_in_64] & 0xF)
+                : (qs[block_of_64 * 32 + (offset_in_64 - 32)] >> 4);
+            orow[base_k + k] = d * (float)sc * (float)nibble_val - dmin * (float)mn;
+        }
+    }
+}
+
+__global__ void dequant_q6k_rows_kernel(const unsigned char* __restrict__ w,
+                                        float* __restrict__ out,
+                                        int row0, int n_rows, int K) {
+    int r = blockIdx.x;
+    if (r >= n_rows) return;
+
+    int nblocks = K / GGUF_QK_K;
+    long row_bytes = (long)nblocks * GGUF_Q6K_BLOCK_BYTES;
+    const unsigned char* wrow = w + (long)(row0 + r) * row_bytes;
+    float* orow = out + (long)r * K;
+
+    for (int blk = blockIdx.y; blk < nblocks; blk += gridDim.y) {
+        const unsigned char* block = wrow + (long)blk * GGUF_Q6K_BLOCK_BYTES;
+        const unsigned char* ql = block;
+        const unsigned char* qh = block + 128;
+        const signed char* sc   = (const signed char*)(block + 192);
+        float d = __half2float(*((const __half*)(block + 208)));
+        int base_k = blk * GGUF_QK_K;
+
+        for (int k = threadIdx.x; k < GGUF_QK_K; k += blockDim.x) {
+            int chunk = k / 128;
+            int local = k % 128;
+            const unsigned char* ql_c = ql + chunk * 64;
+            const unsigned char* qh_c = qh + chunk * 32;
+            const signed char* sc_c   = sc + chunk * 8;
+            int sub = local / 32;
+            int l   = local % 32;
+            int qval;
+            switch (sub) {
+                case 0: qval = (int)((ql_c[l]       & 0xF) | (((qh_c[l] >> 0) & 3) << 4)) - 32; break;
+                case 1: qval = (int)((ql_c[l + 32]  & 0xF) | (((qh_c[l] >> 2) & 3) << 4)) - 32; break;
+                case 2: qval = (int)((ql_c[l]       >> 4)  | (((qh_c[l] >> 4) & 3) << 4)) - 32; break;
+                default: qval = (int)((ql_c[l + 32] >> 4)  | (((qh_c[l] >> 6) & 3) << 4)) - 32; break;
+            }
+            orow[base_k + k] = d * (float)sc_c[(l / 16) + sub * 2] * (float)qval;
+        }
+    }
+}
+
+void dequant_q4k_rows(const unsigned char* w, float* out, int row0, int n_rows, int K) {
+    if (n_rows <= 0 || K <= 0) return;
+    int nblocks = K / GGUF_QK_K;
+    int by = nblocks < 32 ? nblocks : 32;
+    dim3 grid(n_rows, by);
+    dequant_q4k_rows_kernel<<<grid, 256>>>(w, out, row0, n_rows, K);
+}
+
+void dequant_q6k_rows(const unsigned char* w, float* out, int row0, int n_rows, int K) {
+    if (n_rows <= 0 || K <= 0) return;
+    int nblocks = K / GGUF_QK_K;
+    int by = nblocks < 32 ? nblocks : 32;
+    dim3 grid(n_rows, by);
+    dequant_q6k_rows_kernel<<<grid, 256>>>(w, out, row0, n_rows, K);
+}
+
 void gemv_q4k(const float* x, const unsigned char* w, float* y, int M, int N, int K) {
     int threads = 128;
     dim3 grid(N, M);

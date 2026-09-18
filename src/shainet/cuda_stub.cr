@@ -162,6 +162,22 @@ module SHAInet
       raise "CUDA disabled"
     end
 
+    def dequant_q4k_rows(*args)
+      raise "CUDA disabled"
+    end
+
+    def dequant_q6k_rows(*args)
+      raise "CUDA disabled"
+    end
+
+    def dequant_k_rows_available? : Bool
+      false
+    end
+
+    def gemm_tn(*args)
+      raise "CUDA disabled"
+    end
+
     def pack_kv_heads(*args)
       raise "CUDA disabled"
     end

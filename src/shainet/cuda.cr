@@ -246,6 +246,22 @@ module SHAInet
         pointerof(beta), c, ldc)
     end
 
+    # C = A^T * B with A and B column-major, which is what a row-major
+    # C[M, N] = X[M, K] * W[N, K]^T needs: pass the dequantized weight as A (lda = K), the
+    # activation as B (ldb = K), m = N_chunk, n = M, ldc = the FULL N so a chunk of output columns
+    # lands in place inside the complete result.
+    def gemm_tn(handle : LibCUBLAS::Handle, a : Pointer(Float32), b : Pointer(Float32), c : Pointer(Float32),
+                m : Int32, n : Int32, k : Int32, lda : Int32, ldb : Int32, ldc : Int32)
+      alpha = 1.0_f32
+      beta = 0.0_f32
+      LibCUBLAS.cublasSgemm_v2(handle,
+        Operation::T.value, Operation::N.value,
+        m, n, k,
+        pointerof(alpha), a, lda,
+        b, ldb,
+        pointerof(beta), c, ldc)
+    end
+
     def gemm_accumulate(handle : LibCUBLAS::Handle, a : Pointer(Float32), b : Pointer(Float32), c : Pointer(Float32),
                         m : Int32, n : Int32, k : Int32, lda : Int32, ldb : Int32, ldc : Int32, alpha : Float32, beta : Float32)
       LibCUBLAS.cublasSgemm_v2(handle,
@@ -315,6 +331,8 @@ module SHAInet
     # GGUF k-quant GEMV
     @@gemv_q4k_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@gemv_q6k_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@dequant_q4k_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@dequant_q6k_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@add_bias_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Void)?
     @@pack_kv_heads_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@prefill_attn_available : Bool? = nil
@@ -622,8 +640,35 @@ module SHAInet
       fn.call(x, w, y, m, n, k)
     end
 
-    # Token-major [rows, kv_heads * head_dim] -> kv-head-major, the layout the KV append
-    # expects.
+    # Dequantize rows [row0, row0 + n_rows) of a k-quant weight into an fp32 [n_rows, K]
+    # row-major buffer, so a batched prefill can run one cuBLAS GEMM per chunk instead of a GEMV
+    # per token. The GEMV kernels reuse nothing across tokens; this reads the weight once.
+    def dequant_q4k_rows(w : Pointer(UInt8), dst : Pointer(Float32),
+                         row0 : Int32, n_rows : Int32, k : Int32)
+      unless fn = @@dequant_q4k_rows_proc
+        @@dequant_q4k_rows_proc = fn = load_kernel_proc("dequant_q4k_rows",
+          Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(w, dst, row0, n_rows, k)
+    end
+
+    def dequant_q6k_rows(w : Pointer(UInt8), dst : Pointer(Float32),
+                         row0 : Int32, n_rows : Int32, k : Int32)
+      unless fn = @@dequant_q6k_rows_proc
+        @@dequant_q6k_rows_proc = fn = load_kernel_proc("dequant_q6k_rows",
+          Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(w, dst, row0, n_rows, k)
+    end
+
+    def dequant_k_rows_available? : Bool
+      return false unless kernels_available?
+      !load_kernel_proc("dequant_q4k_rows",
+        Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)).nil?
+    end
+
     def pack_kv_heads(dst : Pointer(Float32), src : Pointer(Float32), rows : Int32,
                       kv_heads : Int32, head_dim : Int32)
       unless fn = @@pack_kv_heads_proc
