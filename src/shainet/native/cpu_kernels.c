@@ -144,7 +144,7 @@ static float dot_q4k_row(const float *x, const uint8_t *w, int K) {
 /* ──────────────────────── Q6_K dot product (one row) ──────────────── */
 static float dot_q6k_row(const float *x, const uint8_t *w, int K) {
     int nb = (K + Q6_K_VALS_PER_BLK - 1) / Q6_K_VALS_PER_BLK;
-    __m256 acc = _mm256_setzero_ps();
+    float acc = 0.0f;
 
     for (int blk = 0; blk < nb; blk++) {
         const uint8_t *block = w + blk * Q6_K_BLOCK_SIZE;
@@ -160,44 +160,29 @@ static float dot_q6k_row(const float *x, const uint8_t *w, int K) {
             const uint8_t *qh_c = qh + chunk * 32;
             const int8_t  *sc_c = sc + chunk * 8;
 
-            for (int l = 0; l < 32; l += 8) {
-                /* Process 4 sets of values (l, l+32, l+64, l+96) for each l */
-                for (int sub = 0; sub < 8 && (l + sub) < 32; sub++) {
-                    int ll = l + sub;
-                    int is = ll / 16;
-                    int k0 = base_k + chunk * 128 + ll;
-                    int k1 = k0 + 32;
-                    int k2 = k0 + 64;
-                    int k3 = k0 + 96;
+            for (int l = 0; l < 32; l++) {
+                int is = l / 16;
+                int k0 = base_k + chunk * 128 + l;
 
-                    int8_t q1 = ((ql_c[ll]      & 0xF) | (((qh_c[ll] >> 0) & 3) << 4)) - 32;
-                    int8_t q2 = ((ql_c[ll + 32]  & 0xF) | (((qh_c[ll] >> 2) & 3) << 4)) - 32;
-                    int8_t q3 = ((ql_c[ll]      >> 4)   | (((qh_c[ll] >> 4) & 3) << 4)) - 32;
-                    int8_t q4 = ((ql_c[ll + 32]  >> 4)  | (((qh_c[ll] >> 6) & 3) << 4)) - 32;
+                int8_t q1 = ((ql_c[l]      & 0xF) | (((qh_c[l] >> 0) & 3) << 4)) - 32;
+                int8_t q2 = ((ql_c[l + 32]  & 0xF) | (((qh_c[l] >> 2) & 3) << 4)) - 32;
+                int8_t q3 = ((ql_c[l]      >> 4)   | (((qh_c[l] >> 4) & 3) << 4)) - 32;
+                int8_t q4 = ((ql_c[l + 32]  >> 4)  | (((qh_c[l] >> 6) & 3) << 4)) - 32;
 
-                    float s0 = d * (float)sc_c[is];
-                    float s2 = d * (float)sc_c[is + 2];
-                    float s4 = d * (float)sc_c[is + 4];
-                    float s6 = d * (float)sc_c[is + 6];
+                float s0 = d * (float)sc_c[is];
+                float s2 = d * (float)sc_c[is + 2];
+                float s4 = d * (float)sc_c[is + 4];
+                float s6 = d * (float)sc_c[is + 6];
 
-                    float sum = 0.0f;
-                    if (k0 < K) sum += x[k0] * s0 * (float)q1;
-                    if (k1 < K) sum += x[k1] * s2 * (float)q2;
-                    if (k2 < K) sum += x[k2] * s4 * (float)q3;
-                    if (k3 < K) sum += x[k3] * s6 * (float)q4;
-                    acc = _mm256_add_ps(acc, _mm256_set1_ps(sum));
-                }
+                if (k0 < K)      acc += x[k0]      * s0 * (float)q1;
+                if (k0+32 < K)   acc += x[k0+32]   * s2 * (float)q2;
+                if (k0+64 < K)   acc += x[k0+64]   * s4 * (float)q3;
+                if (k0+96 < K)   acc += x[k0+96]   * s6 * (float)q4;
             }
         }
     }
 
-    /* Horizontal sum */
-    __m128 lo = _mm256_castps256_ps128(acc);
-    __m128 hi = _mm256_extractf128_ps(acc, 1);
-    lo = _mm_add_ps(lo, hi);
-    lo = _mm_hadd_ps(lo, lo);
-    lo = _mm_hadd_ps(lo, lo);
-    return _mm_cvtss_f32(lo);
+    return acc;
 }
 
 /* ──────────────────────── GEMV entry points ──────────────────────── */
