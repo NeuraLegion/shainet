@@ -953,7 +953,16 @@ module SHAInet
     def self.prefill_chunk : Int32
       v = @@prefill_chunk
       return v if v
-      v = (ENV["SHAINET_PREFILL_CHUNK"]? || "8192").to_i
+      # 8192 meant "never chunk in practice", so the attention workspaces sized to the whole prompt
+      # and a long prefill needed VRAM in proportion to it. Measured on Qwen3.8-27B at the 2048 MB
+      # default reserve: a 2048-token prefill FAILED outright with 8192, and completes with 256
+      # leaving 808 MB spare. It is also not slower -- a 1400-token prefill went 20.0 to 25.9 per
+      # second, since a chunk that fits cache beats one that does not.
+      #
+      # The knock-on is layers: the reserve is what decides how many stay on the host, so bounding
+      # the workspace is what lets it come down. At a 1536 MB reserve this places 55 layers instead
+      # of 52 and still survives a 2048-token prefill.
+      v = (ENV["SHAINET_PREFILL_CHUNK"]? || "256").to_i
       v = 1 if v < 1
       @@prefill_chunk = v
       v
