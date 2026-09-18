@@ -293,20 +293,15 @@ module SHAInet
       return false unless @norm1.device_capable? && @norm2.device_capable?
       return false unless @w_q.is_a?(QuantizedWeight) && @w_k.is_a?(QuantizedWeight) &&
                           @w_v.is_a?(QuantizedWeight) && @w_o.is_a?(QuantizedWeight)
-      # A gated attention layer (Qwen3.5) must decline: apply_attn_gate! is wired into the two
-      # HOST paths only, so the device path would silently drop the gate. It did exactly that,
-      # and the symptom was that a kv-cached generation disagreed with the same prompt run
-      # uncached -- visible only by comparing the two, since each looked plausible alone.
+      # A gated attention layer (Qwen3.5) used to decline outright, because the gate was applied on
+      # the two HOST paths and the PREFILL device path but NOT in attention_cached_device, which ran
+      # w_o on ungated attention. So the device path silently dropped the gate on every decode step,
+      # and the symptom was that a kv-cached generation disagreed with the same prompt run uncached
+      # -- visible only by comparing the two, since each looked plausible alone.
       #
-      # Relaxing this to "the gate merely has to be reachable" was tried and REVERTED: with
-      # apply_device_attn_gate! definitely applying the gate, Qwen3.8-27B still went from
-      # 'system' at 24.16 to '2' at 19.42, so something else in the device attention path does not
-      # match this architecture (the partial rotary dim, the Q/K head norms, or the gate's position
-      # relative to w_o are the candidates). It is worth chasing -- keeping all 16 full-attention
-      # layers off the device chain costs a readback and re-upload per layer, measured at 44 ms of a
-      # 140 ms generated step -- but it needs its own investigation against a reference, not a
-      # relaxed capability check.
-      return false unless @w_gate_attn.nil?
+      # attention_cached_device now applies it too, so the requirement is that the gate be
+      # REACHABLE, not absent. It still refuses rather than proceeding ungated.
+      return false unless device_attn_gate_reachable?
       return false unless gpu_attention?
       ffn = @ffn
       case ffn
@@ -507,8 +502,24 @@ module SHAInet
         CUDA.memcpy(ao.device_ptr.not_nil!.as(Pointer(Void)), @@gpu_attn_out.as(Pointer(Void)),
           @q_dim.to_u64 * 4_u64, CUDA::MemcpyKind::DeviceToDevice)
         ao.mark_device_dirty!
+        # The gate belongs HERE, between attention and w_o, exactly as the two host paths and the
+        # prefill device path apply it. It was missing: this path ran w_o on ungated attention, so a
+        # Qwen3.5 stack silently lost the gate on every decode step. That is why
+        # block_device_capable? refused a gated layer outright, and why relaxing that refusal
+        # without this line turned 'system' at 24.16 into '2' at 19.42.
+        raise "device attention gate could not be applied" unless apply_device_attn_gate!(x, ao)
         @w_o.as(QuantizedWeight).gemv_into(ao, dst)
       end
+    end
+
+    # Whether the single-token device attention can apply this layer's gate. Checked by
+    # block_device_capable? so a layer whose gate is not reachable declines the device path instead
+    # of running ungated.
+    private def device_attn_gate_reachable? : Bool
+      wg = @w_gate_attn
+      return true if wg.nil?
+      return false unless CUDA.mul_sigmoid_available?
+      wg.is_a?(QuantizedWeight) || (wg.is_a?(CudaMatrix) && wg.rows == @d_model && wg.cols == @q_dim)
     end
 
     # GPU forward — full sequence
