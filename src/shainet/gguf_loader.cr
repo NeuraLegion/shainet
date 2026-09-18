@@ -107,32 +107,36 @@ module SHAInet
         kv_per_token = 2_i64 * n_kv_heads * head_dim * kv_elem_bytes * full_attn_layers
         # The attention workspace term depends on which attention path runs. The single-block kernel
         # stages a full score row per query token, n_heads * ATTN_CHUNK * 4 B = 24 KB per token of
-        # context. The split-KV path instead stores per-split partials, which scale with the query
-        # chunk and the number of 512-key splits rather than with context x chunk: at 24 heads, a
-        # 256-token chunk and 16k context that is ~203 MB against ~384 MB.
+        # context, which grows without bound.
         #
-        # Budget the smaller figure only when the split kernels are actually present, since the
-        # single-block path would overrun a workspace sized for the split one.
+        # The split-KV path is held under a FIXED budget instead (ATTN_SPLIT_WS_BUDGET_FLOATS, 64 MB)
+        # by capping the query chunk as the split count rises, so it contributes a constant rather
+        # than a per-token term. That is what makes the reserve winnable: while the workspace grew
+        # with context, every megabyte added to the reserve was absorbed by the same growth, and a
+        # full-context session failed at ~15979 tokens regardless.
         split_attn = ENV.fetch("SHAINET_SPLIT_ATTN", "1") != "0" && CUDA.attention_split_kv_available?
-        ws_per_token = if split_attn
-                         # heads * chunk * splits * (head_dim + 2), amortized per context token:
-                         # splits grows as context/512, so the per-token term is
-                         # heads * chunk * (head_dim + 2) / 512 * 4 B.
-                         (n_heads.to_i64 * 256 * (head_dim + 2) * 4) // 512
-                       else
-                         n_heads.to_i64 * 256 * 4
-                       end
+        ws_per_token = split_attn ? 0_i64 : n_heads.to_i64 * 256 * 4
+        ws_fixed = split_attn ? 64_i64 * 1024 * 1024 : 0_i64
         # The fixed term is not a fudge: per-layer SSM state is 3.1 MB (48 heads x 128 x 128 x 4 B)
         # and there are ~39 GDN layers on the device, the SwiGLU trio at Network.prefill_rows is
         # ~107 MB, the host-weight staging slot is up to 70 MB, the dequant scratch 20 MB, and the
         # conv state and resident mixer buffers add more. The 20% on top covers the transient peak
         # when a growing buffer holds its old and new allocation at once.
         #
-        # Calibrated against measurement: at 16384 tokens this yields ~2611 MB, which places 50 of 64
-        # layers and completes a full 16016-token conversation. 1987 MB placed 52 layers and died at
-        # ~8000 tokens; 3072 MB placed 48 and also completed, but paid ~11 ms/token more for nothing.
-        fixed_bytes = 768_i64 * 1024 * 1024
-        derived = ((kv_per_token + ws_per_token) * max_context + fixed_bytes)
+        # Sized from real failures, not a model. The history is worth keeping because each step was
+        # driven by an observed OOM rather than a calculation:
+        #
+        #   768 MB  -> a reported session died at 15401 of 16384 tokens, 64 MB alloc, 79 MB free.
+        #   1024 MB -> still died, at 15979 tokens with 104 MB free.
+        #   1280 MB -> still died at 15979 with 118 MB free. The +308 MB of reserve bought +14 MB of
+        #              headroom, which is the tell: the failing allocation GREW with context, so the
+        #              reserve could never catch it. Fixed by bounding the attention workspace
+        #              instead (ATTN_SPLIT_WS_BUDGET_FLOATS), which is the real repair.
+        #
+        # Back to 896 MB now that the workspace contributes a constant: the reserve no longer has to
+        # outrun a growing term, and over-reserving costs layers on every run.
+        fixed_bytes = 896_i64 * 1024 * 1024
+        derived = ((kv_per_token + ws_per_token) * max_context + fixed_bytes + ws_fixed)
         derived = (derived * 120) // 100
         derived_mb = (derived // (1024 * 1024)).to_i
 
@@ -143,7 +147,7 @@ module SHAInet
                        derived_mb
                      end
         kv_mb = (kv_per_token * max_context) // (1024 * 1024)
-        ws_mb = (ws_per_token * max_context) // (1024 * 1024)
+        ws_mb = (ws_per_token * max_context + ws_fixed) // (1024 * 1024)
         Log.info do
           "gguf: reserve #{reserve_mb} MB for #{max_context}-token context " \
           "(KV #{kv_mb} MB + workspace #{ws_mb} MB + fixed/margin)"

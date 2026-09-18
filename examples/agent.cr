@@ -889,6 +889,8 @@ module AgentDemo
     def chat(input : String, max_tokens : Int32)
       @messages << Message.new("user", input)
       @recent_calls.clear
+      # One OOM recovery per turn: a second failure after compacting is not a transient.
+      compacted_for_oom = false
       step = 0
       loop do
         step += 1
@@ -921,6 +923,22 @@ module AgentDemo
         begin
           text, text_ids = generate(max_tokens) # streams the filtered prose inline
         rescue ex
+          # An allocation failure is recoverable, and losing the turn to it is the wrong answer.
+          #
+          # Auto-compaction only triggers above @max_context, but VRAM can run out BELOW it -- a
+          # reported session died at 15401 of 16384 tokens, failing a 64 MB allocation with 79 MB
+          # free, throwing away several minutes of tool work. The cache and context are exactly what
+          # the memory is holding, so drop both hard and try once more before giving up.
+          oom = ex.message.to_s.downcase.includes?("memory allocation") ||
+                ex.message.to_s.downcase.includes?("out of memory")
+          if oom && !compacted_for_oom
+            compacted_for_oom = true
+            reset_cache!
+            removed = compact!((@max_context * 0.5).to_i)
+            STDERR.puts "\n  [agent] out of GPU memory at #{context_tokens + removed} tokens; " \
+                        "compacted to #{context_tokens} (−#{removed}) and retrying".colorize(:yellow)
+            next
+          end
           STDERR.puts "\n  [agent] generation failed: #{ex.message}".colorize(:red)
           STDERR.puts "  (out of GPU memory? try /clear, a shorter request, or a smaller SHAINET_EXPERT_CACHE_MB)".colorize(:dark_gray)
           reset_cache!

@@ -253,13 +253,35 @@ module SHAInet
         result : SimpleMatrix? = nil
         offset = 0
         cols = input.cols
-        while offset < input.rows
-          n = Math.min(limit, input.rows - offset)
-          slice = SimpleMatrix.new(n, cols)
-          # Contiguous row-major copy: row `offset + i` of the input is row `i` of the slice.
-          slice.data.to_unsafe.copy_from(input.data.to_unsafe + offset.to_i64 * cols, n.to_i64 * cols)
-          result = run(slice, stealth)
-          offset += n
+        slices = (input.rows + limit - 1) // limit
+
+        # Report progress across the WHOLE prefill, not per slice.
+        #
+        # prefill_progress is called from the per-slice layer loop, so with the stack run once per
+        # slice a caller's progress bar ran 1..N_layers, jumped back to 1, and climbed again -- which
+        # reads as repeated work rather than as one prefill split into parts. Offsetting the layer
+        # index by the slices already finished, and scaling the total, keeps it monotonic. The
+        # callback's signature is unchanged, so callers need no edit.
+        outer = @prefill_progress
+        done_slices = 0
+        if outer
+          @prefill_progress = ->(layer_idx : Int32, total_layers : Int32) do
+            outer.call(done_slices * total_layers + layer_idx, slices * total_layers)
+          end
+        end
+
+        begin
+          while offset < input.rows
+            n = Math.min(limit, input.rows - offset)
+            slice = SimpleMatrix.new(n, cols)
+            # Contiguous row-major copy: row `offset + i` of the input is row `i` of the slice.
+            slice.data.to_unsafe.copy_from(input.data.to_unsafe + offset.to_i64 * cols, n.to_i64 * cols)
+            result = run_unchunked(slice, stealth)
+            offset += n
+            done_slices += 1
+          end
+        ensure
+          @prefill_progress = outer
         end
         # The last slice carries the last position, which is the only one the head keeps.
         return result.not_nil!

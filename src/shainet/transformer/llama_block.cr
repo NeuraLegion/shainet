@@ -813,6 +813,11 @@ module SHAInet
       aq = attn_ws(@@attn_ws_aq, n, qdim)
 
       max_chunk = attn_chunk_tokens(total_len)
+      # The split path's workspace scales with chunk * splits, so cap the chunk to keep it inside a
+      # fixed budget. Without this the workspace grows with context and no reserve is ever enough.
+      if cap = split_attn_chunk_cap(total_len)
+        max_chunk = cap if cap < max_chunk
+      end
       max_chunk = n if n < max_chunk
       kv_cap = @num_kv_heads * max_chunk * head_dim
       q_cap = max_chunk * qdim
@@ -1275,6 +1280,11 @@ module SHAInet
       # workspace at ATTN_WS_BUDGET_FLOATS and also bounds the staging and
       # output buffers, which were previously linear in the full prompt length.
       max_chunk = attn_chunk_tokens(total_len)
+      # The split path's workspace scales with chunk * splits, so cap the chunk to keep it inside a
+      # fixed budget. Without this the workspace grows with context and no reserve is ever enough.
+      if cap = split_attn_chunk_cap(total_len)
+        max_chunk = cap if cap < max_chunk
+      end
       max_chunk = new_tokens if new_tokens < max_chunk
 
       chunk_floats = max_chunk * head_dim   # floats per kv_head per tensor
@@ -1575,6 +1585,35 @@ module SHAInet
           @head_dim, @gpu_cache_cap)
       end
     end
+
+    # Ceiling on the SPLIT attention workspace, in fp32 elements (64 MB).
+    #
+    # The split partials are heads * chunk * splits * (head_dim + 2), and splits grows as
+    # context / ATTN_SPLIT_SCORES -- so at a fixed query chunk the workspace grows with context, just
+    # as the single-block score row did. That is what made a full-context session fail no matter how
+    # large the reserve was: at 15979 tokens the workspace wanted 131 MB (and grow_dev_buf asked for
+    # 148 MB) while 118 MB was free, and every megabyte added to the reserve was absorbed by the same
+    # growth. Holding chunk * splits under a budget makes the workspace CONSTANT in context, which is
+    # what lets the reserve be a fixed term rather than a losing race.
+    ATTN_SPLIT_WS_BUDGET_FLOATS = 16_i64 * 1024 * 1024
+
+    # Largest query chunk that keeps the split workspace inside its budget at this context length.
+    # Returns nil when the split path is not in use, so callers keep attn_chunk_tokens unchanged --
+    # that function's budget arithmetic is pinned by specs and is still correct for the single-block
+    # path.
+    def split_attn_chunk_cap(total_len : Int32) : Int32?
+      return unless use_split_attn?
+      splits = (total_len + ATTN_SPLIT_SCORES_HOST - 1) // ATTN_SPLIT_SCORES_HOST
+      return if splits <= 0
+      per_token = @num_heads.to_i64 * splits.to_i64 * (@head_dim + 2).to_i64
+      return if per_token <= 0
+      n = (ATTN_SPLIT_WS_BUDGET_FLOATS // per_token).to_i32
+      n < 1 ? 1 : n
+    end
+
+    # Mirrors ATTN_SPLIT_SCORES in the CUDA source. Kept here so the chunk cap can be computed
+    # without a device round trip; a mismatch would only make the cap conservative, not wrong.
+    ATTN_SPLIT_SCORES_HOST = 512
 
     # Whether the split-KV attention path is in use, decided ONCE.
     #
