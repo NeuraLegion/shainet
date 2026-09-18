@@ -227,31 +227,50 @@ module SHAInet
     # Returns nil when anything it needs is missing, so the host path above stays the reference
     # implementation and a CPU-only build keeps working. SHAINET_GDN_RESIDENT=0 forces the host
     # path, which is how a spec A/Bs the two in one process.
-    private def mix_resident(normed : SimpleMatrix, chunk : Int32) : SimpleMatrix?
-      return if ENV.fetch("SHAINET_GDN_RESIDENT", "1") == "0"
-      return unless CUDA.fully_available? && CUDA.gated_delta_rule_available?
-      return unless CUDA.gdn_mixer_kernels_available?
-      return unless chunk <= 1 || true # chunked and sequential agree; the kernel handles both
-      wq = @w_q
-      wk = @w_k
-      wv = @w_v
-      wg = @w_gate
-      wo = @w_o
-      wa = @w_alpha
-      wb = @w_beta
-      return unless wq.is_a?(QuantizedWeight) && wk.is_a?(QuantizedWeight) &&
-                    wv.is_a?(QuantizedWeight) && wg.is_a?(QuantizedWeight) &&
-                    wo.is_a?(QuantizedWeight)
-      return unless wa.is_a?(CudaMatrix) && wb.is_a?(CudaMatrix)
-
+    private def mix_resident(normed : SimpleMatrix) : SimpleMatrix?
+      # Check BEFORE touching resident_buf: a CudaMatrix cannot be constructed without CUDA, so
+      # allocating first raised instead of declining on a CPU-only build.
+      return unless mixer_resident_capable?
       seq = normed.rows
-      k_dim = @num_k_heads * @head_k
-      v_dim = @num_v_heads * @head_v
-
       xd = resident_buf(:x, seq, @d_model)
       xd.raw_data.to_unsafe.copy_from(normed.data.to_unsafe, seq * @d_model)
       xd.mark_host_modified!
       xd.sync_to_device!("gdn_res_in")
+      rd = mix_resident_device(xd)
+      return unless rd
+      rd.sync_from_device!("gdn_res_out") if rd.device_dirty?
+      out = SimpleMatrix.new(seq, @d_model)
+      out.data.to_unsafe.copy_from(rd.raw_data.to_unsafe, seq * @d_model)
+      out
+    end
+
+    # Can the mixer run entirely on the device? Checked separately so forward_resident can decide
+    # before it commits to the device chain.
+    private def mixer_resident_capable? : Bool
+      return false if ENV.fetch("SHAINET_GDN_RESIDENT", "1") == "0"
+      return false unless CUDA.fully_available? && CUDA.gated_delta_rule_available?
+      return false unless CUDA.gdn_mixer_kernels_available?
+      @w_q.is_a?(QuantizedWeight) && @w_k.is_a?(QuantizedWeight) &&
+        @w_v.is_a?(QuantizedWeight) && @w_gate.is_a?(QuantizedWeight) &&
+        @w_o.is_a?(QuantizedWeight) &&
+        @w_alpha.is_a?(CudaMatrix) && @w_beta.is_a?(CudaMatrix)
+    end
+
+    # The mixer with a device input and a device output, so a caller already on the device does not
+    # round-trip through the host to reach it.
+    private def mix_resident_device(xd : CudaMatrix) : CudaMatrix?
+      return unless mixer_resident_capable?
+      wq = @w_q.as(QuantizedWeight)
+      wk = @w_k.as(QuantizedWeight)
+      wv = @w_v.as(QuantizedWeight)
+      wg = @w_gate.as(QuantizedWeight)
+      wo = @w_o.as(QuantizedWeight)
+      wa = @w_alpha.as(CudaMatrix)
+      wb = @w_beta.as(CudaMatrix)
+
+      seq = xd.rows
+      k_dim = @num_k_heads * @head_k
+      v_dim = @num_v_heads * @head_v
 
       qd = resident_buf(:q, seq, k_dim)
       kd = resident_buf(:k, seq, k_dim)
@@ -317,11 +336,7 @@ module SHAInet
 
       rd = resident_buf(:rd, seq, @d_model)
       wo.gemv_into(gated, rd)
-      rd.sync_from_device!("gdn_res_out") if rd.device_dirty?
-
-      out = SimpleMatrix.new(seq, @d_model)
-      out.data.to_unsafe.copy_from(rd.raw_data.to_unsafe, seq * @d_model)
-      out
+      rd
     end
 
     # Reusable device buffers, keyed by role and shape and SHARED across every block.
@@ -405,7 +420,7 @@ module SHAInet
     # at 1 it is the sequential recurrence, which is all decode can use anyway. Both produce the
     # same numbers, which is specified rather than assumed.
     def mix(normed : SimpleMatrix, chunk : Int32 = 64) : SimpleMatrix
-      if res = Profile.measure("gdn.resident") { mix_resident(normed, chunk) }
+      if res = Profile.measure("gdn.resident") { mix_resident(normed) }
         return res
       end
 
@@ -630,6 +645,9 @@ module SHAInet
     end
 
     def forward(x : SimpleMatrix) : SimpleMatrix
+      if r = Profile.measure("gdn.block_resident") { forward_resident(x) }
+        return r
+      end
       n1 = Profile.measure("gdn.norm") { @norm1.forward(x) }
       mixed = mix(n1)
       h = Profile.measure("gdn.residual") { x + mixed }
@@ -640,12 +658,132 @@ module SHAInet
 
     # Single-token step, for decode. Same math, chunk 1.
     def forward_cached(x : SimpleMatrix) : SimpleMatrix
+      if r = Profile.measure("gdn.block_resident") { forward_resident(x) }
+        return r
+      end
       n1 = Profile.measure("gdn.norm") { @norm1.forward(x) }
       mixed = mix(n1, chunk: 1)
       h = Profile.measure("gdn.residual") { x + mixed }
       n2 = Profile.measure("gdn.norm") { @norm2.forward(h) }
       ff = ffn_forward(n2)
       Profile.measure("gdn.residual") { h + ff }
+    end
+
+    # The whole block device-in, device-out, so the network's device chain does not have to break
+    # at a linear-attention layer.
+    #
+    # Before this the chain ended at every Gated DeltaNet block: the activation came home, the block
+    # ran, and the next block uploaded it again. In a hybrid stack that is 48 of 64 layers, so the
+    # activation crossed the bus about 96 times per token on top of the mixer's own transfers.
+    #
+    # Returns nil unless every stage can run on the device, so the caller falls back to the host
+    # path and that stays the reference implementation.
+    # Whether the network's device chain can pass through this block without coming home.
+    def device_chain_capable? : Bool
+      return false unless mixer_resident_capable?
+      ffn = @ffn
+      return false unless ffn.is_a?(SwiGLUFF) && ffn.gate_proj.is_a?(QuantizedWeight)
+      @norm1.gamma.is_a?(CudaMatrix) && @norm2.gamma.is_a?(CudaMatrix) && CUDA.kernels_available?
+    end
+
+    def forward_cached_device(xd : CudaMatrix) : CudaMatrix?
+      return unless mixer_resident_capable?
+      ffn = @ffn
+      return unless ffn.is_a?(SwiGLUFF) && ffn.gate_proj.is_a?(QuantizedWeight)
+      g1 = @norm1.gamma
+      g2 = @norm2.gamma
+      return unless g1.is_a?(CudaMatrix) && g2.is_a?(CudaMatrix)
+      return unless CUDA.kernels_available?
+
+      seq = xd.rows
+      d = @d_model
+      eps = @eps.to_f32
+
+      # The residual accumulates in a buffer this block owns: xd belongs to the caller's chain and
+      # the next block still needs it intact until this one returns.
+      acc = resident_buf(:blk_acc, seq, d)
+      CUDA.copy_device_to_device(acc.device_ptr.not_nil!, xd.device_ptr.not_nil!,
+        (seq.to_u64 * d * 4).to_u64)
+      acc.mark_device_dirty!
+
+      nd = resident_buf(:blk_n, seq, d)
+      CUDA.rms_norm_forward(nd.device_ptr.not_nil!, acc.device_ptr.not_nil!,
+        g1.device_ptr.not_nil!, seq, d, eps)
+      nd.mark_device_dirty!
+
+      md = mix_resident_device(nd)
+      return unless md
+      CUDA.add_inplace(acc.device_ptr.not_nil!, md.device_ptr.not_nil!, seq * d)
+
+      CUDA.rms_norm_forward(nd.device_ptr.not_nil!, acc.device_ptr.not_nil!,
+        g2.device_ptr.not_nil!, seq, d, eps)
+      nd.mark_device_dirty!
+
+      fd = resident_buf(:blk_ffn, seq, d)
+      ffn.forward_device_batch(nd, fd)
+      CUDA.add_inplace(acc.device_ptr.not_nil!, fd.device_ptr.not_nil!, seq * d)
+      acc.mark_device_dirty!
+
+      # The chain's next block reads this, so hand back a buffer it can keep: acc is reused on the
+      # next call, so copy into a distinct output slot.
+      outd = resident_buf(:blk_out, seq, d)
+      CUDA.copy_device_to_device(outd.device_ptr.not_nil!, acc.device_ptr.not_nil!,
+        (seq.to_u64 * d * 4).to_u64)
+      outd.mark_device_dirty!
+      outd
+    end
+
+    # The whole block on the device: one upload in, one download out.
+    #
+    # Even with the mixer resident, the block still crossed the bus four times per layer -- the
+    # mixer uploaded and downloaded, then the FFN did it again -- and ran both RMS norms and both
+    # residual adds element by element on the host. Chaining them on the device leaves one upload
+    # and one download for the whole block.
+    #
+    # Returns nil unless every stage can run on the device, so the host path above stays the
+    # reference implementation.
+    private def forward_resident(x : SimpleMatrix) : SimpleMatrix?
+      return unless mixer_resident_capable?
+      ffn = @ffn
+      return unless ffn.is_a?(SwiGLUFF) && ffn.gate_proj.is_a?(QuantizedWeight)
+      g1 = @norm1.gamma
+      g2 = @norm2.gamma
+      return unless g1.is_a?(CudaMatrix) && g2.is_a?(CudaMatrix)
+      return unless CUDA.kernels_available?
+
+      seq = x.rows
+      d = @d_model
+      eps = @eps.to_f32
+
+      xd = resident_buf(:blk_x, seq, d)
+      xd.raw_data.to_unsafe.copy_from(x.data.to_unsafe, seq * d)
+      xd.mark_host_modified!
+      xd.sync_to_device!("gdn_blk_in")
+
+      nd = resident_buf(:blk_n, seq, d)
+      CUDA.rms_norm_forward(nd.device_ptr.not_nil!, xd.device_ptr.not_nil!,
+        g1.device_ptr.not_nil!, seq, d, eps)
+      nd.mark_device_dirty!
+
+      md = mix_resident_device(nd)
+      return unless md
+      # residual: xd += mixer output
+      CUDA.add_inplace(xd.device_ptr.not_nil!, md.device_ptr.not_nil!, seq * d)
+      xd.mark_device_dirty!
+
+      CUDA.rms_norm_forward(nd.device_ptr.not_nil!, xd.device_ptr.not_nil!,
+        g2.device_ptr.not_nil!, seq, d, eps)
+      nd.mark_device_dirty!
+
+      fd = resident_buf(:blk_ffn, seq, d)
+      ffn.forward_device_batch(nd, fd)
+      CUDA.add_inplace(xd.device_ptr.not_nil!, fd.device_ptr.not_nil!, seq * d)
+      xd.mark_device_dirty!
+
+      xd.sync_from_device!("gdn_blk_out")
+      out = SimpleMatrix.new(seq, d)
+      out.data.to_unsafe.copy_from(xd.raw_data.to_unsafe, seq * d)
+      out
     end
 
     # Run the FFN via the device batch path when the weights are quantized, avoiding the

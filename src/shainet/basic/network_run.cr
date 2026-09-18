@@ -293,21 +293,40 @@ module SHAInet
               matrix = block.forward(matrix)
             end
           when GatedDeltaNetBlock
-            # The linear-attention block type in a qwen3_5 hybrid stack. Its mixer is host-side
-            # (the recurrence is ~2M FLOP per token against ~600M for the projections, which ARE
-            # on the device), so it ends any device chain in progress.
+            # The linear-attention block type in a qwen3_5 hybrid stack.
             #
-            # Without this branch the case fell through and the block was SILENTLY SKIPPED: a
-            # Qwen3.5-9B ran as an 8-layer attention-only model, produced one repeated token, and
+            # It now offers a device-in/device-out path, so it no longer ends the chain. That
+            # mattered: in a hybrid stack 48 of 64 layers are this type, so breaking the chain here
+            # brought the activation home and re-uploaded it about 96 times per token.
+            #
+            # Without this branch at all the case fell through and the block was SILENTLY SKIPPED:
+            # a Qwen3.5-9B ran as an 8-layer attention-only model, produced one repeated token, and
             # gave byte-identical logits across changes that demonstrably altered the blocks --
             # which is the only reason it was noticed.
             gdn = l.as(GatedDeltaNetBlock)
-            if da = dev_act
-              matrix = device_row_to_host(da)
-              dev_act = nil
+            nxt = nil
+            if dev_act.nil? && (sm0 = matrix.as?(SimpleMatrix)) && gdn.device_chain_capable?
+              buf = chain_buf(sm0.rows, sm0.cols)
+              Profile.measure("net.dev_upload") do
+                buf.raw_data.to_unsafe.copy_from(sm0.data.to_unsafe, sm0.rows * sm0.cols)
+                buf.mark_host_modified!
+                buf.sync_to_device!("block_chain_in")
+              end
+              dev_act = buf
             end
-            sm = matrix.as(SimpleMatrix)
-            matrix = use_kv_cache? && sm.rows == 1 ? gdn.forward_cached(sm) : gdn.forward(sm)
+            if da0 = dev_act
+              nxt = gdn.forward_cached_device(da0)
+            end
+            if nxt
+              dev_act = nxt
+            else
+              if da = dev_act
+                matrix = device_row_to_host(da)
+                dev_act = nil
+              end
+              sm = matrix.as(SimpleMatrix)
+              matrix = use_kv_cache? && sm.rows == 1 ? gdn.forward_cached(sm) : gdn.forward(sm)
+            end
           end
         end
 

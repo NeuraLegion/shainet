@@ -297,6 +297,15 @@ module SHAInet
       # HOST paths only, so the device path would silently drop the gate. It did exactly that,
       # and the symptom was that a kv-cached generation disagreed with the same prompt run
       # uncached -- visible only by comparing the two, since each looked plausible alone.
+      #
+      # Relaxing this to "the gate merely has to be reachable" was tried and REVERTED: with
+      # apply_device_attn_gate! definitely applying the gate, Qwen3.8-27B still went from
+      # 'system' at 24.16 to '2' at 19.42, so something else in the device attention path does not
+      # match this architecture (the partial rotary dim, the Q/K head norms, or the gate's position
+      # relative to w_o are the candidates). It is worth chasing -- keeping all 16 full-attention
+      # layers off the device chain costs a readback and re-upload per layer, measured at 44 ms of a
+      # 140 ms generated step -- but it needs its own investigation against a reference, not a
+      # relaxed capability check.
       return false unless @w_gate_attn.nil?
       return false unless gpu_attention?
       ffn = @ffn
