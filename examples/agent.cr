@@ -38,6 +38,11 @@ module AgentDemo
     n < 1 ? 1 : n
   end
 
+  # How many times an IDENTICAL tool call is allowed before the loop intervenes, and how many recent
+  # call signatures to remember. Small on purpose: two identical calls are a retry, three is a loop.
+  REPEAT_CALL_LIMIT  =  2
+  RECENT_CALL_MEMORY = 12
+
   record ToolParam, name : String, type : String, description : String, required : Bool = true
   # `ids` holds the EXACT tokens the model produced for an assistant turn, when they are
   # known. Re-encoding the decoded text does not reliably reproduce them -- a decode,
@@ -519,6 +524,7 @@ module AgentDemo
     @stop_ids : Array(Int32)
     @system_block : String
     @messages : Array(Message)
+    @recent_calls : Array(String)
     @sampler : SHAInet::Sampler
     getter max_context : Int32
 
@@ -532,6 +538,7 @@ module AgentDemo
       @stop_ids = [@im_end]
       ["<|endoftext|>", "<|end_of_text|>"].each { |n| (id = @tokenizer.vocab[n]?) && @stop_ids << id }
       @system_block = AgentDemo.render_tools_block(@tools)
+      @recent_calls = [] of String
       @sampler = SHAInet::Sampler.new(temperature: 0.3, top_k: 20, repetition_penalty: 1.1)
       @messages = [] of Message
     end
@@ -814,6 +821,7 @@ module AgentDemo
     # Handle one user input: run the tool loop until the model answers plainly.
     def chat(input : String, max_tokens : Int32)
       @messages << Message.new("user", input)
+      @recent_calls.clear
       step = 0
       loop do
         step += 1
@@ -869,6 +877,31 @@ module AgentDemo
 
         calls.each do |c|
           STDERR.puts "  #{"⚒ #{c.name}".colorize(:yellow)}(#{c.args.map { |k, v| "#{k}=#{v.inspect}" }.join(", ")})".colorize(:dark_gray)
+
+          # Break identical repeated calls.
+          #
+          # Nothing else in the loop can. The repetition penalty runs with window 20 over the
+          # CURRENT message's tokens, but a tool call is ~45 tokens and each retry is a separate
+          # generate() call, so the penalty never sees that the same call was already made last
+          # turn. Observed in practice: a model asked for a path that did not exist, then reissued
+          # one malformed list_directory ten times in a row, each round costing a full prefill and
+          # ~94 tokens of context, until the step budget ran out.
+          sig = "#{c.name}(#{c.args.to_a.sort_by(&.[0]).map { |k, v| "#{k}=#{v}" }.join(",")})"
+          repeats = @recent_calls.count(sig)
+          if repeats >= REPEAT_CALL_LIMIT
+            STDERR.puts "  [agent] same call #{repeats + 1}x; telling the model to change approach".colorize(:yellow)
+            @recent_calls.clear
+            @messages << Message.new("tool",
+              "This exact call was already made #{repeats + 1} times and returned the same result " \
+              "each time. Repeating it will not help. Change approach: check the argument against " \
+              "the tool's description (list_directory takes a DIRECTORY path, not a shell command " \
+              "-- use run_command for shell), try a different tool, or answer with what you have " \
+              "and say what you could not determine.")
+            next
+          end
+          @recent_calls << sig
+          @recent_calls.shift if @recent_calls.size > RECENT_CALL_MEMORY
+
           tool = @tools.find { |t| t.name == c.name }
           result =
             if tool
