@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
+#include <math.h>
 
 /* ──────────────────────── Q4_K block layout ──────────────────────── */
 /* 144 bytes per block of 256 values:
@@ -265,6 +266,220 @@ static void dequant_q6k_row_f32(const uint8_t *w, float *out, int K) {
 }
 
 /* fp32 dot product, AVX2 with FMA. */
+/* ─────────── Q8 activation quantization + integer dot products ───────────
+ *
+ * This is llama.cpp's vec_dot_q4_K_q8_K / vec_dot_q6_K_q8_K strategy, and it is the reason
+ * Ollama stays fast with layers offloaded to the host: instead of dequantizing the WEIGHT to
+ * fp32 and doing fp32 dot products, quantize the ACTIVATION to int8 once and multiply against
+ * the raw k-quant bytes with integer SIMD.
+ *
+ * Two wins over the fp32 path. Integer SIMD is 32 bytes wide against 8 floats, and the weight is
+ * never materialized as fp32 at all, so the K-sized fp32 buffer per row disappears. It also helps
+ * at M=1, where the fp32 path has nothing to amortize -- that is decode, where the gap to Ollama
+ * was 9x.
+ *
+ * The trade is real: quantizing the activation to int8 costs roughly 0.4% relative accuracy, and
+ * it is visible in llama.cpp's own numbers -- its MUL_MAT outputs differ from an fp32 reference by
+ * 0.1-0.6%. That is the accuracy Ollama ships.
+ *
+ * Layout, per activation row: nb = K/256 blocks, each with an fp32 scale, 256 int8 quants, and 16
+ * int16 group sums. The group sums are what make the asymmetric Q4_K min term cheap (it needs
+ * sum(qa) per group, not a dot) and let Q6_K subtract its constant 32 offset without unpacking
+ * signed values.
+ */
+
+typedef struct {
+    float  *d;      /* [M * nb]        per-block activation scale */
+    int8_t *qs;     /* [M * K]         int8 quants */
+    int16_t *bsums; /* [M * nb * 16]   sums of qs over each group of 16 */
+} q8k_act;
+
+static inline int32_t hsum_epi32_128(__m128i v) {
+    v = _mm_add_epi32(v, _mm_shuffle_epi32(v, _MM_SHUFFLE(1, 0, 3, 2)));
+    v = _mm_add_epi32(v, _mm_shuffle_epi32(v, _MM_SHUFFLE(2, 3, 0, 1)));
+    return _mm_cvtsi128_si32(v);
+}
+
+/* Sum 32 unsigned x signed byte products, split into the first and second 16.
+ *
+ * maddubs gives int16 lane k = bytes 2k,2k+1; madd_epi16 then gives int32 lane j = int16 lanes
+ * 2j,2j+1 = bytes 4j..4j+3, within each 128-bit half. So int32 lanes 0-3 cover bytes 0-15 and
+ * lanes 4-7 cover bytes 16-31, which is exactly the 16-value scale groups Q6_K needs; Q4_K just
+ * adds the two halves. Bounds: maddubs peaks at 2*63*127 = 16002, inside int16. */
+static inline void maddubs32_split(__m256i u, __m256i s, int32_t *lo16, int32_t *hi16) {
+    __m256i p16 = _mm256_maddubs_epi16(u, s);
+    __m256i p32 = _mm256_madd_epi16(p16, _mm256_set1_epi16(1));
+    *lo16 = hsum_epi32_128(_mm256_castsi256_si128(p32));
+    *hi16 = hsum_epi32_128(_mm256_extracti128_si256(p32, 1));
+}
+
+/* Quantize one activation row to Q8_K. */
+static void quantize_row_q8k(const float *x, int K, int nb,
+                             float *d_out, int8_t *q_out, int16_t *bs_out) {
+    for (int b = 0; b < nb; b++) {
+        const float *xb = x + b * 256;
+        float amax = 0.0f;
+        for (int i = 0; i < 256; i++) {
+            float a = fabsf(xb[i]);
+            if (a > amax) amax = a;
+        }
+        float d = amax / 127.0f;
+        float inv = (d > 0.0f) ? (1.0f / d) : 0.0f;
+        d_out[b] = d;
+        int8_t *qb = q_out + b * 256;
+        for (int i = 0; i < 256; i++) {
+            int v = (int)lrintf(xb[i] * inv);
+            if (v > 127) v = 127;
+            if (v < -128) v = -128;
+            qb[i] = (int8_t)v;
+        }
+        int16_t *bs = bs_out + b * 16;
+        for (int g = 0; g < 16; g++) {
+            int s = 0;
+            for (int i = 0; i < 16; i++) s += qb[g * 16 + i];
+            bs[g] = (int16_t)s;
+        }
+    }
+}
+
+/* Q4_K weight row against a Q8_K activation row.
+ *
+ *   w_i  = d * sc[g] * q_i - dmin * m[g]        (g = i/32, q_i a 4-bit nibble)
+ *   a_i  = da * qa_i
+ *   dot  = da * ( d * SUM_g sc[g] * SUM_(i in g) q_i*qa_i
+ *               - dmin * SUM_g m[g] * SUM_(i in g) qa_i )
+ *
+ * The second sum is two group-of-16 bsums, so the min term costs no multiplies over K. */
+static float dot_q4k_q8k(const uint8_t *w, const float *da, const int8_t *qa,
+                         const int16_t *bsums, int nb) {
+    const __m256i lomask = _mm256_set1_epi8(0x0F);
+    float sumf = 0.0f;
+
+    for (int b = 0; b < nb; b++) {
+        const uint8_t *block = w + (size_t)b * Q4_K_BLOCK_SIZE;
+        float d    = f16_to_f32(*(const uint16_t *)(block + 0));
+        float dmin = f16_to_f32(*(const uint16_t *)(block + 2));
+        const uint8_t *sc = block + 4;
+        const uint8_t *qs = block + 16;
+        const int8_t  *ap = qa + (size_t)b * 256;
+        const int16_t *bs = bsums + (size_t)b * 16;
+
+        int32_t main_acc = 0;
+        int32_t min_acc = 0;
+
+        for (int j64 = 0; j64 < 4; j64++) {
+            uint8_t s0, m0, s1, m1;
+            get_scale_min_k4(j64 * 2,     sc, &s0, &m0);
+            get_scale_min_k4(j64 * 2 + 1, sc, &s1, &m1);
+
+            __m256i qb = _mm256_loadu_si256((const __m256i *)(qs + j64 * 32));
+            /* Group 2*j64 is the low nibbles (values j64*64 .. +32), group 2*j64+1 the high. */
+            __m256i nlo = _mm256_and_si256(qb, lomask);
+            __m256i nhi = _mm256_and_si256(_mm256_srli_epi16(qb, 4), lomask);
+
+            __m256i alo = _mm256_loadu_si256((const __m256i *)(ap + j64 * 64));
+            __m256i ahi = _mm256_loadu_si256((const __m256i *)(ap + j64 * 64 + 32));
+
+            int32_t l0, h0, l1, h1;
+            maddubs32_split(nlo, alo, &l0, &h0);
+            maddubs32_split(nhi, ahi, &l1, &h1);
+            main_acc += (int32_t)s0 * (l0 + h0) + (int32_t)s1 * (l1 + h1);
+
+            /* Each 32-value group spans two bsums groups of 16. */
+            int g0 = j64 * 2, g1 = j64 * 2 + 1;
+            min_acc += (int32_t)m0 * ((int32_t)bs[g0 * 2] + bs[g0 * 2 + 1]);
+            min_acc += (int32_t)m1 * ((int32_t)bs[g1 * 2] + bs[g1 * 2 + 1]);
+        }
+        sumf += da[b] * (d * (float)main_acc - dmin * (float)min_acc);
+    }
+    return sumf;
+}
+
+/* Q6_K weight row against a Q8_K activation row.
+ *
+ *   w_i = d * sc[is] * (q6_i - 32)              (is = i/16, q6_i a 6-bit value 0..63)
+ *   dot = da * d * SUM_is sc[is] * ( SUM_(i in is) q6_i*qa_i - 32 * bsums[is] )
+ *
+ * Keeping q6 unsigned and folding the -32 through bsums is what lets maddubs be used at all;
+ * its unsigned operand cannot carry a signed weight. */
+static float dot_q6k_q8k(const uint8_t *w, const float *da, const int8_t *qa,
+                         const int16_t *bsums, int nb) {
+    const __m256i lomask = _mm256_set1_epi8(0x0F);
+    const __m256i m3 = _mm256_set1_epi8(3);
+    float sumf = 0.0f;
+
+    for (int b = 0; b < nb; b++) {
+        const uint8_t *block = w + (size_t)b * Q6_K_BLOCK_SIZE;
+        const uint8_t *ql = block;
+        const uint8_t *qh = block + 128;
+        const int8_t  *sc = (const int8_t *)(block + 192);
+        float d = f16_to_f32(*(const uint16_t *)(block + 208));
+        const int8_t  *ap = qa + (size_t)b * 256;
+        const int16_t *bs = bsums + (size_t)b * 16;
+
+        int32_t main_acc = 0;
+
+        for (int chunk = 0; chunk < 2; chunk++) {
+            const uint8_t *ql_c = ql + chunk * 64;
+            const uint8_t *qh_c = qh + chunk * 32;
+            const int8_t  *sc_c = sc + chunk * 8;
+            const int8_t  *ap_c = ap + chunk * 128;
+            const int16_t *bs_c = bs + chunk * 8;
+
+            __m256i qlo = _mm256_loadu_si256((const __m256i *)ql_c);        /* l = 0..31 */
+            __m256i qhi = _mm256_loadu_si256((const __m256i *)(ql_c + 32)); /* l+32 */
+            __m256i hbits = _mm256_loadu_si256((const __m256i *)qh_c);
+
+            /* Four 32-value spans, matching dequantize_row_q6_K's q1..q4. */
+            __m256i v0 = _mm256_or_si256(_mm256_and_si256(qlo, lomask),
+                _mm256_slli_epi16(_mm256_and_si256(hbits, m3), 4));
+            __m256i v1 = _mm256_or_si256(_mm256_and_si256(qhi, lomask),
+                _mm256_slli_epi16(_mm256_and_si256(_mm256_srli_epi16(hbits, 2), m3), 4));
+            __m256i v2 = _mm256_or_si256(_mm256_and_si256(_mm256_srli_epi16(qlo, 4), lomask),
+                _mm256_slli_epi16(_mm256_and_si256(_mm256_srli_epi16(hbits, 4), m3), 4));
+            __m256i v3 = _mm256_or_si256(_mm256_and_si256(_mm256_srli_epi16(qhi, 4), lomask),
+                _mm256_slli_epi16(_mm256_and_si256(_mm256_srli_epi16(hbits, 6), m3), 4));
+
+            const __m256i *vs[4] = {&v0, &v1, &v2, &v3};
+            for (int sub = 0; sub < 4; sub++) {
+                __m256i av = _mm256_loadu_si256((const __m256i *)(ap_c + sub * 32));
+                int32_t lo, hi;
+                maddubs32_split(*vs[sub], av, &lo, &hi);
+                /* Within a 32-value span the scale changes at l=16: sc_c[sub*2], sc_c[sub*2+1]. */
+                int is0 = sub * 2, is1 = sub * 2 + 1;
+                main_acc += (int32_t)sc_c[is0] * (lo - 32 * (int32_t)bs_c[is0]);
+                main_acc += (int32_t)sc_c[is1] * (hi - 32 * (int32_t)bs_c[is1]);
+            }
+        }
+        sumf += da[b] * d * (float)main_acc;
+    }
+    return sumf;
+}
+
+/* Allocate and fill Q8_K activations for all M rows. Returns 0 on allocation failure. */
+static int quantize_act_q8k(const float *x, int M, int K, int nb, q8k_act *out) {
+    out->d = (float *)malloc((size_t)M * nb * sizeof(float));
+    out->qs = (int8_t *)malloc((size_t)M * K);
+    out->bsums = (int16_t *)malloc((size_t)M * nb * 16 * sizeof(int16_t));
+    if (!out->d || !out->qs || !out->bsums) {
+        free(out->d); free(out->qs); free(out->bsums);
+        out->d = NULL; out->qs = NULL; out->bsums = NULL;
+        return 0;
+    }
+    #pragma omp parallel for schedule(static)
+    for (int m = 0; m < M; m++) {
+        quantize_row_q8k(x + (size_t)m * K, K, nb,
+                         out->d + (size_t)m * nb,
+                         out->qs + (size_t)m * K,
+                         out->bsums + (size_t)m * nb * 16);
+    }
+    return 1;
+}
+
+static void free_act_q8k(q8k_act *a) {
+    free(a->d); free(a->qs); free(a->bsums);
+}
+
 static inline float dot_f32(const float *a, const float *b, int K) {
     __m256 acc0 = _mm256_setzero_ps();
     __m256 acc1 = _mm256_setzero_ps();
@@ -341,10 +556,60 @@ static inline void apply_row(const float *x, float *y, const float *wbuf,
     }
 }
 
+/* Set SHAINET_CPU_Q8=0 to force the fp32 path (for A/B testing the accuracy trade). */
+static int q8_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("SHAINET_CPU_Q8");
+        cached = (e && e[0] == '0') ? 0 : 1;
+    }
+    return cached;
+}
+
+/* How many tokens to hold in the inner loop.
+ *
+ * With n outer and every token inner, the weight row is read once but the whole quantized
+ * activation is re-read for each of the N rows -- at M=128, K=17408 that is 2.2 MB times N, about
+ * 11 GB per matmul. Blocking the tokens so one block stays in L2 turns that into one pass over the
+ * activation per block, at the cost of re-reading the weight once per block. ~384 KB per block
+ * keeps it inside a typical L2 slice. */
+static inline int q8_token_block(int K, int M) {
+    int mb = 393216 / (K > 0 ? K : 1);
+    if (mb < 1) mb = 1;
+    if (mb > M) mb = M;
+    return mb;
+}
+
 void gemv_q4k_cpu(const float *x, const uint8_t *W, float *y,
                   int M, int N, int K) {
     int bytes_per_row = ((K + Q4_K_VALS_PER_BLK - 1) / Q4_K_VALS_PER_BLK)
                         * Q4_K_BLOCK_SIZE;
+
+    /* Q8 activation + integer dot: llama.cpp's strategy, and the fastest path at every M
+     * including M=1. Requires whole 256-value blocks, which every weight in a k-quant GGUF has. */
+    if (q8_enabled() && K % Q4_K_VALS_PER_BLK == 0) {
+        int nb = K / Q4_K_VALS_PER_BLK;
+        q8k_act act;
+        if (quantize_act_q8k(x, M, K, nb, &act)) {
+            int mblk = q8_token_block(K, M);
+            for (int m0 = 0; m0 < M; m0 += mblk) {
+                int mcount = (M - m0 < mblk) ? (M - m0) : mblk;
+                #pragma omp parallel for schedule(static)
+                for (int n = 0; n < N; n++) {
+                    const uint8_t *wrow = W + (long long)n * bytes_per_row;
+                    for (int mi = 0; mi < mcount; mi++) {
+                        int m = m0 + mi;
+                        y[(long long)m * N + n] = dot_q4k_q8k(wrow,
+                            act.d + (size_t)m * nb,
+                            act.qs + (size_t)m * K,
+                            act.bsums + (size_t)m * nb * 16, nb);
+                    }
+                }
+            }
+            free_act_q8k(&act);
+            return;
+        }
+    }
 
     if (M == 1) {
         /* Fused dequant+dot: the row is read once regardless, so no buffer is worth its write. */
@@ -376,6 +641,30 @@ void gemv_q6k_cpu(const float *x, const uint8_t *W, float *y,
                   int M, int N, int K) {
     int bytes_per_row = ((K + Q6_K_VALS_PER_BLK - 1) / Q6_K_VALS_PER_BLK)
                         * Q6_K_BLOCK_SIZE;
+
+    if (q8_enabled() && K % Q6_K_VALS_PER_BLK == 0) {
+        int nb = K / Q6_K_VALS_PER_BLK;
+        q8k_act act;
+        if (quantize_act_q8k(x, M, K, nb, &act)) {
+            int mblk = q8_token_block(K, M);
+            for (int m0 = 0; m0 < M; m0 += mblk) {
+                int mcount = (M - m0 < mblk) ? (M - m0) : mblk;
+                #pragma omp parallel for schedule(static)
+                for (int n = 0; n < N; n++) {
+                    const uint8_t *wrow = W + (long long)n * bytes_per_row;
+                    for (int mi = 0; mi < mcount; mi++) {
+                        int m = m0 + mi;
+                        y[(long long)m * N + n] = dot_q6k_q8k(wrow,
+                            act.d + (size_t)m * nb,
+                            act.qs + (size_t)m * K,
+                            act.bsums + (size_t)m * nb * 16, nb);
+                    }
+                }
+            }
+            free_act_q8k(&act);
+            return;
+        }
+    }
 
     if (M == 1) {
         #pragma omp parallel for schedule(static)
