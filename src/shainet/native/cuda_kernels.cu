@@ -1508,18 +1508,21 @@ void attention_kv_f16(const float* q, const unsigned short* kc, const unsigned s
 // L2 normalization of q and k, and the 1/sqrt(dk) scale on q, are done HERE rather than on the
 // host, which removes the per-head slicing and copying that cost as much as the arithmetic.
 //
-// q and k are indexed by KEY head (kh = h / heads_per_k), matching grouped-query attention: several
-// value heads share one key head's projection, as the reference's repeat_interleave expresses.
+// q and k are indexed by KEY head. Which key head a value head reads depends on the weight
+// layout, so the caller passes k_head_tiled: 0 selects grouped indexing (kh = h / heads_per_k),
+// which the SafeTensors layout uses and which matches HF's repeat_interleave; 1 selects tiled
+// indexing (kh = h % nk), which the GGUF layout uses because llama.cpp widens q/k with
+// ggml_repeat, and ggml_repeat tiles rather than interleaves.
 __global__ void gated_delta_rule_kernel(
     const float* __restrict__ q, const float* __restrict__ k, const float* __restrict__ v,
     const float* __restrict__ alpha, const float* __restrict__ beta,
     float* __restrict__ state, float* __restrict__ out,
-    int seq, int nv, int nk, int dk, int dv, int heads_per_k, float q_scale)
+    int seq, int nv, int nk, int dk, int dv, int heads_per_k, float q_scale, int k_head_tiled)
 {
     extern __shared__ float sh[];
     const int h = blockIdx.x;
     if (h >= nv) return;
-    const int kh = h / heads_per_k;
+    const int kh = k_head_tiled ? (h % nk) : (h / heads_per_k);
     const int tid = threadIdx.x;
     const int nthr = blockDim.x;
 
@@ -1608,7 +1611,8 @@ __global__ void gated_delta_rule_kernel(
 void gated_delta_rule(const float* q, const float* k, const float* v,
                       const float* alpha, const float* beta,
                       float* state, float* out,
-                      int seq, int nv, int nk, int dk, int dv, int heads_per_k, float q_scale) {
+                      int seq, int nv, int nk, int dk, int dv, int heads_per_k, float q_scale,
+                      int k_head_tiled) {
     if (seq <= 0 || nv <= 0) return;
     int threads = 128;
     if (dv < threads) threads = dv < 32 ? 32 : dv;
@@ -1623,7 +1627,8 @@ void gated_delta_rule(const float* q, const float* k, const float* v,
     cudaFuncSetAttribute(gated_delta_rule_kernel,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shmem);
     gated_delta_rule_kernel<<<nv, threads, shmem>>>(q, k, v, alpha, beta, state, out,
-                                                    seq, nv, nk, dk, dv, heads_per_k, q_scale);
+                                                    seq, nv, nk, dk, dv, heads_per_k, q_scale,
+                                                    k_head_tiled);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         printf("CUDA Error in gated_delta_rule: %s (shmem=%zu threads=%d)\n",

@@ -396,6 +396,13 @@ module SHAInet
       block.w_alpha = block.w_alpha.as(SimpleMatrix).to_cuda if CUDA.fully_available?
       block.w_beta = block.w_beta.as(SimpleMatrix).to_cuda if CUDA.fully_available?
 
+      # GGUF lays the fused projection out flat as [q * num_k_heads, k * num_k_heads,
+      # v * num_v_heads]; llama.cpp then widens q/k to num_v_heads with ggml_repeat, which TILES.
+      # So value head h reads key head h % num_k_heads, not h // heads_per_k as the SafeTensors
+      # layout wants. Verified elementwise against llama.cpp's dumped attn_output (cosine and
+      # magnitude ratio both 1.000000 at layers 0, 10 and 21).
+      block.k_head_tiled = true
+
       # A_log and dt_bias (tiny F32 vectors)
       #
       # GGUF's `ssm_a` is NOT the raw HF `A_log`: llama.cpp's converter stores the

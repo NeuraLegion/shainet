@@ -62,6 +62,20 @@ module SHAInet
     getter a_log : Array(Float64)
     getter dt_bias : Array(Float64)
 
+    # Which key head each value head reads, which is a property of the WEIGHT LAYOUT and so
+    # differs by loader -- it is not a free choice.
+    #
+    # false (grouped, `h // heads_per_k`): the SafeTensors layout. HFLoader's
+    # split_head_interleaved deliberately rearranges the fused projection so value heads for key
+    # head kh land contiguously at kh*heads_per_k, matching HF's repeat_interleave.
+    #
+    # true (tiled, `h % num_k_heads`): the GGUF layout. llama.cpp widens q/k from num_k_heads to
+    # num_v_heads with ggml_repeat, which TILES rather than interleaves, so value head h reads key
+    # head h % num_k_heads. Verified elementwise against llama.cpp's own dumped attn_output at
+    # layers 0, 10 and 21: cosine 1.000000 and magnitude ratio 1.000000 for tiled, against 0.74,
+    # 0.16 and 0.26 for grouped.
+    property? k_head_tiled : Bool
+
     def initialize(@d_model : Int32, ff_hidden : Int32,
                    @num_v_heads : Int32 = 32, @num_k_heads : Int32 = 16,
                    @head_k : Int32 = 128, @head_v : Int32 = 128,
@@ -107,6 +121,7 @@ module SHAInet
       end
       @a_log = Array(Float64).new(@num_v_heads, 0.0)
       @dt_bias = Array(Float64).new(@num_v_heads, 0.0)
+      @k_head_tiled = false
 
       @conv_q = ShortConv.new(k_dim, @conv_kernel)
       @conv_k = ShortConv.new(k_dim, @conv_kernel)
@@ -196,6 +211,11 @@ module SHAInet
       {alpha, beta}
     end
 
+    # The key head value head `h` reads. See k_head_tiled for why this depends on the loader.
+    def k_head_for(h : Int32, heads_per_k : Int32) : Int32
+      @k_head_tiled ? h % @num_k_heads : h // heads_per_k
+    end
+
     # The mixer: normed input in, [seq, d_model] out.
     #
     # `chunk` selects the operator form. Above 1 it uses the chunked parallel path for prefill;
@@ -227,7 +247,7 @@ module SHAInet
       else
         mixed = SimpleMatrix.new(seq, v_dim, 0.0)
         @num_v_heads.times do |h|
-          kh = h // heads_per_k
+          kh = k_head_for(h, heads_per_k)
           qh = SimpleMatrix.new(seq, @head_k, 0.0)
           khm = SimpleMatrix.new(seq, @head_k, 0.0)
           vh = SimpleMatrix.new(seq, @head_v, 0.0)
@@ -374,7 +394,7 @@ module SHAInet
           ad.device_ptr.not_nil!, bd.device_ptr.not_nil!,
           st.device_ptr.not_nil!, od.device_ptr.not_nil!,
           seq, @num_v_heads, @num_k_heads, @head_k, @head_v, heads_per_k,
-          (1.0 / Math.sqrt(@head_k.to_f64)).to_f32)
+          (1.0 / Math.sqrt(@head_k.to_f64)).to_f32, @k_head_tiled)
         od.mark_device_dirty!
         od.sync_from_device!("gdn_out")
 

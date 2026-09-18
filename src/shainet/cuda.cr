@@ -309,7 +309,7 @@ module SHAInet
     @@scatter_add_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Int32), Pointer(Float32), Int32, Int32, Void)?
     @@gather_available : Bool? = nil
     @@mul_sigmoid_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Void)?
-    @@gated_delta_rule_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void)?
+    @@gated_delta_rule_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Int32, Void)?
     @@rope_forward_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Void)?
     @@head_rmsnorm_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Float32, Void)?
     # GGUF k-quant GEMV
@@ -549,19 +549,24 @@ module SHAInet
     # sequence, or a zeroed buffer for a fresh one. q and k are indexed by KEY head, so nk may be
     # smaller than nv (grouped-query sharing). L2 normalization of q/k and the q_scale are applied
     # inside the kernel.
+    #
+    # `k_head_tiled` selects which key head a value head reads, which is a property of the weight
+    # layout: false is grouped (h // heads_per_k, the SafeTensors layout), true is tiled
+    # (h % nk, the GGUF layout, because llama.cpp widens q/k with ggml_repeat and that tiles).
     def gated_delta_rule(q : Pointer(Float32), k : Pointer(Float32), v : Pointer(Float32),
                          alpha : Pointer(Float32), beta : Pointer(Float32),
                          state : Pointer(Float32), out_ptr : Pointer(Float32),
                          seq : Int32, nv : Int32, nk : Int32, dk : Int32, dv : Int32,
-                         heads_per_k : Int32, q_scale : Float32)
+                         heads_per_k : Int32, q_scale : Float32, k_head_tiled : Bool = false)
       unless fn = @@gated_delta_rule_proc
         @@gated_delta_rule_proc = fn = load_kernel_proc("gated_delta_rule",
           Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32),
                Pointer(Float32), Pointer(Float32), Pointer(Float32),
-               Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void))
+               Int32, Int32, Int32, Int32, Int32, Int32, Float32, Int32, Void))
       end
       raise "CUDA kernels not available" unless fn
-      fn.call(q, k, v, alpha, beta, state, out_ptr, seq, nv, nk, dk, dv, heads_per_k, q_scale)
+      fn.call(q, k, v, alpha, beta, state, out_ptr, seq, nv, nk, dk, dv, heads_per_k, q_scale,
+        k_head_tiled ? 1 : 0)
     end
 
     def gated_delta_rule_available? : Bool
