@@ -1849,6 +1849,97 @@ __global__ void gdn_gates_kernel(float* __restrict__ alpha, float* __restrict__ 
 // dst[t,c] = sum_j w[c,j] * x[t-j, c], reading the carried state for t-j < 0. w[c,0] is the current
 // position, matching ShortConv's tap order (the loader reverses GGUF's order once at load time).
 // The state is updated to the last kernel-1 positions so a decode step continues the sequence.
+// Causal conv + SiLU for q, k and v in ONE launch.
+//
+// The decode path ran nine kernels for this stage: three short_conv (each of which is itself two
+// launches, conv then state roll) plus three mul_sigmoid to apply SiLU in place. That is nine
+// launches per GDN layer, and with 48 GDN layers it is ~430 of the ~1280 launches a token issues.
+// Batch=1 decode is latency-bound, not arithmetic-bound, so those launches are the cost.
+//
+// Two things happen here. SiLU is folded into the convolution's write, which is exact -- the same
+// x*sigmoid(x) applied to the same value, just before it leaves a register instead of after a round
+// trip through HBM. And all three tensors share one grid: a thread's channel index selects its
+// tensor from the cumulative channel offsets, so q (k_dim), k (k_dim) and v (v_dim) are convolved
+// together. Nine launches become two.
+__global__ void short_conv_silu3_kernel(float* __restrict__ d0, const float* __restrict__ s0,
+                                        const float* __restrict__ st0, const float* __restrict__ w0,
+                                        float* __restrict__ d1, const float* __restrict__ s1,
+                                        const float* __restrict__ st1, const float* __restrict__ w1,
+                                        float* __restrict__ d2, const float* __restrict__ s2,
+                                        const float* __restrict__ st2, const float* __restrict__ w2,
+                                        int seq, int ch0, int ch1, int ch2, int kernel,
+                                        int apply_silu) {
+    int g = blockIdx.x * blockDim.x + threadIdx.x;
+    if (g >= ch0 + ch1 + ch2) return;
+
+    float* dst;
+    const float* src;
+    const float* state;
+    const float* w;
+    int channels, c;
+    if (g < ch0) {
+        dst = d0; src = s0; state = st0; w = w0; channels = ch0; c = g;
+    } else if (g < ch0 + ch1) {
+        dst = d1; src = s1; state = st1; w = w1; channels = ch1; c = g - ch0;
+    } else {
+        dst = d2; src = s2; state = st2; w = w2; channels = ch2; c = g - ch0 - ch1;
+    }
+
+    for (int t = 0; t < seq; ++t) {
+        float acc = 0.0f;
+        for (int j = 0; j < kernel; ++j) {
+            int back = t - j;
+            float v;
+            if (back >= 0) {
+                v = src[(long)back * channels + c];
+            } else {
+                int si = kernel - 1 + back;          // back is negative; -1 -> last state column
+                v = (si >= 0) ? state[(long)c * (kernel - 1) + si] : 0.0f;
+            }
+            acc += w[(long)c * kernel + j] * v;
+        }
+        // SiLU folded in. Written in exactly the form mul_sigmoid uses --
+        // x * (1/(1+__expf(-x))), same intrinsic, same order of operations -- so fusing it does not
+        // move the result. A reciprocal-then-multiply and a plain divide round differently, and the
+        // fast intrinsic __expf differs from expf, so this is not a place to simplify the algebra.
+        if (apply_silu) acc = acc * (1.0f / (1.0f + __expf(-acc)));
+        dst[(long)t * channels + c] = acc;
+    }
+}
+
+// The matching state roll for all three tensors, one launch. Split from the convolution for the same
+// reason the single-tensor version is: the reads above must not race these writes.
+__global__ void short_conv_state3_kernel(float* __restrict__ st0, const float* __restrict__ s0,
+                                         float* __restrict__ st1, const float* __restrict__ s1,
+                                         float* __restrict__ st2, const float* __restrict__ s2,
+                                         int seq, int ch0, int ch1, int ch2, int kernel) {
+    int g = blockIdx.x * blockDim.x + threadIdx.x;
+    if (g >= ch0 + ch1 + ch2) return;
+
+    float* state;
+    const float* src;
+    int channels, c;
+    if (g < ch0) {
+        state = st0; src = s0; channels = ch0; c = g;
+    } else if (g < ch0 + ch1) {
+        state = st1; src = s1; channels = ch1; c = g - ch0;
+    } else {
+        state = st2; src = s2; channels = ch2; c = g - ch0 - ch1;
+    }
+
+    int keep = kernel - 1;
+    float tmp[8]; // kernel is 4 for every shipped Gated DeltaNet; 8 is slack
+    if (keep > 8) return;
+    for (int i = 0; i < keep; ++i) {
+        int s = seq - keep + i;
+        // A call shorter than the window keeps part of the OLD state, otherwise history is lost --
+        // which is every decode step, where seq is 1 and the window is 4. Staged through tmp so
+        // these reads are not clobbered by the writes below.
+        tmp[i] = (s >= 0) ? src[(long)s * channels + c] : state[(long)c * keep + (keep + s)];
+    }
+    for (int i = 0; i < keep; ++i) state[(long)c * keep + i] = tmp[i];
+}
+
 __global__ void short_conv_kernel(float* __restrict__ dst, const float* __restrict__ src,
                                   const float* __restrict__ state,
                                   const float* __restrict__ w,
@@ -1897,6 +1988,30 @@ void gdn_gates(float* alpha, float* beta, const float* a_proj, const float* b_pr
     int threads = 256;
     gdn_gates_kernel<<<(n + threads - 1) / threads, threads>>>(
         alpha, beta, a_proj, b_proj, a_log, dt_bias, seq, heads);
+}
+
+// Fused causal conv (+ optional SiLU) for q, k and v in two launches instead of nine.
+void short_conv_silu3(float* d0, const float* s0, float* st0, const float* w0,
+                      float* d1, const float* s1, float* st1, const float* w1,
+                      float* d2, const float* s2, float* st2, const float* w2,
+                      int seq, int ch0, int ch1, int ch2, int kernel, int apply_silu) {
+    if (seq <= 0 || kernel <= 0) return;
+    int total = ch0 + ch1 + ch2;
+    if (total <= 0) return;
+    int threads = 256;
+    int blocks = (total + threads - 1) / threads;
+    short_conv_silu3_kernel<<<blocks, threads>>>(d0, s0, st0, w0,
+                                                d1, s1, st1, w1,
+                                                d2, s2, st2, w2,
+                                                seq, ch0, ch1, ch2, kernel, apply_silu);
+    if (kernel > 1) {
+        short_conv_state3_kernel<<<blocks, threads>>>(st0, s0, st1, s1, st2, s2,
+                                                      seq, ch0, ch1, ch2, kernel);
+    }
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in short_conv_silu3: %s\n", cudaGetErrorString(err));
+    }
 }
 
 void short_conv(float* dst, const float* src, float* state, const float* w,

@@ -178,6 +178,18 @@ module SHAInet
       raise "CUDA disabled"
     end
 
+    def short_conv_silu3(d0 : Pointer(Float32), s0 : Pointer(Float32), st0 : Pointer(Float32), w0 : Pointer(Float32),
+                         d1 : Pointer(Float32), s1 : Pointer(Float32), st1 : Pointer(Float32), w1 : Pointer(Float32),
+                         d2 : Pointer(Float32), s2 : Pointer(Float32), st2 : Pointer(Float32), w2 : Pointer(Float32),
+                         seq : Int32, ch0 : Int32, ch1 : Int32, ch2 : Int32,
+                         kernel : Int32, apply_silu : Bool) : Bool
+      false
+    end
+
+    def short_conv_silu3_available? : Bool
+      false
+    end
+
     def short_conv(*args)
       raise "CUDA disabled"
     end

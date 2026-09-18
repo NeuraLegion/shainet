@@ -282,16 +282,29 @@ module SHAInet
       qc = resident_buf(:qc, seq, k_dim)
       kc = resident_buf(:kc, seq, k_dim)
       vc = resident_buf(:vc, seq, v_dim)
-      CUDA.short_conv(qc.device_ptr.not_nil!, qd.device_ptr.not_nil!,
-        conv_state_dev(:q, k_dim), conv_weight_dev(:q, @conv_q), seq, k_dim, @conv_kernel)
-      CUDA.short_conv(kc.device_ptr.not_nil!, kd.device_ptr.not_nil!,
-        conv_state_dev(:k, k_dim), conv_weight_dev(:k, @conv_k), seq, k_dim, @conv_kernel)
-      CUDA.short_conv(vc.device_ptr.not_nil!, vd.device_ptr.not_nil!,
-        conv_state_dev(:v, v_dim), conv_weight_dev(:v, @conv_v), seq, v_dim, @conv_kernel)
-      # mul_sigmoid(x, x) is x * sigmoid(x), i.e. SiLU in place.
-      CUDA.mul_sigmoid(qc.device_ptr.not_nil!, qc.device_ptr.not_nil!, seq * k_dim)
-      CUDA.mul_sigmoid(kc.device_ptr.not_nil!, kc.device_ptr.not_nil!, seq * k_dim)
-      CUDA.mul_sigmoid(vc.device_ptr.not_nil!, vc.device_ptr.not_nil!, seq * v_dim)
+      # Nine launches (three conv, three state rolls, three SiLU) collapse to two when the fused
+      # kernel is present. SiLU is written in mul_sigmoid's exact form inside the conv, so the
+      # numbers do not move; the unfused path below stays as the fallback.
+      fused = CUDA.short_conv_silu3(
+        qc.device_ptr.not_nil!, qd.device_ptr.not_nil!,
+        conv_state_dev(:q, k_dim), conv_weight_dev(:q, @conv_q),
+        kc.device_ptr.not_nil!, kd.device_ptr.not_nil!,
+        conv_state_dev(:k, k_dim), conv_weight_dev(:k, @conv_k),
+        vc.device_ptr.not_nil!, vd.device_ptr.not_nil!,
+        conv_state_dev(:v, v_dim), conv_weight_dev(:v, @conv_v),
+        seq, k_dim, k_dim, v_dim, @conv_kernel, true)
+      unless fused
+        CUDA.short_conv(qc.device_ptr.not_nil!, qd.device_ptr.not_nil!,
+          conv_state_dev(:q, k_dim), conv_weight_dev(:q, @conv_q), seq, k_dim, @conv_kernel)
+        CUDA.short_conv(kc.device_ptr.not_nil!, kd.device_ptr.not_nil!,
+          conv_state_dev(:k, k_dim), conv_weight_dev(:k, @conv_k), seq, k_dim, @conv_kernel)
+        CUDA.short_conv(vc.device_ptr.not_nil!, vd.device_ptr.not_nil!,
+          conv_state_dev(:v, v_dim), conv_weight_dev(:v, @conv_v), seq, v_dim, @conv_kernel)
+        # mul_sigmoid(x, x) is x * sigmoid(x), i.e. SiLU in place.
+        CUDA.mul_sigmoid(qc.device_ptr.not_nil!, qc.device_ptr.not_nil!, seq * k_dim)
+        CUDA.mul_sigmoid(kc.device_ptr.not_nil!, kc.device_ptr.not_nil!, seq * k_dim)
+        CUDA.mul_sigmoid(vc.device_ptr.not_nil!, vc.device_ptr.not_nil!, seq * v_dim)
+      end
       qc.mark_device_dirty!
       kc.mark_device_dirty!
       vc.mark_device_dirty!
