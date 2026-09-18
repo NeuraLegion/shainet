@@ -1690,15 +1690,17 @@ __device__ __forceinline__ void get_scale_min_k4(int j, const unsigned char* sca
 
 // Q4_K GEMV: y[m, n] = x[m, K] * dequant(W_q4k[n, K])
 //
-// One WARP per output row, four warps per block. The previous shape was one block per (n, m) pair
-// with 128 threads striding over K and a shared-memory halving reduction, which cost a
-// __syncthreads per step and called get_scale_min_k4 once per VALUE. It reached ~100 GB/s of
-// weight bandwidth on a card that does 400+.
+// One WARP per output row, four warps per block, and each qs byte read EXACTLY ONCE.
 //
-// Lane l takes values [l*8, l*8+8) of each 256-value superblock. Because 8 divides both 64 and 32,
-// those 8 values sit in ONE 64-value sub-block, on ONE side of the nibble split, and in ONE 32-value
-// scale group -- so each lane does a single 8-byte contiguous read from qs and unpacks its group's
-// 6-bit scale once. The reduction is a warp shuffle, so no shared memory and no barrier.
+// The previous shape gave lane l the eight values [l*8, l*8+8), which meant lanes 0-3 read bytes
+// 0-31 for their low nibbles and lanes 4-7 read the SAME bytes for the high nibbles. Every byte was
+// fetched twice, so DRAM traffic was double the useful bytes and the kernel measured 170 GB/s of a
+// 576 GB/s card while actually moving ~340.
+//
+// Now lane l owns bytes [l*4, l*4+4) -- 32 lanes x 4 = the whole 128-byte qs -- and produces both
+// nibbles of each: byte b of sub-block j64 = b/32 at offset off = b%32 carries value j64*64 + off in
+// its low nibble and j64*64 + off + 32 in its high. Those two values sit in scale groups j64*2 and
+// j64*2 + 1, both fixed for the lane, so it unpacks two 6-bit scales per superblock and no more.
 __global__ void gemv_q4k_kernel(const float* __restrict__ x,
                                 const unsigned char* __restrict__ w,
                                 float* __restrict__ y,
@@ -1714,12 +1716,13 @@ __global__ void gemv_q4k_kernel(const float* __restrict__ x,
     const unsigned char* wrow = w + (long)n * row_bytes;
     const float* xrow = x + (long)m * K;
 
-    const int v0 = lane * 8;              // first value this lane owns
-    const int group = v0 >> 5;            // 32-value scale group
-    const int blk64 = v0 >> 6;            // which 64-value sub-block
-    const int off64 = v0 & 63;            // offset inside it
-    const int hi = off64 >> 5;            // 0 = low nibbles, 1 = high nibbles
-    const int qoff = blk64 * 32 + (off64 & 31);
+    const int b0 = lane * 4;          // first qs byte this lane owns
+    const int j64 = b0 >> 5;          // 64-value sub-block
+    const int off = b0 & 31;          // offset inside it
+    const int glo = j64 * 2;          // scale group of the low-nibble values
+    const int ghi = glo + 1;          // and of the high-nibble values
+    const int vlo = j64 * 64 + off;   // first low-nibble value index
+    const int vhi = vlo + 32;         // first high-nibble value index
 
     float acc = 0.0f;
     for (int b = 0; b < nblocks; ++b) {
@@ -1727,20 +1730,27 @@ __global__ void gemv_q4k_kernel(const float* __restrict__ x,
         const float d    = __half2float(*((const __half*)(block + 0)));
         const float dmin = __half2float(*((const __half*)(block + 2)));
 
-        unsigned char sc, mn;
-        get_scale_min_k4(group, block + 4, &sc, &mn);
-        const float ds = d * (float)sc;
-        const float dm = dmin * (float)mn;
+        unsigned char sc_l, mn_l, sc_h, mn_h;
+        get_scale_min_k4(glo, block + 4, &sc_l, &mn_l);
+        get_scale_min_k4(ghi, block + 4, &sc_h, &mn_h);
+        const float dl = d * (float)sc_l, ml = dmin * (float)mn_l;
+        const float dh = d * (float)sc_h, mh = dmin * (float)mn_h;
 
-        const unsigned char* qp = block + 16 + qoff;
-        const float* xp = xrow + b * GGUF_QK_K + v0;
+        // One 32-bit load for the lane's four bytes.
+        const uchar4 q = *((const uchar4*)(block + 16 + b0));
+        const float* xl = xrow + b * GGUF_QK_K + vlo;
+        const float* xh = xrow + b * GGUF_QK_K + vhi;
+        const float4 xlo = *((const float4*)xl);
+        const float4 xhi = *((const float4*)xh);
 
-        #pragma unroll
-        for (int i = 0; i < 8; ++i) {
-            const unsigned char byte = qp[i];
-            const int q = hi ? (byte >> 4) : (byte & 0xF);
-            acc += (ds * (float)q - dm) * xp[i];
-        }
+        acc += (dl * (float)(q.x & 0xF) - ml) * xlo.x;
+        acc += (dl * (float)(q.y & 0xF) - ml) * xlo.y;
+        acc += (dl * (float)(q.z & 0xF) - ml) * xlo.z;
+        acc += (dl * (float)(q.w & 0xF) - ml) * xlo.w;
+        acc += (dh * (float)(q.x >> 4) - mh) * xhi.x;
+        acc += (dh * (float)(q.y >> 4) - mh) * xhi.y;
+        acc += (dh * (float)(q.z >> 4) - mh) * xhi.z;
+        acc += (dh * (float)(q.w >> 4) - mh) * xhi.w;
     }
 
     #pragma unroll
@@ -1748,12 +1758,12 @@ __global__ void gemv_q4k_kernel(const float* __restrict__ x,
     if (lane == 0) y[(long)m * N + n] = acc;
 }
 
-// Q6_K GEMV, warp per output row. Same reasoning as the Q4_K kernel above.
+// Q6_K GEMV, warp per output row, each byte read EXACTLY ONCE. Same reasoning as Q4_K above.
 //
-// Lane l takes values [l*8, l*8+8). Q6_K's 128-value chunks split into four 32-value spans (q1..q4
-// in dequantize_row_q6_K), and 8 divides 32, so a lane's 8 values sit in one span with one scale
-// group (16 values) -- almost: a span crosses a scale boundary at l=16 within the span, and 8
-// divides 16, so the lane's 8 values are still inside ONE group. One scale lookup per lane.
+// Q6_K packs three bytes into four values: for a chunk of 128 and an offset l in [0,32),
+// ql[l], ql[l+32] and qh[l] together give values l, l+32, l+64, l+96 of that chunk. So a lane takes
+// one l and does both chunks -- six bytes, eight values, nothing fetched twice. All eight of its
+// 6-bit scale indices are fixed by l, so the scale lookups leave the inner loop as well.
 __global__ void gemv_q6k_kernel(const float* __restrict__ x,
                                 const unsigned char* __restrict__ w,
                                 float* __restrict__ y,
@@ -1769,35 +1779,35 @@ __global__ void gemv_q6k_kernel(const float* __restrict__ x,
     const unsigned char* wrow = w + (long)n * row_bytes;
     const float* xrow = x + (long)m * K;
 
-    const int v0 = lane * 8;
-    const int chunk = v0 >> 7;            // 0 or 1 (128 values each)
-    const int local = v0 & 127;
-    const int sub = local >> 5;           // which of q1..q4
-    const int l0 = local & 31;            // offset within the 32-value span
-    const int is = l0 >> 4;               // 16-value scale group inside the span
+    const int l = lane;          // offset within the 32-wide group
+    const int is = l >> 4;       // 16-value scale group, fixed for this lane
 
     float acc = 0.0f;
     for (int b = 0; b < nblocks; ++b) {
         const unsigned char* block = wrow + (long)b * GGUF_Q6K_BLOCK_BYTES;
-        const unsigned char* ql_c = block + chunk * 64;
-        const unsigned char* qh_c = block + 128 + chunk * 32;
-        const signed char*   sc_c = (const signed char*)(block + 192) + chunk * 8;
         const float d = __half2float(*((const __half*)(block + 208)));
-        const float ds = d * (float)sc_c[is + sub * 2];
-        const float* xp = xrow + b * GGUF_QK_K + v0;
+        const float* xb = xrow + b * GGUF_QK_K;
 
         #pragma unroll
-        for (int i = 0; i < 8; ++i) {
-            const int l = l0 + i;
-            const unsigned char hb = qh_c[l];
-            int q;
-            switch (sub) {
-                case 0:  q = (int)((ql_c[l]      & 0xF) | (((hb >> 0) & 3) << 4)) - 32; break;
-                case 1:  q = (int)((ql_c[l + 32] & 0xF) | (((hb >> 2) & 3) << 4)) - 32; break;
-                case 2:  q = (int)((ql_c[l]      >> 4)  | (((hb >> 4) & 3) << 4)) - 32; break;
-                default: q = (int)((ql_c[l + 32] >> 4)  | (((hb >> 6) & 3) << 4)) - 32; break;
-            }
-            acc += ds * (float)q * xp[i];
+        for (int chunk = 0; chunk < 2; ++chunk) {
+            const unsigned char* ql_c = block + chunk * 64;
+            const unsigned char* qh_c = block + 128 + chunk * 32;
+            const signed char*   sc_c = (const signed char*)(block + 192) + chunk * 8;
+
+            const unsigned char a = ql_c[l];       // low nibble -> value l, high -> value l+64
+            const unsigned char c = ql_c[l + 32];  // low nibble -> value l+32, high -> l+96
+            const unsigned char h = qh_c[l];       // the four 2-bit high parts
+            const float* xc = xb + chunk * 128;
+
+            const int q0 = (int)((a & 0xF) | (((h >> 0) & 3) << 4)) - 32;
+            const int q1 = (int)((c & 0xF) | (((h >> 2) & 3) << 4)) - 32;
+            const int q2 = (int)((a >> 4)  | (((h >> 4) & 3) << 4)) - 32;
+            const int q3 = (int)((c >> 4)  | (((h >> 6) & 3) << 4)) - 32;
+
+            acc += d * (float)sc_c[is + 0] * (float)q0 * xc[l];
+            acc += d * (float)sc_c[is + 2] * (float)q1 * xc[l + 32];
+            acc += d * (float)sc_c[is + 4] * (float)q2 * xc[l + 64];
+            acc += d * (float)sc_c[is + 6] * (float)q3 * xc[l + 96];
         }
     }
 
