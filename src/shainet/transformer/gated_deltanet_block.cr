@@ -339,15 +339,25 @@ module SHAInet
       rd
     end
 
-    # Reusable device buffers, keyed by role and shape and SHARED across every block.
+    # Reusable device buffers, one per role, SHARED across every block.
     #
     # Per-block buffers OOM'd: at a 301-token prefill one block's set is ~40 MB, and 40 device
     # blocks wanted 1.6 GB on a card with ~1.5 GB spare. The blocks run strictly one at a time, so
     # one set serves all of them, exactly like the GEMM dequant scratch.
-    @@res_bufs = {} of {Symbol, Int32, Int32} => CudaMatrix
+    #
+    # Keyed by ROLE ONLY, and reallocated when the shape changes. Keying by {role, rows, cols}
+    # instead kept a full set per distinct sequence length, which is unbounded for a caller whose
+    # prompts vary: after one 301-token prefill and one 1400-token prefill a 1400-token run OOM'd
+    # even with a 2048 MB reserve. A generation does one prefill shape then a steady rows=1 shape,
+    # so eviction costs two reallocations and then nothing.
+    @@res_bufs = {} of Symbol => CudaMatrix
 
     private def resident_buf(role : Symbol, rows : Int32, cols : Int32) : CudaMatrix
-      @@res_bufs[{role, rows, cols}] ||= CudaMatrix.new(rows, cols)
+      if existing = @@res_bufs[role]?
+        return existing if existing.rows == rows && existing.cols == cols
+        existing.free!
+      end
+      @@res_bufs[role] = CudaMatrix.new(rows, cols)
     end
 
     def self.release_resident_buffers!
