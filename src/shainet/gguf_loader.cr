@@ -397,12 +397,26 @@ module SHAInet
       block.w_beta = block.w_beta.as(SimpleMatrix).to_cuda if CUDA.fully_available?
 
       # A_log and dt_bias (tiny F32 vectors)
+      #
+      # GGUF's `ssm_a` is NOT the raw HF `A_log`: llama.cpp's converter stores the
+      # pre-computed `-exp(A_log)` (always negative, e.g. -0.04). llama.cpp then uses it
+      # directly as `alpha = exp(softplus(proj + dt_bias) * ssm_a)`.
+      #
+      # GatedDeltaNetBlock#gates expects the HF form and computes
+      # `alpha = exp(-exp(a_log) * softplus(proj + dt_bias))`, so feed it
+      # `a_log = log(-ssm_a)` to make `-exp(a_log)` equal the stored `ssm_a`.
+      #
+      # Reading `ssm_a` as if it were A_log applied exp() to an already-exponentiated
+      # value: for ssm_a = -0.0406 that yields a decay exponent of -0.96 instead of
+      # -0.0406, ~24x too much decay in every one of the 48 linear-attention layers.
       a_log_info = gf.tensors["blk.#{idx}.ssm_a"]
       dt_info = gf.tensors["blk.#{idx}.ssm_dt.bias"]
       a_log = read_gguf_f32_tensor(gf, a_log_info)
       dt_bias = read_gguf_f32_tensor(gf, dt_info)
       num_v_heads.times do |h|
-        block.a_log[h] = a_log[h].to_f64
+        neg_a = -a_log[h].to_f64
+        raise "gguf: ssm_a[#{h}] of blk.#{idx} is #{a_log[h]}, expected negative (-exp(A_log))" unless neg_a > 0.0
+        block.a_log[h] = Math.log(neg_a)
         block.dt_bias[h] = dt_bias[h].to_f64
       end
 
