@@ -59,6 +59,15 @@ module SHAInet
 
     @pool_owned : Bool = false
 
+    # Debug tracing flag, read ONCE at class init.
+    #
+    # This was ENV["SHAINET_DEBUG"]? evaluated inline on every gemv_into call, TWICE. A Crystal ENV
+    # lookup calls getenv -- a linear scan of the environment -- and allocates a String for the
+    # result. A generated token issues on the order of five hundred GEMV calls across the resident
+    # layers, so the untaken branch of a debug print cost ~1000 getenv calls and ~1000 short-lived
+    # allocations per token, for nothing.
+    @@debug : Bool = ENV["SHAINET_DEBUG"]? == "1"
+
     # Allocate device memory only (no upload). Used by GGUFHostMatrix for its
     # shared scratch buffer -- the data is uploaded per-GEMV via cudaMemcpy.
     def self.new_empty(rows : Int32, cols : Int32, ggml_type : GGUF::GGMLType, byte_size : UInt64) : GGUFMatrix
@@ -88,8 +97,10 @@ module SHAInet
       raise ArgumentError.new("result shape mismatch") unless result.rows == x.rows && result.cols == @cols
       raise RuntimeError.new("GGUF gemv requires a valid device pointer") if @dev_ptr.null?
 
-      STDERR.puts "  [gguf gemv] #{@ggml_type} M=#{x.rows} N=#{@cols} K=#{@rows} bytes=#{@byte_size} pool=#{@pool_owned}" if ENV["SHAINET_DEBUG"]? == "1"
-      STDERR.flush if ENV["SHAINET_DEBUG"]? == "1"
+      if @@debug
+        STDERR.puts "  [gguf gemv] #{@ggml_type} M=#{x.rows} N=#{@cols} K=#{@rows} bytes=#{@byte_size} pool=#{@pool_owned}"
+        STDERR.flush
+      end
 
       # Ensure activation is resident on device (cheap no-op when already synced).
       x.sync_to_device!("gguf_gemv_in") unless x.device_dirty?

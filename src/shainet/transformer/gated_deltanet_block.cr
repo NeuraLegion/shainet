@@ -247,7 +247,7 @@ module SHAInet
     # Can the mixer run entirely on the device? Checked separately so forward_resident can decide
     # before it commits to the device chain.
     private def mixer_resident_capable? : Bool
-      return false if ENV.fetch("SHAINET_GDN_RESIDENT", "1") == "0"
+      return false unless @@resident_enabled
       return false unless CUDA.fully_available? && CUDA.gated_delta_rule_available?
       return false unless CUDA.gdn_mixer_kernels_available?
       @w_q.is_a?(QuantizedWeight) && @w_k.is_a?(QuantizedWeight) &&
@@ -584,7 +584,7 @@ module SHAInet
                            heads_per_k : Int32) : SimpleMatrix?
       # SHAINET_GDN_DEVICE=0 forces the host path. Read per call rather than memoized so a spec can
       # A/B the two within one process, which is how their equivalence is asserted.
-      return if ENV.fetch("SHAINET_GDN_DEVICE", "1") == "0"
+      return unless @@device_enabled
       return unless CUDA.gated_delta_rule_available?
 
       qd = CudaMatrix.new(seq, k_dim)
@@ -703,6 +703,11 @@ module SHAInet
     # for want of VRAM and forced a larger reserve, which in turn kept layers on the host. The
     # recurrence already carries its conv and recurrent state across calls, which is exactly what a
     # decode step relies on, so a chunked prefill computes the same thing as a whole-sequence one.
+    # Read ONCE: these gate capability checks that run for all 48 GDN blocks on every token, and a
+    # Crystal ENV lookup is a getenv linear scan of the environment plus a String allocation.
+    @@resident_enabled : Bool = ENV.fetch("SHAINET_GDN_RESIDENT", "1") != "0"
+    @@device_enabled : Bool = ENV.fetch("SHAINET_GDN_DEVICE", "1") != "0"
+
     RESIDENT_CHUNK = 256
 
     def forward_cached_device(xd : CudaMatrix) : CudaMatrix?

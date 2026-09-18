@@ -50,6 +50,12 @@ module SHAInet
     # was wrong and 32 stands. Tunable to re-measure the crossover on other hardware.
     DEFAULT_BATCH_DEVICE_MIN_ROWS = 32
 
+    # Read ONCE. Both were ENV lookups evaluated on EVERY call, and a Crystal ENV lookup is a getenv
+    # linear scan of the environment plus a String allocation -- paid per matmul, per layer, per
+    # token, including for the untaken branch of a debug print.
+    @@debug : Bool = ENV["SHAINET_DEBUG"]? == "1"
+    @@offload_op : Bool = ENV.fetch("SHAINET_HOST_OFFLOAD_OP", "1") != "0"
+
     @@batch_device_min_rows : Int32?
 
     def self.batch_device_min_rows : Int32
@@ -62,13 +68,15 @@ module SHAInet
     end
 
     def gemv_into(x : CudaMatrix, result : CudaMatrix) : CudaMatrix
-      STDERR.puts "  [gguf host gemv] #{@ggml_type} M=#{x.rows} N=#{@cols} K=#{@rows} bytes=#{@byte_size}" if ENV["SHAINET_DEBUG"]? == "1"
+      if @@debug
+        STDERR.puts "  [gguf host gemv] #{@ggml_type} M=#{x.rows} N=#{@cols} K=#{@rows} bytes=#{@byte_size}"
+      end
 
       m = x.rows
       k = @rows
       n = @cols
 
-      if m >= GGUFHostMatrix.batch_device_min_rows && ENV.fetch("SHAINET_HOST_OFFLOAD_OP", "1") != "0"
+      if m >= GGUFHostMatrix.batch_device_min_rows && @@offload_op
         if staged = GGUFMatrix.stage_host(k, n, @ggml_type, @host_ptr, @byte_size)
           return staged.gemm_into(x, result)
         end
