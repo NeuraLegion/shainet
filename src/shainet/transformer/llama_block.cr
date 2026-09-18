@@ -1572,8 +1572,36 @@ module SHAInet
     end
 
     # Dispatch the attention kernel for the active cache dtype.
+    #
+    # Prefers the split-KV ("flash-decoding") path, which adds the KV length as a grid dimension. The
+    # single-block kernels below parallelize over (head, token) only, so at decode -- one token -- they
+    # run num_heads blocks, about 2.6% of this card, and each block walks the whole KV length while
+    # staging its score row in GLOBAL memory. Measured at the real shape (24 heads, head_dim 256), the
+    # split path is 1.37x at 1k context rising to 6.87x at 14k, and stays nearly FLAT as context grows
+    # (0.298 ms to 0.944 ms across a 14x range) where the single-block kernel scales linearly. With 16
+    # attention layers that is ~104 ms of per-token attention at 14k becoming ~15 ms.
+    #
+    # It needs its own workspace size, so it is only taken when the shared scratch is already large
+    # enough; otherwise the single-block path runs and the scratch grows for next time.
     private def attend_kv(q : Pointer(Float32), n : Int32, base_pos : Int32,
                           heads_per_kv : Int32, scale : Float32)
+      total_len = base_pos + n
+      if CUDA.attention_split_kv_available?
+        need = CUDA.attention_split_ws_floats(n, @num_heads, @head_dim, total_len)
+        if need > 0 && @@gpu_attn_ws_cap >= need && !@@gpu_attn_ws.null?
+          ok = if kv_cache_fp16?
+                 CUDA.attention_split_kv_f16(q, @gpu_k_cache.as(Pointer(UInt16)),
+                   @gpu_v_cache.as(Pointer(UInt16)), @@gpu_attn_out, @@gpu_attn_ws,
+                   n, base_pos, @num_heads, heads_per_kv, @head_dim, @gpu_cache_cap, scale)
+               else
+                 CUDA.attention_split_kv_f32(q, @gpu_k_cache.as(Pointer(Float32)),
+                   @gpu_v_cache.as(Pointer(Float32)), @@gpu_attn_out, @@gpu_attn_ws,
+                   n, base_pos, @num_heads, heads_per_kv, @head_dim, @gpu_cache_cap, scale)
+               end
+          return if ok
+        end
+      end
+
       if kv_cache_fp16?
         CUDA.attention_kv_f16(q, @gpu_k_cache.as(Pointer(UInt16)),
           @gpu_v_cache.as(Pointer(UInt16)), @@gpu_attn_out, @@gpu_attn_ws,

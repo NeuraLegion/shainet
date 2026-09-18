@@ -106,6 +106,31 @@ module SHAInet
       raise "CUDA disabled"
     end
 
+    def attention_split_kv_f32(q : Pointer(Float32), kc : Pointer(Float32), vc : Pointer(Float32),
+                               out_ptr : Pointer(Float32), ws : Pointer(Float32),
+                               new_tokens : Int32, start_pos : Int32, num_heads : Int32,
+                               heads_per_kv : Int32, head_dim : Int32, capacity : Int32,
+                               scale : Float32) : Bool
+      false
+    end
+
+    def attention_split_kv_f16(q : Pointer(Float32), kc : Pointer(UInt16), vc : Pointer(UInt16),
+                               out_ptr : Pointer(Float32), ws : Pointer(Float32),
+                               new_tokens : Int32, start_pos : Int32, num_heads : Int32,
+                               heads_per_kv : Int32, head_dim : Int32, capacity : Int32,
+                               scale : Float32) : Bool
+      false
+    end
+
+    def attention_split_ws_floats(new_tokens : Int32, num_heads : Int32, head_dim : Int32,
+                                  total_len : Int32) : Int32
+      0
+    end
+
+    def attention_split_kv_available? : Bool
+      false
+    end
+
     def attention_kv_f16(*args)
       raise "CUDA disabled"
     end

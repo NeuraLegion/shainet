@@ -368,6 +368,9 @@ module SHAInet
     @@attn_device_available : Bool? = nil
     @@attention_kv_f32_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void)?
     @@attention_kv_f16_proc : Proc(Pointer(Float32), Pointer(UInt16), Pointer(UInt16), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void)?
+    @@attention_split_kv_f32_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void)?
+    @@attention_split_kv_f16_proc : Proc(Pointer(Float32), Pointer(UInt16), Pointer(UInt16), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void)?
+    @@attention_split_ws_floats_proc : Proc(Int32, Int32, Int32, Int32, Int32)?
 
     def softmax_rows(dst : Pointer(Float32), src : Pointer(Float32), rows : Int32, cols : Int32)
       # Validate inputs
@@ -1447,6 +1450,62 @@ module SHAInet
         Log.error { "CUDA Error in kv_cache_append_f16: #{ex}" }
         raise ex
       end
+    end
+
+    # Split-KV ("flash-decoding") attention. Same contract as attention_kv_* but the grid also spans
+    # the KV length, so decode occupies the whole card instead of num_heads blocks, and the scores
+    # stay in shared memory rather than a global workspace. Exact, not approximate: the per-split
+    # partials are merged with the standard max-rescale.
+    #
+    # `ws` must hold attention_split_ws_floats(...) floats. Returns false when the kernels are
+    # missing so the caller keeps the single-block path.
+    def attention_split_kv_f32(q : Pointer(Float32), kc : Pointer(Float32), vc : Pointer(Float32),
+                               out_ptr : Pointer(Float32), ws : Pointer(Float32),
+                               new_tokens : Int32, start_pos : Int32, num_heads : Int32,
+                               heads_per_kv : Int32, head_dim : Int32, capacity : Int32,
+                               scale : Float32) : Bool
+      unless fn = @@attention_split_kv_f32_proc
+        @@attention_split_kv_f32_proc = fn = load_kernel_proc("attention_split_kv_f32",
+          Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32),
+               Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void))
+      end
+      return false unless fn
+      fn.call(q, kc, vc, out_ptr, ws, new_tokens, start_pos, num_heads,
+        heads_per_kv, head_dim, capacity, scale)
+      true
+    end
+
+    def attention_split_kv_f16(q : Pointer(Float32), kc : Pointer(UInt16), vc : Pointer(UInt16),
+                               out_ptr : Pointer(Float32), ws : Pointer(Float32),
+                               new_tokens : Int32, start_pos : Int32, num_heads : Int32,
+                               heads_per_kv : Int32, head_dim : Int32, capacity : Int32,
+                               scale : Float32) : Bool
+      unless fn = @@attention_split_kv_f16_proc
+        @@attention_split_kv_f16_proc = fn = load_kernel_proc("attention_split_kv_f16",
+          Proc(Pointer(Float32), Pointer(UInt16), Pointer(UInt16), Pointer(Float32),
+               Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void))
+      end
+      return false unless fn
+      fn.call(q, kc, vc, out_ptr, ws, new_tokens, start_pos, num_heads,
+        heads_per_kv, head_dim, capacity, scale)
+      true
+    end
+
+    # Floats of partial-buffer space the split path needs. Kept on the kernel side so the split size
+    # is defined in exactly one place.
+    def attention_split_ws_floats(new_tokens : Int32, num_heads : Int32, head_dim : Int32,
+                                  total_len : Int32) : Int32
+      unless fn = @@attention_split_ws_floats_proc
+        @@attention_split_ws_floats_proc = fn = load_kernel_proc("attention_split_ws_floats",
+          Proc(Int32, Int32, Int32, Int32, Int32))
+      end
+      return 0 unless fn
+      fn.call(new_tokens, num_heads, head_dim, total_len)
+    end
+
+    def attention_split_kv_available? : Bool
+      return false unless kernels_available?
+      !load_kernel_proc("attention_split_ws_floats", Proc(Int32, Int32, Int32, Int32, Int32)).nil?
     end
 
     def attention_kv_f16(q : Pointer(Float32), kc : Pointer(UInt16), vc : Pointer(UInt16),

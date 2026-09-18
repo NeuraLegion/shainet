@@ -1375,6 +1375,157 @@ extern "C++" {
 // GQA: query head h reads kv head h / heads_per_kv.
 // KV is the cache storage type (float or __half); loads convert to fp32 so the
 // dot product, softmax and weighted sum are identical in both instantiations.
+// ---------------------------------------------------------------------------
+// Split-KV ("flash-decoding") attention for the single-token decode step.
+//
+// The kernel below this one parallelizes over (head, token) only. At decode that is ONE token, so
+// the grid is num_heads blocks -- 24 for this model -- and with 128 threads that occupies 3072 of a
+// 4090 Laptop's ~117k thread slots, about 2.6% of the card, while each block serially reduces over
+// the entire KV length. It also stages the score row in GLOBAL memory (`ws`) and walks it three
+// times: write scores, read/exponentiate/write, read for the V weighting. Both costs grow with
+// context, which is why decode fell from ~8 tok/s to 3.7 tok/s at 14k tokens.
+//
+// Flash-decoding adds the KV length as a third grid dimension: each block handles a SLICE of the
+// keys, keeps its slice's scores in shared memory, and emits a partial output plus the two softmax
+// statistics (running max and sum). A second kernel combines the partials. Because softmax is
+// associative under the standard max-rescale, the result is exact, not an approximation.
+//
+// Two consequences beyond parallelism: the global `ws` score buffer disappears entirely (it was
+// sized num_heads * chunk * total_len, the single largest allocation in the process and the one that
+// OOM'd a 16 GB card at 9.5k tokens), and the scores are never round-tripped through HBM.
+#define ATTN_SPLIT_SCORES 512   // scores held in shared memory per split; 2 KB at fp32
+
+template <typename KV>
+__global__ void attention_split_kv_kernel(const float* __restrict__ q,
+                                          const KV* __restrict__ kc,
+                                          const KV* __restrict__ vc,
+                                          float* __restrict__ part_out,
+                                          float* __restrict__ part_max,
+                                          float* __restrict__ part_sum,
+                                          int new_tokens, int start_pos,
+                                          int num_heads, int heads_per_kv,
+                                          int head_dim, int capacity, float scale,
+                                          int num_splits) {
+    const int h = blockIdx.x;
+    const int i = blockIdx.y;
+    const int sp = blockIdx.z;
+    if (h >= num_heads || i >= new_tokens || sp >= num_splits) return;
+
+    const int kv_h = h / heads_per_kv;
+    const int visible = start_pos + i + 1;
+    const int d_model = num_heads * head_dim;
+
+    const float* qv = q + (long)i * d_model + (long)h * head_dim;
+    const KV* kh = kc + (long)kv_h * capacity * head_dim;
+    const KV* vh = vc + (long)kv_h * capacity * head_dim;
+
+    // This split's key range.
+    const int j0 = sp * ATTN_SPLIT_SCORES;
+    const int j1 = min(j0 + ATTN_SPLIT_SCORES, visible);
+
+    const long pidx = ((long)h * new_tokens + i) * num_splits + sp;
+
+    const int tid = threadIdx.x;
+    const int nt = blockDim.x;
+    extern __shared__ float smem[];
+    float* q_s = smem;                        // head_dim
+    float* sc = smem + head_dim;              // ATTN_SPLIT_SCORES
+    float* red = sc + ATTN_SPLIT_SCORES;      // nt
+
+    // An empty split contributes nothing. Identity for the combine: sum 0, max -inf.
+    if (j0 >= j1) {
+        if (tid == 0) { part_max[pidx] = -INFINITY; part_sum[pidx] = 0.0f; }
+        for (int d = tid; d < head_dim; d += nt) part_out[pidx * head_dim + d] = 0.0f;
+        return;
+    }
+
+    for (int d = tid; d < head_dim; d += nt) q_s[d] = qv[d];
+    __syncthreads();
+
+    // Scores for this slice, into SHARED memory. Max tracked for a stable softmax.
+    float lmax = -INFINITY;
+    for (int j = j0 + tid; j < j1; j += nt) {
+        const KV* krow = kh + (long)j * head_dim;
+        float dot = 0.0f;
+        for (int d = 0; d < head_dim; ++d) dot += q_s[d] * KVStore<KV>::load(krow, d);
+        dot *= scale;
+        sc[j - j0] = dot;
+        if (dot > lmax) lmax = dot;
+    }
+    red[tid] = lmax;
+    __syncthreads();
+    for (int s = nt >> 1; s > 0; s >>= 1) {
+        if (tid < s) red[tid] = fmaxf(red[tid], red[tid + s]);
+        __syncthreads();
+    }
+    const float gmax = red[0];
+    __syncthreads();
+
+    float lsum = 0.0f;
+    for (int j = j0 + tid; j < j1; j += nt) {
+        float e = expf(sc[j - j0] - gmax);
+        sc[j - j0] = e;
+        lsum += e;
+    }
+    red[tid] = lsum;
+    __syncthreads();
+    for (int s = nt >> 1; s > 0; s >>= 1) {
+        if (tid < s) red[tid] += red[tid + s];
+        __syncthreads();
+    }
+    const float ssum = red[0];
+    __syncthreads();
+
+    // UNNORMALIZED weighted V for this slice. Normalization happens in the combine, once, using the
+    // slice sums -- dividing here would make the partials incombinable.
+    for (int d = tid; d < head_dim; d += nt) {
+        float acc = 0.0f;
+        for (int j = j0; j < j1; ++j) {
+            acc += sc[j - j0] * KVStore<KV>::load(vh, (long)j * head_dim + d);
+        }
+        part_out[pidx * head_dim + d] = acc;
+    }
+    if (tid == 0) { part_max[pidx] = gmax; part_sum[pidx] = ssum; }
+}
+
+// Combine the per-split partials. Each split reported its own max, so rescale every slice onto the
+// global max before summing -- the standard log-sum-exp merge, which makes the split exact.
+__global__ void attention_split_combine_kernel(const float* __restrict__ part_out,
+                                               const float* __restrict__ part_max,
+                                               const float* __restrict__ part_sum,
+                                               float* __restrict__ out,
+                                               int new_tokens, int num_heads, int head_dim,
+                                               int num_splits) {
+    const int h = blockIdx.x;
+    const int i = blockIdx.y;
+    if (h >= num_heads || i >= new_tokens) return;
+
+    const long base = ((long)h * new_tokens + i) * num_splits;
+
+    float gmax = -INFINITY;
+    for (int s = 0; s < num_splits; ++s) gmax = fmaxf(gmax, part_max[base + s]);
+    if (!isfinite(gmax)) gmax = 0.0f;   // every split empty; leaves a zero row rather than NaNs
+
+    float denom = 0.0f;
+    for (int s = 0; s < num_splits; ++s) {
+        const float m = part_max[base + s];
+        if (!isfinite(m)) continue;
+        denom += part_sum[base + s] * expf(m - gmax);
+    }
+    const float inv = denom > 0.0f ? 1.0f / denom : 0.0f;
+
+    const int d_model = num_heads * head_dim;
+    for (int d = threadIdx.x; d < head_dim; d += blockDim.x) {
+        float acc = 0.0f;
+        for (int s = 0; s < num_splits; ++s) {
+            const float m = part_max[base + s];
+            if (!isfinite(m)) continue;
+            acc += part_out[(base + s) * head_dim + d] * expf(m - gmax);
+        }
+        out[(long)i * d_model + (long)h * head_dim + d] = acc * inv;
+    }
+}
+
 template <typename KV>
 __global__ void attention_kv_kernel_t(const float* __restrict__ q,
                                       const KV* __restrict__ kc,
@@ -1451,6 +1602,77 @@ __global__ void attention_kv_kernel_t(const float* __restrict__ q,
 }
 
 } // extern "C++"
+
+// How many splits a given context length uses, and how many floats of partials that needs. The
+// caller sizes its buffer from this rather than duplicating the arithmetic.
+int attention_split_count(int total_len) {
+    if (total_len <= 0) return 0;
+    return (total_len + ATTN_SPLIT_SCORES - 1) / ATTN_SPLIT_SCORES;
+}
+
+int attention_split_ws_floats(int new_tokens, int num_heads, int head_dim, int total_len) {
+    int splits = attention_split_count(total_len);
+    if (splits <= 0) return 0;
+    // partial outputs + one max and one sum per split
+    return num_heads * new_tokens * splits * (head_dim + 2);
+}
+
+// Split-KV decode attention. `ws` holds the partials: [heads, tokens, splits, head_dim] outputs,
+// then the per-split maxima, then the per-split sums.
+//
+// extern "C++" because a template cannot carry C linkage, and this sits inside the file's extern "C"
+// block alongside the two exported entry points that instantiate it.
+extern "C++" {
+template <typename KV>
+static void attention_split_kv_launch(const float* q, const KV* kc, const KV* vc,
+                                      float* out, float* ws, int new_tokens, int start_pos,
+                                      int num_heads, int heads_per_kv, int head_dim,
+                                      int capacity, float scale) {
+    const int total_len = start_pos + new_tokens;
+    const int splits = attention_split_count(total_len);
+    if (splits <= 0) return;
+
+    const long n_part = (long)num_heads * new_tokens * splits;
+    float* part_out = ws;
+    float* part_max = ws + n_part * head_dim;
+    float* part_sum = part_max + n_part;
+
+    const int threads = 128;
+    dim3 grid(num_heads, new_tokens, splits);
+    size_t shmem = (head_dim + ATTN_SPLIT_SCORES + threads) * sizeof(float);
+    attention_split_kv_kernel<KV><<<grid, threads, shmem>>>(q, kc, vc,
+                                                            part_out, part_max, part_sum,
+                                                            new_tokens, start_pos, num_heads,
+                                                            heads_per_kv, head_dim, capacity,
+                                                            scale, splits);
+    dim3 cgrid(num_heads, new_tokens);
+    attention_split_combine_kernel<<<cgrid, threads>>>(part_out, part_max, part_sum, out,
+                                                       new_tokens, num_heads, head_dim, splits);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in attention_split_kv: %s\n", cudaGetErrorString(err));
+    }
+}
+
+} // extern "C++"
+
+void attention_split_kv_f32(const float* q, const float* kc, const float* vc,
+                            float* out, float* ws, int new_tokens, int start_pos,
+                            int num_heads, int heads_per_kv, int head_dim,
+                            int capacity, float scale) {
+    attention_split_kv_launch<float>(q, kc, vc, out, ws, new_tokens, start_pos,
+                                     num_heads, heads_per_kv, head_dim, capacity, scale);
+}
+
+void attention_split_kv_f16(const float* q, const unsigned short* kc, const unsigned short* vc,
+                            float* out, float* ws, int new_tokens, int start_pos,
+                            int num_heads, int heads_per_kv, int head_dim,
+                            int capacity, float scale) {
+    attention_split_kv_launch<__half>(q, reinterpret_cast<const __half*>(kc),
+                                      reinterpret_cast<const __half*>(vc),
+                                      out, ws, new_tokens, start_pos,
+                                      num_heads, heads_per_kv, head_dim, capacity, scale);
+}
 
 void attention_kv_f32(const float* q, const float* kc, const float* vc,
                       float* out, float* ws, int new_tokens, int start_pos,
