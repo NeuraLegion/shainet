@@ -63,24 +63,55 @@ module SHAInet
 
         @@progress.try &.call(0, num_transformer_layers)
 
-        # Layer-level GPU/CPU split: fill GPU back-to-front until VRAM budget is met.
-        # Layers that don't fit stay host-resident (dequanted to fp32 SimpleMatrix).
-        # This mirrors Ollama's approach: 45/66 layers on GPU for the 27B.
-        gpu_layers = num_transformer_layers # default: all on GPU
+        # Layer-level GPU/CPU split: fill GPU back-to-front until the VRAM budget is met.
+        # Layers that don't fit stay host-resident and run the CPU k-quant kernels.
+        #
+        # Sizes come from the GGUF rather than a per-layer average. The averages this replaced
+        # (237 MB per layer, 535 MB for lm_head) were wrong in both directions on Qwen3.8-27B:
+        # layers actually run 199.7-240.6 MB (mean 223.2 GDN / 211.3 full) and output.weight is
+        # 994.6 MB, not 535. The lm_head error alone claimed 460 MB that does not exist, and the
+        # two errors only partly cancel: measured 51 layers placed with 2505 MB still free, which
+        # is ~11 more layers' worth of headroom left unused while those layers ran on the CPU at
+        # 3.3x the per-layer cost.
+        layer_bytes = Array(UInt64).new(num_transformer_layers, 0_u64)
+        gf.tensors.each do |name, info|
+          next unless name.starts_with?("blk.")
+          idx = name.split('.')[1].to_i? || next
+          next unless idx < num_transformer_layers
+          layer_bytes[idx] += info.byte_size
+        end
+        lm_head_bytes = gf.tensors["output.weight"].byte_size
+
+        gpu_layers = num_transformer_layers
+        # The reserve is not slack: it has to cover the KV cache, which grows with the prompt, plus
+        # the activation and GEMM workspaces. On Qwen3.8-27B the KV cache is ~131 KB per token
+        # (16 full-attention layers x 2 x 4 kv_heads x 256 x 4 B), so the 2048 MB default carries
+        # roughly an 8K context. Measured at 1024 MB the model places 56 layers and a 1024-token
+        # prefill finishes with only 198 MB free, so lowering it trades context for layers.
         reserve_mb = (ENV["SHAINET_GGUF_RESERVE_MB"]? || "2048").to_i
         if CUDA.fully_available?
           if info = CUDA.memory_info
-            free_mb = (info[:free] / (1024 * 1024)).to_i32
-            budget_mb = free_mb - reserve_mb
-            # Estimate ~237 MB per layer in native Q4_K/Q6_K + ~535 MB for lm_head
-            lm_head_mb = 535
-            per_layer_mb = 237
-            gpu_layers = Math.max(0, (budget_mb - lm_head_mb) // per_layer_mb)
-            gpu_layers = Math.min(gpu_layers, num_transformer_layers)
+            budget = (info[:free].to_i64) - (reserve_mb.to_i64 * 1024 * 1024)
+            # lm_head is always placed on the device, so it comes out of the budget first.
+            budget -= lm_head_bytes.to_i64
+            fits = 0
+            (num_transformer_layers - 1).downto(0) do |i|
+              break if budget < layer_bytes[i].to_i64
+              budget -= layer_bytes[i].to_i64
+              fits += 1
+            end
+            gpu_layers = fits
+          else
+            # No usable reading: placing everything on the device is the one choice that cannot
+            # be right for a model larger than any single card, and it fails as an OOM mid-load
+            # rather than as a slow run. Keep the whole trunk on the host instead.
+            Log.warn { "gguf: CUDA.memory_info unavailable; keeping all layers on the host" }
+            gpu_layers = 0
           end
         end
         cpu_layers = num_transformer_layers - gpu_layers
-        Log.info { "gguf: #{gpu_layers}/#{num_transformer_layers} layers on GPU, #{cpu_layers} on CPU (reserve #{reserve_mb} MB)" }
+        placed_mb = (layer_bytes[cpu_layers, gpu_layers].sum(0_u64) + (gpu_layers > 0 ? lm_head_bytes : 0_u64)) // (1024 * 1024)
+        Log.info { "gguf: #{gpu_layers}/#{num_transformer_layers} layers on GPU (#{placed_mb} MB placed), #{cpu_layers} on CPU (reserve #{reserve_mb} MB)" }
 
         # Bulk CUDA allocation: one malloc + one memcpy for ALL GPU tensors.
         # This replaces 416 individual malloc+memcpy calls (was 292s, Ollama does 7.58s).

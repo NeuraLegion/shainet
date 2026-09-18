@@ -310,10 +310,12 @@ module SHAInet
       end
 
       gate = Profile.measure("gdn.project") { project(normed, @w_gate, v_dim) }
-      seq.times do |t|
-        v_dim.times { |j| normed_mix[t, j] = normed_mix[t, j].to_f64 * silu(gate[t, j].to_f64) }
+      Profile.measure("gdn.gate_mul") do
+        seq.times do |t|
+          v_dim.times { |j| normed_mix[t, j] = normed_mix[t, j].to_f64 * silu(gate[t, j].to_f64) }
+        end
       end
-      project(normed_mix, @w_o, @d_model)
+      Profile.measure("gdn.out_proj") { project(normed_mix, @w_o, @d_model) }
     end
 
     # Move the block's projections to the device, optionally quantized.
@@ -441,14 +443,22 @@ module SHAInet
     end
 
     def forward(x : SimpleMatrix) : SimpleMatrix
-      h = x + mix(@norm1.forward(x))
-      h + ffn_forward(@norm2.forward(h))
+      n1 = Profile.measure("gdn.norm") { @norm1.forward(x) }
+      mixed = mix(n1)
+      h = Profile.measure("gdn.residual") { x + mixed }
+      n2 = Profile.measure("gdn.norm") { @norm2.forward(h) }
+      ff = ffn_forward(n2)
+      Profile.measure("gdn.residual") { h + ff }
     end
 
     # Single-token step, for decode. Same math, chunk 1.
     def forward_cached(x : SimpleMatrix) : SimpleMatrix
-      h = x + mix(@norm1.forward(x), chunk: 1)
-      h + ffn_forward(@norm2.forward(h))
+      n1 = Profile.measure("gdn.norm") { @norm1.forward(x) }
+      mixed = mix(n1, chunk: 1)
+      h = Profile.measure("gdn.residual") { x + mixed }
+      n2 = Profile.measure("gdn.norm") { @norm2.forward(h) }
+      ff = ffn_forward(n2)
+      Profile.measure("gdn.residual") { h + ff }
     end
 
     # Run the FFN via the device batch path when the weights are quantized, avoiding the
