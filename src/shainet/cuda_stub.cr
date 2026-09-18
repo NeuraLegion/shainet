@@ -174,6 +174,18 @@ module SHAInet
       false
     end
 
+    def gdn_gates(*args)
+      raise "CUDA disabled"
+    end
+
+    def short_conv(*args)
+      raise "CUDA disabled"
+    end
+
+    def gdn_mixer_kernels_available? : Bool
+      false
+    end
+
     def gemm_tn(*args)
       raise "CUDA disabled"
     end

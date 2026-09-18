@@ -332,6 +332,8 @@ module SHAInet
     @@gemv_q4k_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@gemv_q6k_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@dequant_q4k_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@gdn_gates_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Void)?
+    @@short_conv_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@dequant_q6k_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@add_bias_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Void)?
     @@pack_kv_heads_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Void)?
@@ -667,6 +669,45 @@ module SHAInet
       return false unless kernels_available?
       !load_kernel_proc("dequant_q4k_rows",
         Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)).nil?
+    end
+
+    # Gated DeltaNet per-head gates:
+    #   alpha[t,h] = exp(-exp(a_log[h]) * softplus(a_proj[t,h] + dt_bias[h]))
+    #   beta [t,h] = sigmoid(b_proj[t,h])
+    def gdn_gates(alpha : Pointer(Float32), beta : Pointer(Float32),
+                  a_proj : Pointer(Float32), b_proj : Pointer(Float32),
+                  a_log : Pointer(Float32), dt_bias : Pointer(Float32),
+                  seq : Int32, heads : Int32)
+      unless fn = @@gdn_gates_proc
+        @@gdn_gates_proc = fn = load_kernel_proc("gdn_gates",
+          Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32),
+               Pointer(Float32), Pointer(Float32), Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(alpha, beta, a_proj, b_proj, a_log, dt_bias, seq, heads)
+    end
+
+    # Short causal depthwise convolution, weight[c, 0] being the current position. `state` carries
+    # kernel-1 past positions and is updated in place, so a decode step continues the sequence.
+    def short_conv(dst : Pointer(Float32), src : Pointer(Float32), state : Pointer(Float32),
+                   w : Pointer(Float32), seq : Int32, channels : Int32, kernel : Int32)
+      unless fn = @@short_conv_proc
+        @@short_conv_proc = fn = load_kernel_proc("short_conv",
+          Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32),
+               Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(dst, src, state, w, seq, channels, kernel)
+    end
+
+    def gdn_mixer_kernels_available? : Bool
+      return false unless kernels_available?
+      return false if load_kernel_proc("gdn_gates",
+                        Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32),
+                             Pointer(Float32), Pointer(Float32), Int32, Int32, Void)).nil?
+      !load_kernel_proc("short_conv",
+        Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32),
+             Int32, Int32, Int32, Void)).nil?
     end
 
     def pack_kv_heads(dst : Pointer(Float32), src : Pointer(Float32), rows : Int32,

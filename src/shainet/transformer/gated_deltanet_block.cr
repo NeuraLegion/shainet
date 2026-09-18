@@ -87,6 +87,7 @@ module SHAInet
       # heads share one key head's state dimension.
       raise ArgumentError.new("num_v_heads (#{@num_v_heads}) must be divisible by num_k_heads (#{@num_k_heads})") unless @num_v_heads % @num_k_heads == 0
 
+      @eps = eps
       @norm1 = RMSNorm.new(@d_model, eps)
       @norm2 = RMSNorm.new(@d_model, eps)
       # PER-HEAD output norm, over head_v rather than over the concatenated v_dim.
@@ -216,12 +217,190 @@ module SHAInet
       @k_head_tiled ? h % @num_k_heads : h // heads_per_k
     end
 
+    # The whole mixer on the device: one upload in, one download out.
+    #
+    # The host path runs each projection through gpu_matmul, which syncs the result back after every
+    # one. At 288 matmuls per decode token those syncs measured 64 ms -- more than the matmul
+    # kernels themselves -- and the elementwise stages between them (conv, SiLU, the gates, the
+    # per-head norm, the output gate) each walked a SimpleMatrix element by element in Crystal.
+    #
+    # Returns nil when anything it needs is missing, so the host path above stays the reference
+    # implementation and a CPU-only build keeps working. SHAINET_GDN_RESIDENT=0 forces the host
+    # path, which is how a spec A/Bs the two in one process.
+    private def mix_resident(normed : SimpleMatrix, chunk : Int32) : SimpleMatrix?
+      return if ENV.fetch("SHAINET_GDN_RESIDENT", "1") == "0"
+      return unless CUDA.fully_available? && CUDA.gated_delta_rule_available?
+      return unless CUDA.gdn_mixer_kernels_available?
+      return unless chunk <= 1 || true # chunked and sequential agree; the kernel handles both
+      wq = @w_q
+      wk = @w_k
+      wv = @w_v
+      wg = @w_gate
+      wo = @w_o
+      wa = @w_alpha
+      wb = @w_beta
+      return unless wq.is_a?(QuantizedWeight) && wk.is_a?(QuantizedWeight) &&
+                    wv.is_a?(QuantizedWeight) && wg.is_a?(QuantizedWeight) &&
+                    wo.is_a?(QuantizedWeight)
+      return unless wa.is_a?(CudaMatrix) && wb.is_a?(CudaMatrix)
+
+      seq = normed.rows
+      k_dim = @num_k_heads * @head_k
+      v_dim = @num_v_heads * @head_v
+
+      xd = resident_buf(:x, seq, @d_model)
+      xd.raw_data.to_unsafe.copy_from(normed.data.to_unsafe, seq * @d_model)
+      xd.mark_host_modified!
+      xd.sync_to_device!("gdn_res_in")
+
+      qd = resident_buf(:q, seq, k_dim)
+      kd = resident_buf(:k, seq, k_dim)
+      vd = resident_buf(:v, seq, v_dim)
+      wq.gemv_into(xd, qd)
+      wk.gemv_into(xd, kd)
+      wv.gemv_into(xd, vd)
+
+      qc = resident_buf(:qc, seq, k_dim)
+      kc = resident_buf(:kc, seq, k_dim)
+      vc = resident_buf(:vc, seq, v_dim)
+      CUDA.short_conv(qc.device_ptr.not_nil!, qd.device_ptr.not_nil!,
+        conv_state_dev(:q, k_dim), conv_weight_dev(:q, @conv_q), seq, k_dim, @conv_kernel)
+      CUDA.short_conv(kc.device_ptr.not_nil!, kd.device_ptr.not_nil!,
+        conv_state_dev(:k, k_dim), conv_weight_dev(:k, @conv_k), seq, k_dim, @conv_kernel)
+      CUDA.short_conv(vc.device_ptr.not_nil!, vd.device_ptr.not_nil!,
+        conv_state_dev(:v, v_dim), conv_weight_dev(:v, @conv_v), seq, v_dim, @conv_kernel)
+      # mul_sigmoid(x, x) is x * sigmoid(x), i.e. SiLU in place.
+      CUDA.mul_sigmoid(qc.device_ptr.not_nil!, qc.device_ptr.not_nil!, seq * k_dim)
+      CUDA.mul_sigmoid(kc.device_ptr.not_nil!, kc.device_ptr.not_nil!, seq * k_dim)
+      CUDA.mul_sigmoid(vc.device_ptr.not_nil!, vc.device_ptr.not_nil!, seq * v_dim)
+      qc.mark_device_dirty!
+      kc.mark_device_dirty!
+      vc.mark_device_dirty!
+
+      ap = resident_buf(:ap, seq, @num_v_heads)
+      bp = resident_buf(:bp, seq, @num_v_heads)
+      h = (@cublas ||= CUDA.create_handle)
+      # ap is row-major [seq, heads], i.e. column-major [heads, seq]; w_alpha is row-major
+      # [d_model, heads], i.e. column-major [heads, d_model]. So this is a plain N,N product
+      # W'(heads x d_model) * x'(d_model x seq) -- NO transpose. Using the transposed form here
+      # silently mixed the head and model axes and moved the <|im_start|> logit by 4%.
+      CUDA.gemm(h, wa.device_ptr.not_nil!, xd.device_ptr.not_nil!,
+        ap.device_ptr.not_nil!, @num_v_heads, seq, @d_model, @num_v_heads, @d_model, @num_v_heads)
+      CUDA.gemm(h, wb.device_ptr.not_nil!, xd.device_ptr.not_nil!,
+        bp.device_ptr.not_nil!, @num_v_heads, seq, @d_model, @num_v_heads, @d_model, @num_v_heads)
+      ad = resident_buf(:ad, seq, @num_v_heads)
+      bd = resident_buf(:bd, seq, @num_v_heads)
+      CUDA.gdn_gates(ad.device_ptr.not_nil!, bd.device_ptr.not_nil!,
+        ap.device_ptr.not_nil!, bp.device_ptr.not_nil!,
+        gate_param_dev(:a_log, @a_log), gate_param_dev(:dt_bias, @dt_bias),
+        seq, @num_v_heads)
+
+      od = resident_buf(:od, seq, v_dim)
+      CUDA.gated_delta_rule(
+        qc.device_ptr.not_nil!, kc.device_ptr.not_nil!, vc.device_ptr.not_nil!,
+        ad.device_ptr.not_nil!, bd.device_ptr.not_nil!,
+        device_state.device_ptr.not_nil!, od.device_ptr.not_nil!,
+        seq, @num_v_heads, @num_k_heads, @head_k, @head_v, @num_v_heads // @num_k_heads,
+        (1.0 / Math.sqrt(@head_k.to_f64)).to_f32, @k_head_tiled)
+
+      # Per-head RMS norm with the shared [head_v] weight, in place.
+      CUDA.head_rmsnorm_rows(od.device_ptr.not_nil!, ssm_gamma_dev, seq, @num_v_heads,
+        @head_v, @eps.to_f32)
+
+      gd = resident_buf(:gd, seq, v_dim)
+      wg.gemv_into(xd, gd)
+      # swiglu_forward(dst, gate, up) = silu(gate) * up, which is the output gate exactly.
+      gated = resident_buf(:gated, seq, v_dim)
+      CUDA.swiglu_forward(gated.device_ptr.not_nil!, gd.device_ptr.not_nil!,
+        od.device_ptr.not_nil!, seq * v_dim)
+      gated.mark_device_dirty!
+
+      rd = resident_buf(:rd, seq, @d_model)
+      wo.gemv_into(gated, rd)
+      rd.sync_from_device!("gdn_res_out") if rd.device_dirty?
+
+      out = SimpleMatrix.new(seq, @d_model)
+      out.data.to_unsafe.copy_from(rd.raw_data.to_unsafe, seq * @d_model)
+      out
+    end
+
+    # Reusable device buffers, keyed by role and shape and SHARED across every block.
+    #
+    # Per-block buffers OOM'd: at a 301-token prefill one block's set is ~40 MB, and 40 device
+    # blocks wanted 1.6 GB on a card with ~1.5 GB spare. The blocks run strictly one at a time, so
+    # one set serves all of them, exactly like the GEMM dequant scratch.
+    @@res_bufs = {} of {Symbol, Int32, Int32} => CudaMatrix
+
+    private def resident_buf(role : Symbol, rows : Int32, cols : Int32) : CudaMatrix
+      @@res_bufs[{role, rows, cols}] ||= CudaMatrix.new(rows, cols)
+    end
+
+    def self.release_resident_buffers!
+      @@res_bufs.each_value(&.free!)
+      @@res_bufs.clear
+    end
+
+    @conv_state_devs = {} of Symbol => CudaMatrix
+    @conv_weight_devs = {} of Symbol => CudaMatrix
+    @gate_param_devs = {} of Symbol => CudaMatrix
+    @ssm_gamma_dev : CudaMatrix?
+    @cublas : CUDA::LibCUBLAS::Handle?
+    @eps : Float64 = 1e-6
+
+    private def conv_state_dev(role : Symbol, channels : Int32) : Pointer(Float32)
+      m = @conv_state_devs[role] ||= begin
+        c = CudaMatrix.new(channels, @conv_kernel - 1)
+        c.zero!
+        c.sync_to_device!("gdn_conv_state_init")
+        c
+      end
+      m.device_ptr.not_nil!
+    end
+
+    private def conv_weight_dev(role : Symbol, conv : ShortConv) : Pointer(Float32)
+      m = @conv_weight_devs[role] ||= begin
+        w = CudaMatrix.new(conv.channels, conv.kernel)
+        conv.channels.times { |c| conv.kernel.times { |j| w[c, j] = conv.weight[c, j] } }
+        w.mark_host_modified!
+        w.sync_to_device!("gdn_conv_w")
+        w
+      end
+      m.device_ptr.not_nil!
+    end
+
+    private def gate_param_dev(role : Symbol, src : Array(Float64)) : Pointer(Float32)
+      m = @gate_param_devs[role] ||= begin
+        v = CudaMatrix.new(1, src.size)
+        src.each_with_index { |x, i| v[0, i] = x.to_f32 }
+        v.mark_host_modified!
+        v.sync_to_device!("gdn_gate_param")
+        v
+      end
+      m.device_ptr.not_nil!
+    end
+
+    private def ssm_gamma_dev : Pointer(Float32)
+      m = @ssm_gamma_dev ||= begin
+        g = @out_norm.gamma
+        v = CudaMatrix.new(1, g.cols)
+        g.cols.times { |i| v[0, i] = g[0, i] }
+        v.mark_host_modified!
+        v.sync_to_device!("gdn_ssm_gamma")
+        v
+      end
+      m.device_ptr.not_nil!
+    end
+
     # The mixer: normed input in, [seq, d_model] out.
     #
     # `chunk` selects the operator form. Above 1 it uses the chunked parallel path for prefill;
     # at 1 it is the sequential recurrence, which is all decode can use anyway. Both produce the
     # same numbers, which is specified rather than assumed.
     def mix(normed : SimpleMatrix, chunk : Int32 = 64) : SimpleMatrix
+      if res = Profile.measure("gdn.resident") { mix_resident(normed, chunk) }
+        return res
+      end
+
       seq = normed.rows
       k_dim = @num_k_heads * @head_k
       v_dim = @num_v_heads * @head_v

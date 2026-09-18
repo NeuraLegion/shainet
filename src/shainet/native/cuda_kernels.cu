@@ -1831,6 +1831,100 @@ __global__ void gemv_q6k_kernel(const float* __restrict__ x,
     if (tid == 0) y[(long)m * N + n] = sdata[0];
 }
 
+// ---- Gated DeltaNet: gates and short causal convolution on the device ----
+//
+// These two are the last elementwise stages the mixer ran on the host. With them the whole mixer
+// stays device-resident, which removes a device->host sync after every projection: at 288 matmuls
+// per decode token those syncs measured 64 ms, more than the matmul kernels themselves.
+
+// alpha[t,h] = exp(-exp(a_log[h]) * softplus(a_proj[t,h] + dt_bias[h]))
+// beta [t,h] = sigmoid(b_proj[t,h])
+//
+// Both ranges are structural rather than clamped: alpha lands in (0,1) for any real a_log and any
+// dt > 0, which is what keeps the recurrent state bounded over a long context.
+__global__ void gdn_gates_kernel(float* __restrict__ alpha, float* __restrict__ beta,
+                                 const float* __restrict__ a_proj,
+                                 const float* __restrict__ b_proj,
+                                 const float* __restrict__ a_log,
+                                 const float* __restrict__ dt_bias,
+                                 int seq, int heads) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= seq * heads) return;
+    int h = idx % heads;
+
+    float x = a_proj[idx] + dt_bias[h];
+    // log1p(exp(x)), guarded: above ~20 the function is x to fp32 precision and exp overflows.
+    float sp = (x > 20.0f) ? x : log1pf(__expf(x));
+    alpha[idx] = __expf(-__expf(a_log[h]) * sp);
+    beta[idx] = 1.0f / (1.0f + __expf(-b_proj[idx]));
+}
+
+// Short causal depthwise convolution over the sequence, per channel.
+//
+// dst[t,c] = sum_j w[c,j] * x[t-j, c], reading the carried state for t-j < 0. w[c,0] is the current
+// position, matching ShortConv's tap order (the loader reverses GGUF's order once at load time).
+// The state is updated to the last kernel-1 positions so a decode step continues the sequence.
+__global__ void short_conv_kernel(float* __restrict__ dst, const float* __restrict__ src,
+                                  const float* __restrict__ state,
+                                  const float* __restrict__ w,
+                                  int seq, int channels, int kernel) {
+    int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= channels) return;
+
+    for (int t = 0; t < seq; ++t) {
+        float acc = 0.0f;
+        for (int j = 0; j < kernel; ++j) {
+            int back = t - j;
+            float v;
+            if (back >= 0) {
+                v = src[(long)back * channels + c];
+            } else {
+                int si = kernel - 1 + back;          // back is negative; -1 -> last state column
+                v = (si >= 0) ? state[(long)c * (kernel - 1) + si] : 0.0f;
+            }
+            acc += w[(long)c * kernel + j] * v;
+        }
+        dst[(long)t * channels + c] = acc;
+    }
+}
+
+// Roll the conv state forward to the last kernel-1 positions of this call. Split from the
+// convolution so the reads above are never racing these writes.
+__global__ void short_conv_state_kernel(float* __restrict__ state, const float* __restrict__ src,
+                                        int seq, int channels, int kernel) {
+    int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= channels) return;
+    int keep = kernel - 1;
+    float tmp[8]; // kernel is 4 for every shipped Gated DeltaNet; 8 is slack
+    if (keep > 8) return;
+    for (int i = 0; i < keep; ++i) {
+        int s = seq - keep + i;
+        // A call shorter than the window keeps part of the old state, otherwise history is lost.
+        tmp[i] = (s >= 0) ? src[(long)s * channels + c] : state[(long)c * keep + (keep + s)];
+    }
+    for (int i = 0; i < keep; ++i) state[(long)c * keep + i] = tmp[i];
+}
+
+void gdn_gates(float* alpha, float* beta, const float* a_proj, const float* b_proj,
+               const float* a_log, const float* dt_bias, int seq, int heads) {
+    int n = seq * heads;
+    if (n <= 0) return;
+    int threads = 256;
+    gdn_gates_kernel<<<(n + threads - 1) / threads, threads>>>(
+        alpha, beta, a_proj, b_proj, a_log, dt_bias, seq, heads);
+}
+
+void short_conv(float* dst, const float* src, float* state, const float* w,
+                int seq, int channels, int kernel) {
+    if (seq <= 0 || channels <= 0 || kernel <= 0) return;
+    int threads = 256;
+    int blocks = (channels + threads - 1) / threads;
+    short_conv_kernel<<<blocks, threads>>>(dst, src, state, w, seq, channels, kernel);
+    if (kernel > 1) {
+        short_conv_state_kernel<<<blocks, threads>>>(state, src, seq, channels, kernel);
+    }
+}
+
 // C entry points
 
 // ---- Dequantize a row range to fp32, so cuBLAS can do the GEMM ----
