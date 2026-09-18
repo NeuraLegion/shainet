@@ -145,6 +145,55 @@ module SHAInet
       end
     end
 
+    # ── One reusable device staging slot for weights that live on the HOST ──
+    #
+    # A host-resident layer is the right choice when DECODING: at one row it streams its weights at
+    # ~69 GB/s of DDR5 and the arithmetic is memory-bound, so the CPU keeps up. PREFILL is a
+    # different problem. At 256 rows the same projection is COMPUTE-bound -- ffn_gate plus ffn_up is
+    # 46 GFLOP per chunk -- and the CPU is about two orders of magnitude off the GPU there. Measured
+    # on a 301-token prefill: the 24 host-layer ffn_gate_up calls took 5520 ms of the 5590 ms spent
+    # in that phase, while the 104 device-layer calls took 73 ms between them.
+    #
+    # Above a batch threshold it is therefore cheaper to SEND the quantized weight to the card and
+    # use the dequant+cuBLAS path, because the upload amortizes over the rows: ffn_gate is 47.8 MB,
+    # roughly 4 ms over PCIe, against ~230 ms of CPU GEMM. One slot suffices because a staged weight
+    # is consumed before the next is staged, and the slot is grown rather than reallocated per call.
+    @@stage_ptr = Pointer(UInt8).null
+    @@stage_bytes = 0_u64
+
+    # Upload host-resident k-quant bytes into the staging slot and return a NON-OWNING view of them so
+    # the caller can use the device GEMM path. Returns nil when the weight cannot be staged, which
+    # leaves the host path as the fallback rather than turning it into a failure.
+    def self.stage_host(rows : Int32, cols : Int32, ggml_type : GGUF::GGMLType,
+                        host_data : Pointer(UInt8), byte_size : UInt64) : GGUFMatrix?
+      return unless CUDA.fully_available?
+      return unless ggml_type.q4_k? || ggml_type.q6_k?
+      if @@stage_bytes < byte_size
+        unless @@stage_ptr.null?
+          CUDA.free(@@stage_ptr.as(Pointer(Void)))
+          @@stage_ptr = Pointer(UInt8).null
+          @@stage_bytes = 0_u64
+        end
+        p = Pointer(Void).null
+        CUDA.malloc(pointerof(p), byte_size)
+        return if p.null?
+        @@stage_ptr = p.as(Pointer(UInt8))
+        @@stage_bytes = byte_size
+      end
+      CUDA.memcpy(@@stage_ptr.as(Pointer(Void)), host_data.as(Pointer(Void)),
+        byte_size, CUDA::MemcpyKind::HostToDevice)
+      view = allocate
+      view.init_view(rows, cols, ggml_type, @@stage_ptr, byte_size)
+      view
+    end
+
+    # Adopt an existing device pointer. @pool_owned suppresses the free, so the staging slot outlives
+    # every view taken of it.
+    protected def init_view(@rows : Int32, @cols : Int32, @ggml_type : GGUF::GGMLType,
+                            @dev_ptr : Pointer(UInt8), @byte_size : UInt64)
+      @pool_owned = true
+    end
+
     protected def self.scratch(floats : Int32) : Pointer(Float32)
       if @@scratch_floats < floats
         release_scratch!

@@ -34,12 +34,29 @@ module SHAInet
       gemv_into(x, result)
     end
 
+    # Above this many rows, send the weight to the GPU and compute there instead of on the CPU.
+    #
+    # At one row a host weight is the right call: it streams at DDR5 bandwidth and the CPU is not the
+    # limit. Past a few dozen rows the same projection becomes compute-bound and the CPU is ~100x off
+    # the GPU, so paying the PCIe upload to borrow the card wins by a wide margin.
+    #
+    # llama.cpp does the same thing and this is its threshold: its scheduler's offload_op hook moves
+    # an op whose weights live in a host buffer onto the GPU once the batch dimension reaches a
+    # hardcoded minimum of 32 rows.
+    BATCH_DEVICE_MIN_ROWS = 32
+
     def gemv_into(x : CudaMatrix, result : CudaMatrix) : CudaMatrix
       STDERR.puts "  [gguf host gemv] #{@ggml_type} M=#{x.rows} N=#{@cols} K=#{@rows} bytes=#{@byte_size}" if ENV["SHAINET_DEBUG"]? == "1"
 
       m = x.rows
       k = @rows
       n = @cols
+
+      if m >= BATCH_DEVICE_MIN_ROWS && ENV.fetch("SHAINET_HOST_OFFLOAD_OP", "1") != "0"
+        if staged = GGUFMatrix.stage_host(k, n, @ggml_type, @host_ptr, @byte_size)
+          return staged.gemm_into(x, result)
+        end
+      end
 
       # Read activation from device to host
       x_host = Pointer(Float32).malloc(m * k)
