@@ -1964,6 +1964,8 @@ __device__ __forceinline__ float iq4nl_val(int idx) {
 #define GGUF_IQ3XXS_BLOCK_BYTES 98
 #define GGUF_IQ3S_BLOCK_BYTES 110
 
+#include "iq_lowbit_kernels.cuh"
+
 __global__ void gemv_iq3xxs_kernel(const float* __restrict__ x,
                                    const unsigned char* __restrict__ w,
                                    float* __restrict__ y,
@@ -2678,6 +2680,102 @@ void dequant_iq3s_rows(const unsigned char* w, float* out, int row0, int n_rows,
     int by = nblocks < 32 ? nblocks : 32;
     dim3 grid(n_rows, by);
     dequant_iq3s_rows_kernel<<<grid, 256>>>(w, out, row0, n_rows, K);
+}
+
+void gemv_q2k_lb(const float* x, const unsigned char* w, float* y, int M, int N, int K) {
+    if (N <= 0 || M <= 0 || K <= 0) return;
+    int threads = 256;
+    int rows_per_block = threads / 32;
+    dim3 grid((N + rows_per_block - 1) / rows_per_block, M);
+    gemv_q2k_lb_kernel<<<grid, threads>>>(x, w, y, M, N, K);
+}
+
+void dequant_q2k_lb_rows(const unsigned char* w, float* out, int row0, int n_rows, int K) {
+    if (n_rows <= 0 || K <= 0) return;
+    int nblocks = K / GGUF_QK_K;
+    int by = nblocks < 32 ? nblocks : 32;
+    dim3 grid(n_rows, by);
+    dequant_q2k_lb_rows_kernel<<<grid, 256>>>(w, out, row0, n_rows, K);
+}
+
+void gemv_iq2xxs(const float* x, const unsigned char* w, float* y, int M, int N, int K) {
+    if (N <= 0 || M <= 0 || K <= 0) return;
+    int threads = 256;
+    int rows_per_block = threads / 32;
+    dim3 grid((N + rows_per_block - 1) / rows_per_block, M);
+    gemv_iq2xxs_kernel<<<grid, threads>>>(x, w, y, M, N, K);
+}
+
+void dequant_iq2xxs_rows(const unsigned char* w, float* out, int row0, int n_rows, int K) {
+    if (n_rows <= 0 || K <= 0) return;
+    int nblocks = K / GGUF_QK_K;
+    int by = nblocks < 32 ? nblocks : 32;
+    dim3 grid(n_rows, by);
+    dequant_iq2xxs_rows_kernel<<<grid, 256>>>(w, out, row0, n_rows, K);
+}
+
+void gemv_iq2xs(const float* x, const unsigned char* w, float* y, int M, int N, int K) {
+    if (N <= 0 || M <= 0 || K <= 0) return;
+    int threads = 256;
+    int rows_per_block = threads / 32;
+    dim3 grid((N + rows_per_block - 1) / rows_per_block, M);
+    gemv_iq2xs_kernel<<<grid, threads>>>(x, w, y, M, N, K);
+}
+
+void dequant_iq2xs_rows(const unsigned char* w, float* out, int row0, int n_rows, int K) {
+    if (n_rows <= 0 || K <= 0) return;
+    int nblocks = K / GGUF_QK_K;
+    int by = nblocks < 32 ? nblocks : 32;
+    dim3 grid(n_rows, by);
+    dequant_iq2xs_rows_kernel<<<grid, 256>>>(w, out, row0, n_rows, K);
+}
+
+void gemv_iq2s(const float* x, const unsigned char* w, float* y, int M, int N, int K) {
+    if (N <= 0 || M <= 0 || K <= 0) return;
+    int threads = 256;
+    int rows_per_block = threads / 32;
+    dim3 grid((N + rows_per_block - 1) / rows_per_block, M);
+    gemv_iq2s_kernel<<<grid, threads>>>(x, w, y, M, N, K);
+}
+
+void dequant_iq2s_rows(const unsigned char* w, float* out, int row0, int n_rows, int K) {
+    if (n_rows <= 0 || K <= 0) return;
+    int nblocks = K / GGUF_QK_K;
+    int by = nblocks < 32 ? nblocks : 32;
+    dim3 grid(n_rows, by);
+    dequant_iq2s_rows_kernel<<<grid, 256>>>(w, out, row0, n_rows, K);
+}
+
+void gemv_iq1m(const float* x, const unsigned char* w, float* y, int M, int N, int K) {
+    if (N <= 0 || M <= 0 || K <= 0) return;
+    int threads = 256;
+    int rows_per_block = threads / 32;
+    dim3 grid((N + rows_per_block - 1) / rows_per_block, M);
+    gemv_iq1m_kernel<<<grid, threads>>>(x, w, y, M, N, K);
+}
+
+void dequant_iq1m_rows(const unsigned char* w, float* out, int row0, int n_rows, int K) {
+    if (n_rows <= 0 || K <= 0) return;
+    int nblocks = K / GGUF_QK_K;
+    int by = nblocks < 32 ? nblocks : 32;
+    dim3 grid(n_rows, by);
+    dequant_iq1m_rows_kernel<<<grid, 256>>>(w, out, row0, n_rows, K);
+}
+
+void gemv_iq1s(const float* x, const unsigned char* w, float* y, int M, int N, int K) {
+    if (N <= 0 || M <= 0 || K <= 0) return;
+    int threads = 256;
+    int rows_per_block = threads / 32;
+    dim3 grid((N + rows_per_block - 1) / rows_per_block, M);
+    gemv_iq1s_kernel<<<grid, threads>>>(x, w, y, M, N, K);
+}
+
+void dequant_iq1s_rows(const unsigned char* w, float* out, int row0, int n_rows, int K) {
+    if (n_rows <= 0 || K <= 0) return;
+    int nblocks = K / GGUF_QK_K;
+    int by = nblocks < 32 ? nblocks : 32;
+    dim3 grid(n_rows, by);
+    dequant_iq1s_rows_kernel<<<grid, 256>>>(w, out, row0, n_rows, K);
 }
 
 void gemv_iq3xxs(const float* x, const unsigned char* w, float* y, int M, int N, int K) {

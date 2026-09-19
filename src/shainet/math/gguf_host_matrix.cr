@@ -24,12 +24,19 @@ module SHAInet
       end
     end
 
-    # Which types have a CPU GEMV, as opposed to merely a scalar reference dequant.
+    # Which types can live on the host at all.
     #
-    # Only the k-quants do. The i-quant formats have reference dequants (used for the embedding and
-    # for load-time transcoding) but no per-token CPU path, because dequantizing a codebook format per
-    # token would be far slower than the weight streaming it would be replacing.
+    # The k-quants have a fused AVX2 GEMV; everything else falls back to dequantizing a row through
+    # the scalar reference and dotting it, which is slower but correct. Both are far better than the
+    # alternative: placement is driven by free VRAM, so refusing a type here does not keep it off the
+    # host, it just turns a slow layer into a crash after the model has finished loading.
     def self.host_type_supported?(t : GGUF::GGMLType) : Bool
+      t.q4_k? || t.q6_k? || GGUF::BLOCK_SIZE.has_key?(t)
+    end
+
+    # Whether this type gets the fused AVX2 path rather than the reference fallback. Callers use it to
+    # decide placement PREFERENCE -- a host layer of i-quants is legal but worth avoiding.
+    def self.host_type_fast?(t : GGUF::GGMLType) : Bool
       t.q4_k? || t.q6_k?
     end
 
@@ -142,6 +149,36 @@ module SHAInet
         gemv_q4k_scalar(x, y, m, k, n)
       when .q6_k?
         gemv_q6k_scalar(x, y, m, k, n)
+      else
+        gemv_reference_scalar(x, y, m, k, n)
+      end
+    end
+
+    # GEMV for any type with a reference dequant, by dequantizing a row and dotting it.
+    #
+    # Slow on purpose-built terms -- it dequantizes the whole weight per call, where the k-quant paths
+    # fuse dequant into the dot product -- but it is the difference between a model that runs and one
+    # that raises. Layer placement is decided by free VRAM, so a long context or a busy card can push
+    # layers onto the host that hold ANY of the file's types; before this, such a layer crashed with
+    # "no CPU GEMV for IQ4_XS" after the model had already loaded.
+    #
+    # The row buffer is allocated once per call rather than per row, since n is in the thousands.
+    private def gemv_reference_scalar(x : Pointer(Float32), y : Pointer(Float32),
+                                      m : Int32, k : Int32, n : Int32)
+      bs, vals = GGUF::BLOCK_SIZE[@ggml_type]
+      bytes_per_row = ((k + vals - 1) // vals).to_i64 * bs
+      wbuf = Pointer(Float32).malloc(k)
+      t = @ggml_type.value.to_i32
+      n.times do |col|
+        unless CPUKernels.dequant_row(t, @host_ptr + col.to_i64 * bytes_per_row, wbuf, k)
+          raise ArgumentError.new("GGUFHostMatrix: no reference dequant for #{@ggml_type}")
+        end
+        m.times do |row|
+          xrow = x + row * k
+          dot = 0.0_f32
+          k.times { |i| dot += wbuf[i] * xrow[i] }
+          y[row * n + col] = dot
+        end
       end
     end
 

@@ -209,6 +209,54 @@ module SHAInet
       raise "CUDA not available"
     end
 
+    def gemv_q2k_lb(*args)
+      raise "CUDA disabled"
+    end
+
+    def dequant_q2k_lb_rows(*args)
+      raise "CUDA disabled"
+    end
+
+    def gemv_iq2xxs(*args)
+      raise "CUDA disabled"
+    end
+
+    def dequant_iq2xxs_rows(*args)
+      raise "CUDA disabled"
+    end
+
+    def gemv_iq2xs(*args)
+      raise "CUDA disabled"
+    end
+
+    def dequant_iq2xs_rows(*args)
+      raise "CUDA disabled"
+    end
+
+    def gemv_iq2s(*args)
+      raise "CUDA disabled"
+    end
+
+    def dequant_iq2s_rows(*args)
+      raise "CUDA disabled"
+    end
+
+    def gemv_iq1m(*args)
+      raise "CUDA disabled"
+    end
+
+    def dequant_iq1m_rows(*args)
+      raise "CUDA disabled"
+    end
+
+    def gemv_iq1s(*args)
+      raise "CUDA disabled"
+    end
+
+    def dequant_iq1s_rows(*args)
+      raise "CUDA disabled"
+    end
+
     def gemv_q4k(*args)
       raise "CUDA disabled"
     end

@@ -158,6 +158,20 @@ module SHAInet
       # bug the conv-window clearing above exists to prevent.
       @dev_state.try(&.free!)
       @dev_state = nil
+      # ...and so must the DEVICE conv windows, which are a separate set of buffers from the three
+      # host ones above. Missing them left exactly the hole this method exists to close, on the only
+      # path that actually runs when the stack is GPU-resident: clearing the host windows while the
+      # device kept its own. Symptom was a second prompt in the same process decoding an endless run
+      # of role tags instead of an answer, while the identical prompt in a fresh process answered
+      # correctly.
+      #
+      # Zeroed and re-uploaded rather than freed, because the shapes do not change between sequences
+      # and reallocating per sequence would churn device memory for nothing.
+      @conv_state_devs.each_value do |m|
+        m.zero!
+        m.mark_host_modified!
+        m.sync_to_device!("gdn_conv_state_clear")
+      end
     end
 
     # Bytes of recurrent state held, for comparison against a KV cache.

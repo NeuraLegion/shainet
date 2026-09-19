@@ -351,6 +351,18 @@ module SHAInet
     @@dequant_iq4xs_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@dequant_iq3s_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@dequant_iq3xxs_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@gemv_q2k_lb_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@dequant_q2k_lb_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@gemv_iq2xxs_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@dequant_iq2xxs_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@gemv_iq2xs_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@dequant_iq2xs_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@gemv_iq2s_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@dequant_iq2s_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@gemv_iq1m_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@dequant_iq1m_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@gemv_iq1s_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@dequant_iq1s_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@gemv_q4k_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@gemv_q6k_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@dequant_q4k_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
@@ -725,6 +737,126 @@ module SHAInet
                             row0 : Int32, n_rows : Int32, k : Int32)
       unless fn = @@dequant_iq3xxs_rows_proc
         @@dequant_iq3xxs_rows_proc = fn = load_kernel_proc("dequant_iq3xxs_rows",
+          Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(w, dst, row0, n_rows, k)
+    end
+
+    def gemv_q2k_lb(x : Pointer(Float32), w : Pointer(UInt8), y : Pointer(Float32),
+                    m : Int32, n : Int32, k_dim : Int32)
+      unless fn = @@gemv_q2k_lb_proc
+        @@gemv_q2k_lb_proc = fn = load_kernel_proc("gemv_q2k_lb",
+          Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(x, w, y, m, n, k_dim)
+    end
+
+    def dequant_q2k_lb_rows(w : Pointer(UInt8), dst : Pointer(Float32),
+                            row0 : Int32, n_rows : Int32, k : Int32)
+      unless fn = @@dequant_q2k_lb_rows_proc
+        @@dequant_q2k_lb_rows_proc = fn = load_kernel_proc("dequant_q2k_lb_rows",
+          Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(w, dst, row0, n_rows, k)
+    end
+
+    def gemv_iq2xxs(x : Pointer(Float32), w : Pointer(UInt8), y : Pointer(Float32),
+                    m : Int32, n : Int32, k_dim : Int32)
+      unless fn = @@gemv_iq2xxs_proc
+        @@gemv_iq2xxs_proc = fn = load_kernel_proc("gemv_iq2xxs",
+          Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(x, w, y, m, n, k_dim)
+    end
+
+    def dequant_iq2xxs_rows(w : Pointer(UInt8), dst : Pointer(Float32),
+                            row0 : Int32, n_rows : Int32, k : Int32)
+      unless fn = @@dequant_iq2xxs_rows_proc
+        @@dequant_iq2xxs_rows_proc = fn = load_kernel_proc("dequant_iq2xxs_rows",
+          Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(w, dst, row0, n_rows, k)
+    end
+
+    def gemv_iq2xs(x : Pointer(Float32), w : Pointer(UInt8), y : Pointer(Float32),
+                   m : Int32, n : Int32, k_dim : Int32)
+      unless fn = @@gemv_iq2xs_proc
+        @@gemv_iq2xs_proc = fn = load_kernel_proc("gemv_iq2xs",
+          Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(x, w, y, m, n, k_dim)
+    end
+
+    def dequant_iq2xs_rows(w : Pointer(UInt8), dst : Pointer(Float32),
+                           row0 : Int32, n_rows : Int32, k : Int32)
+      unless fn = @@dequant_iq2xs_rows_proc
+        @@dequant_iq2xs_rows_proc = fn = load_kernel_proc("dequant_iq2xs_rows",
+          Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(w, dst, row0, n_rows, k)
+    end
+
+    def gemv_iq2s(x : Pointer(Float32), w : Pointer(UInt8), y : Pointer(Float32),
+                  m : Int32, n : Int32, k_dim : Int32)
+      unless fn = @@gemv_iq2s_proc
+        @@gemv_iq2s_proc = fn = load_kernel_proc("gemv_iq2s",
+          Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(x, w, y, m, n, k_dim)
+    end
+
+    def dequant_iq2s_rows(w : Pointer(UInt8), dst : Pointer(Float32),
+                          row0 : Int32, n_rows : Int32, k : Int32)
+      unless fn = @@dequant_iq2s_rows_proc
+        @@dequant_iq2s_rows_proc = fn = load_kernel_proc("dequant_iq2s_rows",
+          Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(w, dst, row0, n_rows, k)
+    end
+
+    def gemv_iq1m(x : Pointer(Float32), w : Pointer(UInt8), y : Pointer(Float32),
+                  m : Int32, n : Int32, k_dim : Int32)
+      unless fn = @@gemv_iq1m_proc
+        @@gemv_iq1m_proc = fn = load_kernel_proc("gemv_iq1m",
+          Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(x, w, y, m, n, k_dim)
+    end
+
+    def dequant_iq1m_rows(w : Pointer(UInt8), dst : Pointer(Float32),
+                          row0 : Int32, n_rows : Int32, k : Int32)
+      unless fn = @@dequant_iq1m_rows_proc
+        @@dequant_iq1m_rows_proc = fn = load_kernel_proc("dequant_iq1m_rows",
+          Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(w, dst, row0, n_rows, k)
+    end
+
+    def gemv_iq1s(x : Pointer(Float32), w : Pointer(UInt8), y : Pointer(Float32),
+                  m : Int32, n : Int32, k_dim : Int32)
+      unless fn = @@gemv_iq1s_proc
+        @@gemv_iq1s_proc = fn = load_kernel_proc("gemv_iq1s",
+          Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(x, w, y, m, n, k_dim)
+    end
+
+    def dequant_iq1s_rows(w : Pointer(UInt8), dst : Pointer(Float32),
+                          row0 : Int32, n_rows : Int32, k : Int32)
+      unless fn = @@dequant_iq1s_rows_proc
+        @@dequant_iq1s_rows_proc = fn = load_kernel_proc("dequant_iq1s_rows",
           Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
       end
       raise "CUDA kernels not available" unless fn

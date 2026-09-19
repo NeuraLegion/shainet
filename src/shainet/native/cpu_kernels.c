@@ -852,6 +852,30 @@ static void dequant_iq1m_row_f32(const uint8_t *w, float *out, int K) {
 
 // One entry point for every type, so the loader can transcode anything without knowing the formats.
 // Returns 0 when the type is not handled. `t` is the GGUF ggml_type number.
+/* IQ1_S: 2 + 32 + 16 = 50 bytes. Scale, three high index bits per group and the delta sign all
+ * share one uint16 per 32-value sub-block. Codebook entries are SIGNED and every value carries a
+ * +/- delta, unlike the IQ2 family which stores magnitudes plus a sign mask. */
+static void dequant_iq1s_row_f32(const uint8_t *w, float *out, int K) {
+    const int nb = K / 256;
+    for (int i = 0; i < nb; ++i) {
+        const uint8_t *blk = w + (long long)i * 50;
+        const float d = f16_to_f32(*(const uint16_t *)(blk + 0));
+        const uint8_t *qs = blk + 2;
+        const uint16_t *qh = (const uint16_t *)(blk + 2 + 32);
+        float *y = out + (long long)i * 256;
+        for (int ib = 0; ib < 8; ++ib) {
+            const uint16_t h = qh[ib];
+            const float dl = d * (float)(2 * ((h >> 12) & 7) + 1);
+            const float delta = (h & 0x8000) ? -SHAINET_IQ1S_DELTA : SHAINET_IQ1S_DELTA;
+            for (int l = 0; l < 4; ++l) {
+                const int8_t *grid = (const int8_t *)(shainet_iq1s_grid + (qs[4 * ib + l] | (((h >> (3 * l)) & 7) << 8)));
+                for (int j = 0; j < 8; ++j) y[j] = dl * (grid[j] + delta);
+                y += 8;
+            }
+        }
+    }
+}
+
 int dequant_any_row(int t, const uint8_t *w, float *out, int K) {
     switch (t) {
     case 10: dequant_q2k_row_f32(w, out, K); return 1;    // Q2_K
@@ -860,6 +884,7 @@ int dequant_any_row(int t, const uint8_t *w, float *out, int K) {
     case 16: dequant_iq2xxs_row_f32(w, out, K); return 1; // IQ2_XXS
     case 17: dequant_iq2xs_row_f32(w, out, K); return 1;  // IQ2_XS
     case 18: dequant_iq3xxs_row_f32(w, out, K); return 1; // IQ3_XXS
+    case 19: dequant_iq1s_row_f32(w, out, K); return 1;   // IQ1_S
     case 21: dequant_iq3s_row_f32(w, out, K); return 1;   // IQ3_S
     case 22: dequant_iq2s_row_f32(w, out, K); return 1;   // IQ2_S
     case 23: dequant_iq4xs_row_f32(w, out, K); return 1;  // IQ4_XS

@@ -41,11 +41,16 @@ describe "hybrid layer stack" do
   # KNOWN LIMITATION, pinned so it cannot go quiet.
   #
   # @transformer_layers is typed Array(TransformerLayer | LlamaLayer) and read from 24 sites,
-  # several on the hot inference path, so widening that union is deferred. The consequence is
-  # that Network#clear_cache! does not reach a gated_deltanet block. This example asserts the
-  # CURRENT behaviour, so whoever widens the union sees it fail and updates it deliberately
-  # rather than discovering the gap from wrong output.
-  it "is NOT reached by Network#clear_cache! yet, so the block must be cleared directly" do
+  # several on the hot inference path, so widening that union is still deferred. Network#clear_cache!
+  # therefore reaches these blocks through @hidden_layers instead.
+  #
+  # This example previously asserted the OPPOSITE -- that a network-level clear did NOT reach the
+  # block -- on the stated grounds that no loader could build a hybrid stack from a checkpoint. GGUF
+  # support for Qwen3.5/3.8 made that false, and the gap became a real bug: recurrent state is not a
+  # stale prefix that gets overwritten, it feeds the first token of the next sequence, so a second
+  # prompt in the same process decoded an immediate end-of-turn and then empty im_start/im_end pairs
+  # forever while the same prompt in a fresh process answered correctly.
+  it "is reached by Network#clear_cache!, so a second sequence starts clean" do
     net = SHAInet::Network.new
     net.add_layer("gated_deltanet", 16, num_heads: 4, ff_hidden: 32, num_kv_heads: 2, head_dim: 4)
     block = net.hidden_layers.find!(&.is_a?(SHAInet::GatedDeltaNetBlock))
@@ -72,15 +77,15 @@ describe "hybrid layer stack" do
     net.clear_cache!
     after_net_clear = block.forward(x)
 
-    # State survived the network-level clear, so the outputs differ.
-    diff = 0.0
-    4.times { |t| 16.times { |j| diff += (after_net_clear[t, j] - first[t, j]).abs } }
-    diff.should be > 1e-6
+    # The network-level clear reaches the block, so the second pass reproduces the first exactly.
+    4.times { |t| 16.times { |j| after_net_clear[t, j].should be_close(first[t, j], 1e-6) } }
 
-    # The block's own clear DOES work, which is the documented workaround.
-    block.clear_cache!
-    after_block_clear = block.forward(x)
-    4.times { |t| 16.times { |j| after_block_clear[t, j].should be_close(first[t, j], 1e-6) } }
+    # Counter-check, so the assertion above cannot pass vacuously on a state-independent block:
+    # running again WITHOUT clearing must differ.
+    dirty = block.forward(x)
+    diff = 0.0
+    4.times { |t| 16.times { |j| diff += (dirty[t, j] - first[t, j]).abs } }
+    diff.should be > 1e-6
   end
 
   it "a linear layer's whole state is worth only a few hundred positions of one KV cache" do

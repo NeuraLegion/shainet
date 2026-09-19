@@ -16,11 +16,21 @@ MODEL_IQ = "/home/unshadow/models/Qwen3.8-27B-GSQ-RCO-IQ3_S.gguf"
 MODEL_TRUSTED = "/home/unshadow/.ollama/models/blobs/" \
                 "sha256-f5f1dd8920d417aac2718b0bda3403da274301efdd6760b4f0f4b864ff2ad57d"
 
-# type => {block bytes, reference dequant}
-IQ_CASES = {
+# Block sizes as ggml-common.h declares them, for every type that has a device kernel.
+#
+# This list is a CHECK, not the source of what gets tested: the kernel comparison below enumerates
+# whatever the model file actually contains and asserts a kernel exists for each. Writing the list by
+# hand is how two broken types went unnoticed once already.
+IQ_BLOCK_BYTES = {
   SHAInet::GGUF::GGMLType::IQ4_XS  => 136,
   SHAInet::GGUF::GGMLType::IQ3_S   => 110,
   SHAInet::GGUF::GGMLType::IQ3_XXS => 98,
+  SHAInet::GGUF::GGMLType::IQ2_S   => 82,
+  SHAInet::GGUF::GGMLType::IQ2_XS  => 74,
+  SHAInet::GGUF::GGMLType::IQ2_XXS => 66,
+  SHAInet::GGUF::GGMLType::IQ1_M   => 56,
+  SHAInet::GGUF::GGMLType::IQ1_S   => 50,
+  SHAInet::GGUF::GGMLType::Q2_K    => 84,
 }
 
 describe "i-quant kernels" do
@@ -96,23 +106,34 @@ describe "i-quant kernels" do
   end
 
   it "declares the block sizes ggml-common.h specifies" do
-    IQ_CASES.each do |t, bytes|
+    IQ_BLOCK_BYTES.each do |t, bytes|
       bs, vals = SHAInet::GGUF::BLOCK_SIZE[t]
       bs.should eq bytes
       vals.should eq 256
     end
   end
 
-  IQ_CASES.each do |type, block_bytes|
-    it "computes #{type} the same on the GPU as the scalar reference, on real weights" do
-      pending! "CUDA unavailable" unless SHAInet::CUDA.fully_available?
-      pending! "CPU kernels unavailable" unless SHAInet::CPUKernels.available?
-      pending! "model not present" unless File.exists?(MODEL_IQ)
+  it "computes every kernel-served type in the file the same on the GPU as the scalar reference" do
+    pending! "CUDA unavailable" unless SHAInet::CUDA.fully_available?
+    pending! "CPU kernels unavailable" unless SHAInet::CPUKernels.available?
+    pending! "model not present" unless File.exists?(MODEL_IQ)
 
-      gf = SHAInet::GGUF::File.open(MODEL_IQ)
-      found = gf.tensors.find { |_, i| i.type == type }
-      pending! "no #{type} tensor in the model" unless found
-      info = found.not_nil![1]
+    gf = SHAInet::GGUF::File.open(MODEL_IQ)
+    floats = {SHAInet::GGUF::GGMLType::F32, SHAInet::GGUF::GGMLType::F16,
+              SHAInet::GGUF::GGMLType::BF16}
+    present = {} of SHAInet::GGUF::GGMLType => SHAInet::GGUF::TensorInfo
+    gf.tensors.each do |nm, i|
+      next unless nm.starts_with?("blk.") && nm.ends_with?(".weight")
+      next if floats.includes?(i.type)
+      present[i.type] ||= i
+    end
+    present.size.should be > 4
+
+    present.each do |type, info|
+      # Every quantized type the file carries must have BOTH a device kernel and a block size on
+      # record. A type reaching this point without one is a loader that will fall back silently.
+      SHAInet::GGUFMatrix.device_type_supported?(type).should be_true
+      block_bytes = IQ_BLOCK_BYTES[type]? || SHAInet::GGUF::BLOCK_SIZE[type][0]
 
       k = info.shape[0].to_i32
       n = info.shape[1].to_i32
