@@ -268,10 +268,12 @@ module SHAInet
           rows = @cols - row0
           rows = chunk if rows > chunk
           case @ggml_type
-          when .iq4_xs? then CUDA.dequant_iq4xs_rows(@dev_ptr, buf, row0, rows, k)
-          when .q4_k?   then CUDA.dequant_q4k_rows(@dev_ptr, buf, row0, rows, k)
-          when .q6_k?   then CUDA.dequant_q6k_rows(@dev_ptr, buf, row0, rows, k)
-          else               raise ArgumentError.new("unsupported GGUF type for gemm: #{@ggml_type}")
+          when .iq4_xs?  then CUDA.dequant_iq4xs_rows(@dev_ptr, buf, row0, rows, k)
+          when .iq3_s?   then CUDA.dequant_iq3s_rows(@dev_ptr, buf, row0, rows, k)
+          when .iq3_xxs? then CUDA.dequant_iq3xxs_rows(@dev_ptr, buf, row0, rows, k)
+          when .q4_k?    then CUDA.dequant_q4k_rows(@dev_ptr, buf, row0, rows, k)
+          when .q6_k?    then CUDA.dequant_q6k_rows(@dev_ptr, buf, row0, rows, k)
+          else                raise ArgumentError.new("unsupported GGUF type for gemm: #{@ggml_type}")
           end
           CUDA.gemm_tn(handle, buf, xp, rp + row0,
             rows, x.rows, k, k, k, @cols)

@@ -349,6 +349,8 @@ module SHAInet
     @@gemv_iq3xxs_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@gemv_iq4xs_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@dequant_iq4xs_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@dequant_iq3s_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@dequant_iq3xxs_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@gemv_q4k_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@gemv_q6k_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@dequant_q4k_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
@@ -703,6 +705,26 @@ module SHAInet
                            row0 : Int32, n_rows : Int32, k : Int32)
       unless fn = @@dequant_iq4xs_rows_proc
         @@dequant_iq4xs_rows_proc = fn = load_kernel_proc("dequant_iq4xs_rows",
+          Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(w, dst, row0, n_rows, k)
+    end
+
+    def dequant_iq3s_rows(w : Pointer(UInt8), dst : Pointer(Float32),
+                          row0 : Int32, n_rows : Int32, k : Int32)
+      unless fn = @@dequant_iq3s_rows_proc
+        @@dequant_iq3s_rows_proc = fn = load_kernel_proc("dequant_iq3s_rows",
+          Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(w, dst, row0, n_rows, k)
+    end
+
+    def dequant_iq3xxs_rows(w : Pointer(UInt8), dst : Pointer(Float32),
+                            row0 : Int32, n_rows : Int32, k : Int32)
+      unless fn = @@dequant_iq3xxs_rows_proc
+        @@dequant_iq3xxs_rows_proc = fn = load_kernel_proc("dequant_iq3xxs_rows",
           Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
       end
       raise "CUDA kernels not available" unless fn

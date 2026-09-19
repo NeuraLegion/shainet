@@ -2133,6 +2133,84 @@ __global__ void dequant_iq4xs_rows_kernel(const unsigned char* __restrict__ w,
     }
 }
 
+// Row-chunk dequant for the batched path, mirroring the two IQ3 GEMV kernels.
+//
+// Prefill multiplies with cuBLAS rather than a GEMV, which needs the weight as fp32, so every type
+// that has a GEMV also needs one of these or a long prompt dies where a one-token prompt works. A
+// 256-value block is 32 groups of 8, so one thread per group covers a block exactly -- the same
+// decomposition the GEMV uses, just writing values out instead of accumulating a dot product.
+__global__ void dequant_iq3xxs_rows_kernel(const unsigned char* __restrict__ w,
+                                          float* __restrict__ out,
+                                          int row0, int rows, int K) {
+    const int r = blockIdx.x;
+    if (r >= rows) return;
+    const int nblocks = K / GGUF_QK_K;
+    const long row_bytes = (long)nblocks * GGUF_IQ3XXS_BLOCK_BYTES;
+    const unsigned char* wrow = w + (long)(row0 + r) * row_bytes;
+    float* orow = out + (long)r * K;
+
+    for (int b = blockIdx.y; b < nblocks; b += gridDim.y) {
+        const unsigned char* block = wrow + (long)b * GGUF_IQ3XXS_BLOCK_BYTES;
+        const float d = __half2float(*((const __half*)(block + 0)));
+        const unsigned char* qs = block + 2;
+        const unsigned char* sas = qs + 64;
+        for (int t = threadIdx.x; t < 32; t += blockDim.x) {
+            const int ib32 = t >> 2;
+            const int lpos = t & 3;
+            unsigned int aux32;
+            memcpy(&aux32, sas + 4 * ib32, sizeof(unsigned int));
+            const float db = d * (0.5f + (aux32 >> 28)) * 0.5f;
+            const unsigned char signs = d_ksigns_iq2xs[(aux32 >> (7 * lpos)) & 127];
+            const unsigned char* g1 = (const unsigned char*)(d_iq3xxs_grid + qs[8 * ib32 + 2 * lpos + 0]);
+            const unsigned char* g2 = (const unsigned char*)(d_iq3xxs_grid + qs[8 * ib32 + 2 * lpos + 1]);
+            float* op = orow + b * GGUF_QK_K + ib32 * 32 + lpos * 8;
+            #pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                op[j + 0] = db * (float)g1[j] * ((signs & d_kmask_iq2xs[j + 0]) ? -1.0f : 1.0f);
+                op[j + 4] = db * (float)g2[j] * ((signs & d_kmask_iq2xs[j + 4]) ? -1.0f : 1.0f);
+            }
+        }
+    }
+}
+
+__global__ void dequant_iq3s_rows_kernel(const unsigned char* __restrict__ w,
+                                        float* __restrict__ out,
+                                        int row0, int rows, int K) {
+    const int r = blockIdx.x;
+    if (r >= rows) return;
+    const int nblocks = K / GGUF_QK_K;
+    const long row_bytes = (long)nblocks * GGUF_IQ3S_BLOCK_BYTES;
+    const unsigned char* wrow = w + (long)(row0 + r) * row_bytes;
+    float* orow = out + (long)r * K;
+
+    for (int b = blockIdx.y; b < nblocks; b += gridDim.y) {
+        const unsigned char* block = wrow + (long)b * GGUF_IQ3S_BLOCK_BYTES;
+        const float d = __half2float(*((const __half*)(block + 0)));
+        const unsigned char* qs = block + 2;
+        const unsigned char* qh = block + 2 + 64;
+        const unsigned char* signs = block + 2 + 64 + 8;
+        const unsigned char* scales = block + 2 + 64 + 8 + 32;
+        for (int t = threadIdx.x; t < 32; t += blockDim.x) {
+            const int ib32 = t >> 2;
+            const int lpos = t & 3;
+            const int ls = (ib32 & 1) ? (scales[ib32 >> 1] >> 4) : (scales[ib32 >> 1] & 0xf);
+            const float db = d * (1 + 2 * ls);
+            const unsigned char sg = signs[4 * ib32 + lpos];
+            const unsigned char qhb = qh[ib32];
+            const int i1 = qs[8 * ib32 + 2 * lpos + 0] | ((qhb << (8 - 2 * lpos)) & 256);
+            const int i2 = qs[8 * ib32 + 2 * lpos + 1] | ((qhb << (7 - 2 * lpos)) & 256);
+            const unsigned char* g1 = (const unsigned char*)(d_iq3s_grid + i1);
+            const unsigned char* g2 = (const unsigned char*)(d_iq3s_grid + i2);
+            float* op = orow + b * GGUF_QK_K + ib32 * 32 + lpos * 8;
+            #pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                op[j + 0] = db * (float)g1[j] * ((sg & d_kmask_iq2xs[j + 0]) ? -1.0f : 1.0f);
+                op[j + 4] = db * (float)g2[j] * ((sg & d_kmask_iq2xs[j + 4]) ? -1.0f : 1.0f);
+            }
+        }
+    }
+}
+
 __global__ void gemv_q4k_kernel(const float* __restrict__ x,
                                 const unsigned char* __restrict__ w,
                                 float* __restrict__ y,
@@ -2552,6 +2630,22 @@ void dequant_iq4xs_rows(const unsigned char* w, float* out, int row0, int n_rows
     int by = nblocks < 32 ? nblocks : 32;
     dim3 grid(n_rows, by);
     dequant_iq4xs_rows_kernel<<<grid, 256>>>(w, out, row0, n_rows, K);
+}
+
+void dequant_iq3xxs_rows(const unsigned char* w, float* out, int row0, int n_rows, int K) {
+    if (n_rows <= 0 || K <= 0) return;
+    int nblocks = K / GGUF_QK_K;
+    int by = nblocks < 32 ? nblocks : 32;
+    dim3 grid(n_rows, by);
+    dequant_iq3xxs_rows_kernel<<<grid, 256>>>(w, out, row0, n_rows, K);
+}
+
+void dequant_iq3s_rows(const unsigned char* w, float* out, int row0, int n_rows, int K) {
+    if (n_rows <= 0 || K <= 0) return;
+    int nblocks = K / GGUF_QK_K;
+    int by = nblocks < 32 ? nblocks : 32;
+    dim3 grid(n_rows, by);
+    dequant_iq3s_rows_kernel<<<grid, 256>>>(w, out, row0, n_rows, K);
 }
 
 void gemv_iq3xxs(const float* x, const unsigned char* w, float* y, int M, int N, int K) {

@@ -199,6 +199,16 @@ module SHAInet
       raise "CUDA not available"
     end
 
+    def dequant_iq3s_rows(w : Pointer(UInt8), out_ptr : Pointer(Float32),
+                          row0 : Int32, rows : Int32, k : Int32)
+      raise "CUDA not available"
+    end
+
+    def dequant_iq3xxs_rows(w : Pointer(UInt8), out_ptr : Pointer(Float32),
+                            row0 : Int32, rows : Int32, k : Int32)
+      raise "CUDA not available"
+    end
+
     def gemv_q4k(*args)
       raise "CUDA disabled"
     end

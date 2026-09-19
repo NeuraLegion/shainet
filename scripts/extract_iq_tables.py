@@ -29,11 +29,20 @@ WANT = [
     ("uint64_t", "iq1s_grid", 2048, "NGRID_IQ1S"),
 ]
 
-# Only the grids the CUDA kernels actually index need a device copy. The IQ2 grids are used by the
-# load-time transcode, which runs on the CPU.
+# Every grid a CUDA kernel indexes needs a device copy. That is now all of them: the low-bit tail
+# (Q2_K, IQ2_XXS, IQ2_XS, IQ2_S, IQ1_M) is served by native kernels rather than transcoded on the
+# CPU, because re-quantizing those weights to symmetric 4-bit measured 194% output error on a
+# full-attention block whose sigmoid gate sits near saturation.
+#
+# Total constant-memory footprint is about 33 KB against CUDA's 64 KB window, dominated by
+# iq1s_grid at 16 KB and iq2s_grid at 8 KB.
 CU_WANT = [
     ("uint32_t", "iq3xxs_grid", 256),
     ("uint32_t", "iq3s_grid", 512),
+    ("uint64_t", "iq2xxs_grid", 256),
+    ("uint64_t", "iq2xs_grid", 512),
+    ("uint64_t", "iq2s_grid", 1024),
+    ("uint64_t", "iq1s_grid", 2048),
     ("uint8_t", "ksigns_iq2xs", 128),
     ("uint8_t", "kmask_iq2xs", 8),
 ]

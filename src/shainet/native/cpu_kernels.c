@@ -700,7 +700,11 @@ static void dequant_iq2xxs_row_f32(const uint8_t *w, float *out, int K) {
         float *y = out + (long long)i * 256;
         for (int ib32 = 0; ib32 < 8; ++ib32) {
             uint32_t aux32[2];
-            memcpy(aux32, qs + 4 * ib32, 2 * sizeof(uint32_t));
+            /* Each sub-block consumes EIGHT bytes: ggml walks this with a uint16_t* advanced by 4,
+             * which is 8 bytes, and copies 8 bytes out of it. Advancing by 4 bytes here instead made
+             * consecutive sub-blocks overlap, which cost nothing at ib32 == 0 and corrupted every
+             * one after it -- measured as cosine 0.117 against the same tensor in a Q4_K build. */
+            memcpy(aux32, qs + 8 * ib32, 2 * sizeof(uint32_t));
             const uint8_t *aux8 = (const uint8_t *)aux32;
             const float db = d * (0.5f + (aux32[1] >> 28)) * 0.25f;
             for (int l = 0; l < 4; ++l) {
@@ -722,7 +726,11 @@ static void dequant_iq2xs_row_f32(const uint8_t *w, float *out, int K) {
         const uint8_t *blk = w + (long long)i * 74;
         const float d = f16_to_f32(*(const uint16_t *)(blk + 0));
         const uint16_t *qs = (const uint16_t *)(blk + 2);
-        const uint8_t *scales = blk + 2 + 32;
+        /* qs is QK_K/8 == 32 uint16, so SIXTY-FOUR bytes; scales follow at 2 + 64. Reading them at
+         * 2 + 32 landed in the middle of qs and produced plausible-looking but wrong scales --
+         * cosine 0.780 against the same tensor in a Q4_K build, high enough to look like ordinary
+         * low-bit quantization loss rather than a bug. */
+        const uint8_t *scales = blk + 2 + 64;
         float *y = out + (long long)i * 256;
         for (int ib32 = 0; ib32 < 8; ++ib32) {
             float db[2];

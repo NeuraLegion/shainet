@@ -216,6 +216,46 @@ module SHAInet
       end
     end
 
+    # Activation trace file, or nil. Set SHAINET_LAYER_TRACE to a path to enable.
+    @@layer_trace_path : String? = begin
+      v = ENV["SHAINET_LAYER_TRACE"]?
+      v && !v.empty? ? v : nil
+    end
+
+    # Write one line per transformer block describing the activation leaving it.
+    #
+    # This exists for a specific failure mode: a stack where every weight passes its own numerical
+    # check and the assembled model still does not predict. Component tests cannot find that, because
+    # the fault is then in how the pieces are wired rather than in any one piece. Tracing the
+    # activation through two builds of the SAME checkpoint and comparing block by block localizes the
+    # divergence to one layer index, which maps to a layer type and a set of tensor types.
+    #
+    # It reads the activation back without clearing dev_act, so the device chain continues and a
+    # traced run follows the same path as an untraced one.
+    private def trace_layer_activation(layer_idx : Int32, l, matrix, dev_act : CudaMatrix?)
+      path = @@layer_trace_path
+      return unless path
+      act = (da = dev_act) ? device_row_to_host(da) : matrix.as?(SimpleMatrix)
+      return unless act
+      row = act.rows - 1
+      norm = 0.0
+      act.cols.times { |c| norm += act[row, c] ** 2 }
+      head = (0...Math.min(8, act.cols)).map { |c| act[row, c].round(5).to_s }.join(",")
+      File.open(path, "a") do |f|
+        f.puts "#{layer_idx}\t#{l.class.name.split("::").last}\t#{Math.sqrt(norm).round(5)}\t#{dev_act ? "dev" : "host"}\t#{head}"
+      end
+
+      # Dump the whole activation leaving this layer, so it can be fed into the SAME layer of a
+      # different build. Feeding one build's activation through another's weights is what separates
+      # "this layer's weights are wrong" from "this layer merely amplifies error accumulated
+      # upstream" -- two explanations that look identical in a norm trace.
+      if (after = ENV["SHAINET_DUMP_AFTER"]?) && after.to_i? == layer_idx && (dp = ENV["SHAINET_DUMP_PATH"]?)
+        File.open(dp, "wb") do |f|
+          act.cols.times { |c| f.write_bytes(act[row, c].to_f32, IO::ByteFormat::LittleEndian) }
+        end
+      end
+    end
+
     # Rows per prefill pass through the stack. Tunable with SHAINET_PREFILL_ROWS; 0 disables.
     #
     # Without this, every activation buffer in the stack is sized to the WHOLE prompt, so peak VRAM
@@ -402,6 +442,8 @@ module SHAInet
               matrix = use_kv_cache? && sm.rows == 1 ? gdn.forward_cached(sm) : gdn.forward(sm)
             end
           end
+
+          trace_layer_activation(layer_idx, l, matrix, dev_act)
         end
 
         if da = dev_act
