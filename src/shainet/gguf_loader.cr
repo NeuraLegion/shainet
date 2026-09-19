@@ -186,6 +186,23 @@ module SHAInet
           end
         end
         cpu_layers = num_transformer_layers - gpu_layers
+        # A host-resident layer of an i-quant model is not "a bit slower", it is catastrophic, and the
+        # number is worth saying out loud because the symptom otherwise looks like the model being bad.
+        #
+        # The k-quants have a fused AVX2 GEMV on the host. The i-quants do not: they fall back to
+        # dequantizing a whole row through the scalar reference per output row, single-threaded.
+        # Measured on this model's own tensors at M=1, per token, for ONE layer: attn_qkv (IQ2_S)
+        # 363 ms, ffn_up (IQ2_XXS) 378 ms, ffn_down (IQ2_S) 377 ms, ssm_out (IQ4_XS) 32 ms -- about
+        # 1150 ms for a single layer, against roughly 85 ms per token for all 64 when they are resident.
+        # One layer short of full residency is therefore a 14x slowdown, not a rounding error.
+        if cpu_layers > 0 && CUDA.fully_available?
+          Log.warn do
+            "gguf: #{cpu_layers} layer(s) did NOT fit on the GPU. For an i-quant model each host " \
+            "layer costs roughly a second per token (no fused AVX2 path for these types), so expect " \
+            "decode to be far slower than a fully resident run. Free VRAM, or lower the context with " \
+            "SHAINET_MAX_CONTEXT to shrink the KV reserve, to get all layers on the card."
+          end
+        end
         placed_mb = (layer_bytes[cpu_layers, gpu_layers].sum(0_u64) + (gpu_layers > 0 ? lm_head_bytes : 0_u64)) // (1024 * 1024)
         Log.info { "gguf: #{gpu_layers}/#{num_transformer_layers} layers on GPU (#{placed_mb} MB placed), #{cpu_layers} on CPU (reserve #{reserve_mb} MB)" }
 

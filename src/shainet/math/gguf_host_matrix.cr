@@ -165,6 +165,12 @@ module SHAInet
     # The row buffer is allocated once per call rather than per row, since n is in the thousands.
     private def gemv_reference_scalar(x : Pointer(Float32), y : Pointer(Float32),
                                       m : Int32, k : Int32, n : Int32)
+      # Parallel C path first. Single-threaded this measured about 1150 ms per token for ONE layer of a
+      # 27B i-quant model -- against roughly 85 ms per token for all 64 layers when resident -- so a
+      # single layer missing out on VRAM cost 14x. Spreading it over cores does not make the fallback
+      # good, but it turns a near-miss on VRAM from unusable into merely slow.
+      return if CPUKernels.gemv_any_host(@ggml_type.value.to_i32, @host_ptr, x, y, m, n, k)
+
       bs, vals = GGUF::BLOCK_SIZE[@ggml_type]
       bytes_per_row = ((k + vals - 1) // vals).to_i64 * bs
       wbuf = Pointer(Float32).malloc(k)

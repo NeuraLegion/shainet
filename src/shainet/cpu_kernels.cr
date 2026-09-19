@@ -18,12 +18,17 @@ module SHAInet
     # Type-dispatched variant: (ggml_type, weights, out, K) -> 1 on success, 0 if unhandled.
     alias DequantAnyProc = Proc(Int32, Pointer(UInt8), Pointer(Float32), Int32, Int32)
 
+    # Parallel generic host GEMV: (ggml_type, weights, x, y, m, n, k) -> 1 on success, 0 if the type
+    # has no reference dequant.
+    alias GemvAnyProc = Proc(Int32, Pointer(UInt8), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32)
+
     @@handle : Pointer(Void)?
     @@gemv_q4k : GemvProc?
     @@gemv_q6k : GemvProc?
     @@sgemm : SgemmProc?
     @@dequant_iq4xs_row : DequantRowProc?
     @@dequant_any_row : DequantAnyProc?
+    @@gemv_any_host : GemvAnyProc?
     @@checked = false
 
     # Dequantize K values of one IQ4_XS row into `out`. Returns false when the kernel is missing.
@@ -47,6 +52,17 @@ module SHAInet
       false
     end
 
+    # Generic host GEMV, parallel over output rows. Returns false when the C kernel is unavailable or
+    # the type has no reference dequant, so the caller can fall back to the scalar loop.
+    def self.gemv_any_host(ggml_type : Int32, w : Pointer(UInt8), x : Pointer(Float32),
+                           y : Pointer(Float32), m : Int32, n : Int32, k : Int32) : Bool
+      ensure_loaded
+      if fn = @@gemv_any_host
+        return fn.call(ggml_type, w, x, y, m, n, k) != 0
+      end
+      false
+    end
+
     def self.available? : Bool
       ensure_loaded
       !!@@handle
@@ -60,6 +76,9 @@ module SHAInet
       )
       return unless handle
       @@handle = handle
+
+      sym = LibC.dlsym(handle, "gemv_any_host")
+      @@gemv_any_host = GemvAnyProc.new(sym, Pointer(Void).null) if sym
 
       sym = LibC.dlsym(handle, "dequant_any_row")
       @@dequant_any_row = DequantAnyProc.new(sym, Pointer(Void).null) if sym

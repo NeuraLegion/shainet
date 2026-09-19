@@ -876,6 +876,73 @@ static void dequant_iq1s_row_f32(const uint8_t *w, float *out, int K) {
     }
 }
 
+/* Block geometry per ggml type: bytes per block and values per block. Mirrors GGUF::BLOCK_SIZE on the
+ * Crystal side; kept here so the parallel GEMV below does not need the caller to pass it. */
+static int block_shape(int t, int *bs, int *vals) {
+    switch (t) {
+    case 10: *bs =  84; *vals = 256; return 1; /* Q2_K     */
+    case 12: *bs = 144; *vals = 256; return 1; /* Q4_K     */
+    case 14: *bs = 210; *vals = 256; return 1; /* Q6_K     */
+    case 16: *bs =  66; *vals = 256; return 1; /* IQ2_XXS  */
+    case 17: *bs =  74; *vals = 256; return 1; /* IQ2_XS   */
+    case 18: *bs =  98; *vals = 256; return 1; /* IQ3_XXS  */
+    case 19: *bs =  50; *vals = 256; return 1; /* IQ1_S    */
+    case 21: *bs = 110; *vals = 256; return 1; /* IQ3_S    */
+    case 22: *bs =  82; *vals = 256; return 1; /* IQ2_S    */
+    case 23: *bs = 136; *vals = 256; return 1; /* IQ4_XS   */
+    case 29: *bs =  56; *vals = 256; return 1; /* IQ1_M    */
+    default: return 0;
+    }
+}
+
+int dequant_any_row(int ggml_type, const uint8_t *w, float *out, int K);
+
+/* Generic host GEMV for any type with a reference dequant: y[m,n] = x[m,k] * W[n,k]^T.
+ *
+ * Parallel over OUTPUT ROWS, which is the only axis that matters here: each output row dequantizes
+ * its own weight row into a private scratch buffer, so the threads share nothing and the work divides
+ * evenly. Each thread allocates one row buffer, not one per row.
+ *
+ * This exists because the i-quant types have no fused AVX2 GEMV, so a host-resident i-quant layer
+ * falls back to dequantize-then-dot. Single-threaded that measured about 1150 ms per token for ONE
+ * layer of a 27B i-quant model -- against roughly 85 ms per token for all 64 layers when resident --
+ * so one layer short of full residency was a 14x slowdown. Dividing it across cores does not make the
+ * fallback good, but it makes a near-miss on VRAM survivable rather than unusable.
+ *
+ * Returns 0 if the type has no reference dequant, leaving the caller to raise. */
+int gemv_any_host(int ggml_type, const uint8_t *w, const float *x, float *y,
+                  int m, int n, int k) {
+    if (m <= 0 || n <= 0 || k <= 0) return 1;
+    int bs = 0, vals = 0;
+    if (!block_shape(ggml_type, &bs, &vals)) return 0;
+    const long long bytes_per_row = (long long)((k + vals - 1) / vals) * bs;
+
+    int ok = 1;
+#pragma omp parallel
+    {
+        float *wbuf = (float *)malloc((size_t)k * sizeof(float));
+        if (wbuf) {
+#pragma omp for schedule(static)
+            for (int col = 0; col < n; ++col) {
+                if (!dequant_any_row(ggml_type, w + (long long)col * bytes_per_row, wbuf, k)) {
+                    ok = 0;
+                    continue;
+                }
+                for (int row = 0; row < m; ++row) {
+                    const float *xrow = x + (long long)row * k;
+                    float dot = 0.0f;
+                    for (int i = 0; i < k; ++i) dot += wbuf[i] * xrow[i];
+                    y[(long long)row * n + col] = dot;
+                }
+            }
+            free(wbuf);
+        } else {
+            ok = 0;
+        }
+    }
+    return ok;
+}
+
 int dequant_any_row(int t, const uint8_t *w, float *out, int K) {
     switch (t) {
     case 10: dequant_q2k_row_f32(w, out, K); return 1;    // Q2_K
