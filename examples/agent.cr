@@ -613,17 +613,60 @@ module AgentDemo
     path.starts_with?("#{ws}/") ? path[(ws.size + 1)..] : path
   end
 
+  # One dimmed line describing what a tool returned.
+  #
+  # Results previously went only into the model's context, so the human watching saw the CALL and then
+  # nothing: a read that came back empty, a search that matched nothing, and a search that matched a
+  # hundred lines were indistinguishable on screen. That is the difference between watching an agent
+  # work and watching a spinner. An error shows its first line, because the reason a retry is happening
+  # is exactly what a person needs in order to intervene.
+  def self.summarize_result(result : String) : String
+    first = result.lines.first?.to_s.strip
+    return "↳ (empty)" if result.strip.empty?
+    if first.starts_with?("Error")
+      return "↳ #{first[0, 100]}"
+    end
+    lines = result.count('\n') + 1
+    kb = result.bytesize >= 1024 ? " · #{(result.bytesize / 1024.0).round(1)} KB" : " · #{result.bytesize} B"
+    # A file read already states its own range in the header, and a no-match search says so; echoing
+    # a line count over those adds nothing, so show their own first line instead.
+    if first.starts_with?("// ") || first.starts_with?("No matches") || first.starts_with?("No files")
+      "↳ #{first[0, 100]}"
+    else
+      "↳ #{lines} line(s)#{kb}"
+    end
+  end
+
+  # Structural regex metacharacters. A bare '.' is deliberately NOT here: it appears in almost every
+  # literal search ("agent.cr", "File.read") and as a regex it still matches the literal, so treating
+  # it as an intent signal would fire constantly for no gain.
+  REGEX_METACHARS = /[|()\[\]+*?{}^$]/
+
   # Search file contents, returning "path:line: text" lines.
   #
   # git grep first: it is far faster than walking the tree in-process and it honours .gitignore, so
   # generated and vendored files do not drown the real hits. It is not always available -- the
   # workspace may not be a repo, or git may not be installed -- so the in-process walk stays as the
   # fallback rather than as dead code, and both paths are held to the same output budget.
+  #
+  # A zero-hit LITERAL search whose pattern looks like a regex is retried as one. Matching literally by
+  # default is right -- it cannot produce surprising hits -- but observed behaviour is that the model
+  # writes an alternation without setting regex and then misreads the empty result: in one session it
+  # searched "puts|print|colorize|…", got nothing, concluded the path parameter rejects files (it does
+  # not -- that same query matches 46 lines), changed the path AND dropped the alternation together,
+  # and credited the wrong change. Two calls wasted and a false belief to reason from. The retry only
+  # ever fires when the strict answer was already empty, so it cannot mask a real result, and it says
+  # what it did so the next call is better formed.
   def self.search_contents(root : String, pattern : String, glob : String?,
                            context : Int32, regex : Bool) : String
     hit = git_grep(root, pattern, glob, context, regex)
-    return hit if hit
-    walk_grep(root, pattern, glob, context, regex)
+    hit ||= walk_grep(root, pattern, glob, context, regex)
+    return hit unless hit == "No matches." && !regex && pattern.matches?(REGEX_METACHARS)
+
+    retried = git_grep(root, pattern, glob, context, true) ||
+              walk_grep(root, pattern, glob, context, true)
+    return hit if retried == "No matches."
+    "(no literal match; retried as a regular expression — pass regex=true to do this directly)\n#{retried}"
   end
 
   # Returns nil when git grep could not run, so the caller falls back.
@@ -1331,6 +1374,7 @@ module AgentDemo
               "Error: unknown tool #{c.name}"
             end
           @messages << Message.new("tool", clamp_tool_result(result))
+          STDERR.puts "    #{AgentDemo.summarize_result(result).colorize(:dark_gray)}"
         end
       end
     end
