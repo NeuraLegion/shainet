@@ -580,6 +580,47 @@ static inline int q8_token_block(int K, int M) {
     return mb;
 }
 
+// ── i-quant (IQ) dequantization ────────────────────────────────────────────────
+//
+// Ported from ggml-quants.c's dequantize_row_* so a scalar reference exists for every type the
+// GSQ-RCO models use. These run ONCE per tensor at load (or per row for the embedding), so they are
+// written for clarity and exactness rather than speed -- the fast paths are the CUDA kernels, and
+// these are what the equivalence specs check them against.
+//
+// Layout constants come from the block structs in ggml-common.h; QK_K is 256 throughout.
+
+// IQ4_XS: 8 sub-blocks of 32. A 6-bit scale per sub-block is split across scales_l (low 4 bits) and
+// scales_h (high 2 bits) and biased by -32. Values are 4-bit indices into a 16-entry table, with the
+// low nibbles of qs[0..15] giving values 0..15 and the high nibbles of the SAME bytes giving 16..31.
+static const int8_t kvalues_iq4nl_ref[16] = {
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
+
+static void dequant_iq4xs_row_f32(const uint8_t *w, float *out, int K) {
+    const int nb = K / 256;
+    for (int i = 0; i < nb; ++i) {
+        const uint8_t *blk = w + (long long)i * 136;
+        const float d = f16_to_f32(*(const uint16_t *)(blk + 0));
+        const uint16_t scales_h = *(const uint16_t *)(blk + 2);
+        const uint8_t *scales_l = blk + 4;
+        const uint8_t *qs = blk + 8;
+        float *y = out + (long long)i * 256;
+        for (int ib = 0; ib < 8; ++ib) {
+            const int ls = ((scales_l[ib / 2] >> (4 * (ib % 2))) & 0xf) | (((scales_h >> (2 * ib)) & 3) << 4);
+            const float dl = d * (float)(ls - 32);
+            for (int j = 0; j < 16; ++j) {
+                y[j + 0]  = dl * (float)kvalues_iq4nl_ref[qs[j] & 0xf];
+                y[j + 16] = dl * (float)kvalues_iq4nl_ref[qs[j] >> 4];
+            }
+            y += 32;
+            qs += 16;
+        }
+    }
+}
+
+void dequant_iq4xs_row(const uint8_t *w, float *out, int K) {
+    dequant_iq4xs_row_f32(w, out, K);
+}
+
 void gemv_q4k_cpu(const float *x, const uint8_t *W, float *y,
                   int M, int N, int K) {
     int bytes_per_row = ((K + Q4_K_VALS_PER_BLK - 1) / Q4_K_VALS_PER_BLK)

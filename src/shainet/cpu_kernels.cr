@@ -12,11 +12,26 @@ module SHAInet
       Int32, Int32, Int32, Nil,
     )
 
+    # Scalar reference dequant for one row of an i-quant tensor. Used for the embedding (per-row,
+    # on demand) and for transcoding tensors whose type has no fast kernel yet.
+    alias DequantRowProc = Proc(Pointer(UInt8), Pointer(Float32), Int32, Nil)
+
     @@handle : Pointer(Void)?
     @@gemv_q4k : GemvProc?
     @@gemv_q6k : GemvProc?
     @@sgemm : SgemmProc?
+    @@dequant_iq4xs_row : DequantRowProc?
     @@checked = false
+
+    # Dequantize K values of one IQ4_XS row into `out`. Returns false when the kernel is missing.
+    def self.dequant_iq4xs_row(w : Pointer(UInt8), out_ptr : Pointer(Float32), k : Int32) : Bool
+      ensure_loaded
+      if fn = @@dequant_iq4xs_row
+        fn.call(w, out_ptr, k)
+        return true
+      end
+      false
+    end
 
     def self.available? : Bool
       ensure_loaded
@@ -31,6 +46,9 @@ module SHAInet
       )
       return unless handle
       @@handle = handle
+
+      sym = LibC.dlsym(handle, "dequant_iq4xs_row")
+      @@dequant_iq4xs_row = DequantRowProc.new(sym, Pointer(Void).null) if sym
 
       sym = LibC.dlsym(handle, "gemv_q4k_cpu")
       if sym

@@ -31,8 +31,8 @@ module SHAInet
     def initialize(@rows : Int32, @cols : Int32, @ggml_type : GGUF::GGMLType,
                    host_data : Pointer(UInt8), byte_size)
       @byte_size = byte_size.to_u64
-      unless @ggml_type.q4_k? || @ggml_type.q6_k?
-        raise ArgumentError.new("GGUFMatrix supports only Q4_K and Q6_K, got #{@ggml_type}")
+      unless GGUFMatrix.device_type_supported?(@ggml_type)
+        raise ArgumentError.new("GGUFMatrix: no device kernel for #{@ggml_type}")
       end
 
       dp = Pointer(UInt8).null
@@ -78,8 +78,8 @@ module SHAInet
 
     protected def initialize_empty(@rows : Int32, @cols : Int32, @ggml_type : GGUF::GGMLType, byte_size : UInt64)
       @byte_size = byte_size
-      unless @ggml_type.q4_k? || @ggml_type.q6_k?
-        raise ArgumentError.new("GGUFMatrix supports only Q4_K and Q6_K, got #{@ggml_type}")
+      unless GGUFMatrix.device_type_supported?(@ggml_type)
+        raise ArgumentError.new("GGUFMatrix: no device kernel for #{@ggml_type}")
       end
       dp = Pointer(UInt8).null
       CUDA.malloc(pointerof(dp).as(Pointer(Pointer(Void))), @byte_size)
@@ -115,6 +115,9 @@ module SHAInet
       end
 
       case @ggml_type
+      when .iq4_xs?
+        CUDA.gemv_iq4xs(x.device_ptr.not_nil!, @dev_ptr, result.device_ptr.not_nil!,
+          x.rows, @cols, @rows)
       when .q4_k?
         CUDA.gemv_q4k(x.device_ptr.not_nil!, @dev_ptr, result.device_ptr.not_nil!,
           x.rows, @cols, @rows)
@@ -156,6 +159,15 @@ module SHAInet
       end
     end
 
+    # Which quantization types have a device GEMV.
+    #
+    # Kept as one predicate because three places need the same answer: both constructors, and
+    # stage_host when it decides whether a host weight can be borrowed onto the card. A type missing
+    # here must be transcoded at load rather than reaching a kernel that cannot read it.
+    def self.device_type_supported?(t : GGUF::GGMLType) : Bool
+      t.q4_k? || t.q6_k? || t.iq4_xs?
+    end
+
     # ── One reusable device staging slot for weights that live on the HOST ──
     #
     # A host-resident layer is the right choice when DECODING: at one row it streams its weights at
@@ -178,7 +190,7 @@ module SHAInet
     def self.stage_host(rows : Int32, cols : Int32, ggml_type : GGUF::GGMLType,
                         host_data : Pointer(UInt8), byte_size : UInt64) : GGUFMatrix?
       return unless CUDA.fully_available?
-      return unless ggml_type.q4_k? || ggml_type.q6_k?
+      return unless GGUFMatrix.device_type_supported?(ggml_type)
       if @@stage_bytes < byte_size
         unless @@stage_ptr.null?
           CUDA.free(@@stage_ptr.as(Pointer(Void)))
@@ -242,9 +254,10 @@ module SHAInet
           rows = @cols - row0
           rows = chunk if rows > chunk
           case @ggml_type
-          when .q4_k? then CUDA.dequant_q4k_rows(@dev_ptr, buf, row0, rows, k)
-          when .q6_k? then CUDA.dequant_q6k_rows(@dev_ptr, buf, row0, rows, k)
-          else             raise ArgumentError.new("unsupported GGUF type for gemm: #{@ggml_type}")
+          when .iq4_xs? then CUDA.dequant_iq4xs_rows(@dev_ptr, buf, row0, rows, k)
+          when .q4_k?   then CUDA.dequant_q4k_rows(@dev_ptr, buf, row0, rows, k)
+          when .q6_k?   then CUDA.dequant_q6k_rows(@dev_ptr, buf, row0, rows, k)
+          else               raise ArgumentError.new("unsupported GGUF type for gemm: #{@ggml_type}")
           end
           CUDA.gemm_tn(handle, buf, xp, rp + row0,
             rows, x.rows, k, k, k, @cols)

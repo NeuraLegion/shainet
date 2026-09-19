@@ -345,6 +345,8 @@ module SHAInet
     @@rope_forward_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Void)?
     @@head_rmsnorm_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Float32, Void)?
     # GGUF k-quant GEMV
+    @@gemv_iq4xs_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@dequant_iq4xs_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@gemv_q4k_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@gemv_q6k_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@dequant_q4k_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
@@ -641,6 +643,16 @@ module SHAInet
 
     # GGUF k-quant GEMV: y[M, N] = x[M, K] * dequant(W[N, K]).
     # W is in raw Q4_K format (144-byte blocks, K must be a multiple of 256).
+    def gemv_iq4xs(x : Pointer(Float32), w : Pointer(UInt8), y : Pointer(Float32),
+                   m : Int32, n : Int32, k : Int32)
+      unless fn = @@gemv_iq4xs_proc
+        @@gemv_iq4xs_proc = fn = load_kernel_proc("gemv_iq4xs",
+          Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(x, w, y, m, n, k)
+    end
+
     def gemv_q4k(x : Pointer(Float32), w : Pointer(UInt8), y : Pointer(Float32),
                  m : Int32, n : Int32, k : Int32)
       unless fn = @@gemv_q4k_proc
@@ -665,6 +677,16 @@ module SHAInet
     # Dequantize rows [row0, row0 + n_rows) of a k-quant weight into an fp32 [n_rows, K]
     # row-major buffer, so a batched prefill can run one cuBLAS GEMM per chunk instead of a GEMV
     # per token. The GEMV kernels reuse nothing across tokens; this reads the weight once.
+    def dequant_iq4xs_rows(w : Pointer(UInt8), dst : Pointer(Float32),
+                           row0 : Int32, n_rows : Int32, k : Int32)
+      unless fn = @@dequant_iq4xs_rows_proc
+        @@dequant_iq4xs_rows_proc = fn = load_kernel_proc("dequant_iq4xs_rows",
+          Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(w, dst, row0, n_rows, k)
+    end
+
     def dequant_q4k_rows(w : Pointer(UInt8), dst : Pointer(Float32),
                          row0 : Int32, n_rows : Int32, k : Int32)
       unless fn = @@dequant_q4k_rows_proc
