@@ -171,8 +171,16 @@ module SHAInet
     # stage_host when it decides whether a host weight can be borrowed onto the card. A type missing
     # here must be transcoded at load rather than reaching a kernel that cannot read it.
     def self.device_type_supported?(t : GGUF::GGMLType) : Bool
+      return t.q4_k? || t.q6_k? if @@force_transcode_iq
       t.q4_k? || t.q6_k? || t.iq4_xs? || t.iq3_s? || t.iq3_xxs?
     end
+
+    # Diagnostic switch: treat the i-quant types as unsupported so every one of them is transcoded
+    # through the scalar reference instead of reaching a kernel. The references are independently
+    # verified against a differently-quantized build of the same model, so this separates "a kernel is
+    # wrong" from "the loader wires something wrong" -- the two explanations that survive when every
+    # component passes its own test but the model still does not predict.
+    @@force_transcode_iq : Bool = ENV.fetch("SHAINET_IQ_FORCE_TRANSCODE", "0") == "1"
 
     # ── One reusable device staging slot for weights that live on the HOST ──
     #

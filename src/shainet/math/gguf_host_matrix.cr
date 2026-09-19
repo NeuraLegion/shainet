@@ -19,9 +19,18 @@ module SHAInet
     @owned : Bytes?
 
     def initialize(@rows, @cols, @ggml_type, @host_ptr, @byte_size, @owned : Bytes? = nil)
-      unless @ggml_type == GGUF::GGMLType::Q4_K || @ggml_type == GGUF::GGMLType::Q6_K
-        raise ArgumentError.new("GGUFHostMatrix: unsupported type #{@ggml_type}")
+      unless GGUFHostMatrix.host_type_supported?(@ggml_type)
+        raise ArgumentError.new("GGUFHostMatrix: no CPU GEMV for #{@ggml_type}")
       end
+    end
+
+    # Which types have a CPU GEMV, as opposed to merely a scalar reference dequant.
+    #
+    # Only the k-quants do. The i-quant formats have reference dequants (used for the embedding and
+    # for load-time transcoding) but no per-token CPU path, because dequantizing a codebook format per
+    # token would be far slower than the weight streaming it would be replacing.
+    def self.host_type_supported?(t : GGUF::GGMLType) : Bool
+      t.q4_k? || t.q6_k?
     end
 
     def device_bytes : UInt64

@@ -281,14 +281,79 @@ module SHAInet
     private def self.load_gguf_weight(gf : GGUF::File, info : GGUF::TensorInfo, on_gpu : Bool = true,
                                       gpu_pool : Pointer(UInt8) = Pointer(UInt8).null,
                                       pool_map : Hash(UInt64, UInt64) = Hash(UInt64, UInt64).new) : QuantizedWeight | SimpleMatrix | CudaMatrix
+      # A QUANTIZED type with no fast kernel is transcoded ONCE here rather than reaching a GEMV that
+      # cannot read it.
+      #
+      # RCO assigns a quantization type per tensor, so a GSQ-RCO file mixes many. In the IQ3_S build
+      # the three types with kernels cover 82.6% of matmul bytes and Q4_K another 8.2%; the remaining
+      # 9.2% is 44 tensors across five low-bit types. Writing five more kernels for that tail would
+      # cost more than it returns, and crucially these are the tensors RCO gave the FEWEST bits to
+      # because they are the least sensitive -- so re-quantizing them to Q4's higher precision is
+      # quality-neutral or better, not a compromise. It costs about +0.46 GiB, which the budget has.
+      #
+      # The quantized? guard is load-bearing. BLOCK_SIZE also carries F32, F16 and BF16, so without it
+      # this branch swallowed every norm and every ssm_alpha/ssm_beta -- 96 BF16 tensors feeding all 48
+      # Gated DeltaNet layers -- and 4-bit quantized them. The model still loaded and still produced
+      # tokens; it had simply lost its gates and norms, which showed up as a logit distribution with no
+      # peak at all (best 9.32 against a 10th-best of 7.45, where the working model gives 24.16 and
+      # 7.16).
+      if quantized_gguf_type?(info.type) && !GGUFMatrix.device_type_supported?(info.type)
+        return transcode_gguf_weight(gf, info)
+      end
+
       unless on_gpu
-        if mmap_ptr = gf.tensor_ptr(info)
-          rows = info.shape[0].to_i32
-          cols = info.shape.size > 1 ? info.shape[1].to_i32 : 1
-          return GGUFHostMatrix.new(rows, cols, info.type, mmap_ptr, info.byte_size)
+        if GGUFHostMatrix.host_type_supported?(info.type)
+          if mmap_ptr = gf.tensor_ptr(info)
+            rows = info.shape[0].to_i32
+            cols = info.shape.size > 1 ? info.shape[1].to_i32 : 1
+            return GGUFHostMatrix.new(rows, cols, info.type, mmap_ptr, info.byte_size)
+          end
+        else
+          # There is no CPU GEMV for the i-quant formats, only the scalar reference used for
+          # transcoding. Rather than fall back to a dequantize-per-token path that would be far slower
+          # than the host streaming it replaces, this tensor goes to the device. That is sound for the
+          # models this matters for: the whole reason to use a GSQ-RCO build is that it fits.
+          Log.debug { "gguf: #{info.name} is #{info.type} with no host kernel; placing on device" }
+          return load_gguf_weight_device(gf, info, gpu_pool, pool_map)
         end
       end
       load_gguf_weight_device(gf, info, gpu_pool, pool_map)
+    end
+
+    # Is this a block-quantized type, as opposed to a plain float format?
+    #
+    # BLOCK_SIZE registers F32/F16/BF16 alongside the quantized types (with a block of one value), so
+    # "has a block size" is NOT the same question as "is quantized" -- and conflating them sends norms
+    # and gate weights down a quantizing path that silently destroys them.
+    private def self.quantized_gguf_type?(t : GGUF::GGMLType) : Bool
+      case t
+      when GGUF::GGMLType::F32, GGUF::GGMLType::F16, GGUF::GGMLType::BF16,
+           GGUF::GGMLType::F64, GGUF::GGMLType::I8, GGUF::GGMLType::I16,
+           GGUF::GGMLType::I32, GGUF::GGMLType::I64
+        false
+      else
+        GGUF::BLOCK_SIZE.has_key?(t)
+      end
+    end
+
+    # Dequantize a tensor with the scalar reference and re-quantize to Q4 for the device.
+    #
+    # Q4CudaMatrix is used rather than a fp32 or fp16 upload because those would defeat the point: the
+    # tail is ~0.91 GiB at 2-3 bits, and fp16 would take it to ~5.6 GiB. Q4 lands near 1.37 GiB.
+    private def self.transcode_gguf_weight(gf : GGUF::File, info : GGUF::TensorInfo) : QuantizedWeight | SimpleMatrix | CudaMatrix
+      k = info.shape[0].to_i32
+      n = info.shape.size > 1 ? info.shape[1].to_i32 : 1
+      values = read_gguf_f32_tensor(gf, info)
+      # GGUF stores ne0 fastest, so the flat array is n rows of k values -- the same convention
+      # GGUFMatrix uses (rows = K, cols = N).
+      m = SimpleMatrix.new(k, n)
+      n.times do |c|
+        base = c * k
+        k.times { |i| m[i, c] = values[base + i].to_f64 }
+      end
+      Log.debug { "gguf: transcoded #{info.name} from #{info.type} to Q4 (#{k}x#{n})" }
+      return Q4CudaMatrix.from_simple(m) if CUDA.fully_available?
+      m
     end
 
     private def self.load_gguf_weight_device(gf : GGUF::File, info : GGUF::TensorInfo,
@@ -311,6 +376,11 @@ module SHAInet
       end
     end
 
+    # Test hook: the private reader, exposed so a diagnostic can compare tensors across two files.
+    def self.read_gguf_f32_tensor_pub(gf : GGUF::File, info : GGUF::TensorInfo) : Array(Float32)
+      read_gguf_f32_tensor(gf, info)
+    end
+
     # Read a GGUF F32 tensor into a flat Array(Float32).
     private def self.read_gguf_f32_tensor(gf : GGUF::File, info : GGUF::TensorInfo) : Array(Float32)
       count = info.element_count.to_i32
@@ -326,9 +396,56 @@ module SHAInet
         dequant_q4k_host(gf, info)
       elsif info.type == GGUF::GGMLType::Q6_K
         dequant_q6k_host(gf, info)
+      elsif info.type == GGUF::GGMLType::BF16
+        # bf16 is just f32 with the low 16 mantissa bits dropped, so widening is a shift -- no table
+        # and no special cases, including for inf/nan. The GSQ-RCO files store ssm_alpha/ssm_beta this
+        # way.
+        count = info.shape.product.to_i32
+        ptr = gf.tensor_ptr(info)
+        raise "read_gguf_f32_tensor: #{info.name} is not mmap-backed" unless ptr
+        Array(Float32).new(count) do |i|
+          bits = (ptr + i * 2).as(Pointer(UInt16)).value.to_u32 << 16
+          pointerof(bits).as(Pointer(Float32)).value
+        end
+      elsif info.type == GGUF::GGMLType::F16
+        count = info.shape.product.to_i32
+        ptr = gf.tensor_ptr(info)
+        raise "read_gguf_f32_tensor: #{info.name} is not mmap-backed" unless ptr
+        Array(Float32).new(count) { |i| half_to_f32((ptr + i * 2).as(Pointer(UInt16)).value) }
       else
-        raise "read_gguf_f32_tensor: unsupported type #{info.type} for #{info.name}"
+        # Anything else goes through the scalar reference dequants. This is the path the GSQ-RCO
+        # models need for token_embd.weight, which they store as IQ2_S -- it is the first tensor the
+        # loader touches, so without this nothing loads at all. These tensors are read once (or per
+        # row, for the embedding), so a scalar routine is the right tool; the fast kernels exist for
+        # the layer matmuls.
+        dequant_any_host(gf, info)
       end
+    end
+
+    # Host-side dequantization for any type with a reference implementation, used for the small
+    # tensors the model reads as f32 -- the embedding, alpha/beta -- and for transcoding.
+    private def self.dequant_any_host(gf : GGUF::File, info : GGUF::TensorInfo) : Array(Float32)
+      bs, vals = GGUF::BLOCK_SIZE[info.type]? ||
+                 raise "read_gguf_f32_tensor: unknown block size for #{info.type} (#{info.name})"
+      rows = info.shape[0].to_i64
+      cols = info.shape.size > 1 ? info.shape[1].to_i64 : 1_i64
+      unless rows % vals == 0
+        raise "read_gguf_f32_tensor: #{info.name} has #{rows} values per row, not a multiple of #{vals}"
+      end
+      bytes_per_row = (rows // vals) * bs
+      ptr = gf.tensor_ptr(info)
+      raise "read_gguf_f32_tensor: #{info.name} is not mmap-backed" unless ptr
+
+      out = Array(Float32).new((rows * cols).to_i32, 0.0_f32)
+      buf = Pointer(Float32).malloc(rows)
+      cols.times do |c|
+        unless CPUKernels.dequant_row(info.type.value.to_i32, ptr + c * bytes_per_row, buf, rows.to_i32)
+          raise "read_gguf_f32_tensor: no reference dequant for #{info.type} (#{info.name})"
+        end
+        base = (c * rows).to_i32
+        rows.to_i32.times { |i| out[base + i] = buf[i] }
+      end
+      out
     end
 
     # Host-side Q4_K dequantization (for small tensors only -- embedding lookup, alpha/beta).
@@ -592,6 +709,38 @@ module SHAInet
     #
     # Destination layout matches HFLoader#split_head_interleaved: output row h*head_dim + i comes
     # from source row h*2*head_dim + i for Q, and + head_dim for the gate.
+    # Wrap a raw quantized buffer for use as a weight, transcoding when its type has no kernel.
+    #
+    # The splits above copy whole ROWS, which works for any format whose rows are independently
+    # quantized -- so the split itself is format-agnostic and only the wrapping needs to care. Types
+    # with a device kernel are wrapped in place; the rest are dequantized with the scalar reference
+    # and re-quantized to Q4, exactly as whole tensors are in transcode_gguf_weight.
+    private def self.wrap_or_transcode(in_dim : Int32, out_rows : Int32, type : GGUF::GGMLType,
+                                       buf : Pointer(UInt8), bytes : UInt64,
+                                       on_gpu : Bool) : QuantizedWeight | SimpleMatrix | CudaMatrix
+      if on_gpu && CUDA.fully_available?
+        return GGUFMatrix.new(in_dim, out_rows, type, buf, bytes) if GGUFMatrix.device_type_supported?(type)
+        bs, vs = GGUF::BLOCK_SIZE[type]? || raise "wrap_or_transcode: unknown block size for #{type}"
+        row_bytes = ((in_dim + vs - 1) // vs) * bs
+        m = SimpleMatrix.new(in_dim, out_rows)
+        rowbuf = Pointer(Float32).malloc(in_dim)
+        out_rows.times do |r|
+          unless CPUKernels.dequant_row(type.value.to_i32, buf + r.to_u64 * row_bytes, rowbuf, in_dim)
+            raise "wrap_or_transcode: no reference dequant for #{type}"
+          end
+          in_dim.times { |i| m[i, r] = rowbuf[i].to_f64 }
+        end
+        return Q4CudaMatrix.from_simple(m)
+      end
+
+      if GGUFHostMatrix.host_type_supported?(type)
+        # The buffers are GC-allocated rather than mmap-backed, and GGUFHostMatrix keeps only the raw
+        # pointer, so hand it the owning slice as well to pin them for the model's lifetime.
+        return GGUFHostMatrix.new(in_dim, out_rows, type, buf, bytes, Bytes.new(buf, bytes))
+      end
+      raise "wrap_or_transcode: #{type} has neither a host GEMV nor a device kernel"
+    end
+
     private def self.split_gguf_q_gate(gf : GGUF::File, info : GGUF::TensorInfo,
                                        n_heads : Int32, head_dim : Int32, on_gpu : Bool)
       in_dim = info.shape[0].to_i32
@@ -616,15 +765,8 @@ module SHAInet
         end
       end
 
-      if on_gpu && CUDA.fully_available?
-        {GGUFMatrix.new(in_dim, half, info.type, qbuf, total),
-         GGUFMatrix.new(in_dim, half, info.type, gbuf, total)}
-      else
-        # The buffers are GC-allocated rather than mmap-backed, and GGUFHostMatrix keeps only the
-        # raw pointer, so hand it the owning slice as well to pin them for the model's lifetime.
-        {GGUFHostMatrix.new(in_dim, half, info.type, qbuf, total, Bytes.new(qbuf, total)),
-         GGUFHostMatrix.new(in_dim, half, info.type, gbuf, total, Bytes.new(gbuf, total))}
-      end
+      {wrap_or_transcode(in_dim, half, info.type, qbuf, total, on_gpu),
+       wrap_or_transcode(in_dim, half, info.type, gbuf, total, on_gpu)}
     end
 
     private def self.load_gguf_full_attn_layer(gf : GGUF::File, net : Network, idx : Int32,
@@ -741,13 +883,19 @@ module SHAInet
       k_bytes = k_out.to_u64 * bytes_per_row
       v_bytes = v_out.to_u64 * bytes_per_row
 
-      if !gpu_pool.null? && (pool_off = pool_map[info.offset]?)
+      if !gpu_pool.null? && (pool_off = pool_map[info.offset]?) && GGUFMatrix.device_type_supported?(info.type)
         # Device pool: create sub-views
         base = gpu_pool + pool_off
         q = GGUFMatrix.from_pool(in_dim, q_out, info.type, base, q_bytes)
         k = GGUFMatrix.from_pool(in_dim, k_out, info.type, base + q_bytes, k_bytes)
         v = GGUFMatrix.from_pool(in_dim, v_out, info.type, base + q_bytes + k_bytes, v_bytes)
         {q, k, v}
+      elsif (mmap_ptr = gf.tensor_ptr(info)) && !GGUFMatrix.device_type_supported?(info.type)
+        # No device kernel for this type: transcode each of the three pieces. The sub-views are just
+        # row ranges of the same buffer, so each can be wrapped independently.
+        {wrap_or_transcode(in_dim, q_out, info.type, mmap_ptr, q_bytes, on_gpu),
+         wrap_or_transcode(in_dim, k_out, info.type, mmap_ptr + q_bytes, k_bytes, on_gpu),
+         wrap_or_transcode(in_dim, v_out, info.type, mmap_ptr + q_bytes + k_bytes, v_bytes, on_gpu)}
       elsif !on_gpu && (mmap_ptr = gf.tensor_ptr(info))
         # Host mmap: sub-views
         q = GGUFHostMatrix.new(in_dim, q_out, info.type, mmap_ptr, q_bytes)
