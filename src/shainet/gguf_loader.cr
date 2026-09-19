@@ -268,6 +268,7 @@ module SHAInet
           layer.kv_max_context = max_context if layer.responds_to?(:kv_max_context=)
         end
 
+        warn_unconsumed_tensors(gf, num_transformer_layers)
         Log.info { "gguf: loaded #{num_transformer_layers} layers from #{path}" }
         net
         # NOTE: gf is NOT closed here. The mmap must stay alive for the model's lifetime
@@ -320,7 +321,57 @@ module SHAInet
       load_gguf_weight_device(gf, info, gpu_pool, pool_map)
     end
 
-    # Is this a block-quantized type, as opposed to a plain float format?
+    # Per-layer tensor suffixes this loader knows how to wire.
+    #
+    # Deliberately a closed list. A GGUF file is self-describing, so a new export can introduce a
+    # tensor we have never heard of and the loader will simply not read it -- producing a model that
+    # loads, runs, and is quietly missing a term. That is the exact failure mode that cost this
+    # effort the most time, and it is invisible without a check like this one.
+    KNOWN_LAYER_SUFFIXES = %w[
+      attn_norm.weight attn_q.weight attn_k.weight attn_v.weight attn_output.weight
+      attn_q_norm.weight attn_k_norm.weight attn_qkv.weight attn_gate.weight
+      post_attention_norm.weight
+      ffn_norm.weight ffn_gate.weight ffn_up.weight ffn_down.weight
+      ssm_a ssm_alpha.weight ssm_beta.weight ssm_conv1d.weight ssm_dt.bias
+      ssm_norm.weight ssm_out.weight ssm_in.weight
+    ]
+
+    KNOWN_TOP_TENSORS = %w[token_embd.weight output.weight output_norm.weight]
+
+    # Report tensors the file carries for a layer we loaded but that nothing here consumed.
+    #
+    # A WARNING rather than a raise: an unknown tensor is usually a newer export carrying something
+    # optional, and refusing to load would be worse than running. But it must be LOUD, because the
+    # alternative is discovering it from degraded output weeks later.
+    #
+    # Skips the multi-token-prediction head (blk.<n_layers> and above) and the vision projector,
+    # which are known-and-deliberately-unused rather than overlooked.
+    private def self.warn_unconsumed_tensors(gf : GGUF::File, num_layers : Int32)
+      unknown = [] of String
+      gf.tensors.each_key do |nm|
+        if nm.starts_with?("blk.")
+          rest = nm[4..]
+          dot = rest.index('.')
+          next unless dot
+          idx = rest[0, dot].to_i?
+          next unless idx
+          next if idx >= num_layers # MTP head and anything past the trunk
+          suffix = rest[(dot + 1)..]
+          unknown << nm unless KNOWN_LAYER_SUFFIXES.includes?(suffix)
+        else
+          next if nm.starts_with?("mmproj") || nm.starts_with?("v.") || nm.starts_with?("mm.")
+          unknown << nm unless KNOWN_TOP_TENSORS.includes?(nm)
+        end
+      end
+      return if unknown.empty?
+      shown = unknown.first(12).join(", ")
+      Log.warn do
+        "gguf: #{unknown.size} tensor(s) in this file are NOT read by the loader and are being " \
+        "ignored: #{shown}#{unknown.size > 12 ? ", ..." : ""}. If any of them carries a weight the " \
+        "model needs, output will be wrong rather than fail."
+      end
+    end
+
     #
     # BLOCK_SIZE registers F32/F16/BF16 alongside the quantized types (with a block of one value), so
     # "has a block size" is NOT the same question as "is quantized" -- and conflating them sends norms
