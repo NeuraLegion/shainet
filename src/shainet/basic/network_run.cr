@@ -365,46 +365,58 @@ module SHAInet
             matrix = l.as(TransformerLayer).forward(matrix)
           when LlamaLayer
             block = l.as(LlamaLayer)
-            if use_kv_cache?
-              sm = matrix.as(SimpleMatrix)
-              # Any row count now, not just a single token. A prefill used to be excluded
-              # here, so every layer paid an upload and a readback around its attention and
-              # its FFN even though both were device-resident internally.
-              if (dev_act || sm.rows >= 1) && block.block_device_capable?
-                if dev_act.nil?
-                  buf = chain_buf(sm.rows, sm.cols)
-                  Profile.measure("net.dev_upload") do
-                    buf.raw_data.to_unsafe.copy_from(sm.data.to_unsafe, sm.rows * sm.cols)
-                    buf.mark_host_modified!
-                    buf.sync_to_device!("block_chain_in")
+            # Per-block-type totals, which is what separates "the recurrence is slow" from "the
+            # matmuls under it are slow". These NEST: stack.gdn and stack.llama each contain the
+            # ffn.* and attn.* phases, so Profile's TOTAL over-counts and the shares to read are
+            # against wall time, not against that total.
+            #
+            # This is how the chunked-prefill plan got cancelled. A 2048-token prefill measured
+            # stack.gdn at 79% of wall, which looks like the sequential delta-rule scan -- but a
+            # microbenchmark of that kernel at real shapes (48 heads, dk=dv=128) puts it at 340 ms
+            # per 512-token chunk, so about 9% of stack.gdn and 6.5% of prefill. The other ~91% is
+            # the ordinary projections and FFN, i.e. the quantized matmul path.
+            Profile.measure("stack.llama") do
+              if use_kv_cache?
+                sm = matrix.as(SimpleMatrix)
+                # Any row count now, not just a single token. A prefill used to be excluded
+                # here, so every layer paid an upload and a readback around its attention and
+                # its FFN even though both were device-resident internally.
+                if (dev_act || sm.rows >= 1) && block.block_device_capable?
+                  if dev_act.nil?
+                    buf = chain_buf(sm.rows, sm.cols)
+                    Profile.measure("net.dev_upload") do
+                      buf.raw_data.to_unsafe.copy_from(sm.data.to_unsafe, sm.rows * sm.cols)
+                      buf.mark_host_modified!
+                      buf.sync_to_device!("block_chain_in")
+                    end
+                    dev_act = buf
                   end
-                  dev_act = buf
-                end
-                nxt = if dev_act.not_nil!.rows > 1
-                        block.forward_cached_device_multi(dev_act.not_nil!)
-                      else
-                        block.forward_cached_device(dev_act.not_nil!)
-                      end
-                if nxt
-                  dev_act = nxt
+                  nxt = if dev_act.not_nil!.rows > 1
+                          block.forward_cached_device_multi(dev_act.not_nil!)
+                        else
+                          block.forward_cached_device(dev_act.not_nil!)
+                        end
+                  if nxt
+                    dev_act = nxt
+                  else
+                    # The multi-token chain declined: finish this block on the host.
+                    matrix = device_row_to_host(dev_act.not_nil!)
+                    dev_act = nil
+                    matrix = block.forward_cached(matrix.as(SimpleMatrix))
+                  end
                 else
-                  # The multi-token chain declined: finish this block on the host.
-                  matrix = device_row_to_host(dev_act.not_nil!)
-                  dev_act = nil
+                  # A block that cannot take the device path ends the chain: bring the
+                  # activation home first so the host path sees the real activation
+                  # rather than a stale copy.
+                  if da = dev_act
+                    matrix = device_row_to_host(da)
+                    dev_act = nil
+                  end
                   matrix = block.forward_cached(matrix.as(SimpleMatrix))
                 end
               else
-                # A block that cannot take the device path ends the chain: bring the
-                # activation home first so the host path sees the real activation
-                # rather than a stale copy.
-                if da = dev_act
-                  matrix = device_row_to_host(da)
-                  dev_act = nil
-                end
-                matrix = block.forward_cached(matrix.as(SimpleMatrix))
+                matrix = block.forward(matrix)
               end
-            else
-              matrix = block.forward(matrix)
             end
           when GatedDeltaNetBlock
             # The linear-attention block type in a qwen3_5 hybrid stack.
@@ -418,28 +430,30 @@ module SHAInet
             # gave byte-identical logits across changes that demonstrably altered the blocks --
             # which is the only reason it was noticed.
             gdn = l.as(GatedDeltaNetBlock)
-            nxt = nil
-            if dev_act.nil? && (sm0 = matrix.as?(SimpleMatrix)) && gdn.device_chain_capable?
-              buf = chain_buf(sm0.rows, sm0.cols)
-              Profile.measure("net.dev_upload") do
-                buf.raw_data.to_unsafe.copy_from(sm0.data.to_unsafe, sm0.rows * sm0.cols)
-                buf.mark_host_modified!
-                buf.sync_to_device!("block_chain_in")
+            Profile.measure("stack.gdn") do
+              nxt = nil
+              if dev_act.nil? && (sm0 = matrix.as?(SimpleMatrix)) && gdn.device_chain_capable?
+                buf = chain_buf(sm0.rows, sm0.cols)
+                Profile.measure("net.dev_upload") do
+                  buf.raw_data.to_unsafe.copy_from(sm0.data.to_unsafe, sm0.rows * sm0.cols)
+                  buf.mark_host_modified!
+                  buf.sync_to_device!("block_chain_in")
+                end
+                dev_act = buf
               end
-              dev_act = buf
-            end
-            if da0 = dev_act
-              nxt = gdn.forward_cached_device(da0)
-            end
-            if nxt
-              dev_act = nxt
-            else
-              if da = dev_act
-                matrix = device_row_to_host(da)
-                dev_act = nil
+              if da0 = dev_act
+                nxt = gdn.forward_cached_device(da0)
               end
-              sm = matrix.as(SimpleMatrix)
-              matrix = use_kv_cache? && sm.rows == 1 ? gdn.forward_cached(sm) : gdn.forward(sm)
+              if nxt
+                dev_act = nxt
+              else
+                if da = dev_act
+                  matrix = device_row_to_host(da)
+                  dev_act = nil
+                end
+                sm = matrix.as(SimpleMatrix)
+                matrix = use_kv_cache? && sm.rows == 1 ? gdn.forward_cached(sm) : gdn.forward(sm)
+              end
             end
           end
 
