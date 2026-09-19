@@ -489,6 +489,7 @@ module AgentDemo
       @tool_chars = 0
       @spin = 0
       @status_shown = false
+      @status_width = 0
     end
 
     def feed(text : String)
@@ -528,8 +529,15 @@ module AgentDemo
       if @mode == :tool
         @tool_chars += t.size
         @spin = (@spin + 1) % SPINNER.size
-        @io.print "\r  #{"#{SPINNER[@spin]} writing tool call… (#{@tool_chars} chars)".colorize(:dark_gray)}"
+        status = "  #{SPINNER[@spin]} writing tool call… (#{@tool_chars} chars)"
+        @io.print "\r#{status.colorize(:dark_gray)}"
         @io.flush
+        # Remember how wide this actually was. The erase used to be a hardcoded 36, which is exactly
+        # the width at a five-digit count and one short from six digits on -- so a tool call over
+        # 99,999 characters, which an apply_patch of a large file reaches, left residue on the line.
+        # Tracking the real width also means the string above can be reworded without silently
+        # breaking the erase.
+        @status_width = status.size if status.size > @status_width
         @status_shown = true
         return
       end
@@ -549,7 +557,7 @@ module AgentDemo
     # Erase the in-progress status line (so following output starts clean).
     private def clear_status
       return unless @status_shown
-      @io.print "\r" + (" " * 36) + "\r"
+      @io.print "\r" + (" " * @status_width) + "\r"
       @io.flush
       @status_shown = false
     end
@@ -589,6 +597,26 @@ module AgentDemo
   # prompt. A rule the model may ignore is weaker than a tool that cannot overspend.
   LARGE_FILE_BYTES = 20_000
   HEAD_LINES       =    200
+
+  # Longest tool argument value shown on the call line.
+  #
+  # The call line used to print every argument through `inspect` in full, so a write_file or
+  # apply_patch carrying a whole file scrolled the entire payload past the user -- the one moment they
+  # most need to SEE what is about to happen is the moment the screen fills with it. The name and the
+  # size are what a person checks; the body is already shown by the confirmation diff.
+  ARG_PREVIEW_CHARS = 72
+
+  # Format tool-call arguments for the one-line display: short values verbatim, long ones cut with
+  # their real size, so a large patch reads as "patch=\"*** Begin Patch…\" (+4182 chars)".
+  def self.format_args(args : Hash(String, String)) : String
+    args.map do |k, v|
+      if v.size > ARG_PREVIEW_CHARS
+        "#{k}=#{v[0, ARG_PREVIEW_CHARS].inspect} (+#{v.size - ARG_PREVIEW_CHARS} chars)"
+      else
+        "#{k}=#{v.inspect}"
+      end
+    end.join(", ")
+  end
 
   # Longest single line returned before it is cut.
   #
@@ -1132,7 +1160,7 @@ module AgentDemo
         break if last_step
 
         calls.each do |c|
-          STDERR.puts "  #{"⚒ #{c.name}".colorize(:yellow)}(#{c.args.map { |k, v| "#{k}=#{v.inspect}" }.join(", ")})".colorize(:dark_gray)
+          STDERR.puts "  #{"⚒ #{c.name}".colorize(:yellow)}(#{AgentDemo.format_args(c.args)})".colorize(:dark_gray)
 
           # Break identical repeated calls.
           #
@@ -1245,7 +1273,11 @@ unless model_dir && (Dir.exists?(model_dir) || File.file?(model_dir.not_nil!))
   exit 1
 end
 
-Colorize.enabled = STDERR.tty?
+# Colour when a human is watching, and only then. A tty is not sufficient on its own: NO_COLOR is the
+# cross-tool convention for "I am a human on a tty and I still do not want escapes" (screen readers,
+# logging a session to a file through `script`, a terminal with a palette that renders dark_gray
+# unreadable), and TERM=dumb terminals do not interpret the sequences at all.
+Colorize.enabled = STDERR.tty? && ENV["NO_COLOR"]?.nil? && ENV["TERM"]? != "dumb"
 STDERR.sync = true # stream tokens as they arrive (no buffering)
 AgentDemo.print_banner(STDERR, "#{File.basename(model_dir)} · local coding agent on Network#run")
 
@@ -1379,6 +1411,14 @@ loop do
     agent.reset
     STDERR.puts "  conversation cleared".colorize(:dark_gray)
     next
+  else
+    # A mistyped command used to go to the MODEL as an ordinary prompt: "/cotext" spent a whole
+    # generation explaining that it does not know what /cotext means. Anything starting with a slash
+    # was meant for the program, so say it is unknown rather than charging a turn for the typo.
+    if input.starts_with?('/')
+      STDERR.puts "  unknown command #{input.split(' ').first} · try /help".colorize(:dark_gray)
+      next
+    end
   end
 
   agent.chat(input, max_tokens)
