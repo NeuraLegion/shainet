@@ -1937,6 +1937,19 @@ __device__ __forceinline__ void get_scale_min_k4(int j, const unsigned char* sca
 __device__ __constant__ int8_t kvalues_iq4nl_dev[16] = {
     -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
 
+// The same sixteen values held in two registers instead of constant memory.
+//
+// Constant memory is built to broadcast ONE address to a whole warp; these lookups are indexed by
+// the weight nibble, so all 32 lanes want different entries and the access serializes. Sixteen
+// int8 fit in two 64-bit literals, making the lookup a shift and a sign-extend with no memory
+// traffic at all. Measured: IQ4_XS GEMV 62.5 GB/s before, against 446 for the k-quant kernels.
+__device__ __forceinline__ float iq4nl_val(int idx) {
+    const unsigned long long lo = 0xF6EADDCFBFAD9881ULL;  // entries 0..7
+    const unsigned long long hi = 0x7159453526190D01ULL;  // entries 8..15
+    const unsigned long long p = (idx < 8) ? lo : hi;
+    return (float)(signed char)((p >> (8 * (idx & 7))) & 0xFFULL);
+}
+
 #define GGUF_IQ4XS_BLOCK_BYTES 136
 
 // ── IQ3_XXS and IQ3_S ─────────────────────────────────────────────────────────
@@ -1955,6 +1968,19 @@ __global__ void gemv_iq3xxs_kernel(const float* __restrict__ x,
                                    const unsigned char* __restrict__ w,
                                    float* __restrict__ y,
                                    int M, int N, int K) {
+    // Codebook staged in SHARED memory, not read from constant memory.
+    //
+    // Constant memory serves a warp best when all 32 lanes read the same address; a codebook lookup
+    // indexed by packed weight bits is the opposite, so every lane wants a different entry and the
+    // access serializes. Shared memory is banked and satisfies a divergent read per bank per cycle.
+    // This grid is 1 KB and the sign table 128 B, so the whole codebook is staged once per block and
+    // amortized over every row that block computes.
+    __shared__ unsigned int s_grid[256];
+    __shared__ unsigned char s_ksigns[128];
+    for (int i = threadIdx.x; i < 256; i += blockDim.x) s_grid[i] = d_iq3xxs_grid[i];
+    for (int i = threadIdx.x; i < 128; i += blockDim.x) s_ksigns[i] = d_ksigns_iq2xs[i];
+    __syncthreads();
+
     const int warp = threadIdx.x >> 5;
     const int lane = threadIdx.x & 31;
     const int n = blockIdx.x * (blockDim.x >> 5) + warp;
@@ -1980,16 +2006,16 @@ __global__ void gemv_iq3xxs_kernel(const float* __restrict__ x,
         unsigned int aux32;
         memcpy(&aux32, sas + 4 * ib32, sizeof(unsigned int));
         const float db = d * (0.5f + (aux32 >> 28)) * 0.5f;
-        const unsigned char signs = d_ksigns_iq2xs[(aux32 >> (7 * lpos)) & 127];
+        const unsigned char signs = s_ksigns[(aux32 >> (7 * lpos)) & 127];
 
-        const unsigned char* g1 = (const unsigned char*)(d_iq3xxs_grid + qs[8 * ib32 + 2 * lpos + 0]);
-        const unsigned char* g2 = (const unsigned char*)(d_iq3xxs_grid + qs[8 * ib32 + 2 * lpos + 1]);
+        const unsigned char* g1 = (const unsigned char*)(s_grid + qs[8 * ib32 + 2 * lpos + 0]);
+        const unsigned char* g2 = (const unsigned char*)(s_grid + qs[8 * ib32 + 2 * lpos + 1]);
         const float* xp = xrow + b * GGUF_QK_K + ib32 * 32 + lpos * 8;
 
         #pragma unroll
         for (int j = 0; j < 4; ++j) {
-            acc += db * (float)g1[j] * ((signs & d_kmask_iq2xs[j + 0]) ? -1.0f : 1.0f) * xp[j + 0];
-            acc += db * (float)g2[j] * ((signs & d_kmask_iq2xs[j + 4]) ? -1.0f : 1.0f) * xp[j + 4];
+            acc += db * (float)g1[j] * ((signs & (1u << (j + 0))) ? -1.0f : 1.0f) * xp[j + 0];
+            acc += db * (float)g2[j] * ((signs & (1u << (j + 4))) ? -1.0f : 1.0f) * xp[j + 4];
         }
     }
 
@@ -2002,6 +2028,12 @@ __global__ void gemv_iq3s_kernel(const float* __restrict__ x,
                                  const unsigned char* __restrict__ w,
                                  float* __restrict__ y,
                                  int M, int N, int K) {
+    // 2 KB codebook staged in shared memory -- see gemv_iq3xxs_kernel for why constant memory is
+    // the wrong home for a lookup whose index differs per lane.
+    __shared__ unsigned int s_grid[512];
+    for (int i = threadIdx.x; i < 512; i += blockDim.x) s_grid[i] = d_iq3s_grid[i];
+    __syncthreads();
+
     const int warp = threadIdx.x >> 5;
     const int lane = threadIdx.x & 31;
     const int n = blockIdx.x * (blockDim.x >> 5) + warp;
@@ -2035,14 +2067,14 @@ __global__ void gemv_iq3s_kernel(const float* __restrict__ x,
 
         const int i1 = qs[8 * ib32 + 2 * lpos + 0] | ((qhb << (8 - 2 * lpos)) & 256);
         const int i2 = qs[8 * ib32 + 2 * lpos + 1] | ((qhb << (7 - 2 * lpos)) & 256);
-        const unsigned char* g1 = (const unsigned char*)(d_iq3s_grid + i1);
-        const unsigned char* g2 = (const unsigned char*)(d_iq3s_grid + i2);
+        const unsigned char* g1 = (const unsigned char*)(s_grid + i1);
+        const unsigned char* g2 = (const unsigned char*)(s_grid + i2);
         const float* xp = xrow + b * GGUF_QK_K + ib32 * 32 + lpos * 8;
 
         #pragma unroll
         for (int j = 0; j < 4; ++j) {
-            acc += db * (float)g1[j] * ((sg & d_kmask_iq2xs[j + 0]) ? -1.0f : 1.0f) * xp[j + 0];
-            acc += db * (float)g2[j] * ((sg & d_kmask_iq2xs[j + 4]) ? -1.0f : 1.0f) * xp[j + 4];
+            acc += db * (float)g1[j] * ((sg & (1u << (j + 0))) ? -1.0f : 1.0f) * xp[j + 0];
+            acc += db * (float)g2[j] * ((sg & (1u << (j + 4))) ? -1.0f : 1.0f) * xp[j + 4];
         }
     }
 
@@ -2089,14 +2121,14 @@ __global__ void gemv_iq4xs_kernel(const float* __restrict__ x,
         const float4 xlo = *((const float4*)xl);
         const float4 xhi = *((const float4*)xh);
 
-        acc += dl * (float)kvalues_iq4nl_dev[q.x & 0xF] * xlo.x;
-        acc += dl * (float)kvalues_iq4nl_dev[q.y & 0xF] * xlo.y;
-        acc += dl * (float)kvalues_iq4nl_dev[q.z & 0xF] * xlo.z;
-        acc += dl * (float)kvalues_iq4nl_dev[q.w & 0xF] * xlo.w;
-        acc += dl * (float)kvalues_iq4nl_dev[q.x >> 4] * xhi.x;
-        acc += dl * (float)kvalues_iq4nl_dev[q.y >> 4] * xhi.y;
-        acc += dl * (float)kvalues_iq4nl_dev[q.z >> 4] * xhi.z;
-        acc += dl * (float)kvalues_iq4nl_dev[q.w >> 4] * xhi.w;
+        acc += dl * iq4nl_val(q.x & 0xF) * xlo.x;
+        acc += dl * iq4nl_val(q.y & 0xF) * xlo.y;
+        acc += dl * iq4nl_val(q.z & 0xF) * xlo.z;
+        acc += dl * iq4nl_val(q.w & 0xF) * xlo.w;
+        acc += dl * iq4nl_val(q.x >> 4) * xhi.x;
+        acc += dl * iq4nl_val(q.y >> 4) * xhi.y;
+        acc += dl * iq4nl_val(q.z >> 4) * xhi.z;
+        acc += dl * iq4nl_val(q.w >> 4) * xhi.w;
     }
 
     #pragma unroll
@@ -2127,8 +2159,8 @@ __global__ void dequant_iq4xs_rows_kernel(const unsigned char* __restrict__ w,
             const int ls = ((scales_l[ib >> 1] >> (4 * (ib & 1))) & 0xF) | (((scales_h >> (2 * ib)) & 3) << 4);
             const float dl = d * (float)(ls - 32);
             const unsigned char byte = qs[t];
-            orow[b * GGUF_QK_K + ib * 32 + off]      = dl * (float)kvalues_iq4nl_dev[byte & 0xF];
-            orow[b * GGUF_QK_K + ib * 32 + off + 16] = dl * (float)kvalues_iq4nl_dev[byte >> 4];
+            orow[b * GGUF_QK_K + ib * 32 + off]      = dl * iq4nl_val(byte & 0xF);
+            orow[b * GGUF_QK_K + ib * 32 + off + 16] = dl * iq4nl_val(byte >> 4);
         }
     }
 }
@@ -2166,8 +2198,8 @@ __global__ void dequant_iq3xxs_rows_kernel(const unsigned char* __restrict__ w,
             float* op = orow + b * GGUF_QK_K + ib32 * 32 + lpos * 8;
             #pragma unroll
             for (int j = 0; j < 4; ++j) {
-                op[j + 0] = db * (float)g1[j] * ((signs & d_kmask_iq2xs[j + 0]) ? -1.0f : 1.0f);
-                op[j + 4] = db * (float)g2[j] * ((signs & d_kmask_iq2xs[j + 4]) ? -1.0f : 1.0f);
+                op[j + 0] = db * (float)g1[j] * ((signs & (1u << (j + 0))) ? -1.0f : 1.0f);
+                op[j + 4] = db * (float)g2[j] * ((signs & (1u << (j + 4))) ? -1.0f : 1.0f);
             }
         }
     }
@@ -2204,8 +2236,8 @@ __global__ void dequant_iq3s_rows_kernel(const unsigned char* __restrict__ w,
             float* op = orow + b * GGUF_QK_K + ib32 * 32 + lpos * 8;
             #pragma unroll
             for (int j = 0; j < 4; ++j) {
-                op[j + 0] = db * (float)g1[j] * ((sg & d_kmask_iq2xs[j + 0]) ? -1.0f : 1.0f);
-                op[j + 4] = db * (float)g2[j] * ((sg & d_kmask_iq2xs[j + 4]) ? -1.0f : 1.0f);
+                op[j + 0] = db * (float)g1[j] * ((sg & (1u << (j + 0))) ? -1.0f : 1.0f);
+                op[j + 4] = db * (float)g2[j] * ((sg & (1u << (j + 4))) ? -1.0f : 1.0f);
             }
         }
     }
