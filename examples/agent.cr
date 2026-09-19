@@ -590,6 +590,15 @@ module AgentDemo
   LARGE_FILE_BYTES = 20_000
   HEAD_LINES       =    200
 
+  # Longest single line returned before it is cut.
+  #
+  # A line-count cap alone does NOT bound the response: 200 lines of minified JavaScript, generated
+  # code or an embedded data blob is still enormous, so the head limit above would be satisfied while
+  # the budget was blown anyway. Claude Code truncates each line to 2000 characters for this reason.
+  # 500 is tighter because our window is 64K rather than 200K, and a source line past 500 characters
+  # is nearly always machine-written.
+  MAX_LINE_CHARS = 500
+
   # Render a file for the model: line-numbered, with a header saying which lines these are of how many.
   #
   # The header is what makes paging possible. A model that sees "lines 1-200 of 2093" knows both that
@@ -604,22 +613,57 @@ module AgentDemo
       e = Math.min(total, end_line || total)
       return "Error: line #{s} is past the end of #{display_path} (#{total} lines)" if s > total
       return "Error: end_line #{e} is before start_line #{s}" if e < s
-      return "// #{display_path} — lines #{s}-#{e} of #{total}\n#{number_lines(lines[(s - 1)...e], s, e)}"
+      kept = fit_lines(lines, s - 1, e - s + 1)
+      last = s + kept - 1
+      note = last < e ? "; clipped at line #{last} to stay inside the context budget, ask for the rest" : ""
+      return "// #{display_path} — lines #{s}-#{last} of #{total}#{note}\n" \
+             "#{number_lines(lines[(s - 1), kept], s, last)}"
     end
 
     if content.bytesize > LARGE_FILE_BYTES
-      shown = Math.min(HEAD_LINES, total)
-      "// #{display_path} — lines 1-#{shown} of #{total}; file is large, so this is only the head. " \
+      kept = fit_lines(lines, 0, HEAD_LINES)
+      "// #{display_path} — lines 1-#{kept} of #{total}; file is large, so this is only the head. " \
       "Call read_file again with start_line/end_line for a specific range, or use search to locate " \
-      "what you need first.\n#{number_lines(lines[0, shown], 1, shown)}"
+      "what you need first.\n#{number_lines(lines[0, kept], 1, kept)}"
     else
       "// #{display_path} — #{total} lines\n#{number_lines(lines, 1, total)}"
     end
   end
 
+  # How many lines starting at `from` fit inside the byte budget, up to `want` of them.
+  #
+  # A line COUNT cap does not bound the response on its own, and neither does a per-line cap: 200
+  # lines of 500 characters is still 100 KB, about 26K tokens, which would defeat the whole point on a
+  # 64K window. Only counting the bytes actually does it. Measured on 400 lines of 2000 characters --
+  # the shape of minified or generated code -- this is what takes an 800 KB file to a bounded reply
+  # instead of a 104 KB one.
+  #
+  # At least one line is always returned, so a single enormous line still yields something rather than
+  # an empty response.
+  private def self.fit_lines(lines : Array(String), from : Int32, want : Int32) : Int32
+    budget = LARGE_FILE_BYTES
+    used = 0
+    kept = 0
+    while kept < want && (from + kept) < lines.size
+      line = lines[from + kept]
+      cost = Math.min(line.bytesize, MAX_LINE_CHARS) + 10 # +10 for the "NNNN | " gutter
+      break if kept > 0 && used + cost > budget
+      used += cost
+      kept += 1
+    end
+    kept
+  end
+
   private def self.number_lines(slice : Array(String), from : Int32, upto : Int32) : String
     width = upto.to_s.size
-    slice.map_with_index { |line, i| "#{(from + i).to_s.rjust(width)} | #{line}" }.join("\n")
+    slice.map_with_index do |line, i|
+      shown = if line.size > MAX_LINE_CHARS
+                "#{line[0, MAX_LINE_CHARS]} …[+#{line.size - MAX_LINE_CHARS} chars]"
+              else
+                line
+              end
+      "#{(from + i).to_s.rjust(width)} | #{shown}"
+    end.join("\n")
   end
 
   # Did this reply START a tool call without finishing it?
