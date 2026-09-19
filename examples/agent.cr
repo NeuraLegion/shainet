@@ -40,8 +40,13 @@ module AgentDemo
 
   # How many times an IDENTICAL tool call is allowed before the loop intervenes, and how many recent
   # call signatures to remember. Small on purpose: two identical calls are a retry, three is a loop.
-  REPEAT_CALL_LIMIT  =  2
-  RECENT_CALL_MEMORY = 12
+  REPEAT_CALL_LIMIT = 2
+
+  # How many times one turn may be told to finish a dropped tool call before its reply is
+  # accepted as-is. Two is enough for a formatting slip without letting a model that simply
+  # wants to answer briefly be nudged in a loop.
+  EMPTY_REPLY_NUDGE_LIMIT =  2
+  RECENT_CALL_MEMORY      = 12
 
   # Turn a failed list_directory into an answer rather than a dead end.
   #
@@ -565,7 +570,31 @@ module AgentDemo
     end
   end
 
-  # Extract <tool_call><function=NAME><parameter=K>V</parameter>...</function></tool_call> blocks.
+  # Did this reply START a tool call without finishing it?
+  #
+  # This is the precise signal, and it beats guessing from prose. The observed failure was the model
+  # emitting its preamble inside a <think> block and then getting 81 characters into the call before
+  # generation stopped -- right after </parameter>, with </function></tool_call> missing. The parser
+  # needs the closing tag, so it returned nothing and the loop treated a half-written call as the
+  # final answer.
+  #
+  # Counting the tags is unambiguous where prose heuristics are not: an earlier version of this looked
+  # for "let's" / "i'll" openers and missed the real case entirely, because once the <think> block was
+  # stripped the remaining text began with "<tool_call>".
+  def self.truncated_tool_call?(text : String) : Bool
+    opens = text.split("<tool_call>").size - 1
+    closes = text.split("</tool_call>").size - 1
+    opens > closes
+  end
+
+  # Did the model reply with nothing usable at all -- no call, no answer?
+  #
+  # Distinct from a truncated call: here it never started one and said nothing either, so there is
+  # nothing to salvage and nothing to show the user.
+  def self.empty_reply?(visible : String) : Bool
+    visible.strip.empty?
+  end
+
   def self.parse_tool_calls(text : String) : Array(ToolCall)
     text = text.scrub # never run regex on invalid UTF-8 (broken-model output)
     calls = [] of ToolCall
@@ -858,16 +887,30 @@ module AgentDemo
       prev = ""
       max_tokens.times do
         row = logits.rows - 1
-        @sampler.apply_repetition_penalty!(logits, generated, window: 20, row: row)
+        # The repetition penalty must NOT run inside a tool call.
+        #
+        # Tool-call syntax is repetitive BY DESIGN -- <function=read_file> and </function> share the
+        # token "function", every argument repeats <parameter= and </parameter>. With window 20 the
+        # tokens needed to CLOSE the call are still inside the window from opening it, so they get
+        # penalised exactly when they are the only correct choice, and the sampler takes <|im_end|>
+        # instead. Observed: generation stopped 81 characters in, immediately after </parameter>,
+        # leaving </function></tool_call> unwritten and the call unparseable.
+        #
+        # Prose still gets the penalty, which is where it earns its keep.
+        unless AgentDemo.truncated_tool_call?(prev)
+          @sampler.apply_repetition_penalty!(logits, generated, window: 20, row: row)
+        end
         id = @sampler.sample(logits, row)
         break if id < 0 || @stop_ids.includes?(id)
         break unless logits[row, id].finite?
         generated << id
+        # Decoded unconditionally, not just when echoing: the tool-call state above is derived from
+        # it, so a non-echoing call (/ask) needs it too.
+        full = @tokenizer.decode(generated).scrub
         if r = renderer
-          full = @tokenizer.decode(generated).scrub
           r.feed(full[prev.size..]) if full.size > prev.size
-          prev = full
         end
+        prev = full
         logits = @net.run([id], stealth: true, return_matrix: true).as(SHAInet::SimpleMatrix)
         # The sampled token is now in the cache too, so the next turn can reuse it.
         @cache_ids << id
@@ -891,6 +934,7 @@ module AgentDemo
       @recent_calls.clear
       # One OOM recovery per turn: a second failure after compacting is not a transient.
       compacted_for_oom = false
+      empty_nudges = 0
       step = 0
       loop do
         step += 1
@@ -955,6 +999,37 @@ module AgentDemo
 
         # Keep the assistant's output (incl. any tool_call markup) verbatim.
         @messages << Message.new("assistant", text.strip, text_ids)
+
+        # A short reply with no tool call is almost always a DROPPED call, not an answer.
+        #
+        # This model's own chat template says reasoning may come "in natural language BEFORE the
+        # function call, but NOT after", so a turn that ends on a one-line preamble has stopped in
+        # the middle of the format it was told to use. Observed verbatim: asked to analyse a file,
+        # the model replied "Let's take a look at the file." and ended the turn -- the loop treated
+        # that as the final answer, printed it, and handed the prompt back having done nothing.
+        #
+        # Nudging costs one extra generation; accepting it costs the whole request. Bounded so a
+        # model that genuinely wants to answer briefly is not badgered, and skipped on the last step
+        # where there would be no chance to act on a call anyway.
+        truncated = AgentDemo.truncated_tool_call?(text)
+        if calls.empty? && !last_step && empty_nudges < EMPTY_REPLY_NUDGE_LIMIT &&
+           (truncated || AgentDemo.empty_reply?(visible))
+          empty_nudges += 1
+          if truncated
+            STDERR.puts "  [agent] tool call was cut off mid-write; asking for it again".colorize(:yellow)
+            @messages << Message.new("tool",
+              "Your last reply began a <tool_call> but stopped before closing it, so nothing ran. " \
+              "Send the SAME call again, complete, as the entire reply -- every <parameter> closed, " \
+              "then </function>, then </tool_call>. Write nothing after the closing </tool_call>.")
+          else
+            STDERR.puts "  [agent] reply was empty; asking the model to act or answer".colorize(:yellow)
+            @messages << Message.new("tool",
+              "Your last reply was empty, so nothing ran and the user saw nothing. Either emit a " \
+              "tool call as the entire reply, or give the complete answer.")
+          end
+          next
+        end
+
         break if calls.empty?
         # On the final step the reply IS the answer. Running its tool calls would spend the
         # results and then break on the next iteration, throwing them away unanswered.
