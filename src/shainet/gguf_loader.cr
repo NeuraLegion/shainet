@@ -137,7 +137,20 @@ module SHAInet
         # outrun a growing term, and over-reserving costs layers on every run.
         fixed_bytes = 896_i64 * 1024 * 1024
         derived = ((kv_per_token + ws_per_token) * max_context + fixed_bytes + ws_fixed)
-        derived = (derived * 120) // 100
+        # 10% on top, reduced from 20%.
+        #
+        # The margin covered the transient peak when a growing buffer holds its old and new allocation
+        # at once. Two things since have shrunk that peak: large buffers now grow by an eighth rather
+        # than doubling, and the attention workspace is held under a fixed budget instead of scaling
+        # with context. What is left to absorb is small next to a KV cache measured in gigabytes.
+        #
+        # It is the difference between running a long context and not. At 64K the 20% margin produced
+        # a 6067 MB reserve, which left room for 59 of 64 layers -- so asking for a longer window put
+        # five layers on the host and made decode slower, the opposite of the intent. 10% gives 5562 MB
+        # and all 64 layers fit. The number to check it against is a measurement rather than a
+        # calculation: a 60000-token prefill with 64/64 resident finished with 506 MB still free, and
+        # that was with a 5300 MB reserve, i.e. less than this.
+        derived = (derived * 110) // 100
         derived_mb = (derived // (1024 * 1024)).to_i
 
         # An explicit reserve always wins: it is the escape hatch for trading context for speed.

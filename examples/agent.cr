@@ -624,7 +624,7 @@ module AgentDemo
     @sampler : SHAInet::Sampler
     getter max_context : Int32
 
-    def initialize(@net : SHAInet::Network, @tokenizer : SHAInet::BPETokenizer, @tools : Array(Tool), @max_context : Int32 = 16384)
+    def initialize(@net : SHAInet::Network, @tokenizer : SHAInet::BPETokenizer, @tools : Array(Tool), @max_context : Int32 = 65536)
       im_start = @tokenizer.vocab["<|im_start|>"]?
       im_end = @tokenizer.vocab["<|im_end|>"]?
       raise "model is not ChatML (<|im_start|>/<|im_end|> missing); this agent targets Qwen3-style models" unless im_start && im_end
@@ -1154,6 +1154,22 @@ STDERR.sync = true # stream tokens as they arrive (no buffering)
 AgentDemo.print_banner(STDERR, "#{File.basename(model_dir)} · local coding agent on Network#run")
 
 STDERR.puts "Loading model from #{model_dir}...".colorize(:dark_gray)
+
+# Decide the context BEFORE loading, and tell the loader about it.
+#
+# These were two independent defaults that happened to agree, and when they stopped agreeing the
+# failure was an OOM mid-conversation rather than anything legible. The loader sizes its VRAM reserve
+# from SHAINET_MAX_CONTEXT so the KV cache has somewhere to grow; the agent separately decided how
+# many tokens it would allow. Loading first and reading the agent's context afterwards meant the
+# reserve was always built for the LOADER's default no matter what the agent went on to permit -- so
+# raising the agent's window silently produced a model with no room for it.
+#
+# 64K is the default because this architecture is built for it (the GGUF declares 262144) and because
+# a 16K window is the difference between an agent that can hold a session and one that compacts every
+# few turns. The loader places what fits and leaves the rest on the host, so a smaller card degrades
+# in speed rather than failing.
+agent_context = (ENV["SHAINET_AGENT_CONTEXT"]? || "65536").to_i
+ENV["SHAINET_MAX_CONTEXT"] ||= agent_context.to_s
 # A 30B takes about nine minutes here. Without a progress line that is indistinguishable
 # from a hang, and the layer loop is where nearly all of it goes.
 load_started = Time.monotonic
@@ -1197,7 +1213,8 @@ STDERR.puts "Loaded in #{(Time.monotonic - t0).total_seconds.round(1)}s · #{mod
 # are cached in VRAM for reuse. Dense models (Qwen3.5, Qwen3-0.6B) have no experts to cache,
 # so reserving VRAM for this wastes 2+ GB that could serve KV context instead.
 # Override with SHAINET_EXPERT_CACHE_MB (0 disables).
-max_context = (ENV["SHAINET_AGENT_CONTEXT"]? || "16384").to_i
+# Set before the load, so the loader's VRAM reserve and this window cannot disagree.
+max_context = agent_context
 
 has_moe = net.hidden_layers.any? { |l| l.is_a?(SHAInet::LlamaBlock) && l.as(SHAInet::LlamaBlock).ffn.is_a?(SHAInet::MoEFF) }
 
