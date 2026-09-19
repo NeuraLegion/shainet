@@ -311,9 +311,14 @@ module AgentDemo
       end,
       Tool.new(
         "search",
-        "Search files under a directory for a regular-expression pattern (grep-like). Returns file:line matches.",
-        [ToolParam.new("pattern", "string", "Regular expression to search for."),
-         ToolParam.new("path", "string", "Directory or file to search (default: current dir).", false)]
+        "Search file CONTENTS and get back path:line: text for every hit. This is how you find the few " \
+        "ranges worth reading instead of reading whole files — search first, then read_file with " \
+        "start_line/end_line around a hit. Case-insensitive; literal text unless regex is true.",
+        [ToolParam.new("pattern", "string", "Text to find, or a regular expression when regex is true."),
+         ToolParam.new("path", "string", "Directory to search (default: workspace root).", false),
+         ToolParam.new("glob", "string", "Only search files whose name matches this, e.g. '*.cr'.", false),
+         ToolParam.new("context", "string", "Lines of context around each hit, 0-5 (default 0).", false),
+         ToolParam.new("regex", "string", "'true' to treat pattern as a regular expression.", false)]
       ) do |args|
         pat = args["pattern"]? || ""
         next "Error: empty pattern" if pat.empty?
@@ -321,31 +326,24 @@ module AgentDemo
         if root.nil?
           next err
         end
-        begin
-          re = Regex.new(pat)
-        rescue ex
-          next "Error: invalid regex: #{ex.message}"
+        ctx = Math.min(5, Math.max(0, (args["context"]? || "0").to_i? || 0))
+        rx = (args["regex"]? || "").downcase == "true"
+        AgentDemo.search_contents(root, pat, args["glob"]?, ctx, rx)
+      end,
+      Tool.new(
+        "glob",
+        "List FILES BY NAME matching a glob, e.g. '**/*.cr' or 'src/**/gguf*.cr'. Use it to see what " \
+        "exists before reading anything; it returns paths only, never file contents.",
+        [ToolParam.new("pattern", "string", "Glob pattern, e.g. '**/*.cr'."),
+         ToolParam.new("path", "string", "Directory to search from (default: workspace root).", false)]
+      ) do |args|
+        pat = args["pattern"]? || ""
+        next "Error: empty pattern" if pat.empty?
+        root, err = AgentDemo.safe_path(args["path"]? || ".")
+        if root.nil?
+          next err
         end
-        files = Dir.exists?(root) ? Dir.glob(File.join(root, "**", "*")) : [root]
-        results = [] of String
-        files.each do |f|
-          break if results.size >= 100
-          next if Dir.exists?(f) || !File.exists?(f) || File.size(f) > 2_000_000
-          begin
-            File.read_lines(f).each_with_index do |line, i|
-              if re.matches?(line)
-                # Report paths relative to the workspace: absolute ones leak the host layout
-                # into the transcript and are not what the model may pass back.
-                rel = f.starts_with?("#{AgentDemo.workspace}/") ? f[(AgentDemo.workspace.size + 1)..] : f
-                results << "#{rel}:#{i + 1}: #{line.strip}"
-                break if results.size >= 100
-              end
-            end
-          rescue
-            # skip unreadable/binary files
-          end
-        end
-        results.empty? ? "No matches." : results.join("\n")
+        AgentDemo.glob_files(root, pat)
       end,
       Tool.new(
         "write_file",
@@ -597,6 +595,141 @@ module AgentDemo
   # prompt. A rule the model may ignore is weaker than a tool that cannot overspend.
   LARGE_FILE_BYTES = 20_000
   HEAD_LINES       =    200
+
+  # Directories never worth walking for source. A plain "**/*" walk of this repo descends into .git
+  # (thousands of loose objects), into lib/ (every installed shard's full source) and into any build
+  # output, which is slow and buries the real hits.
+  NOISE_DIRS = {".git", "node_modules", "dist", "build", "vendor", "target", ".cache", "lib", "bin", ".shards"}
+
+  # Most matching lines returned before the rest are summarized as a count.
+  MAX_MATCHES = 120
+
+  private def self.noise_path?(rel : String) : Bool
+    rel.split('/').any? { |seg| NOISE_DIRS.includes?(seg) }
+  end
+
+  private def self.relativize(path : String) : String
+    ws = workspace
+    path.starts_with?("#{ws}/") ? path[(ws.size + 1)..] : path
+  end
+
+  # Search file contents, returning "path:line: text" lines.
+  #
+  # git grep first: it is far faster than walking the tree in-process and it honours .gitignore, so
+  # generated and vendored files do not drown the real hits. It is not always available -- the
+  # workspace may not be a repo, or git may not be installed -- so the in-process walk stays as the
+  # fallback rather than as dead code, and both paths are held to the same output budget.
+  def self.search_contents(root : String, pattern : String, glob : String?,
+                           context : Int32, regex : Bool) : String
+    hit = git_grep(root, pattern, glob, context, regex)
+    return hit if hit
+    walk_grep(root, pattern, glob, context, regex)
+  end
+
+  # Returns nil when git grep could not run, so the caller falls back.
+  private def self.git_grep(root : String, pattern : String, glob : String?,
+                            context : Int32, regex : Bool) : String?
+    rel = relativize(root)
+    args = ["grep", "-nI", "--no-color", "--untracked", "-i"]
+    args += ["-C", context.to_s] if context > 0
+    args << (regex ? "-E" : "-F")
+    args += ["-e", pattern, "--"]
+    if glob && !glob.empty?
+      spec = glob.includes?("/") ? glob : "**/#{glob}"
+      prefix = (rel == "." || rel.empty?) ? "" : "#{rel.rstrip('/')}/"
+      args << ":(glob)#{prefix}#{spec}"
+    elsif rel != "." && !rel.empty?
+      args << rel
+    end
+
+    stdout = IO::Memory.new
+    stderr = IO::Memory.new
+    status = Process.run("git", args, output: stdout, error: stderr, chdir: workspace)
+    # Exit 1 is "no matches", which is a real answer. Anything else (128 = not a repo, or git
+    # missing) means the search did not happen, so say so by returning nil.
+    return unless status.exit_code == 0 || status.exit_code == 1
+    bound_matches(stdout.to_s.lines.map(&.chomp).reject(&.empty?))
+  rescue
+    nil
+  end
+
+  private def self.walk_grep(root : String, pattern : String, glob : String?,
+                             context : Int32, regex : Bool) : String
+    re = begin
+      regex ? Regex.new(pattern, Regex::Options::IGNORE_CASE) : Regex.new(Regex.escape(pattern), Regex::Options::IGNORE_CASE)
+    rescue ex
+      return "Error: invalid regex: #{ex.message}"
+    end
+
+    files = Dir.exists?(root) ? Dir.glob(File.join(root, "**", "*")) : [root]
+    hits = [] of String
+    files.each do |f|
+      break if hits.size >= MAX_MATCHES
+      rel = relativize(f)
+      next if noise_path?(rel)
+      next if Dir.exists?(f) || !File.exists?(f) || File.size(f) > 2_000_000
+      next if glob && !glob.empty? && !File.match?(glob.includes?("/") ? glob : "**/#{glob}", rel)
+      begin
+        lines = File.read_lines(f)
+        lines.each_with_index do |line, i|
+          next unless re.matches?(line)
+          lo = Math.max(0, i - context)
+          hi = Math.min(lines.size - 1, i + context)
+          (lo..hi).each { |j| hits << "#{rel}:#{j + 1}: #{lines[j].strip}" }
+          break if hits.size >= MAX_MATCHES
+        end
+      rescue
+        # unreadable or binary
+      end
+    end
+    bound_matches(hits)
+  end
+
+  # Hold match output to the same budget as a file read: long lines cut, total bounded, and the
+  # overflow reported as a count with the remedy rather than silently dropped.
+  private def self.bound_matches(lines : Array(String)) : String
+    return "No matches." if lines.empty?
+    kept = lines.first(MAX_MATCHES)
+    body = kept.map do |l|
+      l.size > MAX_LINE_CHARS ? "#{l[0, MAX_LINE_CHARS]} …[+#{l.size - MAX_LINE_CHARS} chars]" : l
+    end
+    text = body.join("\n")
+    if text.bytesize > LARGE_FILE_BYTES
+      acc = [] of String
+      used = 0
+      body.each do |l|
+        break if used + l.bytesize + 1 > LARGE_FILE_BYTES
+        used += l.bytesize + 1
+        acc << l
+      end
+      text = acc.join("\n")
+      return "#{text}\n… output truncated at #{acc.size} of #{lines.size} matching lines; narrow the pattern, the glob or the path."
+    end
+    if lines.size > kept.size
+      "#{text}\n… and #{lines.size - kept.size} more matches; narrow the pattern, the glob or the path."
+    else
+      text
+    end
+  end
+
+  # Find files by NAME. Returns paths only, so the model can pick what to read.
+  def self.glob_files(root : String, pattern : String) : String
+    spec = File.join(root, pattern)
+    found = Dir.glob(spec).reject do |p|
+      rel = relativize(p)
+      noise_path?(rel) || Dir.exists?(p)
+    end
+    return "No files match #{pattern}." if found.empty?
+    rels = found.map { |p| relativize(p) }.sort!
+    shown = rels.first(MAX_MATCHES)
+    head = "#{rels.size} file(s) match #{pattern}"
+    body = shown.join("\n")
+    if rels.size > shown.size
+      "#{head} (showing #{shown.size}):\n#{body}\n… narrow the pattern to see the rest."
+    else
+      "#{head}:\n#{body}"
+    end
+  end
 
   # Longest tool argument value shown on the call line.
   #
@@ -1239,7 +1372,20 @@ module AgentDemo
       s << "</parameter>\n</function>\n</tool_call>\n\n"
       s << "<IMPORTANT>\n- Function calls MUST be wrapped in <tool_call></tool_call> with an inner"
       s << " <function=...></function> block.\n- Provide any reasoning BEFORE the call, never after.\n"
-      s << "- If no function is needed, just answer normally.\n</IMPORTANT>"
+      s << "- If no function is needed, just answer normally.\n</IMPORTANT>\n\n"
+      # Locating before reading is the difference between three targeted reads and paging a whole
+      # file. Asked what to improve in a 1389-line file, the model read the head and then every
+      # remaining range in sequence -- five calls, about 24K tokens -- when glob plus search would
+      # have pointed at the handful of ranges that mattered. The bounded read stops any single call
+      # from being huge; only knowing WHERE to look stops the total from being huge.
+      s << "<SEARCH_FIRST>\nTo work on code you have not read, LOCATE before you read:\n"
+      s << "1. glob to see which files exist (e.g. pattern='src/**/*.cr').\n"
+      s << "2. search for the symbol, message or pattern you care about — it returns path:line, and\n"
+      s << "   context=3 shows the surrounding lines.\n"
+      s << "3. read_file with start_line/end_line around the lines search pointed at.\n"
+      s << "Reading a whole large file, or paging one range after another until you have all of it,"
+      s << " spends the context you need for the actual work. Search is cheap; a full read is not.\n"
+      s << "</SEARCH_FIRST>"
     end
   end
 end
