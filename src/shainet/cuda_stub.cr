@@ -70,7 +70,7 @@ module SHAInet
       nil
     end
 
-    def create_handle(*args)
+    def create_handle(*args, **opts)
       raise "CUDA disabled"
     end
 

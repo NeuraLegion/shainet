@@ -278,7 +278,17 @@ module SHAInet
       k = @rows
       chunk = SCRATCH_ROWS > @cols ? @cols : SCRATCH_ROWS
       buf = GGUFMatrix.scratch(chunk * k)
-      handle = CUDA.create_handle
+      # TF32 here, true fp32 everywhere else.
+      #
+      # This path runs ONLY for M > 1, which is prefill. Decode goes through the hand-written GEMV
+      # kernels and touches cuBLAS not at all, so the determinism that pedantic fp32 protects --
+      # identical logits run to run -- is unaffected by this.
+      #
+      # Worth 2.1x on the dominant cost: the GEMM is 84% of this function (12.72 ms against 2.41 ms
+      # of dequant on a real 5120x17408 IQ3_S weight), and TF32 measured 30.3 against 14.1 TFLOP/s at
+      # exactly this shape. The weights are already 2-4 bit quantized, so TF32's 10-bit mantissa is
+      # far finer than the values it is multiplying.
+      handle = CUDA.create_handle(tf32: true)
       begin
         xp = x.device_ptr.not_nil!
         rp = result.device_ptr.not_nil!

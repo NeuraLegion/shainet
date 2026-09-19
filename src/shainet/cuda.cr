@@ -197,36 +197,66 @@ module SHAInet
     @@handle_pool_mutex = Mutex.new
     @@max_pool_size = 4 # Limit pool size to avoid resource exhaustion
 
-    def create_handle
+    # cuBLAS math modes, by their documented values. Naming them matters: the previous code treated
+    # 16 as "allow TF32", but 16 alone is DEFAULT_MATH | DISALLOW_REDUCED, which enables no tensor
+    # path at all. The escape hatch therefore did nothing, and the measurement taken through it
+    # ("TF32 buys nothing here") was measuring pedantic fp32 against pedantic fp32.
+    CUBLAS_DEFAULT_MATH         =  0
+    CUBLAS_PEDANTIC_MATH        =  2
+    CUBLAS_TF32_TENSOR_OP_MATH  =  3
+    CUBLAS_DISALLOW_REDUCED_RED = 16
+
+    # True fp32, deterministic: what decode and every default path gets.
+    MATH_MODE_PEDANTIC = CUBLAS_PEDANTIC_MATH | CUBLAS_DISALLOW_REDUCED_RED # 18
+    # TF32 tensor cores with deterministic accumulation: 2.1x on SGEMM, measured at the shape the
+    # quantized prefill GEMM actually uses (M=1024 N=512 K=5120: 14.1 -> 30.3 TFLOP/s).
+    MATH_MODE_TF32 = CUBLAS_TF32_TENSOR_OP_MATH | CUBLAS_DISALLOW_REDUCED_RED # 19
+
+    # Acquire a cuBLAS handle. `tf32: true` asks for the TF32 tensor-core path.
+    #
+    # The math mode is set on every acquire, not only on creation, because handles are POOLED: a
+    # handle returned by a TF32 caller would otherwise hand its mode to the next caller that wanted
+    # pedantic fp32, which is a silent precision change depending on call order.
+    def create_handle(tf32 : Bool = false)
+      mode = if mm = ENV["SHAINET_CUBLAS_MATHMODE"]?
+               mm.to_i
+             elsif tf32 || ENV.fetch("SHAINET_CUBLAS_TF32", "0") == "1"
+               MATH_MODE_TF32
+             else
+               MATH_MODE_PEDANTIC
+             end
+
+      pooled = nil.as(LibCUBLAS::Handle?)
       @@handle_pool_mutex.synchronize do
-        if !@@handle_pool.empty?
-          return @@handle_pool.pop
-        end
+        pooled = @@handle_pool.pop unless @@handle_pool.empty?
+      end
+      if h = pooled
+        apply_math_mode(h, mode)
+        return h
       end
 
       handle = Pointer(LibCUBLAS::Handle).malloc(1)
       raise "cublasCreate failed" unless LibCUBLAS.cublasCreate_v2(handle) == 0
-      # Ask for true fp32 in-process, so callers do not have to remember NVIDIA_TF32_OVERRIDE=0.
-      #
-      # On Ampere and Ada, cuBLAS runs SGEMM on TF32 tensor cores by default, cutting the mantissa
-      # from 23 bits to 10 -- enough to make token generation vary between runs. The documented
-      # workaround is the NVIDIA_TF32_OVERRIDE=0 environment variable, but that has to be set before
-      # the process starts, so it is easy to forget and invisible when missing.
-      # CUBLAS_PEDANTIC_MATH (2) disables the TF32 path for this handle instead, and 16 is
-      # CUBLAS_MATH_DISALLOW_REDUCED_PRECISION_REDUCTION, which additionally prevents
-      # non-deterministic reduced-precision accumulation. Measured on Qwen3.8-27B prefill, TF32 buys
-      # nothing here anyway (18.1 vs 20.1 tok/s, inside run-to-run noise) because the path is
-      # dequant-bandwidth-bound rather than FLOP-bound -- so this costs no speed.
-      #
-      # Older drivers may reject the combined value; fall back to the reduction flag alone rather
-      # than leaving the handle unconfigured. Set SHAINET_CUBLAS_TF32=1 to allow TF32 back.
-      pedantic = ENV.fetch("SHAINET_CUBLAS_TF32", "0") == "1" ? 16 : 18
-      result = LibCUBLAS.cublasSetMathMode(handle.value, pedantic)
-      if result != 0 && pedantic != 16
-        result = LibCUBLAS.cublasSetMathMode(handle.value, 16)
+      apply_math_mode(handle.value, mode)
+      handle.value
+    end
+
+    # Ask for true fp32 by default, so callers do not have to remember NVIDIA_TF32_OVERRIDE=0.
+    #
+    # On Ampere and Ada, cuBLAS can run SGEMM on TF32 tensor cores, cutting the mantissa from 23 bits
+    # to 10 -- enough to make token generation vary between runs. The documented workaround is the
+    # NVIDIA_TF32_OVERRIDE=0 environment variable, but that has to be set before the process starts,
+    # so it is easy to forget and invisible when missing. Setting the mode per handle fixes that
+    # in-process.
+    #
+    # Older drivers may reject the combined value; fall back to the reduction flag alone rather than
+    # leaving the handle unconfigured.
+    private def apply_math_mode(handle : LibCUBLAS::Handle, mode : Int32)
+      result = LibCUBLAS.cublasSetMathMode(handle, mode)
+      if result != 0 && mode != CUBLAS_DISALLOW_REDUCED_RED
+        result = LibCUBLAS.cublasSetMathMode(handle, CUBLAS_DISALLOW_REDUCED_RED)
       end
       Log.warn { "cublasSetMathMode failed (code #{result})" } unless result == 0
-      handle.value
     end
 
     def destroy_handle(handle : LibCUBLAS::Handle)
