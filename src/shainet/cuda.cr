@@ -345,6 +345,8 @@ module SHAInet
     @@rope_forward_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Void)?
     @@head_rmsnorm_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Float32, Void)?
     # GGUF k-quant GEMV
+    @@gemv_iq3s_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@gemv_iq3xxs_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@gemv_iq4xs_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@dequant_iq4xs_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@gemv_q4k_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
@@ -643,6 +645,26 @@ module SHAInet
 
     # GGUF k-quant GEMV: y[M, N] = x[M, K] * dequant(W[N, K]).
     # W is in raw Q4_K format (144-byte blocks, K must be a multiple of 256).
+    def gemv_iq3s(x : Pointer(Float32), w : Pointer(UInt8), y : Pointer(Float32),
+                  m : Int32, n : Int32, k : Int32)
+      unless fn = @@gemv_iq3s_proc
+        @@gemv_iq3s_proc = fn = load_kernel_proc("gemv_iq3s",
+          Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(x, w, y, m, n, k)
+    end
+
+    def gemv_iq3xxs(x : Pointer(Float32), w : Pointer(UInt8), y : Pointer(Float32),
+                    m : Int32, n : Int32, k : Int32)
+      unless fn = @@gemv_iq3xxs_proc
+        @@gemv_iq3xxs_proc = fn = load_kernel_proc("gemv_iq3xxs",
+          Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(x, w, y, m, n, k)
+    end
+
     def gemv_iq4xs(x : Pointer(Float32), w : Pointer(UInt8), y : Pointer(Float32),
                    m : Int32, n : Int32, k : Int32)
       unless fn = @@gemv_iq4xs_proc

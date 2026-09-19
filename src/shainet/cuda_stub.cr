@@ -179,6 +179,16 @@ module SHAInet
       raise "CUDA disabled"
     end
 
+    def gemv_iq3xxs(x : Pointer(Float32), w : Pointer(UInt8), y : Pointer(Float32),
+                    m : Int32, n : Int32, k : Int32)
+      raise "CUDA not available"
+    end
+
+    def gemv_iq3s(x : Pointer(Float32), w : Pointer(UInt8), y : Pointer(Float32),
+                  m : Int32, n : Int32, k : Int32)
+      raise "CUDA not available"
+    end
+
     def gemv_iq4xs(x : Pointer(Float32), w : Pointer(UInt8), y : Pointer(Float32),
                    m : Int32, n : Int32, k : Int32)
       raise "CUDA not available"

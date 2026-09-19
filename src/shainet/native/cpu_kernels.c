@@ -17,6 +17,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
+#include "iq_tables.h"  // codebook grids, generated from ggml-common.h
 
 /* ──────────────────────── Q4_K block layout ──────────────────────── */
 /* 144 bytes per block of 256 values:
@@ -614,6 +615,248 @@ static void dequant_iq4xs_row_f32(const uint8_t *w, float *out, int K) {
             y += 32;
             qs += 16;
         }
+    }
+}
+
+// IQ3_XXS: 98-byte block. d, then qs[64] grid indices followed by scales_and_signs[32] read as
+// eight uint32. Each uint32 carries a 4-bit scale in its top bits and four 7-bit sign selectors.
+static void dequant_iq3xxs_row_f32(const uint8_t *w, float *out, int K) {
+    const int nb = K / 256;
+    for (int i = 0; i < nb; ++i) {
+        const uint8_t *blk = w + (long long)i * 98;
+        const float d = f16_to_f32(*(const uint16_t *)(blk + 0));
+        const uint8_t *qs = blk + 2;
+        const uint8_t *sas = qs + 64;
+        float *y = out + (long long)i * 256;
+        for (int ib32 = 0; ib32 < 8; ++ib32) {
+            uint32_t aux32;
+            memcpy(&aux32, sas + 4 * ib32, sizeof(uint32_t));
+            const float db = d * (0.5f + (aux32 >> 28)) * 0.5f;
+            for (int l = 0; l < 4; ++l) {
+                const uint8_t signs = shainet_ksigns_iq2xs[(aux32 >> (7 * l)) & 127];
+                const uint8_t *g1 = (const uint8_t *)(shainet_iq3xxs_grid + qs[2 * l + 0]);
+                const uint8_t *g2 = (const uint8_t *)(shainet_iq3xxs_grid + qs[2 * l + 1]);
+                for (int j = 0; j < 4; ++j) {
+                    y[j + 0] = db * g1[j] * ((signs & shainet_kmask_iq2xs[j + 0]) ? -1.f : 1.f);
+                    y[j + 4] = db * g2[j] * ((signs & shainet_kmask_iq2xs[j + 4]) ? -1.f : 1.f);
+                }
+                y += 8;
+            }
+            qs += 8;
+        }
+    }
+}
+
+// IQ3_S: 110-byte block. d, qs[64], qh[8], signs[32], scales[4]. The grid index is 9 bits: 8 from
+// qs plus one bit pulled out of qh, which is why the shifts differ per l.
+static void dequant_iq3s_row_f32(const uint8_t *w, float *out, int K) {
+    const int nb = K / 256;
+    for (int i = 0; i < nb; ++i) {
+        const uint8_t *blk = w + (long long)i * 110;
+        const float d = f16_to_f32(*(const uint16_t *)(blk + 0));
+        const uint8_t *qs = blk + 2;
+        const uint8_t *qh = blk + 2 + 64;
+        const uint8_t *signs = blk + 2 + 64 + 8;
+        const uint8_t *scales = blk + 2 + 64 + 8 + 32;
+        float *y = out + (long long)i * 256;
+        for (int ib32 = 0; ib32 < 8; ib32 += 2) {
+            const float db1 = d * (1 + 2 * (scales[ib32 / 2] & 0xf));
+            const float db2 = d * (1 + 2 * (scales[ib32 / 2] >> 4));
+            for (int l = 0; l < 4; ++l) {
+                const uint8_t *g1 = (const uint8_t *)(shainet_iq3s_grid + (qs[2 * l + 0] | ((qh[0] << (8 - 2 * l)) & 256)));
+                const uint8_t *g2 = (const uint8_t *)(shainet_iq3s_grid + (qs[2 * l + 1] | ((qh[0] << (7 - 2 * l)) & 256)));
+                for (int j = 0; j < 4; ++j) {
+                    y[j + 0] = db1 * g1[j] * ((signs[l] & shainet_kmask_iq2xs[j + 0]) ? -1.f : 1.f);
+                    y[j + 4] = db1 * g2[j] * ((signs[l] & shainet_kmask_iq2xs[j + 4]) ? -1.f : 1.f);
+                }
+                y += 8;
+            }
+            qs += 8;
+            signs += 4;
+            for (int l = 0; l < 4; ++l) {
+                const uint8_t *g1 = (const uint8_t *)(shainet_iq3s_grid + (qs[2 * l + 0] | ((qh[1] << (8 - 2 * l)) & 256)));
+                const uint8_t *g2 = (const uint8_t *)(shainet_iq3s_grid + (qs[2 * l + 1] | ((qh[1] << (7 - 2 * l)) & 256)));
+                for (int j = 0; j < 4; ++j) {
+                    y[j + 0] = db2 * g1[j] * ((signs[l] & shainet_kmask_iq2xs[j + 0]) ? -1.f : 1.f);
+                    y[j + 4] = db2 * g2[j] * ((signs[l] & shainet_kmask_iq2xs[j + 4]) ? -1.f : 1.f);
+                }
+                y += 8;
+            }
+            qh += 2;
+            qs += 8;
+            signs += 4;
+        }
+    }
+}
+
+// IQ2_XXS: 66-byte block. d then qs[64] read as pairs of uint32: the first holds four grid indices,
+// the second a 4-bit scale plus four 7-bit sign selectors.
+static void dequant_iq2xxs_row_f32(const uint8_t *w, float *out, int K) {
+    const int nb = K / 256;
+    for (int i = 0; i < nb; ++i) {
+        const uint8_t *blk = w + (long long)i * 66;
+        const float d = f16_to_f32(*(const uint16_t *)(blk + 0));
+        const uint8_t *qs = blk + 2;
+        float *y = out + (long long)i * 256;
+        for (int ib32 = 0; ib32 < 8; ++ib32) {
+            uint32_t aux32[2];
+            memcpy(aux32, qs + 4 * ib32, 2 * sizeof(uint32_t));
+            const uint8_t *aux8 = (const uint8_t *)aux32;
+            const float db = d * (0.5f + (aux32[1] >> 28)) * 0.25f;
+            for (int l = 0; l < 4; ++l) {
+                const uint8_t *grid = (const uint8_t *)(shainet_iq2xxs_grid + aux8[l]);
+                const uint8_t signs = shainet_ksigns_iq2xs[(aux32[1] >> (7 * l)) & 127];
+                for (int j = 0; j < 8; ++j) {
+                    y[j] = db * grid[j] * ((signs & shainet_kmask_iq2xs[j]) ? -1.f : 1.f);
+                }
+                y += 8;
+            }
+        }
+    }
+}
+
+// IQ2_XS: 74-byte block. d, qs[32] as uint16 (9-bit grid index + 7-bit sign selector), scales[8].
+static void dequant_iq2xs_row_f32(const uint8_t *w, float *out, int K) {
+    const int nb = K / 256;
+    for (int i = 0; i < nb; ++i) {
+        const uint8_t *blk = w + (long long)i * 74;
+        const float d = f16_to_f32(*(const uint16_t *)(blk + 0));
+        const uint16_t *qs = (const uint16_t *)(blk + 2);
+        const uint8_t *scales = blk + 2 + 32;
+        float *y = out + (long long)i * 256;
+        for (int ib32 = 0; ib32 < 8; ++ib32) {
+            float db[2];
+            db[0] = d * (0.5f + (scales[ib32] & 0xf)) * 0.25f;
+            db[1] = d * (0.5f + (scales[ib32] >> 4)) * 0.25f;
+            for (int l = 0; l < 4; ++l) {
+                const uint8_t *grid = (const uint8_t *)(shainet_iq2xs_grid + (qs[4 * ib32 + l] & 511));
+                const uint8_t signs = shainet_ksigns_iq2xs[qs[4 * ib32 + l] >> 9];
+                for (int j = 0; j < 8; ++j) {
+                    y[j] = db[l / 2] * grid[j] * ((signs & shainet_kmask_iq2xs[j]) ? -1.f : 1.f);
+                }
+                y += 8;
+            }
+        }
+    }
+}
+
+// IQ2_S: 82-byte block. d, qs[64] (the last 32 bytes of which are sign bytes), qh[8], scales[8].
+// The grid index is 10 bits: 8 from qs plus two from qh.
+static void dequant_iq2s_row_f32(const uint8_t *w, float *out, int K) {
+    const int nb = K / 256;
+    for (int i = 0; i < nb; ++i) {
+        const uint8_t *blk = w + (long long)i * 82;
+        const float d = f16_to_f32(*(const uint16_t *)(blk + 0));
+        const uint8_t *qs = blk + 2;
+        const uint8_t *qh = blk + 2 + 64;
+        const uint8_t *scales = blk + 2 + 64 + 8;
+        const uint8_t *signs = qs + 32;
+        float *y = out + (long long)i * 256;
+        for (int ib32 = 0; ib32 < 8; ++ib32) {
+            float db[2];
+            db[0] = d * (0.5f + (scales[ib32] & 0xf)) * 0.25f;
+            db[1] = d * (0.5f + (scales[ib32] >> 4)) * 0.25f;
+            for (int l = 0; l < 4; ++l) {
+                const float dl = db[l / 2];
+                const uint8_t *grid = (const uint8_t *)(shainet_iq2s_grid + (qs[l] | ((qh[ib32] << (8 - 2 * l)) & 0x300)));
+                for (int j = 0; j < 8; ++j) {
+                    y[j] = dl * grid[j] * ((signs[l] & shainet_kmask_iq2xs[j]) ? -1.f : 1.f);
+                }
+                y += 8;
+            }
+            qs += 4;
+            signs += 4;
+        }
+    }
+}
+
+// Q2_K: 84-byte block. scales[16] (4-bit scale + 4-bit min each), qs[64] holding four 2-bit values
+// per byte, then d and dmin.
+static void dequant_q2k_row_f32(const uint8_t *w, float *out, int K) {
+    const int nb = K / 256;
+    for (int i = 0; i < nb; ++i) {
+        const uint8_t *blk = w + (long long)i * 84;
+        const uint8_t *scales = blk + 0;
+        const uint8_t *q = blk + 16;
+        const float d = f16_to_f32(*(const uint16_t *)(blk + 80));
+        const float dmin = f16_to_f32(*(const uint16_t *)(blk + 82));
+        float *y = out + (long long)i * 256;
+        int is = 0;
+        for (int n = 0; n < 256; n += 128) {
+            int shift = 0;
+            for (int j = 0; j < 4; ++j) {
+                uint8_t sc = scales[is++];
+                float dl = d * (sc & 0xF), ml = dmin * (sc >> 4);
+                for (int l = 0; l < 16; ++l) *y++ = dl * (float)((int8_t)((q[l] >> shift) & 3)) - ml;
+                sc = scales[is++];
+                dl = d * (sc & 0xF);
+                ml = dmin * (sc >> 4);
+                for (int l = 0; l < 16; ++l) *y++ = dl * (float)((int8_t)((q[l + 16] >> shift) & 3)) - ml;
+                shift += 2;
+            }
+            q += 32;
+        }
+    }
+}
+
+// IQ1_M: 56-byte block, and the only one with NO fp16 d field -- the scale is reassembled from four
+// nibbles spread across the scales array and interpreted as an fp16.
+#define SHAINET_IQ1S_DELTA 0.125f
+static void dequant_iq1m_row_f32(const uint8_t *w, float *out, int K) {
+    const int nb = K / 256;
+    for (int i = 0; i < nb; ++i) {
+        const uint8_t *blk = w + (long long)i * 56;
+        const uint8_t *qs = blk + 0;
+        const uint8_t *qh = blk + 32;
+        const uint16_t *sc = (const uint16_t *)(blk + 48);
+        const uint16_t scale_u16 =
+            (uint16_t)((sc[0] >> 12) | ((sc[1] >> 8) & 0x00f0) | ((sc[2] >> 4) & 0x0f00) | (sc[3] & 0xf000));
+        const float d = f16_to_f32(scale_u16);
+        float *y = out + (long long)i * 256;
+        for (int ib = 0; ib < 8; ++ib) {
+            const float dl1 = d * (2 * ((sc[ib / 2] >> (6 * (ib % 2) + 0)) & 0x7) + 1);
+            const float dl2 = d * (2 * ((sc[ib / 2] >> (6 * (ib % 2) + 3)) & 0x7) + 1);
+            uint16_t idx[4];
+            float delta[4];
+            idx[0] = qs[0] | ((qh[0] << 8) & 0x700);
+            idx[1] = qs[1] | ((qh[0] << 4) & 0x700);
+            idx[2] = qs[2] | ((qh[1] << 8) & 0x700);
+            idx[3] = qs[3] | ((qh[1] << 4) & 0x700);
+            delta[0] = (qh[0] & 0x08) ? -SHAINET_IQ1S_DELTA : SHAINET_IQ1S_DELTA;
+            delta[1] = (qh[0] & 0x80) ? -SHAINET_IQ1S_DELTA : SHAINET_IQ1S_DELTA;
+            delta[2] = (qh[1] & 0x08) ? -SHAINET_IQ1S_DELTA : SHAINET_IQ1S_DELTA;
+            delta[3] = (qh[1] & 0x80) ? -SHAINET_IQ1S_DELTA : SHAINET_IQ1S_DELTA;
+            for (int l = 0; l < 2; ++l) {
+                const int8_t *grid = (const int8_t *)(shainet_iq1s_grid + idx[l]);
+                for (int j = 0; j < 8; ++j) y[j] = dl1 * (grid[j] + delta[l]);
+                y += 8;
+            }
+            for (int l = 2; l < 4; ++l) {
+                const int8_t *grid = (const int8_t *)(shainet_iq1s_grid + idx[l]);
+                for (int j = 0; j < 8; ++j) y[j] = dl2 * (grid[j] + delta[l]);
+                y += 8;
+            }
+            qs += 4;
+            qh += 2;
+        }
+    }
+}
+
+// One entry point for every type, so the loader can transcode anything without knowing the formats.
+// Returns 0 when the type is not handled. `t` is the GGUF ggml_type number.
+int dequant_any_row(int t, const uint8_t *w, float *out, int K) {
+    switch (t) {
+    case 10: dequant_q2k_row_f32(w, out, K); return 1;    // Q2_K
+    case 12: dequant_q4k_row_f32(w, out, K); return 1;    // Q4_K
+    case 14: dequant_q6k_row_f32(w, out, K); return 1;    // Q6_K
+    case 16: dequant_iq2xxs_row_f32(w, out, K); return 1; // IQ2_XXS
+    case 17: dequant_iq2xs_row_f32(w, out, K); return 1;  // IQ2_XS
+    case 18: dequant_iq3xxs_row_f32(w, out, K); return 1; // IQ3_XXS
+    case 21: dequant_iq3s_row_f32(w, out, K); return 1;   // IQ3_S
+    case 22: dequant_iq2s_row_f32(w, out, K); return 1;   // IQ2_S
+    case 23: dequant_iq4xs_row_f32(w, out, K); return 1;  // IQ4_XS
+    case 29: dequant_iq1m_row_f32(w, out, K); return 1;   // IQ1_M
+    default: return 0;
     }
 }
 

@@ -118,6 +118,12 @@ module SHAInet
       when .iq4_xs?
         CUDA.gemv_iq4xs(x.device_ptr.not_nil!, @dev_ptr, result.device_ptr.not_nil!,
           x.rows, @cols, @rows)
+      when .iq3_s?
+        CUDA.gemv_iq3s(x.device_ptr.not_nil!, @dev_ptr, result.device_ptr.not_nil!,
+          x.rows, @cols, @rows)
+      when .iq3_xxs?
+        CUDA.gemv_iq3xxs(x.device_ptr.not_nil!, @dev_ptr, result.device_ptr.not_nil!,
+          x.rows, @cols, @rows)
       when .q4_k?
         CUDA.gemv_q4k(x.device_ptr.not_nil!, @dev_ptr, result.device_ptr.not_nil!,
           x.rows, @cols, @rows)
@@ -165,7 +171,7 @@ module SHAInet
     # stage_host when it decides whether a host weight can be borrowed onto the card. A type missing
     # here must be transcoded at load rather than reaching a kernel that cannot read it.
     def self.device_type_supported?(t : GGUF::GGMLType) : Bool
-      t.q4_k? || t.q6_k? || t.iq4_xs?
+      t.q4_k? || t.q6_k? || t.iq4_xs? || t.iq3_s? || t.iq3_xxs?
     end
 
     # ── One reusable device staging slot for weights that live on the HOST ──

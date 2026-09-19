@@ -2,6 +2,7 @@
 #include <cuda_fp16.h>
 #include <cstdio>
 #include <cstdlib>
+#include "iq_tables.cuh"  // i-quant codebook grids in constant memory
 
 // Device kernels
 // Simple row-wise softmax kernel. This version runs one thread per row and
@@ -1938,6 +1939,118 @@ __device__ __constant__ int8_t kvalues_iq4nl_dev[16] = {
 
 #define GGUF_IQ4XS_BLOCK_BYTES 136
 
+// ── IQ3_XXS and IQ3_S ─────────────────────────────────────────────────────────
+//
+// Both decode through a codebook: a grid index selects four packed int8 values, and a sign selector
+// flips them. One 256-value block therefore splits into 32 groups of 8 values (two grid entries and
+// one sign byte each), which maps exactly onto a warp -- lane l owns group l, so each lane reads its
+// own two grid indices and its own sign byte, with no duplicated reads and no cross-lane sharing
+// until the final shuffle reduction.
+//
+// Unlike Q4_K there is no nibble-splitting subtlety here; the bytes are already one-per-purpose.
+#define GGUF_IQ3XXS_BLOCK_BYTES 98
+#define GGUF_IQ3S_BLOCK_BYTES 110
+
+__global__ void gemv_iq3xxs_kernel(const float* __restrict__ x,
+                                   const unsigned char* __restrict__ w,
+                                   float* __restrict__ y,
+                                   int M, int N, int K) {
+    const int warp = threadIdx.x >> 5;
+    const int lane = threadIdx.x & 31;
+    const int n = blockIdx.x * (blockDim.x >> 5) + warp;
+    const int m = blockIdx.y;
+    if (n >= N || m >= M) return;
+
+    const int nblocks = K / GGUF_QK_K;
+    const long row_bytes = (long)nblocks * GGUF_IQ3XXS_BLOCK_BYTES;
+    const unsigned char* wrow = w + (long)n * row_bytes;
+    const float* xrow = x + (long)m * K;
+
+    // Lane l handles group l of 32: sub-block ib32 = l/4, position within it lpos = l%4.
+    const int ib32 = lane >> 2;
+    const int lpos = lane & 3;
+
+    float acc = 0.0f;
+    for (int b = 0; b < nblocks; ++b) {
+        const unsigned char* block = wrow + (long)b * GGUF_IQ3XXS_BLOCK_BYTES;
+        const float d = __half2float(*((const __half*)(block + 0)));
+        const unsigned char* qs = block + 2;
+        const unsigned char* sas = qs + 64;   // scales_and_signs, eight uint32
+
+        unsigned int aux32;
+        memcpy(&aux32, sas + 4 * ib32, sizeof(unsigned int));
+        const float db = d * (0.5f + (aux32 >> 28)) * 0.5f;
+        const unsigned char signs = d_ksigns_iq2xs[(aux32 >> (7 * lpos)) & 127];
+
+        const unsigned char* g1 = (const unsigned char*)(d_iq3xxs_grid + qs[8 * ib32 + 2 * lpos + 0]);
+        const unsigned char* g2 = (const unsigned char*)(d_iq3xxs_grid + qs[8 * ib32 + 2 * lpos + 1]);
+        const float* xp = xrow + b * GGUF_QK_K + ib32 * 32 + lpos * 8;
+
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            acc += db * (float)g1[j] * ((signs & d_kmask_iq2xs[j + 0]) ? -1.0f : 1.0f) * xp[j + 0];
+            acc += db * (float)g2[j] * ((signs & d_kmask_iq2xs[j + 4]) ? -1.0f : 1.0f) * xp[j + 4];
+        }
+    }
+
+    #pragma unroll
+    for (int s = 16; s > 0; s >>= 1) acc += __shfl_down_sync(0xFFFFFFFF, acc, s);
+    if (lane == 0) y[(long)m * N + n] = acc;
+}
+
+__global__ void gemv_iq3s_kernel(const float* __restrict__ x,
+                                 const unsigned char* __restrict__ w,
+                                 float* __restrict__ y,
+                                 int M, int N, int K) {
+    const int warp = threadIdx.x >> 5;
+    const int lane = threadIdx.x & 31;
+    const int n = blockIdx.x * (blockDim.x >> 5) + warp;
+    const int m = blockIdx.y;
+    if (n >= N || m >= M) return;
+
+    const int nblocks = K / GGUF_QK_K;
+    const long row_bytes = (long)nblocks * GGUF_IQ3S_BLOCK_BYTES;
+    const unsigned char* wrow = w + (long)n * row_bytes;
+    const float* xrow = x + (long)m * K;
+
+    const int ib32 = lane >> 2;   // which 32-value sub-block
+    const int lpos = lane & 3;    // group of 8 within it
+
+    float acc = 0.0f;
+    for (int b = 0; b < nblocks; ++b) {
+        const unsigned char* block = wrow + (long)b * GGUF_IQ3S_BLOCK_BYTES;
+        const float d = __half2float(*((const __half*)(block + 0)));
+        const unsigned char* qs = block + 2;
+        const unsigned char* qh = block + 2 + 64;
+        const unsigned char* signs = block + 2 + 64 + 8;
+        const unsigned char* scales = block + 2 + 64 + 8 + 32;
+
+        // The reference walks ib32 in steps of two, taking the low nibble of scales[ib32/2] for the
+        // even sub-block and the high nibble for the odd one, and reads qh[ib32] for its ninth
+        // index bit. Expressed per-lane that is just: pick the nibble by parity.
+        const int ls = (ib32 & 1) ? (scales[ib32 >> 1] >> 4) : (scales[ib32 >> 1] & 0xf);
+        const float db = d * (1 + 2 * ls);
+        const unsigned char sg = signs[4 * ib32 + lpos];
+        const unsigned char qhb = qh[ib32];
+
+        const int i1 = qs[8 * ib32 + 2 * lpos + 0] | ((qhb << (8 - 2 * lpos)) & 256);
+        const int i2 = qs[8 * ib32 + 2 * lpos + 1] | ((qhb << (7 - 2 * lpos)) & 256);
+        const unsigned char* g1 = (const unsigned char*)(d_iq3s_grid + i1);
+        const unsigned char* g2 = (const unsigned char*)(d_iq3s_grid + i2);
+        const float* xp = xrow + b * GGUF_QK_K + ib32 * 32 + lpos * 8;
+
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            acc += db * (float)g1[j] * ((sg & d_kmask_iq2xs[j + 0]) ? -1.0f : 1.0f) * xp[j + 0];
+            acc += db * (float)g2[j] * ((sg & d_kmask_iq2xs[j + 4]) ? -1.0f : 1.0f) * xp[j + 4];
+        }
+    }
+
+    #pragma unroll
+    for (int s = 16; s > 0; s >>= 1) acc += __shfl_down_sync(0xFFFFFFFF, acc, s);
+    if (lane == 0) y[(long)m * N + n] = acc;
+}
+
 __global__ void gemv_iq4xs_kernel(const float* __restrict__ x,
                                   const unsigned char* __restrict__ w,
                                   float* __restrict__ y,
@@ -2439,6 +2552,24 @@ void dequant_iq4xs_rows(const unsigned char* w, float* out, int row0, int n_rows
     int by = nblocks < 32 ? nblocks : 32;
     dim3 grid(n_rows, by);
     dequant_iq4xs_rows_kernel<<<grid, 256>>>(w, out, row0, n_rows, K);
+}
+
+void gemv_iq3xxs(const float* x, const unsigned char* w, float* y, int M, int N, int K) {
+    const int warps = 4;
+    const int threads = warps * 32;
+    dim3 grid((N + warps - 1) / warps, M);
+    gemv_iq3xxs_kernel<<<grid, threads>>>(x, w, y, M, N, K);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) printf("CUDA Error in gemv_iq3xxs: %s\n", cudaGetErrorString(err));
+}
+
+void gemv_iq3s(const float* x, const unsigned char* w, float* y, int M, int N, int K) {
+    const int warps = 4;
+    const int threads = warps * 32;
+    dim3 grid((N + warps - 1) / warps, M);
+    gemv_iq3s_kernel<<<grid, threads>>>(x, w, y, M, N, K);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) printf("CUDA Error in gemv_iq3s: %s\n", cudaGetErrorString(err));
 }
 
 void gemv_iq4xs(const float* x, const unsigned char* w, float* y, int M, int N, int K) {
