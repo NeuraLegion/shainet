@@ -268,6 +268,7 @@ module SHAInet
           layer.kv_max_context = max_context if layer.responds_to?(:kv_max_context=)
         end
 
+        tune_prefill_chunk(kv_per_token, max_context)
         warn_unconsumed_tensors(gf, num_transformer_layers)
         Log.info { "gguf: loaded #{num_transformer_layers} layers from #{path}" }
         net
@@ -319,6 +320,64 @@ module SHAInet
         end
       end
       load_gguf_weight_device(gf, info, gpu_pool, pool_map)
+    end
+
+    # Pick the prefill chunk from the VRAM actually left after placement.
+    #
+    # The chunk sets M for every matmul in a block, and M is what amortizes the dequant: a quantized
+    # weight is expanded into fp32 scratch once per pass no matter how many rows use it. Measured on
+    # one real 5120x17408 weight through gemm_into with the dequant included, M=512 gives 12.8 TFLOP/s
+    # against 19.3 at M=1024; end to end on a 5041-token prefill, chunk 256 gives 128 tok/s, 512 gives
+    # 150 and 1024 gives 179-185. Past that it stops paying: 2048 buys 2% for another 400 MB and 4096
+    # is no better at all.
+    #
+    # It cannot simply be raised, which is why this is measured rather than set. A bigger chunk costs
+    # workspace VRAM -- about 550 MB at 1024, 156 MB at 512 -- and workspace is what caps context. At
+    # a 16K context this model leaves ~3.9 GB free and 1024 is comfortable; at 64K it leaves ~506 MB
+    # and anything above the floor would OOM mid-prefill. Reading the real number after placement
+    # covers both without the caller choosing.
+    #
+    # SHAINET_GDN_CHUNK / SHAINET_PREFILL_CHUNK still win: an explicit setting is never overridden.
+    private def self.tune_prefill_chunk(kv_per_token : Int64, max_context : Int32)
+      return unless CUDA.fully_available?
+      return if ENV["SHAINET_GDN_CHUNK"]? || ENV["SHAINET_PREFILL_CHUNK"]?
+      info = CUDA.memory_info
+      return unless info
+      free_mb = info[:free] // (1024 * 1024)
+      # Subtract the KV cache that has not been allocated YET.
+      #
+      # Free-VRAM-after-placement is the wrong signal on its own: the KV cache grows as the context
+      # fills, so a 64K-context load can report 5145 MB free and still end up with 506 MB at 60K
+      # tokens. Sizing the chunk from the first number would pick the largest tier and then OOM in
+      # the middle of a long prefill -- turning a speed knob into a crash.
+      kv_mb = (kv_per_token * max_context) // (1024 * 1024)
+      headroom_mb = free_mb - kv_mb
+      # Each tier demands roughly three times what the chunk itself costs (about 550 MB at 1024,
+      # 156 MB at 512), so a mis-estimate degrades throughput rather than killing the run.
+      #
+      # The 1400 floor is deliberately above what 512 costs. A 64K load projects about 1049 MB of
+      # headroom, and the only configuration actually observed surviving a 60000-token prefill is the
+      # 256 floor, which finished with 506 MB to spare. Raising that run to 512 was never tested, so
+      # it stays on the floor rather than shipping an untested tier into the case with least room.
+      chunk = if headroom_mb > 1800
+                1024
+              elsif headroom_mb > 1400
+                512
+              else
+                256
+              end
+      return if chunk == 256
+      GatedDeltaNetBlock.resident_chunk = chunk
+      LlamaBlock.prefill_chunk = chunk
+      # The network-level slice has to be at least as large, or it becomes the binding cap and the
+      # block chunk is never reached. That is not hypothetical: with the slice left at its 512 default
+      # and the block chunk at 1024, a 5041-token prefill measured 157-161 tok/s against 179-185 when
+      # the slice was raised too.
+      Network.prefill_rows = chunk if Network.prefill_rows < chunk
+      Log.info do
+        "gguf: prefill chunk #{chunk} rows (#{headroom_mb} MB projected headroom: " \
+        "#{free_mb} MB free less #{kv_mb} MB of KV at #{max_context} tokens)"
+      end
     end
 
     # Per-layer tensor suffixes this loader knows how to wire.

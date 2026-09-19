@@ -735,19 +735,40 @@ module SHAInet
     @@resident_enabled : Bool = ENV.fetch("SHAINET_GDN_RESIDENT", "1") != "0"
     @@device_enabled : Bool = ENV.fetch("SHAINET_GDN_DEVICE", "1") != "0"
 
-    RESIDENT_CHUNK = 256
+    # Rows of prompt this block processes per pass during prefill.
+    #
+    # This is what sets M for every matmul in the block, and M is what amortizes the dequant: the
+    # quantized weight is dequantized into fp32 scratch once per pass regardless of how many rows use
+    # it, so a small chunk pays that cost over few rows. Measured on one real 5120x17408 IQ2_XXS
+    # weight through gemm_into, dequant included: M=512 gives 12.8 TFLOP/s and M=1024 gives 19.3.
+    #
+    # It was a hardcoded 256, which silently capped M for 48 of the 64 layers and is why raising
+    # Network.prefill_rows measured as doing nothing at all (512/1024/2048 all within noise) -- the
+    # network-level chunk never reached the matmul.
+    #
+    # Bigger is faster but costs workspace VRAM, which is what caps context, so it is tunable rather
+    # than simply raised: SHAINET_GDN_CHUNK.
+    @@resident_chunk : Int32 = (ENV["SHAINET_GDN_CHUNK"]?.try(&.to_i?) || 256)
+
+    def self.resident_chunk : Int32
+      @@resident_chunk
+    end
+
+    def self.resident_chunk=(v : Int32)
+      @@resident_chunk = v
+    end
 
     def forward_cached_device(xd : CudaMatrix) : CudaMatrix?
       return unless device_chain_capable?
       seq = xd.rows
-      return forward_cached_device_chunk(xd) if seq <= RESIDENT_CHUNK
+      return forward_cached_device_chunk(xd) if seq <= @@resident_chunk
 
       d = @d_model
       full = resident_buf(:blk_full, seq, d)
       off = 0
       while off < seq
         n = seq - off
-        n = RESIDENT_CHUNK if n > RESIDENT_CHUNK
+        n = @@resident_chunk if n > @@resident_chunk
         src = resident_buf(:blk_slice, n, d)
         CUDA.copy_device_to_device(src.device_ptr.not_nil!,
           xd.device_ptr.not_nil! + off * d, (n.to_u64 * d * 4).to_u64)
