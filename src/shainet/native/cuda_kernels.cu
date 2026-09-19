@@ -2,6 +2,7 @@
 #include <cuda_fp16.h>
 #include <cstdio>
 #include <cstdlib>
+#include "iq_tables.cuh"  // i-quant codebook grids in constant memory
 
 // Device kernels
 // Simple row-wise softmax kernel. This version runs one thread per row and
@@ -1375,6 +1376,157 @@ extern "C++" {
 // GQA: query head h reads kv head h / heads_per_kv.
 // KV is the cache storage type (float or __half); loads convert to fp32 so the
 // dot product, softmax and weighted sum are identical in both instantiations.
+// ---------------------------------------------------------------------------
+// Split-KV ("flash-decoding") attention for the single-token decode step.
+//
+// The kernel below this one parallelizes over (head, token) only. At decode that is ONE token, so
+// the grid is num_heads blocks -- 24 for this model -- and with 128 threads that occupies 3072 of a
+// 4090 Laptop's ~117k thread slots, about 2.6% of the card, while each block serially reduces over
+// the entire KV length. It also stages the score row in GLOBAL memory (`ws`) and walks it three
+// times: write scores, read/exponentiate/write, read for the V weighting. Both costs grow with
+// context, which is why decode fell from ~8 tok/s to 3.7 tok/s at 14k tokens.
+//
+// Flash-decoding adds the KV length as a third grid dimension: each block handles a SLICE of the
+// keys, keeps its slice's scores in shared memory, and emits a partial output plus the two softmax
+// statistics (running max and sum). A second kernel combines the partials. Because softmax is
+// associative under the standard max-rescale, the result is exact, not an approximation.
+//
+// Two consequences beyond parallelism: the global `ws` score buffer disappears entirely (it was
+// sized num_heads * chunk * total_len, the single largest allocation in the process and the one that
+// OOM'd a 16 GB card at 9.5k tokens), and the scores are never round-tripped through HBM.
+#define ATTN_SPLIT_SCORES 512   // scores held in shared memory per split; 2 KB at fp32
+
+template <typename KV>
+__global__ void attention_split_kv_kernel(const float* __restrict__ q,
+                                          const KV* __restrict__ kc,
+                                          const KV* __restrict__ vc,
+                                          float* __restrict__ part_out,
+                                          float* __restrict__ part_max,
+                                          float* __restrict__ part_sum,
+                                          int new_tokens, int start_pos,
+                                          int num_heads, int heads_per_kv,
+                                          int head_dim, int capacity, float scale,
+                                          int num_splits) {
+    const int h = blockIdx.x;
+    const int i = blockIdx.y;
+    const int sp = blockIdx.z;
+    if (h >= num_heads || i >= new_tokens || sp >= num_splits) return;
+
+    const int kv_h = h / heads_per_kv;
+    const int visible = start_pos + i + 1;
+    const int d_model = num_heads * head_dim;
+
+    const float* qv = q + (long)i * d_model + (long)h * head_dim;
+    const KV* kh = kc + (long)kv_h * capacity * head_dim;
+    const KV* vh = vc + (long)kv_h * capacity * head_dim;
+
+    // This split's key range.
+    const int j0 = sp * ATTN_SPLIT_SCORES;
+    const int j1 = min(j0 + ATTN_SPLIT_SCORES, visible);
+
+    const long pidx = ((long)h * new_tokens + i) * num_splits + sp;
+
+    const int tid = threadIdx.x;
+    const int nt = blockDim.x;
+    extern __shared__ float smem[];
+    float* q_s = smem;                        // head_dim
+    float* sc = smem + head_dim;              // ATTN_SPLIT_SCORES
+    float* red = sc + ATTN_SPLIT_SCORES;      // nt
+
+    // An empty split contributes nothing. Identity for the combine: sum 0, max -inf.
+    if (j0 >= j1) {
+        if (tid == 0) { part_max[pidx] = -INFINITY; part_sum[pidx] = 0.0f; }
+        for (int d = tid; d < head_dim; d += nt) part_out[pidx * head_dim + d] = 0.0f;
+        return;
+    }
+
+    for (int d = tid; d < head_dim; d += nt) q_s[d] = qv[d];
+    __syncthreads();
+
+    // Scores for this slice, into SHARED memory. Max tracked for a stable softmax.
+    float lmax = -INFINITY;
+    for (int j = j0 + tid; j < j1; j += nt) {
+        const KV* krow = kh + (long)j * head_dim;
+        float dot = 0.0f;
+        for (int d = 0; d < head_dim; ++d) dot += q_s[d] * KVStore<KV>::load(krow, d);
+        dot *= scale;
+        sc[j - j0] = dot;
+        if (dot > lmax) lmax = dot;
+    }
+    red[tid] = lmax;
+    __syncthreads();
+    for (int s = nt >> 1; s > 0; s >>= 1) {
+        if (tid < s) red[tid] = fmaxf(red[tid], red[tid + s]);
+        __syncthreads();
+    }
+    const float gmax = red[0];
+    __syncthreads();
+
+    float lsum = 0.0f;
+    for (int j = j0 + tid; j < j1; j += nt) {
+        float e = expf(sc[j - j0] - gmax);
+        sc[j - j0] = e;
+        lsum += e;
+    }
+    red[tid] = lsum;
+    __syncthreads();
+    for (int s = nt >> 1; s > 0; s >>= 1) {
+        if (tid < s) red[tid] += red[tid + s];
+        __syncthreads();
+    }
+    const float ssum = red[0];
+    __syncthreads();
+
+    // UNNORMALIZED weighted V for this slice. Normalization happens in the combine, once, using the
+    // slice sums -- dividing here would make the partials incombinable.
+    for (int d = tid; d < head_dim; d += nt) {
+        float acc = 0.0f;
+        for (int j = j0; j < j1; ++j) {
+            acc += sc[j - j0] * KVStore<KV>::load(vh, (long)j * head_dim + d);
+        }
+        part_out[pidx * head_dim + d] = acc;
+    }
+    if (tid == 0) { part_max[pidx] = gmax; part_sum[pidx] = ssum; }
+}
+
+// Combine the per-split partials. Each split reported its own max, so rescale every slice onto the
+// global max before summing -- the standard log-sum-exp merge, which makes the split exact.
+__global__ void attention_split_combine_kernel(const float* __restrict__ part_out,
+                                               const float* __restrict__ part_max,
+                                               const float* __restrict__ part_sum,
+                                               float* __restrict__ out,
+                                               int new_tokens, int num_heads, int head_dim,
+                                               int num_splits) {
+    const int h = blockIdx.x;
+    const int i = blockIdx.y;
+    if (h >= num_heads || i >= new_tokens) return;
+
+    const long base = ((long)h * new_tokens + i) * num_splits;
+
+    float gmax = -INFINITY;
+    for (int s = 0; s < num_splits; ++s) gmax = fmaxf(gmax, part_max[base + s]);
+    if (!isfinite(gmax)) gmax = 0.0f;   // every split empty; leaves a zero row rather than NaNs
+
+    float denom = 0.0f;
+    for (int s = 0; s < num_splits; ++s) {
+        const float m = part_max[base + s];
+        if (!isfinite(m)) continue;
+        denom += part_sum[base + s] * expf(m - gmax);
+    }
+    const float inv = denom > 0.0f ? 1.0f / denom : 0.0f;
+
+    const int d_model = num_heads * head_dim;
+    for (int d = threadIdx.x; d < head_dim; d += blockDim.x) {
+        float acc = 0.0f;
+        for (int s = 0; s < num_splits; ++s) {
+            const float m = part_max[base + s];
+            if (!isfinite(m)) continue;
+            acc += part_out[(base + s) * head_dim + d] * expf(m - gmax);
+        }
+        out[(long)i * d_model + (long)h * head_dim + d] = acc * inv;
+    }
+}
+
 template <typename KV>
 __global__ void attention_kv_kernel_t(const float* __restrict__ q,
                                       const KV* __restrict__ kc,
@@ -1452,6 +1604,77 @@ __global__ void attention_kv_kernel_t(const float* __restrict__ q,
 
 } // extern "C++"
 
+// How many splits a given context length uses, and how many floats of partials that needs. The
+// caller sizes its buffer from this rather than duplicating the arithmetic.
+int attention_split_count(int total_len) {
+    if (total_len <= 0) return 0;
+    return (total_len + ATTN_SPLIT_SCORES - 1) / ATTN_SPLIT_SCORES;
+}
+
+int attention_split_ws_floats(int new_tokens, int num_heads, int head_dim, int total_len) {
+    int splits = attention_split_count(total_len);
+    if (splits <= 0) return 0;
+    // partial outputs + one max and one sum per split
+    return num_heads * new_tokens * splits * (head_dim + 2);
+}
+
+// Split-KV decode attention. `ws` holds the partials: [heads, tokens, splits, head_dim] outputs,
+// then the per-split maxima, then the per-split sums.
+//
+// extern "C++" because a template cannot carry C linkage, and this sits inside the file's extern "C"
+// block alongside the two exported entry points that instantiate it.
+extern "C++" {
+template <typename KV>
+static void attention_split_kv_launch(const float* q, const KV* kc, const KV* vc,
+                                      float* out, float* ws, int new_tokens, int start_pos,
+                                      int num_heads, int heads_per_kv, int head_dim,
+                                      int capacity, float scale) {
+    const int total_len = start_pos + new_tokens;
+    const int splits = attention_split_count(total_len);
+    if (splits <= 0) return;
+
+    const long n_part = (long)num_heads * new_tokens * splits;
+    float* part_out = ws;
+    float* part_max = ws + n_part * head_dim;
+    float* part_sum = part_max + n_part;
+
+    const int threads = 128;
+    dim3 grid(num_heads, new_tokens, splits);
+    size_t shmem = (head_dim + ATTN_SPLIT_SCORES + threads) * sizeof(float);
+    attention_split_kv_kernel<KV><<<grid, threads, shmem>>>(q, kc, vc,
+                                                            part_out, part_max, part_sum,
+                                                            new_tokens, start_pos, num_heads,
+                                                            heads_per_kv, head_dim, capacity,
+                                                            scale, splits);
+    dim3 cgrid(num_heads, new_tokens);
+    attention_split_combine_kernel<<<cgrid, threads>>>(part_out, part_max, part_sum, out,
+                                                       new_tokens, num_heads, head_dim, splits);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in attention_split_kv: %s\n", cudaGetErrorString(err));
+    }
+}
+
+} // extern "C++"
+
+void attention_split_kv_f32(const float* q, const float* kc, const float* vc,
+                            float* out, float* ws, int new_tokens, int start_pos,
+                            int num_heads, int heads_per_kv, int head_dim,
+                            int capacity, float scale) {
+    attention_split_kv_launch<float>(q, kc, vc, out, ws, new_tokens, start_pos,
+                                     num_heads, heads_per_kv, head_dim, capacity, scale);
+}
+
+void attention_split_kv_f16(const float* q, const unsigned short* kc, const unsigned short* vc,
+                            float* out, float* ws, int new_tokens, int start_pos,
+                            int num_heads, int heads_per_kv, int head_dim,
+                            int capacity, float scale) {
+    attention_split_kv_launch<__half>(q, reinterpret_cast<const __half*>(kc),
+                                      reinterpret_cast<const __half*>(vc),
+                                      out, ws, new_tokens, start_pos,
+                                      num_heads, heads_per_kv, head_dim, capacity, scale);
+}
+
 void attention_kv_f32(const float* q, const float* kc, const float* vc,
                       float* out, float* ws, int new_tokens, int start_pos,
                       int num_heads, int heads_per_kv, int head_dim,
@@ -1508,18 +1731,21 @@ void attention_kv_f16(const float* q, const unsigned short* kc, const unsigned s
 // L2 normalization of q and k, and the 1/sqrt(dk) scale on q, are done HERE rather than on the
 // host, which removes the per-head slicing and copying that cost as much as the arithmetic.
 //
-// q and k are indexed by KEY head (kh = h / heads_per_k), matching grouped-query attention: several
-// value heads share one key head's projection, as the reference's repeat_interleave expresses.
+// q and k are indexed by KEY head. Which key head a value head reads depends on the weight
+// layout, so the caller passes k_head_tiled: 0 selects grouped indexing (kh = h / heads_per_k),
+// which the SafeTensors layout uses and which matches HF's repeat_interleave; 1 selects tiled
+// indexing (kh = h % nk), which the GGUF layout uses because llama.cpp widens q/k with
+// ggml_repeat, and ggml_repeat tiles rather than interleaves.
 __global__ void gated_delta_rule_kernel(
     const float* __restrict__ q, const float* __restrict__ k, const float* __restrict__ v,
     const float* __restrict__ alpha, const float* __restrict__ beta,
     float* __restrict__ state, float* __restrict__ out,
-    int seq, int nv, int nk, int dk, int dv, int heads_per_k, float q_scale)
+    int seq, int nv, int nk, int dk, int dv, int heads_per_k, float q_scale, int k_head_tiled)
 {
     extern __shared__ float sh[];
     const int h = blockIdx.x;
     if (h >= nv) return;
-    const int kh = h / heads_per_k;
+    const int kh = k_head_tiled ? (h % nk) : (h / heads_per_k);
     const int tid = threadIdx.x;
     const int nthr = blockDim.x;
 
@@ -1608,7 +1834,8 @@ __global__ void gated_delta_rule_kernel(
 void gated_delta_rule(const float* q, const float* k, const float* v,
                       const float* alpha, const float* beta,
                       float* state, float* out,
-                      int seq, int nv, int nk, int dk, int dv, int heads_per_k, float q_scale) {
+                      int seq, int nv, int nk, int dk, int dv, int heads_per_k, float q_scale,
+                      int k_head_tiled) {
     if (seq <= 0 || nv <= 0) return;
     int threads = 128;
     if (dv < threads) threads = dv < 32 ? 32 : dv;
@@ -1623,7 +1850,8 @@ void gated_delta_rule(const float* q, const float* k, const float* v,
     cudaFuncSetAttribute(gated_delta_rule_kernel,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shmem);
     gated_delta_rule_kernel<<<nv, threads, shmem>>>(q, k, v, alpha, beta, state, out,
-                                                    seq, nv, nk, dk, dv, heads_per_k, q_scale);
+                                                    seq, nv, nk, dk, dv, heads_per_k, q_scale,
+                                                    k_head_tiled);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         printf("CUDA Error in gated_delta_rule: %s (shmem=%zu threads=%d)\n",
@@ -1684,153 +1912,924 @@ __device__ __forceinline__ void get_scale_min_k4(int j, const unsigned char* sca
 }
 
 // Q4_K GEMV: y[m, n] = x[m, K] * dequant(W_q4k[n, K])
-// One block per (n, m) pair; threads stride over K.
+//
+// One WARP per output row, four warps per block, and each qs byte read EXACTLY ONCE.
+//
+// The previous shape gave lane l the eight values [l*8, l*8+8), which meant lanes 0-3 read bytes
+// 0-31 for their low nibbles and lanes 4-7 read the SAME bytes for the high nibbles. Every byte was
+// fetched twice, so DRAM traffic was double the useful bytes and the kernel measured 170 GB/s of a
+// 576 GB/s card while actually moving ~340.
+//
+// Now lane l owns bytes [l*4, l*4+4) -- 32 lanes x 4 = the whole 128-byte qs -- and produces both
+// nibbles of each: byte b of sub-block j64 = b/32 at offset off = b%32 carries value j64*64 + off in
+// its low nibble and j64*64 + off + 32 in its high. Those two values sit in scale groups j64*2 and
+// j64*2 + 1, both fixed for the lane, so it unpacks two 6-bit scales per superblock and no more.
+// ── IQ4_XS ────────────────────────────────────────────────────────────────────
+//
+// 136-byte block over 256 values: d (fp16), scales_h (u16), scales_l[4], qs[128].
+// Eight sub-blocks of 32. Each sub-block's 6-bit scale is split across scales_l (low 4 bits) and
+// scales_h (high 2 bits), biased by -32. Values are 4-bit indices into a 16-entry non-linear table.
+//
+// The value layout is the same shape as Q4_K's: within a sub-block, the low nibbles of qs[0..15]
+// give values 0..15 and the HIGH nibbles of those same bytes give 16..31. So the byte-once warp
+// assignment developed for Q4_K carries over directly -- a lane owns bytes and emits both nibbles,
+// rather than owning values and reading each byte twice.
+__device__ __constant__ int8_t kvalues_iq4nl_dev[16] = {
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
+
+// The same sixteen values held in two registers instead of constant memory.
+//
+// Constant memory is built to broadcast ONE address to a whole warp; these lookups are indexed by
+// the weight nibble, so all 32 lanes want different entries and the access serializes. Sixteen
+// int8 fit in two 64-bit literals, making the lookup a shift and a sign-extend with no memory
+// traffic at all. Measured: IQ4_XS GEMV 62.5 GB/s before, against 446 for the k-quant kernels.
+__device__ __forceinline__ float iq4nl_val(int idx) {
+    const unsigned long long lo = 0xF6EADDCFBFAD9881ULL;  // entries 0..7
+    const unsigned long long hi = 0x7159453526190D01ULL;  // entries 8..15
+    const unsigned long long p = (idx < 8) ? lo : hi;
+    return (float)(signed char)((p >> (8 * (idx & 7))) & 0xFFULL);
+}
+
+#define GGUF_IQ4XS_BLOCK_BYTES 136
+
+// ── IQ3_XXS and IQ3_S ─────────────────────────────────────────────────────────
+//
+// Both decode through a codebook: a grid index selects four packed int8 values, and a sign selector
+// flips them. One 256-value block therefore splits into 32 groups of 8 values (two grid entries and
+// one sign byte each), which maps exactly onto a warp -- lane l owns group l, so each lane reads its
+// own two grid indices and its own sign byte, with no duplicated reads and no cross-lane sharing
+// until the final shuffle reduction.
+//
+// Unlike Q4_K there is no nibble-splitting subtlety here; the bytes are already one-per-purpose.
+#define GGUF_IQ3XXS_BLOCK_BYTES 98
+#define GGUF_IQ3S_BLOCK_BYTES 110
+
+#include "iq_lowbit_kernels.cuh"
+
+__global__ void gemv_iq3xxs_kernel(const float* __restrict__ x,
+                                   const unsigned char* __restrict__ w,
+                                   float* __restrict__ y,
+                                   int M, int N, int K) {
+    // Codebook staged in SHARED memory, not read from constant memory.
+    //
+    // Constant memory serves a warp best when all 32 lanes read the same address; a codebook lookup
+    // indexed by packed weight bits is the opposite, so every lane wants a different entry and the
+    // access serializes. Shared memory is banked and satisfies a divergent read per bank per cycle.
+    // This grid is 1 KB and the sign table 128 B, so the whole codebook is staged once per block and
+    // amortized over every row that block computes.
+    __shared__ unsigned int s_grid[256];
+    __shared__ unsigned char s_ksigns[128];
+    for (int i = threadIdx.x; i < 256; i += blockDim.x) s_grid[i] = d_iq3xxs_grid[i];
+    for (int i = threadIdx.x; i < 128; i += blockDim.x) s_ksigns[i] = d_ksigns_iq2xs[i];
+    __syncthreads();
+
+    const int warp = threadIdx.x >> 5;
+    const int lane = threadIdx.x & 31;
+    const int n = blockIdx.x * (blockDim.x >> 5) + warp;
+    const int m = blockIdx.y;
+    if (n >= N || m >= M) return;
+
+    const int nblocks = K / GGUF_QK_K;
+    const long row_bytes = (long)nblocks * GGUF_IQ3XXS_BLOCK_BYTES;
+    const unsigned char* wrow = w + (long)n * row_bytes;
+    const float* xrow = x + (long)m * K;
+
+    // Lane l handles group l of 32: sub-block ib32 = l/4, position within it lpos = l%4.
+    const int ib32 = lane >> 2;
+    const int lpos = lane & 3;
+
+    float acc = 0.0f;
+    for (int b = 0; b < nblocks; ++b) {
+        const unsigned char* block = wrow + (long)b * GGUF_IQ3XXS_BLOCK_BYTES;
+        const float d = __half2float(*((const __half*)(block + 0)));
+        const unsigned char* qs = block + 2;
+        const unsigned char* sas = qs + 64;   // scales_and_signs, eight uint32
+
+        unsigned int aux32;
+        memcpy(&aux32, sas + 4 * ib32, sizeof(unsigned int));
+        const float db = d * (0.5f + (aux32 >> 28)) * 0.5f;
+        const unsigned char signs = s_ksigns[(aux32 >> (7 * lpos)) & 127];
+
+        const unsigned char* g1 = (const unsigned char*)(s_grid + qs[8 * ib32 + 2 * lpos + 0]);
+        const unsigned char* g2 = (const unsigned char*)(s_grid + qs[8 * ib32 + 2 * lpos + 1]);
+        const float* xp = xrow + b * GGUF_QK_K + ib32 * 32 + lpos * 8;
+
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            acc += db * (float)g1[j] * ((signs & (1u << (j + 0))) ? -1.0f : 1.0f) * xp[j + 0];
+            acc += db * (float)g2[j] * ((signs & (1u << (j + 4))) ? -1.0f : 1.0f) * xp[j + 4];
+        }
+    }
+
+    #pragma unroll
+    for (int s = 16; s > 0; s >>= 1) acc += __shfl_down_sync(0xFFFFFFFF, acc, s);
+    if (lane == 0) y[(long)m * N + n] = acc;
+}
+
+__global__ void gemv_iq3s_kernel(const float* __restrict__ x,
+                                 const unsigned char* __restrict__ w,
+                                 float* __restrict__ y,
+                                 int M, int N, int K) {
+    // 2 KB codebook staged in shared memory -- see gemv_iq3xxs_kernel for why constant memory is
+    // the wrong home for a lookup whose index differs per lane.
+    __shared__ unsigned int s_grid[512];
+    for (int i = threadIdx.x; i < 512; i += blockDim.x) s_grid[i] = d_iq3s_grid[i];
+    __syncthreads();
+
+    const int warp = threadIdx.x >> 5;
+    const int lane = threadIdx.x & 31;
+    const int n = blockIdx.x * (blockDim.x >> 5) + warp;
+    const int m = blockIdx.y;
+    if (n >= N || m >= M) return;
+
+    const int nblocks = K / GGUF_QK_K;
+    const long row_bytes = (long)nblocks * GGUF_IQ3S_BLOCK_BYTES;
+    const unsigned char* wrow = w + (long)n * row_bytes;
+    const float* xrow = x + (long)m * K;
+
+    const int ib32 = lane >> 2;   // which 32-value sub-block
+    const int lpos = lane & 3;    // group of 8 within it
+
+    float acc = 0.0f;
+    for (int b = 0; b < nblocks; ++b) {
+        const unsigned char* block = wrow + (long)b * GGUF_IQ3S_BLOCK_BYTES;
+        const float d = __half2float(*((const __half*)(block + 0)));
+        const unsigned char* qs = block + 2;
+        const unsigned char* qh = block + 2 + 64;
+        const unsigned char* signs = block + 2 + 64 + 8;
+        const unsigned char* scales = block + 2 + 64 + 8 + 32;
+
+        // The reference walks ib32 in steps of two, taking the low nibble of scales[ib32/2] for the
+        // even sub-block and the high nibble for the odd one, and reads qh[ib32] for its ninth
+        // index bit. Expressed per-lane that is just: pick the nibble by parity.
+        const int ls = (ib32 & 1) ? (scales[ib32 >> 1] >> 4) : (scales[ib32 >> 1] & 0xf);
+        const float db = d * (1 + 2 * ls);
+        const unsigned char sg = signs[4 * ib32 + lpos];
+        const unsigned char qhb = qh[ib32];
+
+        const int i1 = qs[8 * ib32 + 2 * lpos + 0] | ((qhb << (8 - 2 * lpos)) & 256);
+        const int i2 = qs[8 * ib32 + 2 * lpos + 1] | ((qhb << (7 - 2 * lpos)) & 256);
+        const unsigned char* g1 = (const unsigned char*)(s_grid + i1);
+        const unsigned char* g2 = (const unsigned char*)(s_grid + i2);
+        const float* xp = xrow + b * GGUF_QK_K + ib32 * 32 + lpos * 8;
+
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            acc += db * (float)g1[j] * ((sg & (1u << (j + 0))) ? -1.0f : 1.0f) * xp[j + 0];
+            acc += db * (float)g2[j] * ((sg & (1u << (j + 4))) ? -1.0f : 1.0f) * xp[j + 4];
+        }
+    }
+
+    #pragma unroll
+    for (int s = 16; s > 0; s >>= 1) acc += __shfl_down_sync(0xFFFFFFFF, acc, s);
+    if (lane == 0) y[(long)m * N + n] = acc;
+}
+
+__global__ void gemv_iq4xs_kernel(const float* __restrict__ x,
+                                  const unsigned char* __restrict__ w,
+                                  float* __restrict__ y,
+                                  int M, int N, int K) {
+    const int warp = threadIdx.x >> 5;
+    const int lane = threadIdx.x & 31;
+    const int n = blockIdx.x * (blockDim.x >> 5) + warp;
+    const int m = blockIdx.y;
+    if (n >= N || m >= M) return;
+
+    const int nblocks = K / GGUF_QK_K;
+    const long row_bytes = (long)nblocks * GGUF_IQ4XS_BLOCK_BYTES;
+    const unsigned char* wrow = w + (long)n * row_bytes;
+    const float* xrow = x + (long)m * K;
+
+    // 32 lanes x 4 bytes covers the whole 128-byte qs, each byte read exactly once.
+    const int b0 = lane * 4;       // first qs byte this lane owns
+    const int ib = b0 >> 4;        // sub-block (16 bytes of qs per 32-value sub-block)
+    const int off = b0 & 15;       // byte offset inside the sub-block
+    const int vlo = ib * 32 + off; // first low-nibble value
+    const int vhi = vlo + 16;      // matching high-nibble value
+
+    float acc = 0.0f;
+    for (int b = 0; b < nblocks; ++b) {
+        const unsigned char* block = wrow + (long)b * GGUF_IQ4XS_BLOCK_BYTES;
+        const float d = __half2float(*((const __half*)(block + 0)));
+        const unsigned short scales_h = *((const unsigned short*)(block + 2));
+        const unsigned char* scales_l = block + 4;
+
+        const int ls = ((scales_l[ib >> 1] >> (4 * (ib & 1))) & 0xF) | (((scales_h >> (2 * ib)) & 3) << 4);
+        const float dl = d * (float)(ls - 32);
+
+        const uchar4 q = *((const uchar4*)(block + 8 + b0));
+        const float* xl = xrow + b * GGUF_QK_K + vlo;
+        const float* xh = xrow + b * GGUF_QK_K + vhi;
+        const float4 xlo = *((const float4*)xl);
+        const float4 xhi = *((const float4*)xh);
+
+        acc += dl * iq4nl_val(q.x & 0xF) * xlo.x;
+        acc += dl * iq4nl_val(q.y & 0xF) * xlo.y;
+        acc += dl * iq4nl_val(q.z & 0xF) * xlo.z;
+        acc += dl * iq4nl_val(q.w & 0xF) * xlo.w;
+        acc += dl * iq4nl_val(q.x >> 4) * xhi.x;
+        acc += dl * iq4nl_val(q.y >> 4) * xhi.y;
+        acc += dl * iq4nl_val(q.z >> 4) * xhi.z;
+        acc += dl * iq4nl_val(q.w >> 4) * xhi.w;
+    }
+
+    #pragma unroll
+    for (int s = 16; s > 0; s >>= 1) acc += __shfl_down_sync(0xFFFFFFFF, acc, s);
+    if (lane == 0) y[(long)m * N + n] = acc;
+}
+
+// Dequantize IQ4_XS rows to fp32 for the batched GEMM path.
+__global__ void dequant_iq4xs_rows_kernel(const unsigned char* __restrict__ w,
+                                          float* __restrict__ out,
+                                          int row0, int rows, int K) {
+    const int r = blockIdx.x;
+    if (r >= rows) return;
+    const int nblocks = K / GGUF_QK_K;
+    const long row_bytes = (long)nblocks * GGUF_IQ4XS_BLOCK_BYTES;
+    const unsigned char* wrow = w + (long)(row0 + r) * row_bytes;
+    float* orow = out + (long)r * K;
+
+    for (int b = blockIdx.y; b < nblocks; b += gridDim.y) {
+        const unsigned char* block = wrow + (long)b * GGUF_IQ4XS_BLOCK_BYTES;
+        const float d = __half2float(*((const __half*)(block + 0)));
+        const unsigned short scales_h = *((const unsigned short*)(block + 2));
+        const unsigned char* scales_l = block + 4;
+        const unsigned char* qs = block + 8;
+        for (int t = threadIdx.x; t < 128; t += blockDim.x) {
+            const int ib = t >> 4;
+            const int off = t & 15;
+            const int ls = ((scales_l[ib >> 1] >> (4 * (ib & 1))) & 0xF) | (((scales_h >> (2 * ib)) & 3) << 4);
+            const float dl = d * (float)(ls - 32);
+            const unsigned char byte = qs[t];
+            orow[b * GGUF_QK_K + ib * 32 + off]      = dl * iq4nl_val(byte & 0xF);
+            orow[b * GGUF_QK_K + ib * 32 + off + 16] = dl * iq4nl_val(byte >> 4);
+        }
+    }
+}
+
+// Row-chunk dequant for the batched path, mirroring the two IQ3 GEMV kernels.
+//
+// Prefill multiplies with cuBLAS rather than a GEMV, which needs the weight as fp32, so every type
+// that has a GEMV also needs one of these or a long prompt dies where a one-token prompt works. A
+// 256-value block is 32 groups of 8, so one thread per group covers a block exactly -- the same
+// decomposition the GEMV uses, just writing values out instead of accumulating a dot product.
+__global__ void dequant_iq3xxs_rows_kernel(const unsigned char* __restrict__ w,
+                                          float* __restrict__ out,
+                                          int row0, int rows, int K) {
+    const int r = blockIdx.x;
+    if (r >= rows) return;
+    const int nblocks = K / GGUF_QK_K;
+    const long row_bytes = (long)nblocks * GGUF_IQ3XXS_BLOCK_BYTES;
+    const unsigned char* wrow = w + (long)(row0 + r) * row_bytes;
+    float* orow = out + (long)r * K;
+
+    for (int b = blockIdx.y; b < nblocks; b += gridDim.y) {
+        const unsigned char* block = wrow + (long)b * GGUF_IQ3XXS_BLOCK_BYTES;
+        const float d = __half2float(*((const __half*)(block + 0)));
+        const unsigned char* qs = block + 2;
+        const unsigned char* sas = qs + 64;
+        for (int t = threadIdx.x; t < 32; t += blockDim.x) {
+            const int ib32 = t >> 2;
+            const int lpos = t & 3;
+            unsigned int aux32;
+            memcpy(&aux32, sas + 4 * ib32, sizeof(unsigned int));
+            const float db = d * (0.5f + (aux32 >> 28)) * 0.5f;
+            const unsigned char signs = d_ksigns_iq2xs[(aux32 >> (7 * lpos)) & 127];
+            const unsigned char* g1 = (const unsigned char*)(d_iq3xxs_grid + qs[8 * ib32 + 2 * lpos + 0]);
+            const unsigned char* g2 = (const unsigned char*)(d_iq3xxs_grid + qs[8 * ib32 + 2 * lpos + 1]);
+            float* op = orow + b * GGUF_QK_K + ib32 * 32 + lpos * 8;
+            #pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                op[j + 0] = db * (float)g1[j] * ((signs & (1u << (j + 0))) ? -1.0f : 1.0f);
+                op[j + 4] = db * (float)g2[j] * ((signs & (1u << (j + 4))) ? -1.0f : 1.0f);
+            }
+        }
+    }
+}
+
+__global__ void dequant_iq3s_rows_kernel(const unsigned char* __restrict__ w,
+                                        float* __restrict__ out,
+                                        int row0, int rows, int K) {
+    const int r = blockIdx.x;
+    if (r >= rows) return;
+    const int nblocks = K / GGUF_QK_K;
+    const long row_bytes = (long)nblocks * GGUF_IQ3S_BLOCK_BYTES;
+    const unsigned char* wrow = w + (long)(row0 + r) * row_bytes;
+    float* orow = out + (long)r * K;
+
+    for (int b = blockIdx.y; b < nblocks; b += gridDim.y) {
+        const unsigned char* block = wrow + (long)b * GGUF_IQ3S_BLOCK_BYTES;
+        const float d = __half2float(*((const __half*)(block + 0)));
+        const unsigned char* qs = block + 2;
+        const unsigned char* qh = block + 2 + 64;
+        const unsigned char* signs = block + 2 + 64 + 8;
+        const unsigned char* scales = block + 2 + 64 + 8 + 32;
+        for (int t = threadIdx.x; t < 32; t += blockDim.x) {
+            const int ib32 = t >> 2;
+            const int lpos = t & 3;
+            const int ls = (ib32 & 1) ? (scales[ib32 >> 1] >> 4) : (scales[ib32 >> 1] & 0xf);
+            const float db = d * (1 + 2 * ls);
+            const unsigned char sg = signs[4 * ib32 + lpos];
+            const unsigned char qhb = qh[ib32];
+            const int i1 = qs[8 * ib32 + 2 * lpos + 0] | ((qhb << (8 - 2 * lpos)) & 256);
+            const int i2 = qs[8 * ib32 + 2 * lpos + 1] | ((qhb << (7 - 2 * lpos)) & 256);
+            const unsigned char* g1 = (const unsigned char*)(d_iq3s_grid + i1);
+            const unsigned char* g2 = (const unsigned char*)(d_iq3s_grid + i2);
+            float* op = orow + b * GGUF_QK_K + ib32 * 32 + lpos * 8;
+            #pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                op[j + 0] = db * (float)g1[j] * ((sg & (1u << (j + 0))) ? -1.0f : 1.0f);
+                op[j + 4] = db * (float)g2[j] * ((sg & (1u << (j + 4))) ? -1.0f : 1.0f);
+            }
+        }
+    }
+}
+
 __global__ void gemv_q4k_kernel(const float* __restrict__ x,
                                 const unsigned char* __restrict__ w,
                                 float* __restrict__ y,
                                 int M, int N, int K) {
-    int n = blockIdx.x;
-    int m = blockIdx.y;
+    const int warp = threadIdx.x >> 5;
+    const int lane = threadIdx.x & 31;
+    const int n = blockIdx.x * (blockDim.x >> 5) + warp;
+    const int m = blockIdx.y;
     if (n >= N || m >= M) return;
 
-    int nblocks = K / GGUF_QK_K;
-    long row_bytes = (long)nblocks * GGUF_Q4K_BLOCK_BYTES;
+    const int nblocks = K / GGUF_QK_K;
+    const long row_bytes = (long)nblocks * GGUF_Q4K_BLOCK_BYTES;
     const unsigned char* wrow = w + (long)n * row_bytes;
     const float* xrow = x + (long)m * K;
 
-    int tid = threadIdx.x;
-    int nthreads = blockDim.x;
-    float partial = 0.0f;
+    const int b0 = lane * 4;          // first qs byte this lane owns
+    const int j64 = b0 >> 5;          // 64-value sub-block
+    const int off = b0 & 31;          // offset inside it
+    const int glo = j64 * 2;          // scale group of the low-nibble values
+    const int ghi = glo + 1;          // and of the high-nibble values
+    const int vlo = j64 * 64 + off;   // first low-nibble value index
+    const int vhi = vlo + 32;         // first high-nibble value index
 
-    for (int blk = 0; blk < nblocks; ++blk) {
-        const unsigned char* block = wrow + (long)blk * GGUF_Q4K_BLOCK_BYTES;
-        // d and dmin are fp16 at offset 0 and 2
-        float d    = __half2float(*((const __half*)(block + 0)));
-        float dmin = __half2float(*((const __half*)(block + 2)));
-        const unsigned char* scales = block + 4;
-        const unsigned char* qs     = block + 16;  // 4 + 12 = 16
+    float acc = 0.0f;
+    for (int b = 0; b < nblocks; ++b) {
+        const unsigned char* block = wrow + (long)b * GGUF_Q4K_BLOCK_BYTES;
+        const float d    = __half2float(*((const __half*)(block + 0)));
+        const float dmin = __half2float(*((const __half*)(block + 2)));
 
-        int base_k = blk * GGUF_QK_K;
+        unsigned char sc_l, mn_l, sc_h, mn_h;
+        get_scale_min_k4(glo, block + 4, &sc_l, &mn_l);
+        get_scale_min_k4(ghi, block + 4, &sc_h, &mn_h);
+        const float dl = d * (float)sc_l, ml = dmin * (float)mn_l;
+        const float dh = d * (float)sc_h, mh = dmin * (float)mn_h;
 
-        // Each thread processes a subset of the 256 values in this block.
-        for (int k = tid; k < GGUF_QK_K; k += nthreads) {
-            int group = k / 32;
-            unsigned char sc, mn;
-            get_scale_min_k4(group, scales, &sc, &mn);
+        // One 32-bit load for the lane's four bytes.
+        const uchar4 q = *((const uchar4*)(block + 16 + b0));
+        const float* xl = xrow + b * GGUF_QK_K + vlo;
+        const float* xh = xrow + b * GGUF_QK_K + vhi;
+        const float4 xlo = *((const float4*)xl);
+        const float4 xhi = *((const float4*)xh);
 
-            // qs layout: 2 nibbles per byte, interleaved in groups of 64.
-            // For k in [0..63]: low nibble = k, high nibble = k+32
-            // Repeated for k in [64..127], [128..191], [192..255]
-            int byte_idx = (k < 128) ? (k % 64) : (64 + k % 64);
-            if (k < 128) byte_idx = k / 2;
-            // Actually, the layout from dequantize_row_q4_K:
-            //   for j in [0..QK_K) step 64:
-            //     for l in [0..32): val_low  = qs[l] & 0xF   (at j+l)
-            //                       val_high = qs[l] >> 4     (at j+l+32)
-            //     qs += 32
-            int block_of_64 = k / 64;
-            int offset_in_64 = k % 64;
-            int nibble_val;
-            if (offset_in_64 < 32) {
-                nibble_val = qs[block_of_64 * 32 + offset_in_64] & 0xF;
-            } else {
-                nibble_val = qs[block_of_64 * 32 + (offset_in_64 - 32)] >> 4;
-            }
-            float val = d * (float)sc * (float)nibble_val - dmin * (float)mn;
-            partial += val * xrow[base_k + k];
-        }
+        acc += (dl * (float)(q.x & 0xF) - ml) * xlo.x;
+        acc += (dl * (float)(q.y & 0xF) - ml) * xlo.y;
+        acc += (dl * (float)(q.z & 0xF) - ml) * xlo.z;
+        acc += (dl * (float)(q.w & 0xF) - ml) * xlo.w;
+        acc += (dh * (float)(q.x >> 4) - mh) * xhi.x;
+        acc += (dh * (float)(q.y >> 4) - mh) * xhi.y;
+        acc += (dh * (float)(q.z >> 4) - mh) * xhi.z;
+        acc += (dh * (float)(q.w >> 4) - mh) * xhi.w;
     }
 
-    // Warp reduction
-    extern __shared__ float sdata[];
-    sdata[tid] = partial;
-    __syncthreads();
-    for (int stride = nthreads >> 1; stride > 0; stride >>= 1) {
-        if (tid < stride) sdata[tid] += sdata[tid + stride];
-        __syncthreads();
-    }
-    if (tid == 0) y[(long)m * N + n] = sdata[0];
+    #pragma unroll
+    for (int s = 16; s > 0; s >>= 1) acc += __shfl_down_sync(0xFFFFFFFF, acc, s);
+    if (lane == 0) y[(long)m * N + n] = acc;
 }
 
-// Q6_K GEMV: y[m, n] = x[m, K] * dequant(W_q6k[n, K])
+// Q6_K GEMV, warp per output row, each byte read EXACTLY ONCE. Same reasoning as Q4_K above.
+//
+// Q6_K packs three bytes into four values: for a chunk of 128 and an offset l in [0,32),
+// ql[l], ql[l+32] and qh[l] together give values l, l+32, l+64, l+96 of that chunk. So a lane takes
+// one l and does both chunks -- six bytes, eight values, nothing fetched twice. All eight of its
+// 6-bit scale indices are fixed by l, so the scale lookups leave the inner loop as well.
 __global__ void gemv_q6k_kernel(const float* __restrict__ x,
                                 const unsigned char* __restrict__ w,
                                 float* __restrict__ y,
                                 int M, int N, int K) {
-    int n = blockIdx.x;
-    int m = blockIdx.y;
+    const int warp = threadIdx.x >> 5;
+    const int lane = threadIdx.x & 31;
+    const int n = blockIdx.x * (blockDim.x >> 5) + warp;
+    const int m = blockIdx.y;
     if (n >= N || m >= M) return;
 
-    int nblocks = K / GGUF_QK_K;
-    long row_bytes = (long)nblocks * GGUF_Q6K_BLOCK_BYTES;
+    const int nblocks = K / GGUF_QK_K;
+    const long row_bytes = (long)nblocks * GGUF_Q6K_BLOCK_BYTES;
     const unsigned char* wrow = w + (long)n * row_bytes;
     const float* xrow = x + (long)m * K;
 
-    int tid = threadIdx.x;
-    int nthreads = blockDim.x;
-    float partial = 0.0f;
+    const int l = lane;          // offset within the 32-wide group
+    const int is = l >> 4;       // 16-value scale group, fixed for this lane
 
-    for (int blk = 0; blk < nblocks; ++blk) {
+    float acc = 0.0f;
+    for (int b = 0; b < nblocks; ++b) {
+        const unsigned char* block = wrow + (long)b * GGUF_Q6K_BLOCK_BYTES;
+        const float d = __half2float(*((const __half*)(block + 208)));
+        const float* xb = xrow + b * GGUF_QK_K;
+
+        #pragma unroll
+        for (int chunk = 0; chunk < 2; ++chunk) {
+            const unsigned char* ql_c = block + chunk * 64;
+            const unsigned char* qh_c = block + 128 + chunk * 32;
+            const signed char*   sc_c = (const signed char*)(block + 192) + chunk * 8;
+
+            const unsigned char a = ql_c[l];       // low nibble -> value l, high -> value l+64
+            const unsigned char c = ql_c[l + 32];  // low nibble -> value l+32, high -> l+96
+            const unsigned char h = qh_c[l];       // the four 2-bit high parts
+            const float* xc = xb + chunk * 128;
+
+            const int q0 = (int)((a & 0xF) | (((h >> 0) & 3) << 4)) - 32;
+            const int q1 = (int)((c & 0xF) | (((h >> 2) & 3) << 4)) - 32;
+            const int q2 = (int)((a >> 4)  | (((h >> 4) & 3) << 4)) - 32;
+            const int q3 = (int)((c >> 4)  | (((h >> 6) & 3) << 4)) - 32;
+
+            acc += d * (float)sc_c[is + 0] * (float)q0 * xc[l];
+            acc += d * (float)sc_c[is + 2] * (float)q1 * xc[l + 32];
+            acc += d * (float)sc_c[is + 4] * (float)q2 * xc[l + 64];
+            acc += d * (float)sc_c[is + 6] * (float)q3 * xc[l + 96];
+        }
+    }
+
+    #pragma unroll
+    for (int s = 16; s > 0; s >>= 1) acc += __shfl_down_sync(0xFFFFFFFF, acc, s);
+    if (lane == 0) y[(long)m * N + n] = acc;
+}
+
+// ---- Gated DeltaNet: gates and short causal convolution on the device ----
+//
+// These two are the last elementwise stages the mixer ran on the host. With them the whole mixer
+// stays device-resident, which removes a device->host sync after every projection: at 288 matmuls
+// per decode token those syncs measured 64 ms, more than the matmul kernels themselves.
+
+// alpha[t,h] = exp(-exp(a_log[h]) * softplus(a_proj[t,h] + dt_bias[h]))
+// beta [t,h] = sigmoid(b_proj[t,h])
+//
+// Both ranges are structural rather than clamped: alpha lands in (0,1) for any real a_log and any
+// dt > 0, which is what keeps the recurrent state bounded over a long context.
+__global__ void gdn_gates_kernel(float* __restrict__ alpha, float* __restrict__ beta,
+                                 const float* __restrict__ a_proj,
+                                 const float* __restrict__ b_proj,
+                                 const float* __restrict__ a_log,
+                                 const float* __restrict__ dt_bias,
+                                 int seq, int heads) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= seq * heads) return;
+    int h = idx % heads;
+
+    float x = a_proj[idx] + dt_bias[h];
+    // log1p(exp(x)), guarded: above ~20 the function is x to fp32 precision and exp overflows.
+    float sp = (x > 20.0f) ? x : log1pf(__expf(x));
+    alpha[idx] = __expf(-__expf(a_log[h]) * sp);
+    beta[idx] = 1.0f / (1.0f + __expf(-b_proj[idx]));
+}
+
+// Short causal depthwise convolution over the sequence, per channel.
+//
+// dst[t,c] = sum_j w[c,j] * x[t-j, c], reading the carried state for t-j < 0. w[c,0] is the current
+// position, matching ShortConv's tap order (the loader reverses GGUF's order once at load time).
+// The state is updated to the last kernel-1 positions so a decode step continues the sequence.
+// Causal conv + SiLU for q, k and v in ONE launch.
+//
+// The decode path ran nine kernels for this stage: three short_conv (each of which is itself two
+// launches, conv then state roll) plus three mul_sigmoid to apply SiLU in place. That is nine
+// launches per GDN layer, and with 48 GDN layers it is ~430 of the ~1280 launches a token issues.
+// Batch=1 decode is latency-bound, not arithmetic-bound, so those launches are the cost.
+//
+// Two things happen here. SiLU is folded into the convolution's write, which is exact -- the same
+// x*sigmoid(x) applied to the same value, just before it leaves a register instead of after a round
+// trip through HBM. And all three tensors share one grid: a thread's channel index selects its
+// tensor from the cumulative channel offsets, so q (k_dim), k (k_dim) and v (v_dim) are convolved
+// together. Nine launches become two.
+__global__ void short_conv_silu3_kernel(float* __restrict__ d0, const float* __restrict__ s0,
+                                        const float* __restrict__ st0, const float* __restrict__ w0,
+                                        float* __restrict__ d1, const float* __restrict__ s1,
+                                        const float* __restrict__ st1, const float* __restrict__ w1,
+                                        float* __restrict__ d2, const float* __restrict__ s2,
+                                        const float* __restrict__ st2, const float* __restrict__ w2,
+                                        int seq, int ch0, int ch1, int ch2, int kernel,
+                                        int apply_silu) {
+    int g = blockIdx.x * blockDim.x + threadIdx.x;
+    if (g >= ch0 + ch1 + ch2) return;
+
+    float* dst;
+    const float* src;
+    const float* state;
+    const float* w;
+    int channels, c;
+    if (g < ch0) {
+        dst = d0; src = s0; state = st0; w = w0; channels = ch0; c = g;
+    } else if (g < ch0 + ch1) {
+        dst = d1; src = s1; state = st1; w = w1; channels = ch1; c = g - ch0;
+    } else {
+        dst = d2; src = s2; state = st2; w = w2; channels = ch2; c = g - ch0 - ch1;
+    }
+
+    for (int t = 0; t < seq; ++t) {
+        float acc = 0.0f;
+        for (int j = 0; j < kernel; ++j) {
+            int back = t - j;
+            float v;
+            if (back >= 0) {
+                v = src[(long)back * channels + c];
+            } else {
+                int si = kernel - 1 + back;          // back is negative; -1 -> last state column
+                v = (si >= 0) ? state[(long)c * (kernel - 1) + si] : 0.0f;
+            }
+            acc += w[(long)c * kernel + j] * v;
+        }
+        // SiLU folded in. Written in exactly the form mul_sigmoid uses --
+        // x * (1/(1+__expf(-x))), same intrinsic, same order of operations -- so fusing it does not
+        // move the result. A reciprocal-then-multiply and a plain divide round differently, and the
+        // fast intrinsic __expf differs from expf, so this is not a place to simplify the algebra.
+        if (apply_silu) acc = acc * (1.0f / (1.0f + __expf(-acc)));
+        dst[(long)t * channels + c] = acc;
+    }
+}
+
+// The matching state roll for all three tensors, one launch. Split from the convolution for the same
+// reason the single-tensor version is: the reads above must not race these writes.
+__global__ void short_conv_state3_kernel(float* __restrict__ st0, const float* __restrict__ s0,
+                                         float* __restrict__ st1, const float* __restrict__ s1,
+                                         float* __restrict__ st2, const float* __restrict__ s2,
+                                         int seq, int ch0, int ch1, int ch2, int kernel) {
+    int g = blockIdx.x * blockDim.x + threadIdx.x;
+    if (g >= ch0 + ch1 + ch2) return;
+
+    float* state;
+    const float* src;
+    int channels, c;
+    if (g < ch0) {
+        state = st0; src = s0; channels = ch0; c = g;
+    } else if (g < ch0 + ch1) {
+        state = st1; src = s1; channels = ch1; c = g - ch0;
+    } else {
+        state = st2; src = s2; channels = ch2; c = g - ch0 - ch1;
+    }
+
+    int keep = kernel - 1;
+    float tmp[8]; // kernel is 4 for every shipped Gated DeltaNet; 8 is slack
+    if (keep > 8) return;
+    for (int i = 0; i < keep; ++i) {
+        int s = seq - keep + i;
+        // A call shorter than the window keeps part of the OLD state, otherwise history is lost --
+        // which is every decode step, where seq is 1 and the window is 4. Staged through tmp so
+        // these reads are not clobbered by the writes below.
+        tmp[i] = (s >= 0) ? src[(long)s * channels + c] : state[(long)c * keep + (keep + s)];
+    }
+    for (int i = 0; i < keep; ++i) state[(long)c * keep + i] = tmp[i];
+}
+
+__global__ void short_conv_kernel(float* __restrict__ dst, const float* __restrict__ src,
+                                  const float* __restrict__ state,
+                                  const float* __restrict__ w,
+                                  int seq, int channels, int kernel) {
+    int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= channels) return;
+
+    for (int t = 0; t < seq; ++t) {
+        float acc = 0.0f;
+        for (int j = 0; j < kernel; ++j) {
+            int back = t - j;
+            float v;
+            if (back >= 0) {
+                v = src[(long)back * channels + c];
+            } else {
+                int si = kernel - 1 + back;          // back is negative; -1 -> last state column
+                v = (si >= 0) ? state[(long)c * (kernel - 1) + si] : 0.0f;
+            }
+            acc += w[(long)c * kernel + j] * v;
+        }
+        dst[(long)t * channels + c] = acc;
+    }
+}
+
+// Roll the conv state forward to the last kernel-1 positions of this call. Split from the
+// convolution so the reads above are never racing these writes.
+__global__ void short_conv_state_kernel(float* __restrict__ state, const float* __restrict__ src,
+                                        int seq, int channels, int kernel) {
+    int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= channels) return;
+    int keep = kernel - 1;
+    float tmp[8]; // kernel is 4 for every shipped Gated DeltaNet; 8 is slack
+    if (keep > 8) return;
+    for (int i = 0; i < keep; ++i) {
+        int s = seq - keep + i;
+        // A call shorter than the window keeps part of the old state, otherwise history is lost.
+        tmp[i] = (s >= 0) ? src[(long)s * channels + c] : state[(long)c * keep + (keep + s)];
+    }
+    for (int i = 0; i < keep; ++i) state[(long)c * keep + i] = tmp[i];
+}
+
+void gdn_gates(float* alpha, float* beta, const float* a_proj, const float* b_proj,
+               const float* a_log, const float* dt_bias, int seq, int heads) {
+    int n = seq * heads;
+    if (n <= 0) return;
+    int threads = 256;
+    gdn_gates_kernel<<<(n + threads - 1) / threads, threads>>>(
+        alpha, beta, a_proj, b_proj, a_log, dt_bias, seq, heads);
+}
+
+// Fused causal conv (+ optional SiLU) for q, k and v in two launches instead of nine.
+void short_conv_silu3(float* d0, const float* s0, float* st0, const float* w0,
+                      float* d1, const float* s1, float* st1, const float* w1,
+                      float* d2, const float* s2, float* st2, const float* w2,
+                      int seq, int ch0, int ch1, int ch2, int kernel, int apply_silu) {
+    if (seq <= 0 || kernel <= 0) return;
+    int total = ch0 + ch1 + ch2;
+    if (total <= 0) return;
+    int threads = 256;
+    int blocks = (total + threads - 1) / threads;
+    short_conv_silu3_kernel<<<blocks, threads>>>(d0, s0, st0, w0,
+                                                d1, s1, st1, w1,
+                                                d2, s2, st2, w2,
+                                                seq, ch0, ch1, ch2, kernel, apply_silu);
+    if (kernel > 1) {
+        short_conv_state3_kernel<<<blocks, threads>>>(st0, s0, st1, s1, st2, s2,
+                                                      seq, ch0, ch1, ch2, kernel);
+    }
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in short_conv_silu3: %s\n", cudaGetErrorString(err));
+    }
+}
+
+void short_conv(float* dst, const float* src, float* state, const float* w,
+                int seq, int channels, int kernel) {
+    if (seq <= 0 || channels <= 0 || kernel <= 0) return;
+    int threads = 256;
+    int blocks = (channels + threads - 1) / threads;
+    short_conv_kernel<<<blocks, threads>>>(dst, src, state, w, seq, channels, kernel);
+    if (kernel > 1) {
+        short_conv_state_kernel<<<blocks, threads>>>(state, src, seq, channels, kernel);
+    }
+}
+
+// C entry points
+
+// ---- Dequantize a row range to fp32, so cuBLAS can do the GEMM ----
+//
+// The GEMV kernels above give each (output, token) pair its own block, so every block
+// re-dequantizes the whole weight row and NOTHING is reused across tokens. Measured on
+// blk.0.ffn_up.weight (Q4_K, 5120x17408, 47.8 MB): 0.54 ms per token flat from M=1 to M=256, i.e.
+// the 47.8 MB weight is re-streamed once per token -- 54 GB of traffic for a 1200-token prefill,
+// per matmul, per layer.
+//
+// For M=1 that is optimal (the weight is read exactly once and the result is one vector), so
+// decode keeps using the GEMV. For M>1 the weight should be read once and reused across all M,
+// which is what a GEMM does. Rather than hand-roll a tiled k-quant GEMM, dequantize a chunk of
+// rows into an fp32 scratch buffer and hand it to cuBLAS, which is already tuned for this shape.
+//
+// Output is [n_rows, K] row-major, matching the GGUF row order, so the caller can treat it as a
+// column-major [K, n_rows] operand and reach the whole result with one cublasSgemm.
+
+__global__ void dequant_q4k_rows_kernel(const unsigned char* __restrict__ w,
+                                        float* __restrict__ out,
+                                        int row0, int n_rows, int K) {
+    int r = blockIdx.x;
+    if (r >= n_rows) return;
+
+    int nblocks = K / GGUF_QK_K;
+    long row_bytes = (long)nblocks * GGUF_Q4K_BLOCK_BYTES;
+    const unsigned char* wrow = w + (long)(row0 + r) * row_bytes;
+    float* orow = out + (long)r * K;
+
+    for (int blk = blockIdx.y; blk < nblocks; blk += gridDim.y) {
+        const unsigned char* block = wrow + (long)blk * GGUF_Q4K_BLOCK_BYTES;
+        float d    = __half2float(*((const __half*)(block + 0)));
+        float dmin = __half2float(*((const __half*)(block + 2)));
+        const unsigned char* scales = block + 4;
+        const unsigned char* qs     = block + 16;
+        int base_k = blk * GGUF_QK_K;
+
+        for (int k = threadIdx.x; k < GGUF_QK_K; k += blockDim.x) {
+            unsigned char sc, mn;
+            get_scale_min_k4(k / 32, scales, &sc, &mn);
+            int block_of_64 = k / 64;
+            int offset_in_64 = k % 64;
+            int nibble_val = (offset_in_64 < 32)
+                ? (qs[block_of_64 * 32 + offset_in_64] & 0xF)
+                : (qs[block_of_64 * 32 + (offset_in_64 - 32)] >> 4);
+            orow[base_k + k] = d * (float)sc * (float)nibble_val - dmin * (float)mn;
+        }
+    }
+}
+
+__global__ void dequant_q6k_rows_kernel(const unsigned char* __restrict__ w,
+                                        float* __restrict__ out,
+                                        int row0, int n_rows, int K) {
+    int r = blockIdx.x;
+    if (r >= n_rows) return;
+
+    int nblocks = K / GGUF_QK_K;
+    long row_bytes = (long)nblocks * GGUF_Q6K_BLOCK_BYTES;
+    const unsigned char* wrow = w + (long)(row0 + r) * row_bytes;
+    float* orow = out + (long)r * K;
+
+    for (int blk = blockIdx.y; blk < nblocks; blk += gridDim.y) {
         const unsigned char* block = wrow + (long)blk * GGUF_Q6K_BLOCK_BYTES;
-        // Q6_K layout: ql[128], qh[64], scales[16], d(fp16)
         const unsigned char* ql = block;
         const unsigned char* qh = block + 128;
         const signed char* sc   = (const signed char*)(block + 192);
         float d = __half2float(*((const __half*)(block + 208)));
-
         int base_k = blk * GGUF_QK_K;
 
-        for (int k = tid; k < GGUF_QK_K; k += nthreads) {
-            // Unpack 6-bit value from ql and qh
-            // Layout from dequantize_row_q6_K:
-            //   For each 128-value chunk (n in [0, 128, ...]):
-            //     for l in [0..32):
-            //       q1 = (ql[l]    & 0xF) | (((qh[l] >> 0) & 3) << 4) - 32
-            //       q2 = (ql[l+32] & 0xF) | (((qh[l] >> 2) & 3) << 4) - 32
-            //       q3 = (ql[l]    >> 4)   | (((qh[l] >> 4) & 3) << 4) - 32
-            //       q4 = (ql[l+32] >> 4)   | (((qh[l] >> 6) & 3) << 4) - 32
-            //       y[l]    = d * sc[is+0] * q1  (is = l/16)
-            //       y[l+32] = d * sc[is+2] * q2
-            //       y[l+64] = d * sc[is+4] * q3
-            //       y[l+96] = d * sc[is+6] * q4
-            //     ql += 64, qh += 32, sc += 8
+        for (int k = threadIdx.x; k < GGUF_QK_K; k += blockDim.x) {
             int chunk = k / 128;
             int local = k % 128;
             const unsigned char* ql_c = ql + chunk * 64;
             const unsigned char* qh_c = qh + chunk * 32;
             const signed char* sc_c   = sc + chunk * 8;
-
-            int sub = local / 32;  // 0..3
+            int sub = local / 32;
             int l   = local % 32;
             int qval;
             switch (sub) {
-                case 0: qval = (int)((ql_c[l]      & 0xF) | (((qh_c[l] >> 0) & 3) << 4)) - 32; break;
+                case 0: qval = (int)((ql_c[l]       & 0xF) | (((qh_c[l] >> 0) & 3) << 4)) - 32; break;
                 case 1: qval = (int)((ql_c[l + 32]  & 0xF) | (((qh_c[l] >> 2) & 3) << 4)) - 32; break;
                 case 2: qval = (int)((ql_c[l]       >> 4)  | (((qh_c[l] >> 4) & 3) << 4)) - 32; break;
-                default: qval = (int)((ql_c[l + 32]  >> 4)  | (((qh_c[l] >> 6) & 3) << 4)) - 32; break;
+                default: qval = (int)((ql_c[l + 32] >> 4)  | (((qh_c[l] >> 6) & 3) << 4)) - 32; break;
             }
-            int is = l / 16;
-            int scale_idx = is + sub * 2;
-            float val = d * (float)sc_c[scale_idx] * (float)qval;
-            partial += val * xrow[base_k + k];
+            orow[base_k + k] = d * (float)sc_c[(l / 16) + sub * 2] * (float)qval;
         }
     }
-
-    extern __shared__ float sdata[];
-    sdata[tid] = partial;
-    __syncthreads();
-    for (int stride = nthreads >> 1; stride > 0; stride >>= 1) {
-        if (tid < stride) sdata[tid] += sdata[tid + stride];
-        __syncthreads();
-    }
-    if (tid == 0) y[(long)m * N + n] = sdata[0];
 }
 
-// C entry points
+void dequant_iq4xs_rows(const unsigned char* w, float* out, int row0, int n_rows, int K) {
+    if (n_rows <= 0 || K <= 0) return;
+    int nblocks = K / GGUF_QK_K;
+    int by = nblocks < 32 ? nblocks : 32;
+    dim3 grid(n_rows, by);
+    dequant_iq4xs_rows_kernel<<<grid, 256>>>(w, out, row0, n_rows, K);
+}
+
+void dequant_iq3xxs_rows(const unsigned char* w, float* out, int row0, int n_rows, int K) {
+    if (n_rows <= 0 || K <= 0) return;
+    int nblocks = K / GGUF_QK_K;
+    int by = nblocks < 32 ? nblocks : 32;
+    dim3 grid(n_rows, by);
+    dequant_iq3xxs_rows_kernel<<<grid, 256>>>(w, out, row0, n_rows, K);
+}
+
+void dequant_iq3s_rows(const unsigned char* w, float* out, int row0, int n_rows, int K) {
+    if (n_rows <= 0 || K <= 0) return;
+    int nblocks = K / GGUF_QK_K;
+    int by = nblocks < 32 ? nblocks : 32;
+    dim3 grid(n_rows, by);
+    dequant_iq3s_rows_kernel<<<grid, 256>>>(w, out, row0, n_rows, K);
+}
+
+void gemv_q2k_lb(const float* x, const unsigned char* w, float* y, int M, int N, int K) {
+    if (N <= 0 || M <= 0 || K <= 0) return;
+    int threads = 256;
+    int rows_per_block = threads / 32;
+    dim3 grid((N + rows_per_block - 1) / rows_per_block, M);
+    gemv_q2k_lb_kernel<<<grid, threads>>>(x, w, y, M, N, K);
+}
+
+void dequant_q2k_lb_rows(const unsigned char* w, float* out, int row0, int n_rows, int K) {
+    if (n_rows <= 0 || K <= 0) return;
+    int nblocks = K / GGUF_QK_K;
+    int by = nblocks < 32 ? nblocks : 32;
+    dim3 grid(n_rows, by);
+    dequant_q2k_lb_rows_kernel<<<grid, 256>>>(w, out, row0, n_rows, K);
+}
+
+void gemv_iq2xxs(const float* x, const unsigned char* w, float* y, int M, int N, int K) {
+    if (N <= 0 || M <= 0 || K <= 0) return;
+    int threads = 256;
+    int rows_per_block = threads / 32;
+    dim3 grid((N + rows_per_block - 1) / rows_per_block, M);
+    gemv_iq2xxs_kernel<<<grid, threads>>>(x, w, y, M, N, K);
+}
+
+void dequant_iq2xxs_rows(const unsigned char* w, float* out, int row0, int n_rows, int K) {
+    if (n_rows <= 0 || K <= 0) return;
+    int nblocks = K / GGUF_QK_K;
+    int by = nblocks < 32 ? nblocks : 32;
+    dim3 grid(n_rows, by);
+    dequant_iq2xxs_rows_kernel<<<grid, 256>>>(w, out, row0, n_rows, K);
+}
+
+void gemv_iq2xs(const float* x, const unsigned char* w, float* y, int M, int N, int K) {
+    if (N <= 0 || M <= 0 || K <= 0) return;
+    int threads = 256;
+    int rows_per_block = threads / 32;
+    dim3 grid((N + rows_per_block - 1) / rows_per_block, M);
+    gemv_iq2xs_kernel<<<grid, threads>>>(x, w, y, M, N, K);
+}
+
+void dequant_iq2xs_rows(const unsigned char* w, float* out, int row0, int n_rows, int K) {
+    if (n_rows <= 0 || K <= 0) return;
+    int nblocks = K / GGUF_QK_K;
+    int by = nblocks < 32 ? nblocks : 32;
+    dim3 grid(n_rows, by);
+    dequant_iq2xs_rows_kernel<<<grid, 256>>>(w, out, row0, n_rows, K);
+}
+
+void gemv_iq2s(const float* x, const unsigned char* w, float* y, int M, int N, int K) {
+    if (N <= 0 || M <= 0 || K <= 0) return;
+    int threads = 256;
+    int rows_per_block = threads / 32;
+    dim3 grid((N + rows_per_block - 1) / rows_per_block, M);
+    gemv_iq2s_kernel<<<grid, threads>>>(x, w, y, M, N, K);
+}
+
+void dequant_iq2s_rows(const unsigned char* w, float* out, int row0, int n_rows, int K) {
+    if (n_rows <= 0 || K <= 0) return;
+    int nblocks = K / GGUF_QK_K;
+    int by = nblocks < 32 ? nblocks : 32;
+    dim3 grid(n_rows, by);
+    dequant_iq2s_rows_kernel<<<grid, 256>>>(w, out, row0, n_rows, K);
+}
+
+void gemv_iq1m(const float* x, const unsigned char* w, float* y, int M, int N, int K) {
+    if (N <= 0 || M <= 0 || K <= 0) return;
+    int threads = 256;
+    int rows_per_block = threads / 32;
+    dim3 grid((N + rows_per_block - 1) / rows_per_block, M);
+    gemv_iq1m_kernel<<<grid, threads>>>(x, w, y, M, N, K);
+}
+
+void dequant_iq1m_rows(const unsigned char* w, float* out, int row0, int n_rows, int K) {
+    if (n_rows <= 0 || K <= 0) return;
+    int nblocks = K / GGUF_QK_K;
+    int by = nblocks < 32 ? nblocks : 32;
+    dim3 grid(n_rows, by);
+    dequant_iq1m_rows_kernel<<<grid, 256>>>(w, out, row0, n_rows, K);
+}
+
+void gemv_iq1s(const float* x, const unsigned char* w, float* y, int M, int N, int K) {
+    if (N <= 0 || M <= 0 || K <= 0) return;
+    int threads = 256;
+    int rows_per_block = threads / 32;
+    dim3 grid((N + rows_per_block - 1) / rows_per_block, M);
+    gemv_iq1s_kernel<<<grid, threads>>>(x, w, y, M, N, K);
+}
+
+void dequant_iq1s_rows(const unsigned char* w, float* out, int row0, int n_rows, int K) {
+    if (n_rows <= 0 || K <= 0) return;
+    int nblocks = K / GGUF_QK_K;
+    int by = nblocks < 32 ? nblocks : 32;
+    dim3 grid(n_rows, by);
+    dequant_iq1s_rows_kernel<<<grid, 256>>>(w, out, row0, n_rows, K);
+}
+
+void gemv_iq3xxs(const float* x, const unsigned char* w, float* y, int M, int N, int K) {
+    const int warps = 4;
+    const int threads = warps * 32;
+    dim3 grid((N + warps - 1) / warps, M);
+    gemv_iq3xxs_kernel<<<grid, threads>>>(x, w, y, M, N, K);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) printf("CUDA Error in gemv_iq3xxs: %s\n", cudaGetErrorString(err));
+}
+
+void gemv_iq3s(const float* x, const unsigned char* w, float* y, int M, int N, int K) {
+    const int warps = 4;
+    const int threads = warps * 32;
+    dim3 grid((N + warps - 1) / warps, M);
+    gemv_iq3s_kernel<<<grid, threads>>>(x, w, y, M, N, K);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) printf("CUDA Error in gemv_iq3s: %s\n", cudaGetErrorString(err));
+}
+
+void gemv_iq4xs(const float* x, const unsigned char* w, float* y, int M, int N, int K) {
+    // One warp per output row, 4 warps per block, shuffle reduction -- same shape as gemv_q4k.
+    const int warps = 4;
+    const int threads = warps * 32;
+    dim3 grid((N + warps - 1) / warps, M);
+    gemv_iq4xs_kernel<<<grid, threads>>>(x, w, y, M, N, K);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in gemv_iq4xs: %s\n", cudaGetErrorString(err));
+    }
+}
+
+void dequant_q4k_rows(const unsigned char* w, float* out, int row0, int n_rows, int K) {
+    if (n_rows <= 0 || K <= 0) return;
+    int nblocks = K / GGUF_QK_K;
+    int by = nblocks < 32 ? nblocks : 32;
+    dim3 grid(n_rows, by);
+    dequant_q4k_rows_kernel<<<grid, 256>>>(w, out, row0, n_rows, K);
+}
+
+void dequant_q6k_rows(const unsigned char* w, float* out, int row0, int n_rows, int K) {
+    if (n_rows <= 0 || K <= 0) return;
+    int nblocks = K / GGUF_QK_K;
+    int by = nblocks < 32 ? nblocks : 32;
+    dim3 grid(n_rows, by);
+    dequant_q6k_rows_kernel<<<grid, 256>>>(w, out, row0, n_rows, K);
+}
+
 void gemv_q4k(const float* x, const unsigned char* w, float* y, int M, int N, int K) {
-    int threads = 128;
-    dim3 grid(N, M);
-    gemv_q4k_kernel<<<grid, threads, threads * sizeof(float)>>>(x, w, y, M, N, K);
+    // One warp per output row, 4 warps per block. No shared memory: the reduction is a shuffle.
+    const int warps = 4;
+    const int threads = warps * 32;
+    dim3 grid((N + warps - 1) / warps, M);
+    gemv_q4k_kernel<<<grid, threads>>>(x, w, y, M, N, K);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         printf("CUDA Error in gemv_q4k: %s\n", cudaGetErrorString(err));
@@ -1838,9 +2837,11 @@ void gemv_q4k(const float* x, const unsigned char* w, float* y, int M, int N, in
 }
 
 void gemv_q6k(const float* x, const unsigned char* w, float* y, int M, int N, int K) {
-    int threads = 128;
-    dim3 grid(N, M);
-    gemv_q6k_kernel<<<grid, threads, threads * sizeof(float)>>>(x, w, y, M, N, K);
+    // One warp per output row, 4 warps per block. No shared memory: the reduction is a shuffle.
+    const int warps = 4;
+    const int threads = warps * 32;
+    dim3 grid((N + warps - 1) / warps, M);
+    gemv_q6k_kernel<<<grid, threads>>>(x, w, y, M, N, K);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         printf("CUDA Error in gemv_q6k: %s\n", cudaGetErrorString(err));

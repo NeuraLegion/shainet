@@ -31,6 +31,9 @@ module SHAInet
     # KV cache mode for autoregressive LLM inference
     property? use_kv_cache : Bool = false
 
+    # Per-layer progress callback for prefill: called with (layer_idx, total_layers)
+    property prefill_progress : Proc(Int32, Int32, Nil)?
+
     # Status flag set to true once quantize! has converted weights to Q8.
     # Informational only — the quantized lm_head dispatch in Network#run keys
     # off @lm_head_q (and block/FFN weights off their own QuantizedCudaMatrix
@@ -150,18 +153,17 @@ module SHAInet
         @hidden_layers << layer
         @transformer_layers << layer.as(LlamaLayer)
       when "gated_deltanet"
-        # NOT added to @transformer_layers, deliberately and temporarily.
+        # NOT added to @transformer_layers, deliberately.
         #
         # That collection is typed Array(TransformerLayer | LlamaLayer) and is read from 24
         # sites, several on the hot inference path, so widening the union is a change that
-        # deserves its own audit rather than a drive-by. The consequence is concrete and worth
-        # knowing: Network#clear_cache! walks @transformer_layers, so it does NOT reach a
-        # gated_deltanet block, and a hand-built hybrid stack must call the block's own
-        # clear_cache! between sequences. There is a spec pinning exactly that, so the gap
-        # cannot go quiet.
+        # deserves its own audit rather than a drive-by.
         #
-        # Nothing user-facing depends on it yet: the loader still refuses to build one of these
-        # from a checkpoint, so the only way to get one is to construct it deliberately.
+        # Network#clear_cache! therefore reaches these blocks through @hidden_layers instead, which
+        # it MUST: an earlier version of this comment argued the gap was harmless because "the loader
+        # still refuses to build one of these from a checkpoint". GGUF support for Qwen3.5/3.8 made
+        # that false -- every one of those models is a hybrid stack -- and the gap turned into a
+        # second prompt in the same process producing garbage.
         @hidden_layers << layer
       when "output"
         if @output_layers.empty?
@@ -183,6 +185,24 @@ module SHAInet
     def clear_cache!
       @transformer_layers.each do |l|
         l.as(LlamaBlock).clear_cache! if l.is_a?(LlamaBlock)
+      end
+      # Gated DeltaNet blocks are reached through @hidden_layers, because they are deliberately not
+      # in @transformer_layers (see add_layer for why the union is not widened here).
+      #
+      # They MUST be cleared. A GDN block carries recurrent state rather than a KV cache, so a stale
+      # state is not merely a stale prefix -- it feeds the first token of the next sequence and
+      # corrupts everything after it. In a hybrid stack that is 48 of 64 layers.
+      #
+      # This was a live bug, not a theoretical one. add_layer's comment argued the gap was harmless
+      # because "the loader still refuses to build one of these from a checkpoint", which stopped
+      # being true once GGUF loading gained Qwen3.5/3.8 support: every one of those models is a hybrid
+      # stack. Observed effect -- ask the model to write an HTML page, then ask it to review a file in
+      # the same process with clear_cache! between: the first answer is correct and the second decodes
+      # an immediate end-of-turn followed by empty im_start/im_end pairs forever. The same review
+      # prompt in a fresh process answers correctly, which is what identified leftover state rather
+      # than the prompt.
+      @hidden_layers.each do |l|
+        l.as(GatedDeltaNetBlock).clear_cache! if l.is_a?(GatedDeltaNetBlock)
       end
     end
 

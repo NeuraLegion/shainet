@@ -1,0 +1,128 @@
+require "./spec_helper"
+
+# Prefill runs the k-quant matmuls with M > 1, and both backends take a DIFFERENT code path there
+# than at M = 1:
+#
+#   device: M = 1 stays a GEMV (the weight is streamed once anyway); M > 1 dequantizes row chunks
+#           into a scratch tile and calls cuBLAS, because the GEMV kernel gives each
+#           (output, token) pair its own block and so re-dequantizes the whole weight per token --
+#           measured flat at 0.54 ms/token from M=1 to M=256 on a 47.8 MB Q4_K weight.
+#   host:   M = 1 keeps the fused dequant+dot; M > 1 unpacks each row once and dots it against
+#           four tokens at a time.
+#
+# A batched path that disagrees with the per-token one would make prefill and decode compute
+# different things from the same weights, which is exactly the class of bug that leaves output
+# fluent but wrong. So assert they agree rather than assuming it.
+
+# Little-endian fp16 for the constants below. 1.0 = 0x3C00, 0.5 = 0x3800.
+private def f16(bits : UInt16, into : Bytes, at : Int32)
+  into[at] = (bits & 0xFF).to_u8
+  into[at + 1] = (bits >> 8).to_u8
+end
+
+# One Q4_K block: d = 1.0, dmin = 0.5, all group scales and mins = 1, qs bytes vary by index so a
+# transposed or mis-strided read cannot pass by symmetry.
+private def build_q4k_block : Bytes
+  block = Bytes.new(144, 0_u8)
+  f16(0x3C00_u16, block, 0)
+  f16(0x3800_u16, block, 2)
+  6.times { |i| block[4 + i] = 0x41_u8 }  # scales: 6-bit 1s
+  6.times { |i| block[10 + i] = 0x41_u8 } # mins:   6-bit 1s
+  128.times { |i| block[16 + i] = ((i % 13) | (((i + 5) % 11) << 4)).to_u8 }
+  block
+end
+
+private def build_q6k_block : Bytes
+  block = Bytes.new(210, 0_u8)
+  128.times { |i| block[i] = ((i * 7) % 251).to_u8 }                           # ql
+  64.times { |i| block[128 + i] = ((i * 11) % 253).to_u8 }                     # qh
+  16.times { |i| block[192 + i] = (i.odd? ? -(i + 1) : (i + 1)).to_i8.to_u8! } # scales, signed
+  f16(0x3C00_u16, block, 208)
+  block
+end
+
+describe "batched k-quant matmul" do
+  {"Q4_K" => 144, "Q6_K" => 210}.each do |kind, bs|
+    it "host M>1 agrees with M=1 for #{kind}" do
+      pending! "CPU kernels not loaded" unless SHAInet::CPUKernels.available?
+
+      k = 256
+      n = 8
+      m = 6 # not a multiple of 4, so the blocked loop and its remainder tail both run
+      block = kind == "Q4_K" ? build_q4k_block : build_q6k_block
+
+      w = Pointer(UInt8).malloc(n * bs)
+      n.times do |r|
+        block.each_with_index do |byte, i|
+          # Perturb one byte per row so no two rows are identical.
+          w[r * bs + i] = i == 0 ? (byte + r).to_u8! : byte
+        end
+      end
+
+      x = Pointer(Float32).malloc(m * k)
+      (m * k).times { |i| x[i] = (0.03 * Math.sin(i * 0.017) + 0.001 * i).to_f32 }
+
+      batched = Pointer(Float32).malloc(m * n)
+      per_token = Pointer(Float32).malloc(m * n)
+
+      ok = if kind == "Q4_K"
+             SHAInet::CPUKernels.gemv_q4k(x, w, batched, m, n, k)
+           else
+             SHAInet::CPUKernels.gemv_q6k(x, w, batched, m, n, k)
+           end
+      pending! "kernel unavailable" unless ok
+
+      m.times do |r|
+        if kind == "Q4_K"
+          SHAInet::CPUKernels.gemv_q4k(x + r * k, w, per_token + r * n, 1, n, k)
+        else
+          SHAInet::CPUKernels.gemv_q6k(x + r * k, w, per_token + r * n, 1, n, k)
+        end
+      end
+
+      scale = (0...(m * n)).max_of { |i| per_token[i].abs }
+      scale = 1.0_f32 if scale < 1e-6
+      (m * n).times do |i|
+        ((batched[i] - per_token[i]).abs / scale).should be < 1e-5
+      end
+    end
+  end
+
+  it "device M>1 GEMM agrees with the per-token GEMV", tags: "cuda" do
+    pending! "no CUDA" unless SHAInet::CUDA.fully_available?
+    pending! "no dequant kernels" unless SHAInet::CUDA.dequant_k_rows_available?
+
+    k = 256
+    n = 8
+    m = 5
+    block = build_q4k_block
+    host = Pointer(UInt8).malloc(n * 144)
+    n.times { |r| block.each_with_index { |byte, i| host[r * 144 + i] = i == 0 ? (byte + r).to_u8! : byte } }
+
+    w = SHAInet::GGUFMatrix.new(k, n, SHAInet::GGUF::GGMLType::Q4_K, host, (n * 144).to_u64)
+    x = SHAInet::CudaMatrix.new(m, k)
+    (m * k).times { |i| x.raw_data[i] = (0.02 * Math.sin(i * 0.031)).to_f32 }
+    x.mark_host_modified!
+    x.sync_to_device!("spec_in")
+
+    gemm = SHAInet::CudaMatrix.new(m, n)
+    gemv = SHAInet::CudaMatrix.new(m, n)
+    w.gemm_into(x, gemm)
+    SHAInet::CUDA.gemv_q4k(x.device_ptr.not_nil!, w.dev_ptr, gemv.device_ptr.not_nil!, m, n, k)
+    gemv.mark_device_dirty!
+    gemm.sync_from_device!("spec_gemm")
+    gemv.sync_from_device!("spec_gemv")
+
+    scale = (0...(m * n)).max_of { |i| gemv.raw_data[i].abs }
+    scale = 1.0_f32 if scale < 1e-6
+    (m * n).times do |i|
+      ((gemm.raw_data[i] - gemv.raw_data[i]).abs / scale).should be < 1e-4
+    end
+
+    x.free!
+    gemm.free!
+    gemv.free!
+    w.free!
+    SHAInet::GGUFMatrix.release_scratch!
+  end
+end

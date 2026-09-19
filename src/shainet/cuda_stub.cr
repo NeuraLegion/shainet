@@ -70,7 +70,7 @@ module SHAInet
       nil
     end
 
-    def create_handle(*args)
+    def create_handle(*args, **opts)
       raise "CUDA disabled"
     end
 
@@ -104,6 +104,31 @@ module SHAInet
 
     def kv_cache_append_f16(*args)
       raise "CUDA disabled"
+    end
+
+    def attention_split_kv_f32(q : Pointer(Float32), kc : Pointer(Float32), vc : Pointer(Float32),
+                               out_ptr : Pointer(Float32), ws : Pointer(Float32),
+                               new_tokens : Int32, start_pos : Int32, num_heads : Int32,
+                               heads_per_kv : Int32, head_dim : Int32, capacity : Int32,
+                               scale : Float32) : Bool
+      false
+    end
+
+    def attention_split_kv_f16(q : Pointer(Float32), kc : Pointer(UInt16), vc : Pointer(UInt16),
+                               out_ptr : Pointer(Float32), ws : Pointer(Float32),
+                               new_tokens : Int32, start_pos : Int32, num_heads : Int32,
+                               heads_per_kv : Int32, head_dim : Int32, capacity : Int32,
+                               scale : Float32) : Bool
+      false
+    end
+
+    def attention_split_ws_floats(new_tokens : Int32, num_heads : Int32, head_dim : Int32,
+                                  total_len : Int32) : Int32
+      0
+    end
+
+    def attention_split_kv_available? : Bool
+      false
     end
 
     def attention_kv_f16(*args)
@@ -154,11 +179,129 @@ module SHAInet
       raise "CUDA disabled"
     end
 
+    def gemv_iq3xxs(x : Pointer(Float32), w : Pointer(UInt8), y : Pointer(Float32),
+                    m : Int32, n : Int32, k : Int32)
+      raise "CUDA not available"
+    end
+
+    def gemv_iq3s(x : Pointer(Float32), w : Pointer(UInt8), y : Pointer(Float32),
+                  m : Int32, n : Int32, k : Int32)
+      raise "CUDA not available"
+    end
+
+    def gemv_iq4xs(x : Pointer(Float32), w : Pointer(UInt8), y : Pointer(Float32),
+                   m : Int32, n : Int32, k : Int32)
+      raise "CUDA not available"
+    end
+
+    def dequant_iq4xs_rows(w : Pointer(UInt8), out_ptr : Pointer(Float32),
+                           row0 : Int32, rows : Int32, k : Int32)
+      raise "CUDA not available"
+    end
+
+    def dequant_iq3s_rows(w : Pointer(UInt8), out_ptr : Pointer(Float32),
+                          row0 : Int32, rows : Int32, k : Int32)
+      raise "CUDA not available"
+    end
+
+    def dequant_iq3xxs_rows(w : Pointer(UInt8), out_ptr : Pointer(Float32),
+                            row0 : Int32, rows : Int32, k : Int32)
+      raise "CUDA not available"
+    end
+
+    def gemv_q2k_lb(*args)
+      raise "CUDA disabled"
+    end
+
+    def dequant_q2k_lb_rows(*args)
+      raise "CUDA disabled"
+    end
+
+    def gemv_iq2xxs(*args)
+      raise "CUDA disabled"
+    end
+
+    def dequant_iq2xxs_rows(*args)
+      raise "CUDA disabled"
+    end
+
+    def gemv_iq2xs(*args)
+      raise "CUDA disabled"
+    end
+
+    def dequant_iq2xs_rows(*args)
+      raise "CUDA disabled"
+    end
+
+    def gemv_iq2s(*args)
+      raise "CUDA disabled"
+    end
+
+    def dequant_iq2s_rows(*args)
+      raise "CUDA disabled"
+    end
+
+    def gemv_iq1m(*args)
+      raise "CUDA disabled"
+    end
+
+    def dequant_iq1m_rows(*args)
+      raise "CUDA disabled"
+    end
+
+    def gemv_iq1s(*args)
+      raise "CUDA disabled"
+    end
+
+    def dequant_iq1s_rows(*args)
+      raise "CUDA disabled"
+    end
+
     def gemv_q4k(*args)
       raise "CUDA disabled"
     end
 
     def gemv_q6k(*args)
+      raise "CUDA disabled"
+    end
+
+    def dequant_q4k_rows(*args)
+      raise "CUDA disabled"
+    end
+
+    def dequant_q6k_rows(*args)
+      raise "CUDA disabled"
+    end
+
+    def dequant_k_rows_available? : Bool
+      false
+    end
+
+    def gdn_gates(*args)
+      raise "CUDA disabled"
+    end
+
+    def short_conv_silu3(d0 : Pointer(Float32), s0 : Pointer(Float32), st0 : Pointer(Float32), w0 : Pointer(Float32),
+                         d1 : Pointer(Float32), s1 : Pointer(Float32), st1 : Pointer(Float32), w1 : Pointer(Float32),
+                         d2 : Pointer(Float32), s2 : Pointer(Float32), st2 : Pointer(Float32), w2 : Pointer(Float32),
+                         seq : Int32, ch0 : Int32, ch1 : Int32, ch2 : Int32,
+                         kernel : Int32, apply_silu : Bool) : Bool
+      false
+    end
+
+    def short_conv_silu3_available? : Bool
+      false
+    end
+
+    def short_conv(*args)
+      raise "CUDA disabled"
+    end
+
+    def gdn_mixer_kernels_available? : Bool
+      false
+    end
+
+    def gemm_tn(*args)
       raise "CUDA disabled"
     end
 

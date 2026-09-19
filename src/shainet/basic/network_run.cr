@@ -216,7 +216,121 @@ module SHAInet
       end
     end
 
+    # Activation trace file, or nil. Set SHAINET_LAYER_TRACE to a path to enable.
+    @@layer_trace_path : String? = begin
+      v = ENV["SHAINET_LAYER_TRACE"]?
+      v && !v.empty? ? v : nil
+    end
+
+    # Write one line per transformer block describing the activation leaving it.
+    #
+    # This exists for a specific failure mode: a stack where every weight passes its own numerical
+    # check and the assembled model still does not predict. Component tests cannot find that, because
+    # the fault is then in how the pieces are wired rather than in any one piece. Tracing the
+    # activation through two builds of the SAME checkpoint and comparing block by block localizes the
+    # divergence to one layer index, which maps to a layer type and a set of tensor types.
+    #
+    # It reads the activation back without clearing dev_act, so the device chain continues and a
+    # traced run follows the same path as an untraced one.
+    private def trace_layer_activation(layer_idx : Int32, l, matrix, dev_act : CudaMatrix?)
+      path = @@layer_trace_path
+      return unless path
+      act = (da = dev_act) ? device_row_to_host(da) : matrix.as?(SimpleMatrix)
+      return unless act
+      row = act.rows - 1
+      norm = 0.0
+      act.cols.times { |c| norm += act[row, c] ** 2 }
+      head = (0...Math.min(8, act.cols)).map { |c| act[row, c].round(5).to_s }.join(",")
+      File.open(path, "a") do |f|
+        f.puts "#{layer_idx}\t#{l.class.name.split("::").last}\t#{Math.sqrt(norm).round(5)}\t#{dev_act ? "dev" : "host"}\t#{head}"
+      end
+
+      # Dump the whole activation leaving this layer, so it can be fed into the SAME layer of a
+      # different build. Feeding one build's activation through another's weights is what separates
+      # "this layer's weights are wrong" from "this layer merely amplifies error accumulated
+      # upstream" -- two explanations that look identical in a norm trace.
+      if (after = ENV["SHAINET_DUMP_AFTER"]?) && after.to_i? == layer_idx && (dp = ENV["SHAINET_DUMP_PATH"]?)
+        File.open(dp, "wb") do |f|
+          act.cols.times { |c| f.write_bytes(act[row, c].to_f32, IO::ByteFormat::LittleEndian) }
+        end
+      end
+    end
+
+    # Rows per prefill pass through the stack. Tunable with SHAINET_PREFILL_ROWS; 0 disables.
+    #
+    # Without this, every activation buffer in the stack is sized to the WHOLE prompt, so peak VRAM
+    # scales with context and a long conversation dies mid-turn. Measured on a 16 GB card with a
+    # 27B model: a 9543-token prefill asked resident_buf for [9543, 5120] (186 MB) and the attention
+    # workspace for 384 MB, and OOM'd -- while the same model prefills 2051 tokens with ~780 MB spare.
+    # Chunking holds those buffers to [PREFILL_ROWS, *] no matter how long the prompt is.
+    #
+    # This is safe because the KV cache already makes a sliced prefill equivalent to a whole one --
+    # it is the same mechanism a chat turn uses when it reuses cached tokens and prefills only the
+    # new ones -- and because the head reduces to the last position anyway (gpu_lm_head_q slices the
+    # final row), so the chunks before the last contribute cache state rather than logits.
+    #
+    # 512 keeps the matmuls comfortably in their batched regime while holding the widest activation
+    # ([rows, 17408] appears three times in the SwiGLU trio) to about 100 MB.
+    DEFAULT_PREFILL_ROWS = 512
+
+    @@prefill_rows : Int32?
+
+    def self.prefill_rows : Int32
+      rows = @@prefill_rows
+      return rows if rows
+      rows = (ENV["SHAINET_PREFILL_ROWS"]?.try(&.to_i?) || DEFAULT_PREFILL_ROWS)
+      @@prefill_rows = rows
+      rows
+    end
+
+    def self.prefill_rows=(rows : Int32)
+      @@prefill_rows = rows
+    end
+
     def run(input : SimpleMatrix, stealth : Bool = false) : SimpleMatrix
+      limit = Network.prefill_rows
+      if limit > 0 && input.rows > limit && use_kv_cache? && !@transformer_layers.empty?
+        result : SimpleMatrix? = nil
+        offset = 0
+        cols = input.cols
+        slices = (input.rows + limit - 1) // limit
+
+        # Report progress across the WHOLE prefill, not per slice.
+        #
+        # prefill_progress is called from the per-slice layer loop, so with the stack run once per
+        # slice a caller's progress bar ran 1..N_layers, jumped back to 1, and climbed again -- which
+        # reads as repeated work rather than as one prefill split into parts. Offsetting the layer
+        # index by the slices already finished, and scaling the total, keeps it monotonic. The
+        # callback's signature is unchanged, so callers need no edit.
+        outer = @prefill_progress
+        done_slices = 0
+        if outer
+          @prefill_progress = ->(layer_idx : Int32, total_layers : Int32) do
+            outer.call(done_slices * total_layers + layer_idx, slices * total_layers)
+          end
+        end
+
+        begin
+          while offset < input.rows
+            n = Math.min(limit, input.rows - offset)
+            slice = SimpleMatrix.new(n, cols)
+            # Contiguous row-major copy: row `offset + i` of the input is row `i` of the slice.
+            slice.data.to_unsafe.copy_from(input.data.to_unsafe + offset.to_i64 * cols, n.to_i64 * cols)
+            result = run_unchunked(slice, stealth)
+            offset += n
+            done_slices += 1
+          end
+        ensure
+          @prefill_progress = outer
+        end
+        # The last slice carries the last position, which is the only one the head keeps.
+        return result.not_nil!
+      end
+
+      run_unchunked(input, stealth)
+    end
+
+    private def run_unchunked(input : SimpleMatrix, stealth : Bool = false) : SimpleMatrix
       verify_net_before_train
 
       matrix = input
@@ -238,7 +352,10 @@ module SHAInet
           prefill_boosted = true
         end
 
-        @hidden_layers.each do |l|
+        @hidden_layers.each_with_index do |l, layer_idx|
+          if input.rows > 1 && @prefill_progress
+            @prefill_progress.try &.call(layer_idx, @hidden_layers.size)
+          end
           case l
           when EmbeddingLayer
             raise NeuralNetRunError.new("Embedding input mismatch") unless matrix.cols == 1
@@ -248,64 +365,99 @@ module SHAInet
             matrix = l.as(TransformerLayer).forward(matrix)
           when LlamaLayer
             block = l.as(LlamaLayer)
-            if use_kv_cache?
-              sm = matrix.as(SimpleMatrix)
-              # Any row count now, not just a single token. A prefill used to be excluded
-              # here, so every layer paid an upload and a readback around its attention and
-              # its FFN even though both were device-resident internally.
-              if (dev_act || sm.rows >= 1) && block.block_device_capable?
-                if dev_act.nil?
-                  buf = chain_buf(sm.rows, sm.cols)
-                  Profile.measure("net.dev_upload") do
-                    buf.raw_data.to_unsafe.copy_from(sm.data.to_unsafe, sm.rows * sm.cols)
-                    buf.mark_host_modified!
-                    buf.sync_to_device!("block_chain_in")
+            # Per-block-type totals, which is what separates "the recurrence is slow" from "the
+            # matmuls under it are slow". These NEST: stack.gdn and stack.llama each contain the
+            # ffn.* and attn.* phases, so Profile's TOTAL over-counts and the shares to read are
+            # against wall time, not against that total.
+            #
+            # This is how the chunked-prefill plan got cancelled. A 2048-token prefill measured
+            # stack.gdn at 79% of wall, which looks like the sequential delta-rule scan -- but a
+            # microbenchmark of that kernel at real shapes (48 heads, dk=dv=128) puts it at 340 ms
+            # per 512-token chunk, so about 9% of stack.gdn and 6.5% of prefill. The other ~91% is
+            # the ordinary projections and FFN, i.e. the quantized matmul path.
+            Profile.measure("stack.llama") do
+              if use_kv_cache?
+                sm = matrix.as(SimpleMatrix)
+                # Any row count now, not just a single token. A prefill used to be excluded
+                # here, so every layer paid an upload and a readback around its attention and
+                # its FFN even though both were device-resident internally.
+                if (dev_act || sm.rows >= 1) && block.block_device_capable?
+                  if dev_act.nil?
+                    buf = chain_buf(sm.rows, sm.cols)
+                    Profile.measure("net.dev_upload") do
+                      buf.raw_data.to_unsafe.copy_from(sm.data.to_unsafe, sm.rows * sm.cols)
+                      buf.mark_host_modified!
+                      buf.sync_to_device!("block_chain_in")
+                    end
+                    dev_act = buf
                   end
-                  dev_act = buf
-                end
-                nxt = if dev_act.not_nil!.rows > 1
-                        block.forward_cached_device_multi(dev_act.not_nil!)
-                      else
-                        block.forward_cached_device(dev_act.not_nil!)
-                      end
-                if nxt
-                  dev_act = nxt
+                  nxt = if dev_act.not_nil!.rows > 1
+                          block.forward_cached_device_multi(dev_act.not_nil!)
+                        else
+                          block.forward_cached_device(dev_act.not_nil!)
+                        end
+                  if nxt
+                    dev_act = nxt
+                  else
+                    # The multi-token chain declined: finish this block on the host.
+                    matrix = device_row_to_host(dev_act.not_nil!)
+                    dev_act = nil
+                    matrix = block.forward_cached(matrix.as(SimpleMatrix))
+                  end
                 else
-                  # The multi-token chain declined: finish this block on the host.
-                  matrix = device_row_to_host(dev_act.not_nil!)
-                  dev_act = nil
+                  # A block that cannot take the device path ends the chain: bring the
+                  # activation home first so the host path sees the real activation
+                  # rather than a stale copy.
+                  if da = dev_act
+                    matrix = device_row_to_host(da)
+                    dev_act = nil
+                  end
                   matrix = block.forward_cached(matrix.as(SimpleMatrix))
                 end
               else
-                # A block that cannot take the device path ends the chain: bring the
-                # activation home first so the host path sees the real activation
-                # rather than a stale copy.
+                matrix = block.forward(matrix)
+              end
+            end
+          when GatedDeltaNetBlock
+            # The linear-attention block type in a qwen3_5 hybrid stack.
+            #
+            # It now offers a device-in/device-out path, so it no longer ends the chain. That
+            # mattered: in a hybrid stack 48 of 64 layers are this type, so breaking the chain here
+            # brought the activation home and re-uploaded it about 96 times per token.
+            #
+            # Without this branch at all the case fell through and the block was SILENTLY SKIPPED:
+            # a Qwen3.5-9B ran as an 8-layer attention-only model, produced one repeated token, and
+            # gave byte-identical logits across changes that demonstrably altered the blocks --
+            # which is the only reason it was noticed.
+            gdn = l.as(GatedDeltaNetBlock)
+            Profile.measure("stack.gdn") do
+              nxt = nil
+              if dev_act.nil? && (sm0 = matrix.as?(SimpleMatrix)) && gdn.device_chain_capable?
+                buf = chain_buf(sm0.rows, sm0.cols)
+                Profile.measure("net.dev_upload") do
+                  buf.raw_data.to_unsafe.copy_from(sm0.data.to_unsafe, sm0.rows * sm0.cols)
+                  buf.mark_host_modified!
+                  buf.sync_to_device!("block_chain_in")
+                end
+                dev_act = buf
+              end
+              if da0 = dev_act
+                nxt = gdn.forward_cached_device(da0)
+              end
+              if nxt
+                dev_act = nxt
+              else
                 if da = dev_act
                   matrix = device_row_to_host(da)
                   dev_act = nil
                 end
-                matrix = block.forward_cached(matrix.as(SimpleMatrix))
+                sm = matrix.as(SimpleMatrix)
+                matrix = use_kv_cache? && sm.rows == 1 ? gdn.forward_cached(sm) : gdn.forward(sm)
               end
-            else
-              matrix = block.forward(matrix)
             end
-          when GatedDeltaNetBlock
-            # The linear-attention block type in a qwen3_5 hybrid stack. Its mixer is host-side
-            # (the recurrence is ~2M FLOP per token against ~600M for the projections, which ARE
-            # on the device), so it ends any device chain in progress.
-            #
-            # Without this branch the case fell through and the block was SILENTLY SKIPPED: a
-            # Qwen3.5-9B ran as an 8-layer attention-only model, produced one repeated token, and
-            # gave byte-identical logits across changes that demonstrably altered the blocks --
-            # which is the only reason it was noticed.
-            gdn = l.as(GatedDeltaNetBlock)
-            if da = dev_act
-              matrix = device_row_to_host(da)
-              dev_act = nil
-            end
-            sm = matrix.as(SimpleMatrix)
-            matrix = use_kv_cache? && sm.rows == 1 ? gdn.forward_cached(sm) : gdn.forward(sm)
           end
+
+          trace_layer_activation(layer_idx, l, matrix, dev_act)
         end
 
         if da = dev_act
