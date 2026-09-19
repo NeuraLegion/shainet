@@ -277,8 +277,15 @@ module AgentDemo
       end,
       Tool.new(
         "read_file",
-        "Read the contents of a text file (truncated if very large). Binary files are refused. Paths are relative to the workspace root; an absolute path outside it needs the user to approve that location once.",
-        [ToolParam.new("path", "string", "File path to read.")]
+        "Read a text file. Returns the whole file when it is small, or the lines from start_line to " \
+        "end_line (1-based, inclusive) when given. A large file returns only its first lines plus its " \
+        "total line count -- ask again with a range to see the rest. Prefer `search` to FIND the lines " \
+        "you want and then read that range: reading a whole large file usually costs more context than " \
+        "the answer is worth. Output is line-numbered. Binary files are refused. Paths are relative to " \
+        "the workspace root; an absolute path outside it needs the user to approve that location once.",
+        [ToolParam.new("path", "string", "File path to read."),
+         ToolParam.new("start_line", "integer", "Optional first line to return (1-based).", false),
+         ToolParam.new("end_line", "integer", "Optional last line to return (1-based, inclusive).", false)]
       ) do |args|
         path, err = AgentDemo.safe_path(args["path"]?)
         if path.nil?
@@ -296,10 +303,9 @@ module AgentDemo
             "Error: #{path} looks like a binary file (contains NUL bytes); refusing to read it"
           elsif !c.valid_encoding?
             "Error: #{path} is not valid UTF-8; refusing to read it"
-          elsif c.bytesize > MAX_READ_BYTES
-            "#{c.byte_slice(0, MAX_READ_BYTES)}\n... [truncated]"
           else
-            c
+            AgentDemo.render_file(args["path"]? || path, c,
+              args["start_line"]?.try(&.to_i?), args["end_line"]?.try(&.to_i?))
           end
         end
       end,
@@ -568,6 +574,52 @@ module AgentDemo
       end
       max
     end
+  end
+
+  # Bytes above which a whole-file read returns a head plus a line count instead of the file.
+  #
+  # The old tool truncated at MAX_READ_BYTES mid-line and said only "... [truncated]" -- no total, no
+  # hint that a range was possible -- so the model could not do better even in principle. Observed on
+  # a 2000-line source file: one read_file spent 16124 tokens, a quarter of a 64K window, to answer a
+  # question an outline would have served.
+  #
+  # The design is ported from bar-bot's coding agent, which had already solved this in Crystal, and it
+  # matches what a survey of established harnesses found: they enforce context economy through BOUNDED
+  # READ DEFAULTS in the tool itself rather than through a "grep before reading" rule in the system
+  # prompt. A rule the model may ignore is weaker than a tool that cannot overspend.
+  LARGE_FILE_BYTES = 20_000
+  HEAD_LINES       =    200
+
+  # Render a file for the model: line-numbered, with a header saying which lines these are of how many.
+  #
+  # The header is what makes paging possible. A model that sees "lines 1-200 of 2093" knows both that
+  # there is more and exactly how to ask for it; one handed a silent truncation knows neither.
+  def self.render_file(display_path : String, content : String,
+                       start_line : Int32?, end_line : Int32?) : String
+    lines = content.split('\n')
+    total = lines.size
+
+    if start_line || end_line
+      s = Math.max(1, start_line || 1)
+      e = Math.min(total, end_line || total)
+      return "Error: line #{s} is past the end of #{display_path} (#{total} lines)" if s > total
+      return "Error: end_line #{e} is before start_line #{s}" if e < s
+      return "// #{display_path} — lines #{s}-#{e} of #{total}\n#{number_lines(lines[(s - 1)...e], s, e)}"
+    end
+
+    if content.bytesize > LARGE_FILE_BYTES
+      shown = Math.min(HEAD_LINES, total)
+      "// #{display_path} — lines 1-#{shown} of #{total}; file is large, so this is only the head. " \
+      "Call read_file again with start_line/end_line for a specific range, or use search to locate " \
+      "what you need first.\n#{number_lines(lines[0, shown], 1, shown)}"
+    else
+      "// #{display_path} — #{total} lines\n#{number_lines(lines, 1, total)}"
+    end
+  end
+
+  private def self.number_lines(slice : Array(String), from : Int32, upto : Int32) : String
+    width = upto.to_s.size
+    slice.map_with_index { |line, i| "#{(from + i).to_s.rjust(width)} | #{line}" }.join("\n")
   end
 
   # Did this reply START a tool call without finishing it?
