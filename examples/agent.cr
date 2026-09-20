@@ -1259,14 +1259,32 @@ module AgentDemo
         tail = prompt[shared..]
         STDERR.puts "  reusing #{reused} cached tok · prefilling #{tail.size}".colorize(:dark_gray)
         logits = run_prefill(tail, reused, prompt.size)
-        @cache_ids = prompt.dup
+        record_prefilled(prompt)
         logits
       else
         STDERR.puts "  prefilling #{prompt.size} tok from scratch".colorize(:dark_gray) if prompt.size > 512
         reset_cache!
         logits = run_prefill(prompt, 0, prompt.size)
-        @cache_ids = prompt.dup
+        record_prefilled(prompt)
         logits
+      end
+    end
+
+    # Record what the KV cache now holds -- unless the prefill was interrupted, in which case throw the
+    # cache away.
+    #
+    # An interrupted prefill leaves the cache holding FEWER tokens than the prompt, so claiming the
+    # whole prompt would make the next turn "reuse" a prefix that is not physically there. That is
+    # silent corruption of the kind this codebase has already produced once (a clear_cache! that missed
+    # the recurrent blocks), and it is the exact hole an audit flagged as the next one of its family:
+    # nothing asserts that a prefix reuser's cache length matches the prefix it claims. An aborted turn
+    # does not need to be fast, it needs to leave the next one correct.
+    private def record_prefilled(prompt : Array(Int32))
+      if AgentDemo.cancelled?
+        reset_cache!
+        STDERR.puts "  #{"cache cleared after the interrupted prefill".colorize(:dark_gray)}"
+      else
+        @cache_ids = prompt.dup
       end
     end
 
@@ -1294,6 +1312,16 @@ module AgentDemo
         elapsed = (Time.monotonic - t0).total_seconds
         STDERR.print "\r  prefill #{done}/#{total} tok (#{done * 100 // total}%) · #{elapsed.round(0).to_i}s".colorize(:dark_gray)
         STDERR.flush
+        # Prefill is the OTHER long blocking phase, and the one most worth escaping: a cold 60K prefill
+        # runs for minutes, and realizing the prompt was wrong 20 seconds in should not mean waiting it
+        # out. Same reason as the decode loop -- without a yield the signal fiber never runs -- and the
+        # cost is one yield per chunk, not per token.
+        Fiber.yield
+        if AgentDemo.cancelled?
+          STDERR.print "\r\033[K"
+          STDERR.puts "  #{"interrupted during prefill".colorize(:yellow)}"
+          break
+        end
       end
       @net.prefill_progress = nil
       STDERR.print "\r\033[K"
@@ -1308,6 +1336,19 @@ module AgentDemo
       renderer = echo ? AgentDemo::StreamRenderer.new(STDERR) : nil
       prev = ""
       max_tokens.times do
+        # Let the scheduler run the signal-handling fiber.
+        #
+        # Without this the Ctrl-C handler NEVER RUNS. Crystal catches the signal in a C handler that
+        # only writes to a pipe; the block registered with Process.on_terminate is invoked by a
+        # dedicated fiber reading that pipe. This loop is single-threaded and CPU/GPU bound with no
+        # other yield point, so the scheduler never gets control and that fiber never runs -- measured
+        # directly: 40 iterations of heavy compute with a signal already pending, handler never fired;
+        # the same loop with this line fired on the first iteration. The earlier version of this
+        # feature was therefore inert, and pressing Ctrl-C repeatedly did nothing until SIGQUIT dumped
+        # core.
+        #
+        # Costs 786 ns, against roughly 85 ms per token.
+        Fiber.yield
         # Abandon the turn on Ctrl-C. Checked per token rather than per tool step so a long answer
         # stops promptly; the partial text stays on screen and in history, which is what makes the
         # next instruction ("no, not that file") land in context that explains itself.
