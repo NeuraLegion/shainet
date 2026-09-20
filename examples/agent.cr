@@ -613,6 +613,90 @@ module AgentDemo
     path.starts_with?("#{ws}/") ? path[(ws.size + 1)..] : path
   end
 
+  # Set by the SIGINT handler, read by the generation loop.
+  #
+  # Ctrl-C used to kill the process outright, which on this model means losing a loaded 9 GB of
+  # weights, the KV cache and the whole conversation because a turn went somewhere unhelpful -- and a
+  # 27B prefill takes long enough that wanting out mid-turn is routine, not exceptional. A flag the
+  # decoder checks each token turns that into abandoning one turn.
+  @@cancelled = false
+
+  # Whether a turn is in flight. The SIGINT handler needs this to decide between cancelling the turn
+  # and treating the press as "I want out": the same key means different things at a prompt and
+  # mid-generation, and guessing wrong either strands the user or discards their work.
+  @@generating = false
+
+  def self.generating? : Bool
+    @@generating
+  end
+
+  def self.generating=(v : Bool)
+    @@generating = v
+  end
+
+  def self.cancelled? : Bool
+    @@cancelled
+  end
+
+  def self.cancel!
+    @@cancelled = true
+  end
+
+  def self.clear_cancel!
+    @@cancelled = false
+  end
+
+  # Bracketed paste. A terminal told to enable it wraps pasted text in these markers, which is the
+  # only reliable way to tell "the user pasted four lines" from "the user sent four messages" --
+  # timing heuristics misfire on a slow terminal and on a fast typist alike.
+  PASTE_START = "\e[200~"
+  PASTE_END   = "\e[201~"
+
+  def self.enable_bracketed_paste
+    return unless STDIN.tty?
+    STDERR.print "\e[?2004h"
+    STDERR.flush
+  end
+
+  def self.disable_bracketed_paste
+    return unless STDIN.tty?
+    STDERR.print "\e[?2004l"
+    STDERR.flush
+  end
+
+  # Read one submission, joining a bracketed paste into a single multi-line string.
+  #
+  # Plain `gets` ends the turn at the first newline, so pasting a stack trace or a code block sent the
+  # first line as the prompt and left the rest queued as separate turns -- the model answered a
+  # fragment while the remainder arrived as nonsense follow-ups. Returns nil on EOF (Ctrl-D).
+  def self.read_submission : String?
+    line = gets
+    return if line.nil?
+
+    unless line.includes?(PASTE_START)
+      return line.chomp
+    end
+
+    # Everything from the marker onward is pasted content; keep reading until the closing marker.
+    buf = [] of String
+    first = line.split(PASTE_START, 2)[1]
+    if first.includes?(PASTE_END)
+      return first.split(PASTE_END, 2)[0].chomp
+    end
+    buf << first.chomp
+    while nxt = gets
+      if nxt.includes?(PASTE_END)
+        buf << nxt.split(PASTE_END, 2)[0]
+        break
+      end
+      buf << nxt.chomp
+    end
+    text = buf.join("\n")
+    lines = text.count('\n') + 1
+    STDERR.puts "  #{"pasted #{lines} line(s), #{text.bytesize} B".colorize(:dark_gray)}" if lines > 1
+    text
+  end
+
   # One dimmed line describing what a tool returned.
   #
   # Results previously went only into the model's context, so the human watching saw the CALL and then
@@ -1186,6 +1270,13 @@ module AgentDemo
       renderer = echo ? AgentDemo::StreamRenderer.new(STDERR) : nil
       prev = ""
       max_tokens.times do
+        # Abandon the turn on Ctrl-C. Checked per token rather than per tool step so a long answer
+        # stops promptly; the partial text stays on screen and in history, which is what makes the
+        # next instruction ("no, not that file") land in context that explains itself.
+        if AgentDemo.cancelled?
+          STDERR.puts "\n  #{"interrupted".colorize(:yellow)}"
+          break
+        end
         row = logits.rows - 1
         # The repetition penalty must NOT run inside a tool call.
         #
@@ -1238,6 +1329,9 @@ module AgentDemo
       step = 0
       loop do
         step += 1
+        # A cancel during a tool step must also end the LOOP, not just the token stream it was in --
+        # otherwise the decoder returns early and the loop calmly starts the next step.
+        break if AgentDemo.cancelled?
         # The LAST allowed step still generates, it just may not call tools. Breaking before
         # generation (which is what this did) threw the turn away: the user got the cap
         # message and no answer, after the agent had already done the work. So tell the model
@@ -1558,12 +1652,44 @@ end
 
 agent = AgentDemo::Agent.new(net, tokenizer, AgentDemo.build_tools, max_context)
 STDERR.puts "Ready · tools: #{AgentDemo.build_tools.map(&.name).join(", ")} · max context #{max_context} tok".colorize(:green)
-STDERR.puts "Commands: /context  /compact  /clear  /ask  /help   (Ctrl-D to exit)".colorize(:dark_gray)
+STDERR.puts "Commands: /context  /compact  /clear  /ask  /help   (Ctrl-C interrupts a turn, Ctrl-D exits)".colorize(:dark_gray)
+
+# Ctrl-C interrupts the TURN; twice in a row at an idle prompt exits.
+#
+# The default handler kills the process, which here throws away 9 GB of loaded weights, the KV cache
+# and the conversation -- a brutal price for "not that file". Trapping it means a wrong turn costs the
+# turn. A second press while already idle is an explicit request to leave, so honour it rather than
+# leaving the user hunting for the exit.
+idle_interrupt = false
+Process.on_terminate do |reason|
+  if reason.interrupted?
+    if AgentDemo.generating?
+      AgentDemo.cancel!
+    elsif idle_interrupt
+      STDERR.puts "\nbye 👋".colorize(:cyan)
+      AgentDemo.disable_bracketed_paste
+      exit 0
+    else
+      idle_interrupt = true
+      STDERR.print "\n  #{"press Ctrl-C again to exit, or Ctrl-D".colorize(:dark_gray)}\n#{"You".colorize(:light_green).bold} ❯ "
+    end
+  else
+    # A real termination request (TERM, or the terminal going away) is not a change of mind about one
+    # turn -- do not swallow it into a cancel the user is not there to see.
+    AgentDemo.disable_bracketed_paste
+    exit 0
+  end
+end
+
+AgentDemo.enable_bracketed_paste
+at_exit { AgentDemo.disable_bracketed_paste }
 
 loop do
   STDERR.print "\n#{"You".colorize(:light_green).bold} ❯ "
-  input = gets
+  input = AgentDemo.read_submission
   break if input.nil?
+  idle_interrupt = false
+  AgentDemo.clear_cancel!
   input = input.strip
   next if input.empty?
 
@@ -1611,7 +1737,12 @@ loop do
     end
   end
 
-  agent.chat(input, max_tokens)
+  AgentDemo.generating = true
+  begin
+    agent.chat(input, max_tokens)
+  ensure
+    AgentDemo.generating = false
+  end
   STDERR.puts "  #{agent.status}".colorize(:dark_gray)
 end
 STDERR.puts "\nbye 👋".colorize(:cyan)
