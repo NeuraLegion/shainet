@@ -144,6 +144,18 @@ module AgentDemo
     @@workspace
   end
 
+  # Change the workspace root at runtime. Realpath'd the same way as at startup, so a symlinked
+  # argument cannot point the sandbox somewhere its label does not say. Must be an existing
+  # directory: a file would make every relative path escape the root.
+  #
+  # Named as a verb rather than as a `workspace=` setter on purpose: it validates and RAISES, and an
+  # assignment that can reject its value reads as though it cannot.
+  def self.switch_workspace!(path : String)
+    resolved = File.realpath(path)
+    raise ArgumentError.new("not a directory: #{path}") unless Dir.exists?(resolved)
+    @@workspace = resolved
+  end
+
   # Resolve a model-supplied path. Returns {path, ""} on success and {nil, error_text} on
   # refusal, so a tool body stays a single line and the model gets told WHY.
   #
@@ -372,6 +384,33 @@ module AgentDemo
         "Wrote #{content.bytesize} bytes to #{rel}"
       end,
       Tool.new(
+        "insert_lines",
+        "INSERT new lines into a file after a given line number, without touching anything already " \
+        "there. Use this for ADDING code — it is safer than replace_lines for an addition, because " \
+        "nothing existing has to be retyped. Pass after_line 0 to insert at the very top of the file.",
+        [ToolParam.new("path", "string", "File path to edit."),
+         ToolParam.new("after_line", "string", "Insert after this line number; 0 means before line 1."),
+         ToolParam.new("content", "string", "Lines to insert.")]
+      ) do |args|
+        path, err = AgentDemo.safe_path(args["path"]?)
+        if path.nil?
+          next err
+        end
+        next "Error: #{args["path"]?} does not exist" unless File.exists?(path)
+        at = (args["after_line"]? || "").to_i?
+        next "Error: after_line must be an integer" if at.nil?
+        body = File.read(path)
+        lines = body.split('\n')
+        total = lines.size
+        total -= 1 if total > 0 && lines[-1].empty? && body.ends_with?('\n')
+        next "Error: after_line #{at} is outside #{args["path"]?} (#{total} lines)" if at < 0 || at > total
+        added = (args["content"]? || "").split('\n')
+        next "Declined by user." unless AgentDemo.confirm?("insert #{added.size} line(s) after line #{at} of #{args["path"]?}")
+        File.write(path, (lines[0, at] + added + lines[at..]).join('\n'))
+        "Inserted #{added.size} line(s) after line #{at} in #{args["path"]?}. " \
+        "Lines after that point have shifted down by #{added.size}; the file is now #{total + added.size} lines."
+      end,
+      Tool.new(
         "replace_lines",
         "Replace a RANGE OF LINES in a file, addressed by number (1-based, inclusive) — you never have " \
         "to reproduce the existing text. Prefer this over edit_file and apply_patch when search or " \
@@ -407,7 +446,19 @@ module AgentDemo
         preview = "#{s}-#{e} of #{args["path"]?} → #{middle.size} line(s)"
         next "Declined by user." unless AgentDemo.confirm?("replace lines #{preview}")
         File.write(path, (before + middle + after).join('\n'))
-        "Replaced lines #{s}-#{e} with #{middle.size} line(s) in #{args["path"]?}."
+        # State the shift explicitly. Left to work it out, the model computed the drift after its first
+        # edit twice and got a different answer each time, then re-ran search before every later edit to
+        # recover the numbers. Line-addressed editing is only cheap if the tool keeps the accounting.
+        delta = middle.size - (e - s + 1)
+        shift = if delta == 0
+                  "Line numbers are unchanged."
+                elsif delta > 0
+                  "Lines after #{e} have shifted DOWN by #{delta}."
+                else
+                  "Lines after #{e} have shifted UP by #{-delta}."
+                end
+        "Replaced lines #{s}-#{e} with #{middle.size} line(s) in #{args["path"]?}. " \
+        "#{shift} The file is now #{total + delta} lines."
       end,
       Tool.new(
         "edit_file",
@@ -1731,7 +1782,7 @@ end
 
 agent = AgentDemo::Agent.new(net, tokenizer, AgentDemo.build_tools, max_context)
 STDERR.puts "Ready · tools: #{AgentDemo.build_tools.map(&.name).join(", ")} · max context #{max_context} tok".colorize(:green)
-STDERR.puts "Commands: /context  /compact  /clear  /ask  /help   (Ctrl-C interrupts a turn, Ctrl-D exits)".colorize(:dark_gray)
+STDERR.puts "Commands: /context   /compact   /clear   /ask   /workspace   /help    (Ctrl-C interrupts a turn, Ctrl-D exits)".colorize(:dark_gray)
 
 # Ctrl-C interrupts the TURN; twice in a row at an idle prompt exits.
 #
@@ -1778,6 +1829,7 @@ loop do
     STDERR.puts "  /compact  summarize + trim the conversation history now".colorize(:dark_gray)
     STDERR.puts "  /clear    reset the conversation".colorize(:dark_gray)
     STDERR.puts "  /ask      revoke 'allow all' and confirm each tool call again".colorize(:dark_gray)
+    STDERR.puts "  /workspace  show the workspace root, or /workspace <dir> to change it".colorize(:dark_gray)
     STDERR.puts "  /help     this message".colorize(:dark_gray)
     next
   when "/ask"
@@ -1805,6 +1857,25 @@ loop do
   when "/clear"
     agent.reset
     STDERR.puts "  conversation cleared".colorize(:dark_gray)
+    next
+  when "/workspace"
+    # No argument: show where the file tools are confined.
+    STDERR.puts "  workspace: #{AgentDemo.workspace}"
+    next
+  when /^\/workspace\s+(.+)$/
+    # Switch the sandbox root. The old root's outside approvals are forgotten with it: they
+    # were granted against a different sandbox, and keeping them would let the new workspace
+    # inherit permissions the user never asked for here.
+    arg = input[/^\/workspace\s+(.+)$/, 1].strip
+    begin
+      AgentDemo.switch_workspace!(arg)
+      outside = AgentDemo::WorkspacePath.approved_outside_count
+      AgentDemo::WorkspacePath.reset_outside_approvals!
+      note = outside > 0 ? " (forgot #{outside} approved path(s) outside the old workspace)" : ""
+      STDERR.puts "  workspace → #{AgentDemo.workspace}#{note}"
+    rescue ex : ArgumentError
+      STDERR.puts "  #{ex.message}"
+    end
     next
   else
     # A mistyped command used to go to the MODEL as an ordinary prompt: "/cotext" spent a whole
