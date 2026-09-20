@@ -19,6 +19,20 @@ require "./agent_v4a"
 # Built-in tools are intentionally read-only (list_directory, read_file). Add
 # your own in build_tools — that is the extension point for an MCP bridge etc.
 
+@[Link("c")]
+lib LibWinsize
+  struct Winsize
+    ws_row : LibC::UShort
+    ws_col : LibC::UShort
+    ws_xpixel : LibC::UShort
+    ws_ypixel : LibC::UShort
+  end
+
+  # One void-pointer signature serves both uses (TIOCGWINSZ wants a Winsize*, FIONREAD an Int32*);
+  # Crystal refuses two `fun`s that differ only in a parameter type.
+  fun ioctl(fd : LibC::Int, request : LibC::ULong, arg : Void*) : LibC::Int
+end
+
 module AgentDemo
   MAX_READ_BYTES = 64_000
 
@@ -142,6 +156,140 @@ module AgentDemo
 
   def self.workspace : String
     @@workspace
+  end
+
+  # A line the user typed WHILE the model was generating.
+  #
+  # Last session the user watched the model loop and typed "You're looping, make smaller changes" --
+  # and had to wait for the turn to finish before it could be delivered. Steering makes that land
+  # immediately: the current generation stops, what it produced so far is kept, and the new instruction
+  # goes in as the next user message, so the model sees both its own partial attempt and the
+  # correction. Ctrl-C throws the turn away; steering redirects it.
+  @@steer : String? = nil
+
+  def self.take_steer : String?
+    s = @@steer
+    @@steer = nil
+    s
+  end
+
+  # Poll stdin without blocking. Only ever called from inside the token loop, which is the one place
+  # where nothing else is reading stdin: the confirmation prompt and the REPL both read between
+  # generations, never during one, so there is no second reader to race for the line.
+  def self.poll_steer : Bool
+    return false unless STDIN.tty?
+    pending = 0
+    return false if LibWinsize.ioctl(STDIN.fd, FIONREAD, pointerof(pending).as(Void*)) != 0
+    return false if pending <= 0
+    line = STDIN.gets
+    return false if line.nil?
+    text = line.chomp.strip
+    return false if text.empty?
+    @@steer = text
+    true
+  rescue
+    false
+  end
+
+  # Terminal size, via ioctl(TIOCGWINSZ).
+  #
+  # Crystal 1.21 has no public API for this -- no tty_size?, no console_size, and no TIOCGWINSZ
+  # anywhere in the stdlib -- so it is bound here. The alternatives were worse: COLUMNS/LINES are not
+  # exported by default, shelling out to `tput` costs a process per query, and the ANSI size report
+  # ("\e[18t") would have to read its answer from stdin, which is where steering is listening.
+  TIOCGWINSZ = {% if flag?(:darwin) %}0x40087468_u64{% else %}0x5413_u64{% end %}
+
+  # Bytes waiting on a descriptor, used to poll stdin without blocking. IO.select does not exist in
+  # Crystal, and a background reader fiber would compete with the confirmation prompt for the same
+  # line, so asking the kernel how much is buffered is both the simplest and the only safe option.
+  FIONREAD = {% if flag?(:darwin) %}0x4004667f_u64{% else %}0x541b_u64{% end %}
+
+  # A status line pinned to the bottom row of the terminal.
+  #
+  # Implemented with a SCROLL REGION (DECSTBM, "\e[1;{rows-1}r") rather than by tracking which row the
+  # cursor is on. Setting the region tells the TERMINAL that ordinary output may only occupy rows 1 to
+  # rows-1, so the bottom line is reserved by the terminal itself and no write can land on it.
+  #
+  # The alternative -- counting newlines and wrapping to maintain a row number, pushing a blank line
+  # whenever content is about to reach the last row -- needs every single write to pass through one
+  # wrapper, and two things here guarantee that is not true. The output is heavily colorized, so
+  # `text.size` counts escape bytes that occupy no columns and the row count drifts on the first
+  # coloured line. And the loader logs through SHAInet's Log, which writes to the same handle without
+  # going through the agent at all. A row counter that is wrong once stays wrong, and the bar then
+  # overwrites real output.
+  #
+  # With a region, the bar also does not need redrawing when output scrolls: scrolling happens inside
+  # the region and leaves the last line alone, so a redraw is needed only when the TEXT changes.
+  class StatusBar
+    @text = ""
+    @installed = false
+
+    def initialize(@io : IO::FileDescriptor)
+      @tty = @io.tty?
+    end
+
+    # Reserve the bottom line. Safe to call when not on a tty: it does nothing and every other method
+    # degrades to a no-op, which is the same gate Colorize.enabled uses.
+    def install
+      return unless @tty && (size = term_size)
+      rows, _ = size
+      return if rows < 3            # too short to give a line away
+      @io.print "\e[1;#{rows - 1}r" # scroll region excludes the last row
+      @io.print "\e[#{rows - 1};1H" # put the cursor inside it
+      @io.flush
+      @installed = true
+    end
+
+    # Release the line and restore the terminal. Registered with at_exit, because a process that dies
+    # with a scroll region set leaves the user's shell scrolling in a box.
+    def uninstall
+      return unless @installed
+      @installed = false
+      if size = term_size
+        rows, _ = size
+        @io.print "\e[r"               # full-screen scrolling again
+        @io.print "\e[#{rows};1H\e[2K" # wipe the bar
+        @io.print "\e[?25h"            # cursor visible
+        @io.print "\e[#{rows};1H"
+      end
+      @io.flush
+    end
+
+    def text=(t : String)
+      return if t == @text
+      @text = t
+      draw
+    end
+
+    def hide_cursor
+      @io.print "\e[?25l" if @installed
+    end
+
+    def show_cursor
+      @io.print "\e[?25h" if @installed
+    end
+
+    # Re-queries the size on every draw rather than caching it, so a resize is picked up for free.
+    private def draw
+      return unless @installed && (size = term_size)
+      rows, cols = size
+      body = @text.size > cols ? @text[0, cols] : @text.ljust(cols)
+      @io.print "\e7"                # save cursor
+      @io.print "\e[#{rows};1H\e[2K" # go to the bar row, clear it
+      @io.print body.colorize(:dark_gray)
+      @io.print "\e8" # restore cursor
+      @io.flush
+    end
+
+    private def term_size
+      return unless @tty
+      ws = LibWinsize::Winsize.new
+      return if LibWinsize.ioctl(@io.fd, AgentDemo::TIOCGWINSZ, pointerof(ws).as(Void*)) != 0
+      return if ws.ws_row == 0 || ws.ws_col == 0
+      {ws.ws_row.to_i, ws.ws_col.to_i}
+    rescue
+      nil
+    end
   end
 
   # Which OS the tools will actually run on.
@@ -1125,6 +1273,10 @@ module AgentDemo
     @nl : Array(Int32)
     @stop_ids : Array(Int32)
     @system_block : String
+
+    # Optional bottom-line status bar. Nil when not on a tty, so every update site can call it
+    # unconditionally without a second tty check.
+    property status_bar : AgentDemo::StatusBar? = nil
     @messages : Array(Message)
     @recent_calls : Array(String)
     @sampler : SHAInet::Sampler
@@ -1429,6 +1581,7 @@ module AgentDemo
       generated = [] of Int32
       renderer = echo ? AgentDemo::StreamRenderer.new(STDERR) : nil
       prev = ""
+      gen_started = Time.instant
       max_tokens.times do
         # Let the scheduler run the signal-handling fiber.
         #
@@ -1449,6 +1602,21 @@ module AgentDemo
         if AgentDemo.cancelled?
           STDERR.puts "\n  #{"interrupted".colorize(:yellow)}"
           break
+        end
+        # Steering: a line typed during generation stops it and is delivered as the next message.
+        # Polled every 8 tokens rather than every one because it is a syscall, and 8 tokens is well
+        # under a second of latency at this model's speed.
+        if generated.size % 8 == 0 && AgentDemo.poll_steer
+          STDERR.puts "\n  #{"steering".colorize(:cyan)}"
+          break
+        end
+        # Live rate on the bar. This is the number the user actually wants during a long answer, and it
+        # did not exist anywhere before: prefill had a progress line, decode had nothing but the text.
+        if (bar = @status_bar) && generated.size % 8 == 0 && generated.size > 0
+          secs = (Time.instant - gen_started).total_seconds
+          rate = secs > 0 ? generated.size / secs : 0.0
+          bar.text = " ctx #{context_tokens}/#{@max_context} · #{generated.size} tok · " \
+                     "#{rate.round(1)} tok/s · #{secs.round(0).to_i}s"
         end
         row = logits.rows - 1
         # The repetition penalty must NOT run inside a tool call.
@@ -1566,6 +1734,16 @@ module AgentDemo
 
         # Keep the assistant's output (incl. any tool_call markup) verbatim.
         @messages << Message.new("assistant", text.strip, text_ids)
+
+        # A steer interrupted this generation: deliver it and go round again, with the partial output
+        # kept above so the model can see what it was doing when it was corrected. No tool calls are
+        # run from a generation that was cut off mid-sentence -- the call may be half-written, and the
+        # user's correction may well be about that very call.
+        if steer = AgentDemo.take_steer
+          @messages << Message.new("user", steer)
+          STDERR.puts "  #{"→ #{steer}".colorize(:cyan)}"
+          next
+        end
 
         # A short reply with no tool call is almost always a DROPPED call, not an answer.
         #
@@ -1855,7 +2033,13 @@ Process.on_terminate do |reason|
 end
 
 AgentDemo.enable_bracketed_paste
+BAR = AgentDemo::StatusBar.new(STDERR)
+BAR.install
+# Registered before the paste reset so the terminal is restored even on an abrupt exit: a process that
+# dies with a scroll region still set leaves the user's shell scrolling inside a box.
+at_exit { BAR.uninstall }
 at_exit { AgentDemo.disable_bracketed_paste }
+agent.status_bar = BAR
 
 loop do
   STDERR.print "\n#{"You".colorize(:light_green).bold} ❯ "
