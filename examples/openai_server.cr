@@ -1,4 +1,5 @@
 require "../src/shainet"
+require "./tool_protocol"
 require "http/server"
 require "json"
 require "random/secure"
@@ -28,10 +29,42 @@ module OpenAIServer
 
   # ---- OpenAI request schema (the fields we honor; unknown fields ignored) ----
 
+  # One tool call, in the shape a client sends back and we emit.
+  struct ToolCallRef
+    include JSON::Serializable
+    getter id : String
+    getter type : String = "function"
+    getter function : FunctionRef
+  end
+
+  struct FunctionRef
+    include JSON::Serializable
+    getter name : String
+    getter arguments : String = "{}"
+  end
+
   struct ChatMessage
     include JSON::Serializable
     getter role : String
-    getter content : String
+    # Nilable because an assistant message that ONLY calls tools has content: null, and clients echo
+    # that message straight back into the next request. A non-nilable field here rejected the whole
+    # conversation with a 400 on the second turn of every tool-using session.
+    getter content : String?
+    getter tool_calls : Array(ToolCallRef)?
+    getter tool_call_id : String?
+  end
+
+  struct ToolDef
+    include JSON::Serializable
+    getter type : String = "function"
+    getter function : ToolFunctionDef
+  end
+
+  struct ToolFunctionDef
+    include JSON::Serializable
+    getter name : String
+    getter description : String = ""
+    getter parameters : JSON::Any?
   end
 
   struct ChatCompletionRequest
@@ -47,11 +80,29 @@ module OpenAIServer
     getter presence_penalty : Float64?
     # `stop` may be a single string or an array of strings in the OpenAI API.
     getter stop : JSON::Any?
+    getter tools : Array(ToolDef)?
+    # "auto", "none", "required", or {type: "function", function: {name: ...}}.
+    getter tool_choice : JSON::Any?
+
+    # The function name a client is forcing, if any.
+    def forced_tool : String?
+      tc = @tool_choice
+      return unless tc
+      tc["function"]?.try(&.["name"]?).try(&.as_s?)
+    end
+
+    def tool_defs : Array(ToolProtocol::FunctionDef)
+      (@tools || [] of ToolDef).map do |t|
+        ToolProtocol::FunctionDef.new(t.function.name, t.function.description, t.function.parameters)
+      end
+    end
   end
 
   # Result of one generation pass.
   record Generation, text : String, prompt_tokens : Int32,
-    completion_tokens : Int32, finish_reason : String
+    completion_tokens : Int32, finish_reason : String,
+    calls : Array(ToolProtocol::Call) = [] of ToolProtocol::Call,
+    tool_defs : Array(ToolProtocol::FunctionDef) = [] of ToolProtocol::FunctionDef
 
   # Wraps a loaded model + tokenizer and serializes generation. The Network's
   # KV cache is shared mutable state, so only one request may generate at a
@@ -101,20 +152,89 @@ module OpenAIServer
       @tok.vocab[name]?
     end
 
+    # Flatten the OpenAI message list into {role, content} pairs the chat template can carry.
+    #
+    # Three shapes need translating, and the model only understands the last of them:
+    #
+    #   * the tool DECLARATIONS, which OpenAI passes as a separate `tools` array and this model expects
+    #     as XML inside the system message. When the client sent no system message one is created, or
+    #     the block would have nowhere to live.
+    #   * an ASSISTANT message carrying tool_calls and usually content: null -- the client echoes its
+    #     own previous turn back. Re-rendered as the XML the model originally emitted, so the
+    #     conversation it sees is the one it wrote rather than a gap where its call used to be.
+    #   * a TOOL result, which OpenAI sends as its own role with a tool_call_id. This model was trained
+    #     on <tool_response> inside a USER turn, so that is what it gets.
+    private def render_messages(messages : Array(ChatMessage),
+                                tools : Array(ToolProtocol::FunctionDef),
+                                forced_tool : String?) : Array(Tuple(String, String))
+      result = [] of Tuple(String, String)
+      tool_block = tools.empty? ? "" : ToolProtocol.render_tools(tools)
+      tool_block += ToolProtocol.render_forced_choice(forced_tool) if forced_tool && !tools.empty?
+      injected = tool_block.empty?
+
+      messages.each do |m|
+        case m.role
+        when "system"
+          body = m.content || ""
+          unless injected
+            body = "#{body}\n\n#{tool_block}"
+            injected = true
+          end
+          result << {"system", body}
+        when "tool"
+          result << {"user", "<tool_response>\n#{m.content || ""}\n</tool_response>"}
+        when "assistant"
+          body = m.content || ""
+          if calls = m.tool_calls
+            calls.each do |c|
+              body += "\n" unless body.empty?
+              body += render_call_xml(c)
+            end
+          end
+          result << {"assistant", body}
+        else
+          result << {m.role, m.content || ""}
+        end
+      end
+
+      # No system message to attach the declarations to: prepend one rather than dropping the tools.
+      result.unshift({"system", tool_block}) unless injected
+      result
+    end
+
+    # Re-render a client-supplied tool call as the XML the model emits, so its own prior turn reads
+    # back to it in the format it produced. Arguments arrive as a JSON string and are unpacked to one
+    # <parameter=> each; a value that is not a plain scalar is written back as JSON, which is what the
+    # model was asked to produce for an array or object parameter.
+    private def render_call_xml(c : ToolCallRef) : String
+      params = String.build do |s|
+        JSON.parse(c.function.arguments).as_h.each do |k, v|
+          s << "<parameter=" << k << ">\n" << (v.as_s? || v.to_json) << "\n</parameter>\n"
+        end
+      rescue
+        # Unparseable arguments: keep them verbatim rather than silently emitting an empty call.
+        s << "<parameter=arguments>\n" << c.function.arguments << "\n</parameter>\n"
+      end
+      "<tool_call>\n<function=#{c.function.name}>\n#{params}</function>\n</tool_call>"
+    end
+
     # Render an OpenAI message list into prompt token ids using whichever chat
     # template the tokenizer advertises (ChatML, then LLaMA 3, else a plain
     # concatenation), ending with the assistant generation prompt.
-    def build_prompt(messages : Array(ChatMessage)) : Array(Int32)
+    def build_prompt(messages : Array(ChatMessage),
+                     tools : Array(ToolProtocol::FunctionDef) = [] of ToolProtocol::FunctionDef,
+                     forced_tool : String? = nil) : Array(Int32)
       ids = [] of Int32
       im_start, im_end = @im_start, @im_end
       bos, start_hdr, end_hdr, eot = @bos, @start_hdr, @end_hdr, @eot
+      rendered = render_messages(messages, tools, forced_tool)
 
       if im_start && im_end
-        messages.each do |m|
+        rendered.each do |role, content|
           ids << im_start
-          ids.concat(@tok.encode(m.role))
+          ids.concat(@tok.encode(role))
           ids.concat(@nl)
-          ids.concat(@tok.encode(m.content))
+          ids.concat(@tok.encode(content))
           ids << im_end
           ids.concat(@nl)
         end
@@ -123,12 +243,12 @@ module OpenAIServer
         ids.concat(@nl)
       elsif bos && start_hdr && end_hdr && eot
         ids << bos
-        messages.each do |m|
+        rendered.each do |role, content|
           ids << start_hdr
-          ids.concat(@tok.encode(m.role))
+          ids.concat(@tok.encode(role))
           ids << end_hdr
           ids.concat(@nl2)
-          ids.concat(@tok.encode(m.content))
+          ids.concat(@tok.encode(content))
           ids << eot
         end
         ids << start_hdr
@@ -164,10 +284,12 @@ module OpenAIServer
 
     def generate(messages : Array(ChatMessage), max_tokens : Int32,
                  temperature : Float64, top_k : Int32, repetition_penalty : Float64,
-                 stop_strings : Array(String), seed : Int64?, &block : String ->) : Generation
+                 stop_strings : Array(String), seed : Int64?,
+                 tools : Array(ToolProtocol::FunctionDef) = [] of ToolProtocol::FunctionDef,
+                 forced_tool : String? = nil, &block : String ->) : Generation
       @mutex.synchronize do
         @net.clear_cache!
-        prompt_ids = build_prompt(messages)
+        prompt_ids = build_prompt(messages, tools, forced_tool)
         # Refuse a prompt that cannot fit rather than dying on it.
         #
         # The agent controls its own prompt and compacts when it grows; a server is handed whatever a
@@ -227,7 +349,13 @@ module OpenAIServer
           logits = @net.run([id], stealth: true, return_matrix: true).as(SHAInet::SimpleMatrix)
         end
 
-        Generation.new(text, prompt_ids.size, generated.size, finish)
+        # Extract any tool calls the model emitted, and report the finish reason OpenAI clients branch
+        # on. A client decides whether to run tools by the presence of tool_calls, so a call the parser
+        # misses is indistinguishable from a final answer -- which is exactly how a truncated call once
+        # got printed as one.
+        calls = tools.empty? ? [] of ToolProtocol::Call : ToolProtocol.parse_calls(text)
+        finish = "tool_calls" unless calls.empty?
+        Generation.new(text, prompt_ids.size, generated.size, finish, calls, tools)
       end
     end
 
@@ -263,7 +391,33 @@ module OpenAIServer
               j.field "message" do
                 j.object do
                   j.field "role", "assistant"
-                  j.field "content", gen.text
+                  # content is null when the turn is only a tool call, which is what OpenAI does and
+                  # what a client's own type expects. The XML is stripped either way: a client that
+                  # received the raw <tool_call> markup as content would show it to its user and, worse,
+                  # echo it back as text on the next turn alongside the structured call.
+                  if gen.calls.empty?
+                    j.field "content", gen.text
+                  else
+                    j.field "content", nil
+                    j.field "tool_calls" do
+                      j.array do
+                        gen.calls.each do |c|
+                          definition = gen.tool_defs.find { |d| d.name == c.name }
+                          j.object do
+                            j.field "id", c.id
+                            j.field "type", "function"
+                            j.field "function" do
+                              j.object do
+                                j.field "name", c.name
+                                # A JSON *string*, not an object: the client calls JSON.parse on it.
+                                j.field "arguments", ToolProtocol.arguments_json(c, definition)
+                              end
+                            end
+                          end
+                        end
+                      end
+                    end
+                  end
                 end
               end
               j.field "finish_reason", gen.finish_reason
@@ -473,7 +627,7 @@ server = HTTP::Server.new do |ctx|
       }
       send.call(OpenAIServer.chunk_json(id, model, created, delta_role: "assistant"))
 
-      gen = engine.generate(request.messages, max_tokens, temperature, top_k, rep_pen, stops, request.seed) do |piece|
+      gen = engine.generate(request.messages, max_tokens, temperature, top_k, rep_pen, stops, request.seed, request.tool_defs, request.forced_tool) do |piece|
         send.call(OpenAIServer.chunk_json(id, model, created, delta_content: piece))
       end
 
@@ -481,7 +635,7 @@ server = HTTP::Server.new do |ctx|
       res.print "data: [DONE]\n\n"
       res.flush
     else
-      gen = engine.generate(request.messages, max_tokens, temperature, top_k, rep_pen, stops, request.seed) { }
+      gen = engine.generate(request.messages, max_tokens, temperature, top_k, rep_pen, stops, request.seed, request.tool_defs, request.forced_tool) { }
       res.content_type = "application/json"
       res.print OpenAIServer.chat_completion_json(OpenAIServer.completion_id, model, gen)
     end
