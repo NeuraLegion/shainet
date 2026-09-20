@@ -56,6 +56,12 @@ module OpenAIServer
   # Wraps a loaded model + tokenizer and serializes generation. The Network's
   # KV cache is shared mutable state, so only one request may generate at a
   # time — concurrent requests are queued behind @mutex.
+  # Raised when a request cannot fit the model's context. Carried as its own type so the handler can
+  # answer 400 with a message a client can act on, rather than letting an allocation failure take the
+  # process down.
+  class ContextLengthError < Exception
+  end
+
   class Engine
     getter model_name : String
 
@@ -70,7 +76,8 @@ module OpenAIServer
     @im_end : Int32?
     @stop_ids : Array(Int32)
 
-    def initialize(@net : SHAInet::Network, @tok : SHAInet::BPETokenizer, @model_name : String)
+    def initialize(@net : SHAInet::Network, @tok : SHAInet::BPETokenizer, @model_name : String,
+                   @max_context : Int32 = 65536)
       @net.use_kv_cache = true
       # Special tokens used by the supported chat templates (nil when absent).
       @bos = sp("<|begin_of_text|>")
@@ -141,12 +148,38 @@ module OpenAIServer
     # Run one generation. Each newly-decoded text piece is yielded to the block
     # (used for SSE streaming); the full text is also returned. Generation is
     # serialized across requests via @mutex.
+    # Pre-flight the context budget, returning an error message or nil.
+    #
+    # Called BEFORE the handler decides between streaming and not, because a streaming response has
+    # already sent its 200 and its SSE headers by the time generation starts -- at that point a 400 is
+    # no longer possible and the client would get a stream that simply dies. Re-tokenizing the prompt
+    # to answer this costs a fraction of one token's generation.
+    def context_error(messages : Array(ChatMessage), max_tokens : Int32) : String?
+      needed = build_prompt(messages).size
+      return if needed + max_tokens <= @max_context
+      "This model's maximum context length is #{@max_context} tokens, but the request needs " \
+      "#{needed} prompt tokens + #{max_tokens} completion tokens (#{needed + max_tokens}). " \
+      "Shorten the messages or lower max_tokens."
+    end
+
     def generate(messages : Array(ChatMessage), max_tokens : Int32,
                  temperature : Float64, top_k : Int32, repetition_penalty : Float64,
                  stop_strings : Array(String), seed : Int64?, &block : String ->) : Generation
       @mutex.synchronize do
         @net.clear_cache!
         prompt_ids = build_prompt(messages)
+        # Refuse a prompt that cannot fit rather than dying on it.
+        #
+        # The agent controls its own prompt and compacts when it grows; a server is handed whatever a
+        # client sends. Without this, one oversized request exhausts VRAM and takes the process down,
+        # losing every other client's session with it. OpenAI's own API answers this case with an
+        # error, so a client already knows how to handle it.
+        if prompt_ids.size + max_tokens > @max_context
+          raise ContextLengthError.new(
+            "This model's maximum context length is #{@max_context} tokens, but the request needs " \
+            "#{prompt_ids.size} prompt tokens + #{max_tokens} completion tokens " \
+            "(#{prompt_ids.size + max_tokens}). Shorten the messages or lower max_tokens.")
+        end
         rng = seed ? Random.new(seed) : Random.new
         sampler = SHAInet::Sampler.new(temperature: temperature, top_k: top_k,
           repetition_penalty: repetition_penalty, rng: rng)
@@ -158,6 +191,18 @@ module OpenAIServer
         finish = "length"
 
         max_tokens.times do
+          # Let other fibers run.
+          #
+          # Crystal's HTTP server is fiber-based, and this loop is CPU/GPU bound with no yield point of
+          # its own. Without this the WHOLE server is frozen for the duration of a generation -- not
+          # just this request: the accept loop stops, health checks time out, and a streaming response
+          # cannot flush. At roughly 85 ms per token a 500-token answer is 42 seconds of a server that
+          # looks dead to everything else. A streaming request gets away with it by accident, because
+          # writing each chunk is I/O and yields; a non-streaming one does no I/O per token at all.
+          #
+          # Same root cause as the agent's Ctrl-C handler never firing: a tight Crystal loop starves
+          # every other fiber, including the ones the runtime needs.
+          Fiber.yield
           last = logits.rows - 1
           sampler.apply_repetition_penalty!(logits, generated, window: 64, row: last)
           id = sampler.sample(logits, last)
@@ -312,12 +357,27 @@ bits = ENV["SHAINET_Q4"]? ? 4 : 8
 mode = ENV["SHAINET_FP32"]? ? "fp32" : "Q#{bits}"
 offload = ENV.fetch("SHAINET_MOE_OFFLOAD", "0") == "1"
 STDERR.puts "  Mode: #{mode}#{offload ? " (MoE offload)" : ""}"
+
+# Decide the context BEFORE loading, and tell the loader.
+#
+# The loader sizes its KV reserve from SHAINET_MAX_CONTEXT at load time, so a context decided after
+# the model is in memory is a context the loader never reserved for. The agent had exactly this bug:
+# two independent defaults that happened to agree, and when they disagreed the symptom was an OOM
+# part-way through a conversation rather than an error at startup. A server is worse off than the
+# agent here, because it will accept whatever prompt a client sends.
+#
+# 65536 by default: this is what the GSQ-RCO model's own authors run (--ctx-size 65536), and on a
+# 16 GB card it still places all 64 layers.
+server_context = (ENV["SHAINET_SERVER_CONTEXT"]? || ENV["SHAINET_MAX_CONTEXT"]? || "65536").to_i
+ENV["SHAINET_MAX_CONTEXT"] = server_context.to_s
+STDERR.puts "  Context: #{server_context} tok (KV reserved for this at load)"
+
 net = SHAInet::HFLoader.load(model_dir, quantize: quantize, bits: bits)
 tokenizer = SHAInet::BPETokenizer.from_hf(File.join(model_dir, "tokenizer.json"))
 STDERR.puts "Loaded in #{(Time.instant - t).total_seconds.round(1)}s (vocab #{tokenizer.vocab.size})"
 
 model_name = File.basename(model_dir.rstrip("/"))
-engine = OpenAIServer::Engine.new(net, tokenizer, model_name)
+engine = OpenAIServer::Engine.new(net, tokenizer, model_name, server_context)
 
 api_key = ENV["SHAINET_API_KEY"]?
 default_max_tokens = (ENV["SHAINET_MAX_TOKENS"]? || "512").to_i
@@ -392,6 +452,13 @@ server = HTTP::Server.new do |ctx|
     rep_pen = 1.0 + (request.frequency_penalty || request.presence_penalty || 0.0).clamp(0.0, 1.0)
     stops = OpenAIServer.normalize_stop(request.stop)
     model = request.model || model_name
+
+    if msg = engine.context_error(request.messages, max_tokens)
+      res.status = HTTP::Status::BAD_REQUEST
+      res.content_type = "application/json"
+      res.print OpenAIServer.error_json(msg, "context_length_exceeded")
+      next
+    end
 
     if request.stream?
       res.content_type = "text/event-stream"
