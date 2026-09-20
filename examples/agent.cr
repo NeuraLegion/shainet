@@ -144,6 +144,22 @@ module AgentDemo
     @@workspace
   end
 
+  # Which OS the tools will actually run on.
+  #
+  # The model guessed wrong in practice, reaching for a macOS path on a Linux host, and a wrong guess
+  # here costs a whole tool call to a command that cannot work.
+  def self.host_os : String
+    {% if flag?(:linux) %}
+      "Linux"
+    {% elsif flag?(:darwin) %}
+      "macOS"
+    {% elsif flag?(:win32) %}
+      "Windows"
+    {% else %}
+      "Unix"
+    {% end %}
+  end
+
   # Change the workspace root at runtime. Realpath'd the same way as at startup, so a symlinked
   # argument cannot point the sandbox somewhere its label does not say. Must be an existing
   # directory: a file would make every relative path escape the root.
@@ -382,6 +398,23 @@ module AgentDemo
         Dir.mkdir_p(File.dirname(path))
         File.write(path, content)
         "Wrote #{content.bytesize} bytes to #{rel}"
+      end,
+      Tool.new(
+        "current_dir",
+        "Show the workspace root that every relative path resolves against, the host OS, and what is " \
+        "directly inside it. Call this if you are unsure where you are — never search the filesystem " \
+        "to find out.",
+        [] of ToolParam
+      ) do |_args|
+        ws = AgentDemo.workspace
+        entries = begin
+          Dir.children(ws).reject(&.starts_with?('.')).sort!
+        rescue
+          [] of String
+        end
+        shown = entries.first(40)
+        more = entries.size > shown.size ? " … and #{entries.size - shown.size} more" : ""
+        "workspace: #{ws}\nhost: #{AgentDemo.host_os}\ncontains (#{entries.size}): #{shown.join(", ")}#{more}"
       end,
       Tool.new(
         "insert_lines",
@@ -1135,7 +1168,17 @@ module AgentDemo
     end
 
     private def build_prompt : Array(Int32)
-      ids = render_message("system", @system_block)
+      # The workspace is appended HERE rather than baked into @system_block, which is built once at
+      # construction: /workspace can change the root mid-session, and a stale root in the system
+      # message is worse than none.
+      #
+      # Stating it at all matters because the model does not otherwise know where it is. Observed: it
+      # tried `cd /Users/...` -- a macOS path, on Linux -- and then `find / -name agent.cr`, a scan of
+      # the entire filesystem, to work out its own location. Every path it handles is relative to this
+      # directory, so it is the one fact the prompt cannot afford to omit.
+      ids = render_message("system", "#{@system_block}\n\n<WORKSPACE>\nAll relative paths resolve " \
+                                     "against #{AgentDemo.workspace}\nThis is a #{AgentDemo.host_os} host. You are already in that " \
+                                     "directory — do not cd to it, and never search the filesystem for it.\n</WORKSPACE>")
       @messages.each do |m|
         if m.role == "tool"
           ids.concat(render_message("user", "<tool_response>\n#{m.content}\n</tool_response>"))
