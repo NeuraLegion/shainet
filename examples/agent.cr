@@ -372,6 +372,44 @@ module AgentDemo
         "Wrote #{content.bytesize} bytes to #{rel}"
       end,
       Tool.new(
+        "replace_lines",
+        "Replace a RANGE OF LINES in a file, addressed by number (1-based, inclusive) — you never have " \
+        "to reproduce the existing text. Prefer this over edit_file and apply_patch when search or " \
+        "read_file has already told you the line numbers. Pass the same number twice to replace one " \
+        "line, and an empty content to delete the range.",
+        [ToolParam.new("path", "string", "File path to edit."),
+         ToolParam.new("start_line", "string", "First line to replace (1-based, inclusive)."),
+         ToolParam.new("end_line", "string", "Last line to replace (1-based, inclusive)."),
+         ToolParam.new("content", "string", "Replacement text for those lines (may be several lines; empty deletes them).")]
+      ) do |args|
+        path, err = AgentDemo.safe_path(args["path"]?)
+        if path.nil?
+          next err
+        end
+        next "Error: #{args["path"]?} does not exist" unless File.exists?(path)
+        s = (args["start_line"]? || "").to_i?
+        e = (args["end_line"]? || "").to_i?
+        next "Error: start_line and end_line must be integers" if s.nil? || e.nil?
+        body = File.read(path)
+        lines = body.split('\n')
+        # A trailing newline makes split produce a final empty element; it is not a line the user can
+        # address, and counting it would put every range off by one at the end of the file.
+        total = lines.size
+        total -= 1 if total > 0 && lines[-1].empty? && body.ends_with?('\n')
+        next "Error: start_line #{s} is outside #{args["path"]?} (#{total} lines)" if s < 1 || s > total
+        next "Error: end_line #{e} is before start_line #{s}" if e < s
+        e = total if e > total
+
+        replacement = args["content"]? || ""
+        before = lines[0, s - 1]
+        after = lines[e..]
+        middle = replacement.empty? ? [] of String : replacement.split('\n')
+        preview = "#{s}-#{e} of #{args["path"]?} → #{middle.size} line(s)"
+        next "Declined by user." unless AgentDemo.confirm?("replace lines #{preview}")
+        File.write(path, (before + middle + after).join('\n'))
+        "Replaced lines #{s}-#{e} with #{middle.size} line(s) in #{args["path"]?}."
+      end,
+      Tool.new(
         "edit_file",
         "Replace an exact string in a file. 'find' must match EXACTLY ONE occurrence, including whitespace; include surrounding context to make it unique. Paths are relative to the workspace root; an absolute path outside it needs the user to approve that location once.",
         [ToolParam.new("path", "string", "File path to edit."),
