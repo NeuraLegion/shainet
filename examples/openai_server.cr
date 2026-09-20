@@ -649,5 +649,13 @@ end
 address = server.bind_tcp(host, port)
 STDERR.puts "OpenAI-compatible API on http://#{address} (model: #{model_name})"
 STDERR.puts "  POST /v1/chat/completions   GET /v1/models   GET /health"
+STDERR.puts "  tools: OpenAI function calling (tools / tool_choice / role:\"tool\")"
 STDERR.puts "  auth: #{api_key ? "Bearer token required (SHAINET_API_KEY)" : "none (localhost only)"}"
+# Printed because getting a client pointed here is mostly a matter of two environment variables, and
+# one of them is not guessable. bright-agent's ollama provider is OpenAI-compat at /v1 (not Ollama's
+# native /api/chat), and it is auto-selected from a :11434 base URL -- but selecting it does NOT change
+# the API mode, which defaults to the /v1/responses API this server does not implement. Without
+# AI_API_MODE=chat the connection fails on a route that looks like our bug and is not.
+STDERR.puts "  bright-agent: AI_API_MODE=chat INFERENCE_PROVIDER=ollama " \
+            "INFERENCE_URL=http://#{address}/v1 AI_MODEL=#{model_name}"
 server.listen
