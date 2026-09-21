@@ -102,7 +102,8 @@ module OpenAIServer
   record Generation, text : String, prompt_tokens : Int32,
     completion_tokens : Int32, finish_reason : String,
     calls : Array(ToolProtocol::Call) = [] of ToolProtocol::Call,
-    tool_defs : Array(ToolProtocol::FunctionDef) = [] of ToolProtocol::FunctionDef
+    tool_defs : Array(ToolProtocol::FunctionDef) = [] of ToolProtocol::FunctionDef,
+    reasoning : String = ""
 
   # Wraps a loaded model + tokenizer and serializes generation. The Network's
   # KV cache is shared mutable state, so only one request may generate at a
@@ -355,8 +356,8 @@ module OpenAIServer
         # got printed as one.
         calls = tools.empty? ? [] of ToolProtocol::Call : ToolProtocol.parse_calls(text)
         finish = "tool_calls" unless calls.empty?
-        Generation.new(OpenAIServer.strip_reasoning(text), prompt_ids.size, generated.size, finish,
-          calls, tools)
+        reasoning, answer = OpenAIServer.split_reasoning(text)
+        Generation.new(answer, prompt_ids.size, generated.size, finish, calls, tools, reasoning)
       end
     end
 
@@ -378,21 +379,27 @@ module OpenAIServer
     "chatcmpl-#{Random::Secure.hex(12)}"
   end
 
-  # Remove the model's private reasoning from what a client sees.
+  # Separate the model's private reasoning from its answer. Returns {reasoning, answer}.
   #
-  # This model emits <think>...</think> before its answer. Observed live: a client received the whole
-  # reasoning paragraph as message.content, which it would show to its user as the answer AND push back
-  # verbatim on the next turn -- feeding the model its own scratchpad as though it were dialogue. The
-  # agent has always filtered this in its renderer; the server was handing it straight out.
+  # Every OpenAI-compatible server that handles reasoning models agrees on the invariant: `content`
+  # carries the conclusion only. They differ on the reasoning, and none of them throw it away -- DeepSeek
+  # returns it as `reasoning_content` "at the same level as content", vLLM the same and now migrating to
+  # `reasoning`, Anthropic as a separate thinking block, and OpenAI's own reasoning models withhold the
+  # text but still bill it in usage. An earlier version of this code deleted it, which kept content
+  # correct and made the server useless to a client that wants to display or log the chain of thought.
   #
-  # An unterminated block (generation stopped mid-thought) drops everything from the opening tag, since
-  # the remainder is reasoning by definition and there is no answer to keep.
-  def strip_reasoning(text : String) : String
-    t = text.gsub(/<think>.*?<\/think>/m, "")
-    if i = t.index("<think>")
-      t = t[0, i]
+  # An unterminated block -- generation stopped mid-thought -- yields all reasoning and no answer, which
+  # is what actually happened: there is no conclusion to report, and inventing one from the scratchpad
+  # would be worse than an empty answer.
+  def split_reasoning(text : String) : Tuple(String, String)
+    reasoning = [] of String
+    text.scan(/<think>(.*?)<\/think>/m) { |m| reasoning << m[1].strip }
+    answer = text.gsub(/<think>.*?<\/think>/m, "")
+    if i = answer.index("<think>")
+      reasoning << answer[(i + "<think>".size)..].strip
+      answer = answer[0, i]
     end
-    t.strip
+    {reasoning.reject(&.empty?).join("\n\n"), answer.strip}
   end
 
   def chat_completion_json(id : String, model : String, gen : Generation) : String
@@ -409,6 +416,16 @@ module OpenAIServer
               j.field "message" do
                 j.object do
                   j.field "role", "assistant"
+                  # Both names, because the ecosystem is mid-rename: DeepSeek and older vLLM read
+                  # `reasoning_content`, current vLLM reads `reasoning` and warns that a client still
+                  # reading the old name will silently see nothing. Emitting one would quietly fail for
+                  # half of them, and an unknown field is ignored by every client, so emitting both is
+                  # the only option with no silent-failure mode. Omitted entirely when there was no
+                  # reasoning, so a non-thinking turn does not carry empty fields.
+                  unless gen.reasoning.empty?
+                    j.field "reasoning_content", gen.reasoning
+                    j.field "reasoning", gen.reasoning
+                  end
                   # content is null when the turn is only a tool call, which is what OpenAI does and
                   # what a client's own type expects. The XML is stripped either way: a client that
                   # received the raw <tool_call> markup as content would show it to its user and, worse,
