@@ -355,7 +355,8 @@ module OpenAIServer
         # got printed as one.
         calls = tools.empty? ? [] of ToolProtocol::Call : ToolProtocol.parse_calls(text)
         finish = "tool_calls" unless calls.empty?
-        Generation.new(text, prompt_ids.size, generated.size, finish, calls, tools)
+        Generation.new(OpenAIServer.strip_reasoning(text), prompt_ids.size, generated.size, finish,
+          calls, tools)
       end
     end
 
@@ -375,6 +376,23 @@ module OpenAIServer
 
   def completion_id : String
     "chatcmpl-#{Random::Secure.hex(12)}"
+  end
+
+  # Remove the model's private reasoning from what a client sees.
+  #
+  # This model emits <think>...</think> before its answer. Observed live: a client received the whole
+  # reasoning paragraph as message.content, which it would show to its user as the answer AND push back
+  # verbatim on the next turn -- feeding the model its own scratchpad as though it were dialogue. The
+  # agent has always filtered this in its renderer; the server was handing it straight out.
+  #
+  # An unterminated block (generation stopped mid-thought) drops everything from the opening tag, since
+  # the remainder is reasoning by definition and there is no answer to keep.
+  def strip_reasoning(text : String) : String
+    t = text.gsub(/<think>.*?<\/think>/m, "")
+    if i = t.index("<think>")
+      t = t[0, i]
+    end
+    t.strip
   end
 
   def chat_completion_json(id : String, model : String, gen : Generation) : String
@@ -497,9 +515,33 @@ model_dir = ARGV[0]?
 port = (ARGV[1]? || "8080").to_i
 host = ARGV[2]? || "127.0.0.1"
 
-unless model_dir && Dir.exists?(model_dir)
-  STDERR.puts "Usage: openai_server <model-dir> [port] [host]"
-  STDERR.puts "  (point at an already-downloaded model, e.g. ~/models/Qwen3-0.6B)"
+# Accept the same three model forms the agent does: a SafeTensors directory, a .gguf FILE, or an Ollama
+# model name.
+#
+# The server only ever accepted a directory, so pointing it at the .gguf everything else in this repo
+# runs was rejected by the usage check -- and passing the containing directory instead got further and
+# then failed looking for config.json, which reads like a corrupt download rather than a server that
+# does not support the format. Same resolution, same tokenizer split, so the two entry points cannot
+# drift on which models they accept.
+gguf_mode = false
+if model_dir && SHAInet::OllamaResolve.ollama_name?(model_dir)
+  resolved = SHAInet::OllamaResolve.resolve(model_dir)
+  unless resolved
+    STDERR.puts "Ollama model '#{model_dir}' not found. Is it pulled?"
+    exit 1
+  end
+  STDERR.puts "Resolved Ollama '#{model_dir}' -> #{resolved}"
+  model_dir = resolved
+  gguf_mode = true
+elsif model_dir && File.file?(model_dir)
+  gguf_mode = true
+end
+
+unless model_dir && (Dir.exists?(model_dir) || File.file?(model_dir))
+  STDERR.puts "Usage: openai_server <model-dir | gguf-file | ollama-name> [port] [host]"
+  STDERR.puts "  openai_server ~/models/Qwen3.8-27B-GSQ-RCO-IQ3_XXS.gguf 8080"
+  STDERR.puts "  openai_server qwen3.8:27b"
+  STDERR.puts "  openai_server ~/models/Qwen3-0.6B        # SafeTensors directory"
   exit 1
 end
 
@@ -527,10 +569,23 @@ ENV["SHAINET_MAX_CONTEXT"] = server_context.to_s
 STDERR.puts "  Context: #{server_context} tok (KV reserved for this at load)"
 
 net = SHAInet::HFLoader.load(model_dir, quantize: quantize, bits: bits)
-tokenizer = SHAInet::BPETokenizer.from_hf(File.join(model_dir, "tokenizer.json"))
+# A GGUF carries its own tokenizer; there is no tokenizer.json beside it. Reading one unconditionally
+# is what turned "this format is not supported here" into a missing-file error about the wrong file.
+tokenizer =
+  if gguf_mode
+    SHAInet::GGUF.extract_tokenizer(model_dir)
+  else
+    path = ENV["SHAINET_TOKENIZER_PATH"]? || File.join(model_dir, "tokenizer.json")
+    unless File.exists?(path)
+      STDERR.puts "Error: tokenizer.json not found at #{path} (set SHAINET_TOKENIZER_PATH to override)."
+      exit 1
+    end
+    SHAInet::BPETokenizer.from_hf(path)
+  end
 STDERR.puts "Loaded in #{(Time.instant - t).total_seconds.round(1)}s (vocab #{tokenizer.vocab.size})"
 
-model_name = File.basename(model_dir.rstrip("/"))
+# Clients display and echo this, so drop the .gguf extension rather than advertising a filename.
+model_name = File.basename(model_dir.rstrip("/")).sub(/\.gguf$/i, "")
 engine = OpenAIServer::Engine.new(net, tokenizer, model_name, server_context)
 
 api_key = ENV["SHAINET_API_KEY"]?
