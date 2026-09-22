@@ -376,8 +376,35 @@ module OpenAIServer
         ms_per_tok = generated.size > 0 ? (dec_secs * 1000 / generated.size).round(0).to_i : 0
         Log.info do
           "decode #{generated.size} tok in #{dec_secs.round(2)}s (#{ms_per_tok} ms/tok) " \
-          "finish=#{finish}#{calls.empty? ? "" : " calls=#{calls.map(&.name).join(",")}"}" \
+          "finish=#{finish} content=#{answer.size}ch" \
+          "#{calls.empty? ? "" : " calls=#{calls.map(&.name).join(",")}"}" \
           "#{reasoning.empty? ? "" : " reasoning=#{reasoning.size}ch"}"
+        end
+        # The failure this turn CANNOT be seen from the numbers above alone, and it is a real one: the
+        # model spent its whole token budget inside <think> and was cut off before writing either an
+        # answer or a tool call. The reply is then structurally valid and useless -- empty content, no
+        # calls -- so a client re-prompts, gets the same thing, and loops. Observed: three consecutive
+        # rounds of 512 tokens and ~2100 characters of reasoning, 145 seconds each, with the caller's
+        # message list growing assistant>user>assistant>user because it had nothing to act on.
+        #
+        # Named explicitly with the remedy, because the fix is the CALLER's max_tokens and nothing in
+        # the response says so.
+        if finish == "length" && answer.empty? && calls.empty? && !reasoning.empty?
+          Log.warn do
+            "reply is EMPTY: all #{generated.size} tokens went to reasoning (#{reasoning.size} chars) " \
+            "and the turn hit max_tokens before any answer or tool call. The caller will see " \
+            "content=\"\" and is likely to retry into the same wall -- raise max_tokens above " \
+            "#{generated.size} for this prompt."
+          end
+        elsif calls.empty? && ToolProtocol.truncated?(text)
+          # A DIFFERENT failure with the same symptom. The model opened <tool_call> and never closed it,
+          # so the parser correctly finds nothing and the client sees a reply with no calls -- which it
+          # reads as a final answer. The remedy is the same knob, but the cause is not "it thought too
+          # long", and conflating the two sends anyone debugging in the wrong direction.
+          Log.warn do
+            "TRUNCATED tool call: a <tool_call> was opened and never closed (finish=#{finish}), so no " \
+            "call could be parsed and the caller will read this as a final answer. Raise max_tokens."
+          end
         end
         Generation.new(answer, prompt_ids.size, generated.size, finish, calls, tools, reasoning)
       end
