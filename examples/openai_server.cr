@@ -485,6 +485,17 @@ module OpenAIServer
       reasoning << answer[(i + "<think>".size)..].strip
       answer = answer[0, i]
     end
+    # Tool-call markup is not prose and must not travel as content.
+    #
+    # The calls are parsed from the raw text separately and returned as a structured tool_calls array, so
+    # leaving the XML in here would send it TWICE -- once structured and once as text a client would
+    # display to its user and echo back on the next turn. Same failure as the <think> leak, one layer
+    # down. An unterminated opener is dropped along with everything after it, since a half-written call
+    # is not something a caller can use either.
+    answer = answer.gsub(/<tool_call>.*?<\/tool_call>/m, "")
+    if i = answer.index("<tool_call>")
+      answer = answer[0, i]
+    end
     {reasoning.reject(&.empty?).join("\n\n"), answer.strip}
   end
 
@@ -516,10 +527,20 @@ module OpenAIServer
                   # what a client's own type expects. The XML is stripped either way: a client that
                   # received the raw <tool_call> markup as content would show it to its user and, worse,
                   # echo it back as text on the next turn alongside the structured call.
-                  if gen.calls.empty?
-                    j.field "content", gen.text
-                  else
+                  # content and tool_calls are not exclusive. OpenAI's schema allows both, and this model
+                  # routinely writes a sentence of intent beside its calls -- measured at 561-703
+                  # characters per turn on a real run, all of which was previously thrown away because
+                  # this branch set content to null whenever calls were present. A client that shows
+                  # intermediate progress to a user had nothing to show.
+                  #
+                  # null only when the prose is genuinely empty, which is what OpenAI returns and what a
+                  # client's own type expects for a pure tool-call turn.
+                  if gen.text.empty?
                     j.field "content", nil
+                  else
+                    j.field "content", gen.text
+                  end
+                  unless gen.calls.empty?
                     j.field "tool_calls" do
                       j.array do
                         gen.calls.each do |c|
