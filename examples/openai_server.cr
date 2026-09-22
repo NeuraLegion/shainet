@@ -328,7 +328,44 @@ module OpenAIServer
         emitted = 0
         finish = "length"
 
-        max_tokens.times do
+        # The caller's max_tokens caps the ANSWER, not the thinking that precedes it.
+        #
+        # Taken literally it does neither, it just stops generation -- and on a reasoning model that
+        # reliably produces the worst possible outcome. Observed live: a client asking for 512 tokens got
+        # three consecutive turns where all 512 went inside <think>, the cap landed mid-thought, and the
+        # reply came back structurally valid and empty. The client could not act on it, retried, and hit
+        # the same wall at 145 seconds a round.
+        #
+        # OpenAI's own answer to this is not to ignore the parameter but to refuse a value too small for
+        # a reasoning request -- smaller values are REJECTED rather than silently returning nothing. We
+        # cannot reject usefully here (the caller cannot know the thinking length in advance, and
+        # bright-agent's 512 is hardcoded), so the cap is honoured where it is meaningful and suspended
+        # where it is destructive: while a thought is still open, generation continues.
+        #
+        # The ceiling is what the context allows, not infinity, so a model that never closes a thought
+        # stops at a real boundary instead of running until something else breaks.
+        # The extension is BOUNDED, and not by the context. Letting it run to the context limit sounded
+        # principled and is not: with a 9K prompt in a 64K window that is 56,000 tokens, and at ~110
+        # ms/token this model would sit in one request for over an hour before giving up. A fixed grace
+        # is both predictable and small enough to fail fast -- 2048 extra tokens is under four minutes.
+        grace = (ENV["SHAINET_REASONING_GRACE"]? || "2048").to_i
+        room = @max_context - prompt_ids.size - 8
+        ceiling = Math.min(Math.max(max_tokens, max_tokens + grace), Math.max(max_tokens, room))
+        extended = false
+
+        while generated.size < ceiling
+          if generated.size >= max_tokens
+            # At the cap. Stop unless a thought is still open, in which case the answer has not been
+            # written yet and stopping here guarantees an empty reply.
+            break unless ToolProtocol.truncated_think?(text)
+            unless extended
+              extended = true
+              Log.info do
+                "still inside <think> at max_tokens=#{max_tokens}; continuing to #{ceiling} so the " \
+                "answer has room (reasoning does not count against the caller's budget)"
+              end
+            end
+          end
           # Let other fibers run.
           #
           # Crystal's HTTP server is fiber-based, and this loop is CPU/GPU bound with no yield point of
@@ -655,7 +692,10 @@ model_name = File.basename(model_dir.rstrip("/")).sub(/\.gguf$/i, "")
 engine = OpenAIServer::Engine.new(net, tokenizer, model_name, server_context)
 
 api_key = ENV["SHAINET_API_KEY"]?
-default_max_tokens = (ENV["SHAINET_MAX_TOKENS"]? || "512").to_i
+# Used only when the caller sends no max_tokens. 512 was a text-model default: on a reasoning model the
+# thinking alone routinely exceeds it, so a caller that omits the field was being handed the empty-reply
+# failure by default rather than by its own choice.
+default_max_tokens = (ENV["SHAINET_MAX_TOKENS"]? || "4096").to_i
 
 authorized = ->(req : HTTP::Request) : Bool {
   return true unless k = api_key
