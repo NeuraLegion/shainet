@@ -197,20 +197,66 @@ module SHAInet
     @@handle_pool_mutex = Mutex.new
     @@max_pool_size = 4 # Limit pool size to avoid resource exhaustion
 
-    def create_handle
+    # cuBLAS math modes, by their documented values. Naming them matters: the previous code treated
+    # 16 as "allow TF32", but 16 alone is DEFAULT_MATH | DISALLOW_REDUCED, which enables no tensor
+    # path at all. The escape hatch therefore did nothing, and the measurement taken through it
+    # ("TF32 buys nothing here") was measuring pedantic fp32 against pedantic fp32.
+    CUBLAS_DEFAULT_MATH         =  0
+    CUBLAS_PEDANTIC_MATH        =  2
+    CUBLAS_TF32_TENSOR_OP_MATH  =  3
+    CUBLAS_DISALLOW_REDUCED_RED = 16
+
+    # True fp32, deterministic: what decode and every default path gets.
+    MATH_MODE_PEDANTIC = CUBLAS_PEDANTIC_MATH | CUBLAS_DISALLOW_REDUCED_RED # 18
+    # TF32 tensor cores with deterministic accumulation: 2.1x on SGEMM, measured at the shape the
+    # quantized prefill GEMM actually uses (M=1024 N=512 K=5120: 14.1 -> 30.3 TFLOP/s).
+    MATH_MODE_TF32 = CUBLAS_TF32_TENSOR_OP_MATH | CUBLAS_DISALLOW_REDUCED_RED # 19
+
+    # Acquire a cuBLAS handle. `tf32: true` asks for the TF32 tensor-core path.
+    #
+    # The math mode is set on every acquire, not only on creation, because handles are POOLED: a
+    # handle returned by a TF32 caller would otherwise hand its mode to the next caller that wanted
+    # pedantic fp32, which is a silent precision change depending on call order.
+    def create_handle(tf32 : Bool = false)
+      mode = if mm = ENV["SHAINET_CUBLAS_MATHMODE"]?
+               mm.to_i
+             elsif tf32 || ENV.fetch("SHAINET_CUBLAS_TF32", "0") == "1"
+               MATH_MODE_TF32
+             else
+               MATH_MODE_PEDANTIC
+             end
+
+      pooled = nil.as(LibCUBLAS::Handle?)
       @@handle_pool_mutex.synchronize do
-        if !@@handle_pool.empty?
-          return @@handle_pool.pop
-        end
+        pooled = @@handle_pool.pop unless @@handle_pool.empty?
+      end
+      if h = pooled
+        apply_math_mode(h, mode)
+        return h
       end
 
       handle = Pointer(LibCUBLAS::Handle).malloc(1)
       raise "cublasCreate failed" unless LibCUBLAS.cublasCreate_v2(handle) == 0
-      # CUBLAS_MATH_DISALLOW_REDUCED_PRECISION_REDUCTION (16): prevent
-      # non-deterministic reduced-precision accumulation in SGEMM on Ada/Ampere.
-      result = LibCUBLAS.cublasSetMathMode(handle.value, 16)
-      Log.warn { "cublasSetMathMode failed (code #{result})" } unless result == 0
+      apply_math_mode(handle.value, mode)
       handle.value
+    end
+
+    # Ask for true fp32 by default, so callers do not have to remember NVIDIA_TF32_OVERRIDE=0.
+    #
+    # On Ampere and Ada, cuBLAS can run SGEMM on TF32 tensor cores, cutting the mantissa from 23 bits
+    # to 10 -- enough to make token generation vary between runs. The documented workaround is the
+    # NVIDIA_TF32_OVERRIDE=0 environment variable, but that has to be set before the process starts,
+    # so it is easy to forget and invisible when missing. Setting the mode per handle fixes that
+    # in-process.
+    #
+    # Older drivers may reject the combined value; fall back to the reduction flag alone rather than
+    # leaving the handle unconfigured.
+    private def apply_math_mode(handle : LibCUBLAS::Handle, mode : Int32)
+      result = LibCUBLAS.cublasSetMathMode(handle, mode)
+      if result != 0 && mode != CUBLAS_DISALLOW_REDUCED_RED
+        result = LibCUBLAS.cublasSetMathMode(handle, CUBLAS_DISALLOW_REDUCED_RED)
+      end
+      Log.warn { "cublasSetMathMode failed (code #{result})" } unless result == 0
     end
 
     def destroy_handle(handle : LibCUBLAS::Handle)
@@ -240,6 +286,22 @@ module SHAInet
       beta = 0.0_f32
       LibCUBLAS.cublasSgemm_v2(handle,
         Operation::N.value, Operation::N.value,
+        m, n, k,
+        pointerof(alpha), a, lda,
+        b, ldb,
+        pointerof(beta), c, ldc)
+    end
+
+    # C = A^T * B with A and B column-major, which is what a row-major
+    # C[M, N] = X[M, K] * W[N, K]^T needs: pass the dequantized weight as A (lda = K), the
+    # activation as B (ldb = K), m = N_chunk, n = M, ldc = the FULL N so a chunk of output columns
+    # lands in place inside the complete result.
+    def gemm_tn(handle : LibCUBLAS::Handle, a : Pointer(Float32), b : Pointer(Float32), c : Pointer(Float32),
+                m : Int32, n : Int32, k : Int32, lda : Int32, ldb : Int32, ldc : Int32)
+      alpha = 1.0_f32
+      beta = 0.0_f32
+      LibCUBLAS.cublasSgemm_v2(handle,
+        Operation::T.value, Operation::N.value,
         m, n, k,
         pointerof(alpha), a, lda,
         b, ldb,
@@ -309,12 +371,35 @@ module SHAInet
     @@scatter_add_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Int32), Pointer(Float32), Int32, Int32, Void)?
     @@gather_available : Bool? = nil
     @@mul_sigmoid_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Void)?
-    @@gated_delta_rule_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void)?
+    @@gated_delta_rule_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Int32, Void)?
     @@rope_forward_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Void)?
     @@head_rmsnorm_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Float32, Void)?
     # GGUF k-quant GEMV
+    @@gemv_iq3s_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@gemv_iq3xxs_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@gemv_iq4xs_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@dequant_iq4xs_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@dequant_iq3s_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@dequant_iq3xxs_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@gemv_q2k_lb_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@dequant_q2k_lb_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@gemv_iq2xxs_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@dequant_iq2xxs_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@gemv_iq2xs_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@dequant_iq2xs_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@gemv_iq2s_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@dequant_iq2s_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@gemv_iq1m_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@dequant_iq1m_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@gemv_iq1s_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@dequant_iq1s_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@gemv_q4k_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@gemv_q6k_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@dequant_q4k_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@gdn_gates_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Void)?
+    @@short_conv_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@short_conv_silu3_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Void)?
+    @@dequant_q6k_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@add_bias_rows_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Void)?
     @@pack_kv_heads_proc : Proc(Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@prefill_attn_available : Bool? = nil
@@ -331,6 +416,9 @@ module SHAInet
     @@attn_device_available : Bool? = nil
     @@attention_kv_f32_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void)?
     @@attention_kv_f16_proc : Proc(Pointer(Float32), Pointer(UInt16), Pointer(UInt16), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void)?
+    @@attention_split_kv_f32_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void)?
+    @@attention_split_kv_f16_proc : Proc(Pointer(Float32), Pointer(UInt16), Pointer(UInt16), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void)?
+    @@attention_split_ws_floats_proc : Proc(Int32, Int32, Int32, Int32, Int32)?
 
     def softmax_rows(dst : Pointer(Float32), src : Pointer(Float32), rows : Int32, cols : Int32)
       # Validate inputs
@@ -549,19 +637,24 @@ module SHAInet
     # sequence, or a zeroed buffer for a fresh one. q and k are indexed by KEY head, so nk may be
     # smaller than nv (grouped-query sharing). L2 normalization of q/k and the q_scale are applied
     # inside the kernel.
+    #
+    # `k_head_tiled` selects which key head a value head reads, which is a property of the weight
+    # layout: false is grouped (h // heads_per_k, the SafeTensors layout), true is tiled
+    # (h % nk, the GGUF layout, because llama.cpp widens q/k with ggml_repeat and that tiles).
     def gated_delta_rule(q : Pointer(Float32), k : Pointer(Float32), v : Pointer(Float32),
                          alpha : Pointer(Float32), beta : Pointer(Float32),
                          state : Pointer(Float32), out_ptr : Pointer(Float32),
                          seq : Int32, nv : Int32, nk : Int32, dk : Int32, dv : Int32,
-                         heads_per_k : Int32, q_scale : Float32)
+                         heads_per_k : Int32, q_scale : Float32, k_head_tiled : Bool = false)
       unless fn = @@gated_delta_rule_proc
         @@gated_delta_rule_proc = fn = load_kernel_proc("gated_delta_rule",
           Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32),
                Pointer(Float32), Pointer(Float32), Pointer(Float32),
-               Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void))
+               Int32, Int32, Int32, Int32, Int32, Int32, Float32, Int32, Void))
       end
       raise "CUDA kernels not available" unless fn
-      fn.call(q, k, v, alpha, beta, state, out_ptr, seq, nv, nk, dk, dv, heads_per_k, q_scale)
+      fn.call(q, k, v, alpha, beta, state, out_ptr, seq, nv, nk, dk, dv, heads_per_k, q_scale,
+        k_head_tiled ? 1 : 0)
     end
 
     def gated_delta_rule_available? : Bool
@@ -596,6 +689,36 @@ module SHAInet
 
     # GGUF k-quant GEMV: y[M, N] = x[M, K] * dequant(W[N, K]).
     # W is in raw Q4_K format (144-byte blocks, K must be a multiple of 256).
+    def gemv_iq3s(x : Pointer(Float32), w : Pointer(UInt8), y : Pointer(Float32),
+                  m : Int32, n : Int32, k : Int32)
+      unless fn = @@gemv_iq3s_proc
+        @@gemv_iq3s_proc = fn = load_kernel_proc("gemv_iq3s",
+          Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(x, w, y, m, n, k)
+    end
+
+    def gemv_iq3xxs(x : Pointer(Float32), w : Pointer(UInt8), y : Pointer(Float32),
+                    m : Int32, n : Int32, k : Int32)
+      unless fn = @@gemv_iq3xxs_proc
+        @@gemv_iq3xxs_proc = fn = load_kernel_proc("gemv_iq3xxs",
+          Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(x, w, y, m, n, k)
+    end
+
+    def gemv_iq4xs(x : Pointer(Float32), w : Pointer(UInt8), y : Pointer(Float32),
+                   m : Int32, n : Int32, k : Int32)
+      unless fn = @@gemv_iq4xs_proc
+        @@gemv_iq4xs_proc = fn = load_kernel_proc("gemv_iq4xs",
+          Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(x, w, y, m, n, k)
+    end
+
     def gemv_q4k(x : Pointer(Float32), w : Pointer(UInt8), y : Pointer(Float32),
                  m : Int32, n : Int32, k : Int32)
       unless fn = @@gemv_q4k_proc
@@ -617,8 +740,258 @@ module SHAInet
       fn.call(x, w, y, m, n, k)
     end
 
-    # Token-major [rows, kv_heads * head_dim] -> kv-head-major, the layout the KV append
-    # expects.
+    # Dequantize rows [row0, row0 + n_rows) of a k-quant weight into an fp32 [n_rows, K]
+    # row-major buffer, so a batched prefill can run one cuBLAS GEMM per chunk instead of a GEMV
+    # per token. The GEMV kernels reuse nothing across tokens; this reads the weight once.
+    def dequant_iq4xs_rows(w : Pointer(UInt8), dst : Pointer(Float32),
+                           row0 : Int32, n_rows : Int32, k : Int32)
+      unless fn = @@dequant_iq4xs_rows_proc
+        @@dequant_iq4xs_rows_proc = fn = load_kernel_proc("dequant_iq4xs_rows",
+          Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(w, dst, row0, n_rows, k)
+    end
+
+    def dequant_iq3s_rows(w : Pointer(UInt8), dst : Pointer(Float32),
+                          row0 : Int32, n_rows : Int32, k : Int32)
+      unless fn = @@dequant_iq3s_rows_proc
+        @@dequant_iq3s_rows_proc = fn = load_kernel_proc("dequant_iq3s_rows",
+          Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(w, dst, row0, n_rows, k)
+    end
+
+    def dequant_iq3xxs_rows(w : Pointer(UInt8), dst : Pointer(Float32),
+                            row0 : Int32, n_rows : Int32, k : Int32)
+      unless fn = @@dequant_iq3xxs_rows_proc
+        @@dequant_iq3xxs_rows_proc = fn = load_kernel_proc("dequant_iq3xxs_rows",
+          Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(w, dst, row0, n_rows, k)
+    end
+
+    def gemv_q2k_lb(x : Pointer(Float32), w : Pointer(UInt8), y : Pointer(Float32),
+                    m : Int32, n : Int32, k_dim : Int32)
+      unless fn = @@gemv_q2k_lb_proc
+        @@gemv_q2k_lb_proc = fn = load_kernel_proc("gemv_q2k_lb",
+          Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(x, w, y, m, n, k_dim)
+    end
+
+    def dequant_q2k_lb_rows(w : Pointer(UInt8), dst : Pointer(Float32),
+                            row0 : Int32, n_rows : Int32, k : Int32)
+      unless fn = @@dequant_q2k_lb_rows_proc
+        @@dequant_q2k_lb_rows_proc = fn = load_kernel_proc("dequant_q2k_lb_rows",
+          Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(w, dst, row0, n_rows, k)
+    end
+
+    def gemv_iq2xxs(x : Pointer(Float32), w : Pointer(UInt8), y : Pointer(Float32),
+                    m : Int32, n : Int32, k_dim : Int32)
+      unless fn = @@gemv_iq2xxs_proc
+        @@gemv_iq2xxs_proc = fn = load_kernel_proc("gemv_iq2xxs",
+          Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(x, w, y, m, n, k_dim)
+    end
+
+    def dequant_iq2xxs_rows(w : Pointer(UInt8), dst : Pointer(Float32),
+                            row0 : Int32, n_rows : Int32, k : Int32)
+      unless fn = @@dequant_iq2xxs_rows_proc
+        @@dequant_iq2xxs_rows_proc = fn = load_kernel_proc("dequant_iq2xxs_rows",
+          Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(w, dst, row0, n_rows, k)
+    end
+
+    def gemv_iq2xs(x : Pointer(Float32), w : Pointer(UInt8), y : Pointer(Float32),
+                   m : Int32, n : Int32, k_dim : Int32)
+      unless fn = @@gemv_iq2xs_proc
+        @@gemv_iq2xs_proc = fn = load_kernel_proc("gemv_iq2xs",
+          Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(x, w, y, m, n, k_dim)
+    end
+
+    def dequant_iq2xs_rows(w : Pointer(UInt8), dst : Pointer(Float32),
+                           row0 : Int32, n_rows : Int32, k : Int32)
+      unless fn = @@dequant_iq2xs_rows_proc
+        @@dequant_iq2xs_rows_proc = fn = load_kernel_proc("dequant_iq2xs_rows",
+          Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(w, dst, row0, n_rows, k)
+    end
+
+    def gemv_iq2s(x : Pointer(Float32), w : Pointer(UInt8), y : Pointer(Float32),
+                  m : Int32, n : Int32, k_dim : Int32)
+      unless fn = @@gemv_iq2s_proc
+        @@gemv_iq2s_proc = fn = load_kernel_proc("gemv_iq2s",
+          Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(x, w, y, m, n, k_dim)
+    end
+
+    def dequant_iq2s_rows(w : Pointer(UInt8), dst : Pointer(Float32),
+                          row0 : Int32, n_rows : Int32, k : Int32)
+      unless fn = @@dequant_iq2s_rows_proc
+        @@dequant_iq2s_rows_proc = fn = load_kernel_proc("dequant_iq2s_rows",
+          Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(w, dst, row0, n_rows, k)
+    end
+
+    def gemv_iq1m(x : Pointer(Float32), w : Pointer(UInt8), y : Pointer(Float32),
+                  m : Int32, n : Int32, k_dim : Int32)
+      unless fn = @@gemv_iq1m_proc
+        @@gemv_iq1m_proc = fn = load_kernel_proc("gemv_iq1m",
+          Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(x, w, y, m, n, k_dim)
+    end
+
+    def dequant_iq1m_rows(w : Pointer(UInt8), dst : Pointer(Float32),
+                          row0 : Int32, n_rows : Int32, k : Int32)
+      unless fn = @@dequant_iq1m_rows_proc
+        @@dequant_iq1m_rows_proc = fn = load_kernel_proc("dequant_iq1m_rows",
+          Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(w, dst, row0, n_rows, k)
+    end
+
+    def gemv_iq1s(x : Pointer(Float32), w : Pointer(UInt8), y : Pointer(Float32),
+                  m : Int32, n : Int32, k_dim : Int32)
+      unless fn = @@gemv_iq1s_proc
+        @@gemv_iq1s_proc = fn = load_kernel_proc("gemv_iq1s",
+          Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(x, w, y, m, n, k_dim)
+    end
+
+    def dequant_iq1s_rows(w : Pointer(UInt8), dst : Pointer(Float32),
+                          row0 : Int32, n_rows : Int32, k : Int32)
+      unless fn = @@dequant_iq1s_rows_proc
+        @@dequant_iq1s_rows_proc = fn = load_kernel_proc("dequant_iq1s_rows",
+          Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(w, dst, row0, n_rows, k)
+    end
+
+    def dequant_q4k_rows(w : Pointer(UInt8), dst : Pointer(Float32),
+                         row0 : Int32, n_rows : Int32, k : Int32)
+      unless fn = @@dequant_q4k_rows_proc
+        @@dequant_q4k_rows_proc = fn = load_kernel_proc("dequant_q4k_rows",
+          Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(w, dst, row0, n_rows, k)
+    end
+
+    def dequant_q6k_rows(w : Pointer(UInt8), dst : Pointer(Float32),
+                         row0 : Int32, n_rows : Int32, k : Int32)
+      unless fn = @@dequant_q6k_rows_proc
+        @@dequant_q6k_rows_proc = fn = load_kernel_proc("dequant_q6k_rows",
+          Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(w, dst, row0, n_rows, k)
+    end
+
+    def dequant_k_rows_available? : Bool
+      return false unless kernels_available?
+      !load_kernel_proc("dequant_q4k_rows",
+        Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)).nil?
+    end
+
+    # Gated DeltaNet per-head gates:
+    #   alpha[t,h] = exp(-exp(a_log[h]) * softplus(a_proj[t,h] + dt_bias[h]))
+    #   beta [t,h] = sigmoid(b_proj[t,h])
+    def gdn_gates(alpha : Pointer(Float32), beta : Pointer(Float32),
+                  a_proj : Pointer(Float32), b_proj : Pointer(Float32),
+                  a_log : Pointer(Float32), dt_bias : Pointer(Float32),
+                  seq : Int32, heads : Int32)
+      unless fn = @@gdn_gates_proc
+        @@gdn_gates_proc = fn = load_kernel_proc("gdn_gates",
+          Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32),
+               Pointer(Float32), Pointer(Float32), Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(alpha, beta, a_proj, b_proj, a_log, dt_bias, seq, heads)
+    end
+
+    # Short causal depthwise convolution, weight[c, 0] being the current position. `state` carries
+    # kernel-1 past positions and is updated in place, so a decode step continues the sequence.
+    def short_conv(dst : Pointer(Float32), src : Pointer(Float32), state : Pointer(Float32),
+                   w : Pointer(Float32), seq : Int32, channels : Int32, kernel : Int32)
+      unless fn = @@short_conv_proc
+        @@short_conv_proc = fn = load_kernel_proc("short_conv",
+          Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32),
+               Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(dst, src, state, w, seq, channels, kernel)
+    end
+
+    # Causal conv (+ optional SiLU) for q, k and v in ONE launch pair instead of nine kernels.
+    #
+    # The unfused stage cost nine launches per GDN layer: three short_conv (each itself a conv plus a
+    # state-roll launch) and three mul_sigmoid. Across 48 GDN layers that was roughly a third of the
+    # ~1280 launches a generated token issues, and batch=1 decode is latency-bound, so those launches
+    # are the cost rather than the arithmetic. Returns false when the kernel is unavailable so the
+    # caller keeps the unfused path.
+    def short_conv_silu3(d0 : Pointer(Float32), s0 : Pointer(Float32), st0 : Pointer(Float32), w0 : Pointer(Float32),
+                         d1 : Pointer(Float32), s1 : Pointer(Float32), st1 : Pointer(Float32), w1 : Pointer(Float32),
+                         d2 : Pointer(Float32), s2 : Pointer(Float32), st2 : Pointer(Float32), w2 : Pointer(Float32),
+                         seq : Int32, ch0 : Int32, ch1 : Int32, ch2 : Int32,
+                         kernel : Int32, apply_silu : Bool) : Bool
+      unless fn = @@short_conv_silu3_proc
+        @@short_conv_silu3_proc = fn = load_kernel_proc("short_conv_silu3",
+          Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32),
+               Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32),
+               Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32),
+               Int32, Int32, Int32, Int32, Int32, Int32, Void))
+      end
+      return false unless fn
+      fn.call(d0, s0, st0, w0, d1, s1, st1, w1, d2, s2, st2, w2,
+        seq, ch0, ch1, ch2, kernel, apply_silu ? 1 : 0)
+      true
+    end
+
+    def short_conv_silu3_available? : Bool
+      return false unless kernels_available?
+      !load_kernel_proc("short_conv_silu3",
+        Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32),
+             Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32),
+             Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32),
+             Int32, Int32, Int32, Int32, Int32, Int32, Void)).nil?
+    end
+
+    def gdn_mixer_kernels_available? : Bool
+      return false unless kernels_available?
+      return false if load_kernel_proc("gdn_gates",
+                        Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32),
+                             Pointer(Float32), Pointer(Float32), Int32, Int32, Void)).nil?
+      !load_kernel_proc("short_conv",
+        Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32),
+             Int32, Int32, Int32, Void)).nil?
+    end
+
     def pack_kv_heads(dst : Pointer(Float32), src : Pointer(Float32), rows : Int32,
                       kv_heads : Int32, head_dim : Int32)
       unless fn = @@pack_kv_heads_proc
@@ -1305,6 +1678,62 @@ module SHAInet
         Log.error { "CUDA Error in kv_cache_append_f16: #{ex}" }
         raise ex
       end
+    end
+
+    # Split-KV ("flash-decoding") attention. Same contract as attention_kv_* but the grid also spans
+    # the KV length, so decode occupies the whole card instead of num_heads blocks, and the scores
+    # stay in shared memory rather than a global workspace. Exact, not approximate: the per-split
+    # partials are merged with the standard max-rescale.
+    #
+    # `ws` must hold attention_split_ws_floats(...) floats. Returns false when the kernels are
+    # missing so the caller keeps the single-block path.
+    def attention_split_kv_f32(q : Pointer(Float32), kc : Pointer(Float32), vc : Pointer(Float32),
+                               out_ptr : Pointer(Float32), ws : Pointer(Float32),
+                               new_tokens : Int32, start_pos : Int32, num_heads : Int32,
+                               heads_per_kv : Int32, head_dim : Int32, capacity : Int32,
+                               scale : Float32) : Bool
+      unless fn = @@attention_split_kv_f32_proc
+        @@attention_split_kv_f32_proc = fn = load_kernel_proc("attention_split_kv_f32",
+          Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32),
+               Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void))
+      end
+      return false unless fn
+      fn.call(q, kc, vc, out_ptr, ws, new_tokens, start_pos, num_heads,
+        heads_per_kv, head_dim, capacity, scale)
+      true
+    end
+
+    def attention_split_kv_f16(q : Pointer(Float32), kc : Pointer(UInt16), vc : Pointer(UInt16),
+                               out_ptr : Pointer(Float32), ws : Pointer(Float32),
+                               new_tokens : Int32, start_pos : Int32, num_heads : Int32,
+                               heads_per_kv : Int32, head_dim : Int32, capacity : Int32,
+                               scale : Float32) : Bool
+      unless fn = @@attention_split_kv_f16_proc
+        @@attention_split_kv_f16_proc = fn = load_kernel_proc("attention_split_kv_f16",
+          Proc(Pointer(Float32), Pointer(UInt16), Pointer(UInt16), Pointer(Float32),
+               Pointer(Float32), Int32, Int32, Int32, Int32, Int32, Int32, Float32, Void))
+      end
+      return false unless fn
+      fn.call(q, kc, vc, out_ptr, ws, new_tokens, start_pos, num_heads,
+        heads_per_kv, head_dim, capacity, scale)
+      true
+    end
+
+    # Floats of partial-buffer space the split path needs. Kept on the kernel side so the split size
+    # is defined in exactly one place.
+    def attention_split_ws_floats(new_tokens : Int32, num_heads : Int32, head_dim : Int32,
+                                  total_len : Int32) : Int32
+      unless fn = @@attention_split_ws_floats_proc
+        @@attention_split_ws_floats_proc = fn = load_kernel_proc("attention_split_ws_floats",
+          Proc(Int32, Int32, Int32, Int32, Int32))
+      end
+      return 0 unless fn
+      fn.call(new_tokens, num_heads, head_dim, total_len)
+    end
+
+    def attention_split_kv_available? : Bool
+      return false unless kernels_available?
+      !load_kernel_proc("attention_split_ws_floats", Proc(Int32, Int32, Int32, Int32, Int32)).nil?
     end
 
     def attention_kv_f16(q : Pointer(Float32), kc : Pointer(UInt16), vc : Pointer(UInt16),

@@ -19,6 +19,20 @@ require "./agent_v4a"
 # Built-in tools are intentionally read-only (list_directory, read_file). Add
 # your own in build_tools — that is the extension point for an MCP bridge etc.
 
+@[Link("c")]
+lib LibWinsize
+  struct Winsize
+    ws_row : LibC::UShort
+    ws_col : LibC::UShort
+    ws_xpixel : LibC::UShort
+    ws_ypixel : LibC::UShort
+  end
+
+  # One void-pointer signature serves both uses (TIOCGWINSZ wants a Winsize*, FIONREAD an Int32*);
+  # Crystal refuses two `fun`s that differ only in a parameter type.
+  fun ioctl(fd : LibC::Int, request : LibC::ULong, arg : Void*) : LibC::Int
+end
+
 module AgentDemo
   MAX_READ_BYTES = 64_000
 
@@ -36,6 +50,79 @@ module AgentDemo
   MAX_TOOL_STEPS = begin
     n = (ENV["AGENT_MAX_TOOL_STEPS"]? || "40").to_i
     n < 1 ? 1 : n
+  end
+
+  # How many times an IDENTICAL tool call is allowed before the loop intervenes, and how many recent
+  # call signatures to remember. Small on purpose: two identical calls are a retry, three is a loop.
+  REPEAT_CALL_LIMIT = 2
+
+  # How many times one turn may be told to finish a dropped tool call before its reply is
+  # accepted as-is. Two is enough for a formatting slip without letting a model that simply
+  # wants to answer briefly be nudged in a loop.
+  EMPTY_REPLY_NUDGE_LIMIT =  2
+  RECENT_CALL_MEMORY      = 12
+
+  # Turn a failed list_directory into an answer rather than a dead end.
+  #
+  # Three cases, in the order a caller actually hits them:
+  #   - the argument is a shell command, not a path (a model reaching for `ls a b 2>/dev/null`
+  #     because no tool offered "check several paths at once") -- name the right tool;
+  #   - the path is a FILE -- say so and list its parent, which is what was wanted;
+  #   - the path does not exist -- list the nearest existing ancestor and point out entries whose
+  #     names are close, so a typo like "example/" for "examples/" is corrected in one round trip.
+  def self.directory_miss_help(raw : String, resolved : String) : String
+    if raw.matches?(/[;|&><$`]|\*\s|\s2>/)
+      return "Error: '#{raw}' looks like a shell command, not a directory path. list_directory " \
+             "takes ONE directory path. Use run_command to run shell, or call list_directory once " \
+             "per path."
+    end
+
+    if File.exists?(resolved) && !Dir.exists?(resolved)
+      parent = File.dirname(raw)
+      parent = "." if parent.empty?
+      listing = safe_children(File.dirname(resolved))
+      return "Error: #{raw} is a FILE, not a directory (use read_file to read it).\n" \
+             "Contents of #{parent}:\n#{listing}"
+    end
+
+    # Walk up to the nearest ancestor that exists, and list it.
+    rel = raw
+    anc = resolved
+    3.times do
+      break if Dir.exists?(anc)
+      anc = File.dirname(anc)
+      rel = File.dirname(rel)
+    end
+    rel = "." if rel.empty? || rel == "/"
+
+    unless Dir.exists?(anc)
+      return "Error: no such directory: #{raw}"
+    end
+
+    wanted = File.basename(raw)
+    entries = begin
+      Dir.children(anc)
+    rescue
+      [] of String
+    end
+    # "Close" deliberately means a shared prefix rather than an edit distance: the typos that
+    # actually occur here are a missing or extra trailing character (example/ for examples/).
+    near = entries.select do |e|
+      next false if wanted.empty?
+      e.starts_with?(wanted[0, [wanted.size, 3].min]) || wanted.starts_with?(e[0, [e.size, 3].min])
+    end.sort!.first(8)
+
+    out = ["Error: no such directory: #{raw}"]
+    out << "Did you mean: #{near.join(", ")}" unless near.empty?
+    out << "Contents of #{rel}:\n#{safe_children(anc)}"
+    out.join("\n")
+  end
+
+  # Directory listing with directories marked, or a readable reason it could not be listed.
+  def self.safe_children(dir : String) : String
+    Dir.children(dir).sort.map { |e| Dir.exists?(File.join(dir, e)) ? "#{e}/" : e }.join("\n")
+  rescue ex
+    "(could not list: #{ex.message})"
   end
 
   record ToolParam, name : String, type : String, description : String, required : Bool = true
@@ -69,6 +156,168 @@ module AgentDemo
 
   def self.workspace : String
     @@workspace
+  end
+
+  # A line the user typed WHILE the model was generating.
+  #
+  # Last session the user watched the model loop and typed "You're looping, make smaller changes" --
+  # and had to wait for the turn to finish before it could be delivered. Steering makes that land
+  # immediately: the current generation stops, what it produced so far is kept, and the new instruction
+  # goes in as the next user message, so the model sees both its own partial attempt and the
+  # correction. Ctrl-C throws the turn away; steering redirects it.
+  @@steer : String? = nil
+
+  def self.take_steer : String?
+    s = @@steer
+    @@steer = nil
+    s
+  end
+
+  # Poll stdin without blocking. Only ever called from inside the token loop, which is the one place
+  # where nothing else is reading stdin: the confirmation prompt and the REPL both read between
+  # generations, never during one, so there is no second reader to race for the line.
+  def self.poll_steer : Bool
+    return false unless STDIN.tty?
+    pending = 0
+    return false if LibWinsize.ioctl(STDIN.fd, FIONREAD, pointerof(pending).as(Void*)) != 0
+    return false if pending <= 0
+    line = STDIN.gets
+    return false if line.nil?
+    text = line.chomp.strip
+    return false if text.empty?
+    @@steer = text
+    true
+  rescue
+    false
+  end
+
+  # Terminal size, via ioctl(TIOCGWINSZ).
+  #
+  # Crystal 1.21 has no public API for this -- no tty_size?, no console_size, and no TIOCGWINSZ
+  # anywhere in the stdlib -- so it is bound here. The alternatives were worse: COLUMNS/LINES are not
+  # exported by default, shelling out to `tput` costs a process per query, and the ANSI size report
+  # ("\e[18t") would have to read its answer from stdin, which is where steering is listening.
+  TIOCGWINSZ = {% if flag?(:darwin) %}0x40087468_u64{% else %}0x5413_u64{% end %}
+
+  # Bytes waiting on a descriptor, used to poll stdin without blocking. IO.select does not exist in
+  # Crystal, and a background reader fiber would compete with the confirmation prompt for the same
+  # line, so asking the kernel how much is buffered is both the simplest and the only safe option.
+  FIONREAD = {% if flag?(:darwin) %}0x4004667f_u64{% else %}0x541b_u64{% end %}
+
+  # A status line pinned to the bottom row of the terminal.
+  #
+  # Implemented with a SCROLL REGION (DECSTBM, "\e[1;{rows-1}r") rather than by tracking which row the
+  # cursor is on. Setting the region tells the TERMINAL that ordinary output may only occupy rows 1 to
+  # rows-1, so the bottom line is reserved by the terminal itself and no write can land on it.
+  #
+  # The alternative -- counting newlines and wrapping to maintain a row number, pushing a blank line
+  # whenever content is about to reach the last row -- needs every single write to pass through one
+  # wrapper, and two things here guarantee that is not true. The output is heavily colorized, so
+  # `text.size` counts escape bytes that occupy no columns and the row count drifts on the first
+  # coloured line. And the loader logs through SHAInet's Log, which writes to the same handle without
+  # going through the agent at all. A row counter that is wrong once stays wrong, and the bar then
+  # overwrites real output.
+  #
+  # With a region, the bar also does not need redrawing when output scrolls: scrolling happens inside
+  # the region and leaves the last line alone, so a redraw is needed only when the TEXT changes.
+  class StatusBar
+    @text = ""
+    @installed = false
+
+    def initialize(@io : IO::FileDescriptor)
+      @tty = @io.tty?
+    end
+
+    # Reserve the bottom line. Safe to call when not on a tty: it does nothing and every other method
+    # degrades to a no-op, which is the same gate Colorize.enabled uses.
+    def install
+      return unless @tty && (size = term_size)
+      rows, _ = size
+      return if rows < 3            # too short to give a line away
+      @io.print "\e[1;#{rows - 1}r" # scroll region excludes the last row
+      @io.print "\e[#{rows - 1};1H" # put the cursor inside it
+      @io.flush
+      @installed = true
+    end
+
+    # Release the line and restore the terminal. Registered with at_exit, because a process that dies
+    # with a scroll region set leaves the user's shell scrolling in a box.
+    def uninstall
+      return unless @installed
+      @installed = false
+      if size = term_size
+        rows, _ = size
+        @io.print "\e[r"               # full-screen scrolling again
+        @io.print "\e[#{rows};1H\e[2K" # wipe the bar
+        @io.print "\e[?25h"            # cursor visible
+        @io.print "\e[#{rows};1H"
+      end
+      @io.flush
+    end
+
+    def text=(t : String)
+      return if t == @text
+      @text = t
+      draw
+    end
+
+    def hide_cursor
+      @io.print "\e[?25l" if @installed
+    end
+
+    def show_cursor
+      @io.print "\e[?25h" if @installed
+    end
+
+    # Re-queries the size on every draw rather than caching it, so a resize is picked up for free.
+    private def draw
+      return unless @installed && (size = term_size)
+      rows, cols = size
+      body = @text.size > cols ? @text[0, cols] : @text.ljust(cols)
+      @io.print "\e7"                # save cursor
+      @io.print "\e[#{rows};1H\e[2K" # go to the bar row, clear it
+      @io.print body.colorize(:dark_gray)
+      @io.print "\e8" # restore cursor
+      @io.flush
+    end
+
+    private def term_size
+      return unless @tty
+      ws = LibWinsize::Winsize.new
+      return if LibWinsize.ioctl(@io.fd, AgentDemo::TIOCGWINSZ, pointerof(ws).as(Void*)) != 0
+      return if ws.ws_row == 0 || ws.ws_col == 0
+      {ws.ws_row.to_i, ws.ws_col.to_i}
+    rescue
+      nil
+    end
+  end
+
+  # Which OS the tools will actually run on.
+  #
+  # The model guessed wrong in practice, reaching for a macOS path on a Linux host, and a wrong guess
+  # here costs a whole tool call to a command that cannot work.
+  def self.host_os : String
+    {% if flag?(:linux) %}
+      "Linux"
+    {% elsif flag?(:darwin) %}
+      "macOS"
+    {% elsif flag?(:win32) %}
+      "Windows"
+    {% else %}
+      "Unix"
+    {% end %}
+  end
+
+  # Change the workspace root at runtime. Realpath'd the same way as at startup, so a symlinked
+  # argument cannot point the sandbox somewhere its label does not say. Must be an existing
+  # directory: a file would make every relative path escape the root.
+  #
+  # Named as a verb rather than as a `workspace=` setter on purpose: it validates and RAISES, and an
+  # assignment that can reject its value reads as though it cannot.
+  def self.switch_workspace!(path : String)
+    resolved = File.realpath(path)
+    raise ArgumentError.new("not a directory: #{path}") unless Dir.exists?(resolved)
+    @@workspace = resolved
   end
 
   # Resolve a model-supplied path. Returns {path, ""} on success and {nil, error_text} on
@@ -195,13 +444,24 @@ module AgentDemo
         if Dir.exists?(path)
           Dir.children(path).sort.map { |e| Dir.exists?(File.join(path, e)) ? "#{e}/" : e }.join("\n")
         else
-          "Error: not a directory: #{raw}"
+          # A miss used to dead-end with just "not a directory", which is what sent a model into a
+          # loop: its real question was "which of these paths exist?", and the error answered
+          # nothing, so it reissued variants -- eventually smuggling a shell command into this
+          # argument. Answer the underlying question instead.
+          AgentDemo.directory_miss_help(raw, path)
         end
       end,
       Tool.new(
         "read_file",
-        "Read the contents of a text file (truncated if very large). Binary files are refused. Paths are relative to the workspace root; an absolute path outside it needs the user to approve that location once.",
-        [ToolParam.new("path", "string", "File path to read.")]
+        "Read a text file. Returns the whole file when it is small, or the lines from start_line to " \
+        "end_line (1-based, inclusive) when given. A large file returns only its first lines plus its " \
+        "total line count -- ask again with a range to see the rest. Prefer `search` to FIND the lines " \
+        "you want and then read that range: reading a whole large file usually costs more context than " \
+        "the answer is worth. Output is line-numbered. Binary files are refused. Paths are relative to " \
+        "the workspace root; an absolute path outside it needs the user to approve that location once.",
+        [ToolParam.new("path", "string", "File path to read."),
+         ToolParam.new("start_line", "integer", "Optional first line to return (1-based).", false),
+         ToolParam.new("end_line", "integer", "Optional last line to return (1-based, inclusive).", false)]
       ) do |args|
         path, err = AgentDemo.safe_path(args["path"]?)
         if path.nil?
@@ -219,18 +479,22 @@ module AgentDemo
             "Error: #{path} looks like a binary file (contains NUL bytes); refusing to read it"
           elsif !c.valid_encoding?
             "Error: #{path} is not valid UTF-8; refusing to read it"
-          elsif c.bytesize > MAX_READ_BYTES
-            "#{c.byte_slice(0, MAX_READ_BYTES)}\n... [truncated]"
           else
-            c
+            AgentDemo.render_file(args["path"]? || path, c,
+              args["start_line"]?.try(&.to_i?), args["end_line"]?.try(&.to_i?))
           end
         end
       end,
       Tool.new(
         "search",
-        "Search files under a directory for a regular-expression pattern (grep-like). Returns file:line matches.",
-        [ToolParam.new("pattern", "string", "Regular expression to search for."),
-         ToolParam.new("path", "string", "Directory or file to search (default: current dir).", false)]
+        "Search file CONTENTS and get back path:line: text for every hit. This is how you find the few " \
+        "ranges worth reading instead of reading whole files — search first, then read_file with " \
+        "start_line/end_line around a hit. Case-insensitive; literal text unless regex is true.",
+        [ToolParam.new("pattern", "string", "Text to find, or a regular expression when regex is true."),
+         ToolParam.new("path", "string", "Directory to search (default: workspace root).", false),
+         ToolParam.new("glob", "string", "Only search files whose name matches this, e.g. '*.cr'.", false),
+         ToolParam.new("context", "string", "Lines of context around each hit, 0-5 (default 0).", false),
+         ToolParam.new("regex", "string", "'true' to treat pattern as a regular expression.", false)]
       ) do |args|
         pat = args["pattern"]? || ""
         next "Error: empty pattern" if pat.empty?
@@ -238,31 +502,24 @@ module AgentDemo
         if root.nil?
           next err
         end
-        begin
-          re = Regex.new(pat)
-        rescue ex
-          next "Error: invalid regex: #{ex.message}"
+        ctx = Math.min(5, Math.max(0, (args["context"]? || "0").to_i? || 0))
+        rx = (args["regex"]? || "").downcase == "true"
+        AgentDemo.search_contents(root, pat, args["glob"]?, ctx, rx)
+      end,
+      Tool.new(
+        "glob",
+        "List FILES BY NAME matching a glob, e.g. '**/*.cr' or 'src/**/gguf*.cr'. Use it to see what " \
+        "exists before reading anything; it returns paths only, never file contents.",
+        [ToolParam.new("pattern", "string", "Glob pattern, e.g. '**/*.cr'."),
+         ToolParam.new("path", "string", "Directory to search from (default: workspace root).", false)]
+      ) do |args|
+        pat = args["pattern"]? || ""
+        next "Error: empty pattern" if pat.empty?
+        root, err = AgentDemo.safe_path(args["path"]? || ".")
+        if root.nil?
+          next err
         end
-        files = Dir.exists?(root) ? Dir.glob(File.join(root, "**", "*")) : [root]
-        results = [] of String
-        files.each do |f|
-          break if results.size >= 100
-          next if Dir.exists?(f) || !File.exists?(f) || File.size(f) > 2_000_000
-          begin
-            File.read_lines(f).each_with_index do |line, i|
-              if re.matches?(line)
-                # Report paths relative to the workspace: absolute ones leak the host layout
-                # into the transcript and are not what the model may pass back.
-                rel = f.starts_with?("#{AgentDemo.workspace}/") ? f[(AgentDemo.workspace.size + 1)..] : f
-                results << "#{rel}:#{i + 1}: #{line.strip}"
-                break if results.size >= 100
-              end
-            end
-          rescue
-            # skip unreadable/binary files
-          end
-        end
-        results.empty? ? "No matches." : results.join("\n")
+        AgentDemo.glob_files(root, pat)
       end,
       Tool.new(
         "write_file",
@@ -289,6 +546,100 @@ module AgentDemo
         Dir.mkdir_p(File.dirname(path))
         File.write(path, content)
         "Wrote #{content.bytesize} bytes to #{rel}"
+      end,
+      Tool.new(
+        "current_dir",
+        "Show the workspace root that every relative path resolves against, the host OS, and what is " \
+        "directly inside it. Call this if you are unsure where you are — never search the filesystem " \
+        "to find out.",
+        [] of ToolParam
+      ) do |_args|
+        ws = AgentDemo.workspace
+        entries = begin
+          Dir.children(ws).reject(&.starts_with?('.')).sort!
+        rescue
+          [] of String
+        end
+        shown = entries.first(40)
+        more = entries.size > shown.size ? " … and #{entries.size - shown.size} more" : ""
+        "workspace: #{ws}\nhost: #{AgentDemo.host_os}\ncontains (#{entries.size}): #{shown.join(", ")}#{more}"
+      end,
+      Tool.new(
+        "insert_lines",
+        "INSERT new lines into a file after a given line number, without touching anything already " \
+        "there. Use this for ADDING code — it is safer than replace_lines for an addition, because " \
+        "nothing existing has to be retyped. Pass after_line 0 to insert at the very top of the file.",
+        [ToolParam.new("path", "string", "File path to edit."),
+         ToolParam.new("after_line", "string", "Insert after this line number; 0 means before line 1."),
+         ToolParam.new("content", "string", "Lines to insert.")]
+      ) do |args|
+        path, err = AgentDemo.safe_path(args["path"]?)
+        if path.nil?
+          next err
+        end
+        next "Error: #{args["path"]?} does not exist" unless File.exists?(path)
+        at = (args["after_line"]? || "").to_i?
+        next "Error: after_line must be an integer" if at.nil?
+        body = File.read(path)
+        lines = body.split('\n')
+        total = lines.size
+        total -= 1 if total > 0 && lines[-1].empty? && body.ends_with?('\n')
+        next "Error: after_line #{at} is outside #{args["path"]?} (#{total} lines)" if at < 0 || at > total
+        added = (args["content"]? || "").split('\n')
+        next "Declined by user." unless AgentDemo.confirm?("insert #{added.size} line(s) after line #{at} of #{args["path"]?}")
+        File.write(path, (lines[0, at] + added + lines[at..]).join('\n'))
+        "Inserted #{added.size} line(s) after line #{at} in #{args["path"]?}. " \
+        "Lines after that point have shifted down by #{added.size}; the file is now #{total + added.size} lines."
+      end,
+      Tool.new(
+        "replace_lines",
+        "Replace a RANGE OF LINES in a file, addressed by number (1-based, inclusive) — you never have " \
+        "to reproduce the existing text. Prefer this over edit_file and apply_patch when search or " \
+        "read_file has already told you the line numbers. Pass the same number twice to replace one " \
+        "line, and an empty content to delete the range.",
+        [ToolParam.new("path", "string", "File path to edit."),
+         ToolParam.new("start_line", "string", "First line to replace (1-based, inclusive)."),
+         ToolParam.new("end_line", "string", "Last line to replace (1-based, inclusive)."),
+         ToolParam.new("content", "string", "Replacement text for those lines (may be several lines; empty deletes them).")]
+      ) do |args|
+        path, err = AgentDemo.safe_path(args["path"]?)
+        if path.nil?
+          next err
+        end
+        next "Error: #{args["path"]?} does not exist" unless File.exists?(path)
+        s = (args["start_line"]? || "").to_i?
+        e = (args["end_line"]? || "").to_i?
+        next "Error: start_line and end_line must be integers" if s.nil? || e.nil?
+        body = File.read(path)
+        lines = body.split('\n')
+        # A trailing newline makes split produce a final empty element; it is not a line the user can
+        # address, and counting it would put every range off by one at the end of the file.
+        total = lines.size
+        total -= 1 if total > 0 && lines[-1].empty? && body.ends_with?('\n')
+        next "Error: start_line #{s} is outside #{args["path"]?} (#{total} lines)" if s < 1 || s > total
+        next "Error: end_line #{e} is before start_line #{s}" if e < s
+        e = total if e > total
+
+        replacement = args["content"]? || ""
+        before = lines[0, s - 1]
+        after = lines[e..]
+        middle = replacement.empty? ? [] of String : replacement.split('\n')
+        preview = "#{s}-#{e} of #{args["path"]?} → #{middle.size} line(s)"
+        next "Declined by user." unless AgentDemo.confirm?("replace lines #{preview}")
+        File.write(path, (before + middle + after).join('\n'))
+        # State the shift explicitly. Left to work it out, the model computed the drift after its first
+        # edit twice and got a different answer each time, then re-ran search before every later edit to
+        # recover the numbers. Line-addressed editing is only cheap if the tool keeps the accounting.
+        delta = middle.size - (e - s + 1)
+        shift = if delta == 0
+                  "Line numbers are unchanged."
+                elsif delta > 0
+                  "Lines after #{e} have shifted DOWN by #{delta}."
+                else
+                  "Lines after #{e} have shifted UP by #{-delta}."
+                end
+        "Replaced lines #{s}-#{e} with #{middle.size} line(s) in #{args["path"]?}. " \
+        "#{shift} The file is now #{total + delta} lines."
       end,
       Tool.new(
         "edit_file",
@@ -406,6 +757,7 @@ module AgentDemo
       @tool_chars = 0
       @spin = 0
       @status_shown = false
+      @status_width = 0
     end
 
     def feed(text : String)
@@ -445,8 +797,15 @@ module AgentDemo
       if @mode == :tool
         @tool_chars += t.size
         @spin = (@spin + 1) % SPINNER.size
-        @io.print "\r  #{"#{SPINNER[@spin]} writing tool call… (#{@tool_chars} chars)".colorize(:dark_gray)}"
+        status = "  #{SPINNER[@spin]} writing tool call… (#{@tool_chars} chars)"
+        @io.print "\r#{status.colorize(:dark_gray)}"
         @io.flush
+        # Remember how wide this actually was. The erase used to be a hardcoded 36, which is exactly
+        # the width at a five-digit count and one short from six digits on -- so a tool call over
+        # 99,999 characters, which an apply_patch of a large file reaches, left residue on the line.
+        # Tracking the real width also means the string above can be reworded without silently
+        # breaking the erase.
+        @status_width = status.size if status.size > @status_width
         @status_shown = true
         return
       end
@@ -466,7 +825,7 @@ module AgentDemo
     # Erase the in-progress status line (so following output starts clean).
     private def clear_status
       return unless @status_shown
-      @io.print "\r" + (" " * 36) + "\r"
+      @io.print "\r" + (" " * @status_width) + "\r"
       @io.flush
       @status_shown = false
     end
@@ -493,7 +852,403 @@ module AgentDemo
     end
   end
 
-  # Extract <tool_call><function=NAME><parameter=K>V</parameter>...</function></tool_call> blocks.
+  # Bytes above which a whole-file read returns a head plus a line count instead of the file.
+  #
+  # The old tool truncated at MAX_READ_BYTES mid-line and said only "... [truncated]" -- no total, no
+  # hint that a range was possible -- so the model could not do better even in principle. Observed on
+  # a 2000-line source file: one read_file spent 16124 tokens, a quarter of a 64K window, to answer a
+  # question an outline would have served.
+  #
+  # The design is ported from bar-bot's coding agent, which had already solved this in Crystal, and it
+  # matches what a survey of established harnesses found: they enforce context economy through BOUNDED
+  # READ DEFAULTS in the tool itself rather than through a "grep before reading" rule in the system
+  # prompt. A rule the model may ignore is weaker than a tool that cannot overspend.
+  LARGE_FILE_BYTES = 20_000
+  HEAD_LINES       =    200
+
+  # Directories never worth walking for source. A plain "**/*" walk of this repo descends into .git
+  # (thousands of loose objects), into lib/ (every installed shard's full source) and into any build
+  # output, which is slow and buries the real hits.
+  NOISE_DIRS = {".git", "node_modules", "dist", "build", "vendor", "target", ".cache", "lib", "bin", ".shards"}
+
+  # Most matching lines returned before the rest are summarized as a count.
+  MAX_MATCHES = 120
+
+  private def self.noise_path?(rel : String) : Bool
+    rel.split('/').any? { |seg| NOISE_DIRS.includes?(seg) }
+  end
+
+  private def self.relativize(path : String) : String
+    ws = workspace
+    path.starts_with?("#{ws}/") ? path[(ws.size + 1)..] : path
+  end
+
+  # Set by the SIGINT handler, read by the generation loop.
+  #
+  # Ctrl-C used to kill the process outright, which on this model means losing a loaded 9 GB of
+  # weights, the KV cache and the whole conversation because a turn went somewhere unhelpful -- and a
+  # 27B prefill takes long enough that wanting out mid-turn is routine, not exceptional. A flag the
+  # decoder checks each token turns that into abandoning one turn.
+  @@cancelled = false
+
+  # Whether a turn is in flight. The SIGINT handler needs this to decide between cancelling the turn
+  # and treating the press as "I want out": the same key means different things at a prompt and
+  # mid-generation, and guessing wrong either strands the user or discards their work.
+  @@generating = false
+
+  def self.generating? : Bool
+    @@generating
+  end
+
+  def self.generating=(v : Bool)
+    @@generating = v
+  end
+
+  def self.cancelled? : Bool
+    @@cancelled
+  end
+
+  def self.cancel!
+    @@cancelled = true
+  end
+
+  def self.clear_cancel!
+    @@cancelled = false
+  end
+
+  # Bracketed paste. A terminal told to enable it wraps pasted text in these markers, which is the
+  # only reliable way to tell "the user pasted four lines" from "the user sent four messages" --
+  # timing heuristics misfire on a slow terminal and on a fast typist alike.
+  PASTE_START = "\e[200~"
+  PASTE_END   = "\e[201~"
+
+  def self.enable_bracketed_paste
+    return unless STDIN.tty?
+    STDERR.print "\e[?2004h"
+    STDERR.flush
+  end
+
+  def self.disable_bracketed_paste
+    return unless STDIN.tty?
+    STDERR.print "\e[?2004l"
+    STDERR.flush
+  end
+
+  # Read one submission, joining a bracketed paste into a single multi-line string.
+  #
+  # Plain `gets` ends the turn at the first newline, so pasting a stack trace or a code block sent the
+  # first line as the prompt and left the rest queued as separate turns -- the model answered a
+  # fragment while the remainder arrived as nonsense follow-ups. Returns nil on EOF (Ctrl-D).
+  def self.read_submission : String?
+    line = gets
+    return if line.nil?
+
+    unless line.includes?(PASTE_START)
+      return line.chomp
+    end
+
+    # Everything from the marker onward is pasted content; keep reading until the closing marker.
+    buf = [] of String
+    first = line.split(PASTE_START, 2)[1]
+    if first.includes?(PASTE_END)
+      return first.split(PASTE_END, 2)[0].chomp
+    end
+    buf << first.chomp
+    while nxt = gets
+      if nxt.includes?(PASTE_END)
+        buf << nxt.split(PASTE_END, 2)[0]
+        break
+      end
+      buf << nxt.chomp
+    end
+    text = buf.join("\n")
+    lines = text.count('\n') + 1
+    STDERR.puts "  #{"pasted #{lines} line(s), #{text.bytesize} B".colorize(:dark_gray)}" if lines > 1
+    text
+  end
+
+  # One dimmed line describing what a tool returned.
+  #
+  # Results previously went only into the model's context, so the human watching saw the CALL and then
+  # nothing: a read that came back empty, a search that matched nothing, and a search that matched a
+  # hundred lines were indistinguishable on screen. That is the difference between watching an agent
+  # work and watching a spinner. An error shows its first line, because the reason a retry is happening
+  # is exactly what a person needs in order to intervene.
+  def self.summarize_result(result : String) : String
+    first = result.lines.first?.to_s.strip
+    return "↳ (empty)" if result.strip.empty?
+    if first.starts_with?("Error")
+      return "↳ #{first[0, 100]}"
+    end
+    lines = result.count('\n') + 1
+    kb = result.bytesize >= 1024 ? " · #{(result.bytesize / 1024.0).round(1)} KB" : " · #{result.bytesize} B"
+    # A file read already states its own range in the header, and a no-match search says so; echoing
+    # a line count over those adds nothing, so show their own first line instead.
+    if first.starts_with?("// ") || first.starts_with?("No matches") || first.starts_with?("No files")
+      "↳ #{first[0, 100]}"
+    else
+      "↳ #{lines} line(s)#{kb}"
+    end
+  end
+
+  # Structural regex metacharacters. A bare '.' is deliberately NOT here: it appears in almost every
+  # literal search ("agent.cr", "File.read") and as a regex it still matches the literal, so treating
+  # it as an intent signal would fire constantly for no gain.
+  REGEX_METACHARS = /[|()\[\]+*?{}^$]/
+
+  # Search file contents, returning "path:line: text" lines.
+  #
+  # git grep first: it is far faster than walking the tree in-process and it honours .gitignore, so
+  # generated and vendored files do not drown the real hits. It is not always available -- the
+  # workspace may not be a repo, or git may not be installed -- so the in-process walk stays as the
+  # fallback rather than as dead code, and both paths are held to the same output budget.
+  #
+  # A zero-hit LITERAL search whose pattern looks like a regex is retried as one. Matching literally by
+  # default is right -- it cannot produce surprising hits -- but observed behaviour is that the model
+  # writes an alternation without setting regex and then misreads the empty result: in one session it
+  # searched "puts|print|colorize|…", got nothing, concluded the path parameter rejects files (it does
+  # not -- that same query matches 46 lines), changed the path AND dropped the alternation together,
+  # and credited the wrong change. Two calls wasted and a false belief to reason from. The retry only
+  # ever fires when the strict answer was already empty, so it cannot mask a real result, and it says
+  # what it did so the next call is better formed.
+  def self.search_contents(root : String, pattern : String, glob : String?,
+                           context : Int32, regex : Bool) : String
+    hit = git_grep(root, pattern, glob, context, regex)
+    hit ||= walk_grep(root, pattern, glob, context, regex)
+    return hit unless hit == "No matches." && !regex && pattern.matches?(REGEX_METACHARS)
+
+    retried = git_grep(root, pattern, glob, context, true) ||
+              walk_grep(root, pattern, glob, context, true)
+    return hit if retried == "No matches."
+    "(no literal match; retried as a regular expression — pass regex=true to do this directly)\n#{retried}"
+  end
+
+  # Returns nil when git grep could not run, so the caller falls back.
+  private def self.git_grep(root : String, pattern : String, glob : String?,
+                            context : Int32, regex : Bool) : String?
+    rel = relativize(root)
+    args = ["grep", "-nI", "--no-color", "--untracked", "-i"]
+    args += ["-C", context.to_s] if context > 0
+    args << (regex ? "-E" : "-F")
+    args += ["-e", pattern, "--"]
+    if glob && !glob.empty?
+      spec = glob.includes?("/") ? glob : "**/#{glob}"
+      prefix = (rel == "." || rel.empty?) ? "" : "#{rel.rstrip('/')}/"
+      args << ":(glob)#{prefix}#{spec}"
+    elsif rel != "." && !rel.empty?
+      args << rel
+    end
+
+    stdout = IO::Memory.new
+    stderr = IO::Memory.new
+    status = Process.run("git", args, output: stdout, error: stderr, chdir: workspace)
+    # Exit 1 is "no matches", which is a real answer. Anything else (128 = not a repo, or git
+    # missing) means the search did not happen, so say so by returning nil.
+    return unless status.exit_code == 0 || status.exit_code == 1
+    bound_matches(stdout.to_s.lines.map(&.chomp).reject(&.empty?))
+  rescue
+    nil
+  end
+
+  private def self.walk_grep(root : String, pattern : String, glob : String?,
+                             context : Int32, regex : Bool) : String
+    re = begin
+      regex ? Regex.new(pattern, Regex::Options::IGNORE_CASE) : Regex.new(Regex.escape(pattern), Regex::Options::IGNORE_CASE)
+    rescue ex
+      return "Error: invalid regex: #{ex.message}"
+    end
+
+    files = Dir.exists?(root) ? Dir.glob(File.join(root, "**", "*")) : [root]
+    hits = [] of String
+    files.each do |f|
+      break if hits.size >= MAX_MATCHES
+      rel = relativize(f)
+      next if noise_path?(rel)
+      next if Dir.exists?(f) || !File.exists?(f) || File.size(f) > 2_000_000
+      next if glob && !glob.empty? && !File.match?(glob.includes?("/") ? glob : "**/#{glob}", rel)
+      begin
+        lines = File.read_lines(f)
+        lines.each_with_index do |line, i|
+          next unless re.matches?(line)
+          lo = Math.max(0, i - context)
+          hi = Math.min(lines.size - 1, i + context)
+          (lo..hi).each { |j| hits << "#{rel}:#{j + 1}: #{lines[j].strip}" }
+          break if hits.size >= MAX_MATCHES
+        end
+      rescue
+        # unreadable or binary
+      end
+    end
+    bound_matches(hits)
+  end
+
+  # Hold match output to the same budget as a file read: long lines cut, total bounded, and the
+  # overflow reported as a count with the remedy rather than silently dropped.
+  private def self.bound_matches(lines : Array(String)) : String
+    return "No matches." if lines.empty?
+    kept = lines.first(MAX_MATCHES)
+    body = kept.map do |l|
+      l.size > MAX_LINE_CHARS ? "#{l[0, MAX_LINE_CHARS]} …[+#{l.size - MAX_LINE_CHARS} chars]" : l
+    end
+    text = body.join("\n")
+    if text.bytesize > LARGE_FILE_BYTES
+      acc = [] of String
+      used = 0
+      body.each do |l|
+        break if used + l.bytesize + 1 > LARGE_FILE_BYTES
+        used += l.bytesize + 1
+        acc << l
+      end
+      text = acc.join("\n")
+      return "#{text}\n… output truncated at #{acc.size} of #{lines.size} matching lines; narrow the pattern, the glob or the path."
+    end
+    if lines.size > kept.size
+      "#{text}\n… and #{lines.size - kept.size} more matches; narrow the pattern, the glob or the path."
+    else
+      text
+    end
+  end
+
+  # Find files by NAME. Returns paths only, so the model can pick what to read.
+  def self.glob_files(root : String, pattern : String) : String
+    spec = File.join(root, pattern)
+    found = Dir.glob(spec).reject do |p|
+      rel = relativize(p)
+      noise_path?(rel) || Dir.exists?(p)
+    end
+    return "No files match #{pattern}." if found.empty?
+    rels = found.map { |p| relativize(p) }.sort!
+    shown = rels.first(MAX_MATCHES)
+    head = "#{rels.size} file(s) match #{pattern}"
+    body = shown.join("\n")
+    if rels.size > shown.size
+      "#{head} (showing #{shown.size}):\n#{body}\n… narrow the pattern to see the rest."
+    else
+      "#{head}:\n#{body}"
+    end
+  end
+
+  # Longest tool argument value shown on the call line.
+  #
+  # The call line used to print every argument through `inspect` in full, so a write_file or
+  # apply_patch carrying a whole file scrolled the entire payload past the user -- the one moment they
+  # most need to SEE what is about to happen is the moment the screen fills with it. The name and the
+  # size are what a person checks; the body is already shown by the confirmation diff.
+  ARG_PREVIEW_CHARS = 72
+
+  # Format tool-call arguments for the one-line display: short values verbatim, long ones cut with
+  # their real size, so a large patch reads as "patch=\"*** Begin Patch…\" (+4182 chars)".
+  def self.format_args(args : Hash(String, String)) : String
+    args.map do |k, v|
+      if v.size > ARG_PREVIEW_CHARS
+        "#{k}=#{v[0, ARG_PREVIEW_CHARS].inspect} (+#{v.size - ARG_PREVIEW_CHARS} chars)"
+      else
+        "#{k}=#{v.inspect}"
+      end
+    end.join(", ")
+  end
+
+  # Longest single line returned before it is cut.
+  #
+  # A line-count cap alone does NOT bound the response: 200 lines of minified JavaScript, generated
+  # code or an embedded data blob is still enormous, so the head limit above would be satisfied while
+  # the budget was blown anyway. Claude Code truncates each line to 2000 characters for this reason.
+  # 500 is tighter because our window is 64K rather than 200K, and a source line past 500 characters
+  # is nearly always machine-written.
+  MAX_LINE_CHARS = 500
+
+  # Render a file for the model: line-numbered, with a header saying which lines these are of how many.
+  #
+  # The header is what makes paging possible. A model that sees "lines 1-200 of 2093" knows both that
+  # there is more and exactly how to ask for it; one handed a silent truncation knows neither.
+  def self.render_file(display_path : String, content : String,
+                       start_line : Int32?, end_line : Int32?) : String
+    lines = content.split('\n')
+    total = lines.size
+
+    if start_line || end_line
+      s = Math.max(1, start_line || 1)
+      e = Math.min(total, end_line || total)
+      return "Error: line #{s} is past the end of #{display_path} (#{total} lines)" if s > total
+      return "Error: end_line #{e} is before start_line #{s}" if e < s
+      kept = fit_lines(lines, s - 1, e - s + 1)
+      last = s + kept - 1
+      note = last < e ? "; clipped at line #{last} to stay inside the context budget, ask for the rest" : ""
+      return "// #{display_path} — lines #{s}-#{last} of #{total}#{note}\n" \
+             "#{number_lines(lines[(s - 1), kept], s, last)}"
+    end
+
+    if content.bytesize > LARGE_FILE_BYTES
+      kept = fit_lines(lines, 0, HEAD_LINES)
+      "// #{display_path} — lines 1-#{kept} of #{total}; file is large, so this is only the head. " \
+      "Call read_file again with start_line/end_line for a specific range, or use search to locate " \
+      "what you need first.\n#{number_lines(lines[0, kept], 1, kept)}"
+    else
+      "// #{display_path} — #{total} lines\n#{number_lines(lines, 1, total)}"
+    end
+  end
+
+  # How many lines starting at `from` fit inside the byte budget, up to `want` of them.
+  #
+  # A line COUNT cap does not bound the response on its own, and neither does a per-line cap: 200
+  # lines of 500 characters is still 100 KB, about 26K tokens, which would defeat the whole point on a
+  # 64K window. Only counting the bytes actually does it. Measured on 400 lines of 2000 characters --
+  # the shape of minified or generated code -- this is what takes an 800 KB file to a bounded reply
+  # instead of a 104 KB one.
+  #
+  # At least one line is always returned, so a single enormous line still yields something rather than
+  # an empty response.
+  private def self.fit_lines(lines : Array(String), from : Int32, want : Int32) : Int32
+    budget = LARGE_FILE_BYTES
+    used = 0
+    kept = 0
+    while kept < want && (from + kept) < lines.size
+      line = lines[from + kept]
+      cost = Math.min(line.bytesize, MAX_LINE_CHARS) + 10 # +10 for the "NNNN | " gutter
+      break if kept > 0 && used + cost > budget
+      used += cost
+      kept += 1
+    end
+    kept
+  end
+
+  private def self.number_lines(slice : Array(String), from : Int32, upto : Int32) : String
+    width = upto.to_s.size
+    slice.map_with_index do |line, i|
+      shown = if line.size > MAX_LINE_CHARS
+                "#{line[0, MAX_LINE_CHARS]} …[+#{line.size - MAX_LINE_CHARS} chars]"
+              else
+                line
+              end
+      "#{(from + i).to_s.rjust(width)} | #{shown}"
+    end.join("\n")
+  end
+
+  # Did this reply START a tool call without finishing it?
+  #
+  # This is the precise signal, and it beats guessing from prose. The observed failure was the model
+  # emitting its preamble inside a <think> block and then getting 81 characters into the call before
+  # generation stopped -- right after </parameter>, with </function></tool_call> missing. The parser
+  # needs the closing tag, so it returned nothing and the loop treated a half-written call as the
+  # final answer.
+  #
+  # Counting the tags is unambiguous where prose heuristics are not: an earlier version of this looked
+  # for "let's" / "i'll" openers and missed the real case entirely, because once the <think> block was
+  # stripped the remaining text began with "<tool_call>".
+  def self.truncated_tool_call?(text : String) : Bool
+    opens = text.split("<tool_call>").size - 1
+    closes = text.split("</tool_call>").size - 1
+    opens > closes
+  end
+
+  # Did the model reply with nothing usable at all -- no call, no answer?
+  #
+  # Distinct from a truncated call: here it never started one and said nothing either, so there is
+  # nothing to salvage and nothing to show the user.
+  def self.empty_reply?(visible : String) : Bool
+    visible.strip.empty?
+  end
+
   def self.parse_tool_calls(text : String) : Array(ToolCall)
     text = text.scrub # never run regex on invalid UTF-8 (broken-model output)
     calls = [] of ToolCall
@@ -518,11 +1273,16 @@ module AgentDemo
     @nl : Array(Int32)
     @stop_ids : Array(Int32)
     @system_block : String
+
+    # Optional bottom-line status bar. Nil when not on a tty, so every update site can call it
+    # unconditionally without a second tty check.
+    property status_bar : AgentDemo::StatusBar? = nil
     @messages : Array(Message)
+    @recent_calls : Array(String)
     @sampler : SHAInet::Sampler
     getter max_context : Int32
 
-    def initialize(@net : SHAInet::Network, @tokenizer : SHAInet::BPETokenizer, @tools : Array(Tool), @max_context : Int32 = 16384)
+    def initialize(@net : SHAInet::Network, @tokenizer : SHAInet::BPETokenizer, @tools : Array(Tool), @max_context : Int32 = 65536)
       im_start = @tokenizer.vocab["<|im_start|>"]?
       im_end = @tokenizer.vocab["<|im_end|>"]?
       raise "model is not ChatML (<|im_start|>/<|im_end|> missing); this agent targets Qwen3-style models" unless im_start && im_end
@@ -532,6 +1292,7 @@ module AgentDemo
       @stop_ids = [@im_end]
       ["<|endoftext|>", "<|end_of_text|>"].each { |n| (id = @tokenizer.vocab[n]?) && @stop_ids << id }
       @system_block = AgentDemo.render_tools_block(@tools)
+      @recent_calls = [] of String
       @sampler = SHAInet::Sampler.new(temperature: 0.3, top_k: 20, repetition_penalty: 1.1)
       @messages = [] of Message
     end
@@ -559,7 +1320,17 @@ module AgentDemo
     end
 
     private def build_prompt : Array(Int32)
-      ids = render_message("system", @system_block)
+      # The workspace is appended HERE rather than baked into @system_block, which is built once at
+      # construction: /workspace can change the root mid-session, and a stale root in the system
+      # message is worse than none.
+      #
+      # Stating it at all matters because the model does not otherwise know where it is. Observed: it
+      # tried `cd /Users/...` -- a macOS path, on Linux -- and then `find / -name agent.cr`, a scan of
+      # the entire filesystem, to work out its own location. Every path it handles is relative to this
+      # directory, so it is the one fact the prompt cannot afford to omit.
+      ids = render_message("system", "#{@system_block}\n\n<WORKSPACE>\nAll relative paths resolve " \
+                                     "against #{AgentDemo.workspace}\nThis is a #{AgentDemo.host_os} host. You are already in that " \
+                                     "directory — do not cd to it, and never search the filesystem for it.\n</WORKSPACE>")
       @messages.each do |m|
         if m.role == "tool"
           ids.concat(render_message("user", "<tool_response>\n#{m.content}\n</tool_response>"))
@@ -734,14 +1505,32 @@ module AgentDemo
         tail = prompt[shared..]
         STDERR.puts "  reusing #{reused} cached tok · prefilling #{tail.size}".colorize(:dark_gray)
         logits = run_prefill(tail, reused, prompt.size)
-        @cache_ids = prompt.dup
+        record_prefilled(prompt)
         logits
       else
         STDERR.puts "  prefilling #{prompt.size} tok from scratch".colorize(:dark_gray) if prompt.size > 512
         reset_cache!
         logits = run_prefill(prompt, 0, prompt.size)
-        @cache_ids = prompt.dup
+        record_prefilled(prompt)
         logits
+      end
+    end
+
+    # Record what the KV cache now holds -- unless the prefill was interrupted, in which case throw the
+    # cache away.
+    #
+    # An interrupted prefill leaves the cache holding FEWER tokens than the prompt, so claiming the
+    # whole prompt would make the next turn "reuse" a prefix that is not physically there. That is
+    # silent corruption of the kind this codebase has already produced once (a clear_cache! that missed
+    # the recurrent blocks), and it is the exact hole an audit flagged as the next one of its family:
+    # nothing asserts that a prefix reuser's cache length matches the prefix it claims. An aborted turn
+    # does not need to be fast, it needs to leave the next one correct.
+    private def record_prefilled(prompt : Array(Int32))
+      if AgentDemo.cancelled?
+        reset_cache!
+        STDERR.puts "  #{"cache cleared after the interrupted prefill".colorize(:dark_gray)}"
+      else
+        @cache_ids = prompt.dup
       end
     end
 
@@ -753,6 +1542,14 @@ module AgentDemo
       logits = nil
       i = 0
       t0 = Time.monotonic
+      # Per-layer progress callback
+      @net.prefill_progress = ->(layer_idx : Int32, total_layers : Int32) do
+        elapsed = (Time.monotonic - t0).total_seconds
+        pct = layer_idx * 100 // total_layers
+        STDERR.print "\r  prefill layer #{layer_idx}/#{total_layers} (#{pct}%) · #{elapsed.round(0).to_i}s".colorize(:dark_gray)
+        STDERR.flush
+        nil
+      end
       while i < ids.size
         n = Math.min(slice, ids.size - i)
         logits = @net.run(ids[i, n], stealth: true, return_matrix: true).as(SHAInet::SimpleMatrix)
@@ -761,7 +1558,18 @@ module AgentDemo
         elapsed = (Time.monotonic - t0).total_seconds
         STDERR.print "\r  prefill #{done}/#{total} tok (#{done * 100 // total}%) · #{elapsed.round(0).to_i}s".colorize(:dark_gray)
         STDERR.flush
+        # Prefill is the OTHER long blocking phase, and the one most worth escaping: a cold 60K prefill
+        # runs for minutes, and realizing the prompt was wrong 20 seconds in should not mean waiting it
+        # out. Same reason as the decode loop -- without a yield the signal fiber never runs -- and the
+        # cost is one yield per chunk, not per token.
+        Fiber.yield
+        if AgentDemo.cancelled?
+          STDERR.print "\r\033[K"
+          STDERR.puts "  #{"interrupted during prefill".colorize(:yellow)}"
+          break
+        end
       end
+      @net.prefill_progress = nil
       STDERR.print "\r\033[K"
       logits.not_nil!
     end
@@ -773,18 +1581,68 @@ module AgentDemo
       generated = [] of Int32
       renderer = echo ? AgentDemo::StreamRenderer.new(STDERR) : nil
       prev = ""
+      gen_started = Time.instant
       max_tokens.times do
+        # Let the scheduler run the signal-handling fiber.
+        #
+        # Without this the Ctrl-C handler NEVER RUNS. Crystal catches the signal in a C handler that
+        # only writes to a pipe; the block registered with Process.on_terminate is invoked by a
+        # dedicated fiber reading that pipe. This loop is single-threaded and CPU/GPU bound with no
+        # other yield point, so the scheduler never gets control and that fiber never runs -- measured
+        # directly: 40 iterations of heavy compute with a signal already pending, handler never fired;
+        # the same loop with this line fired on the first iteration. The earlier version of this
+        # feature was therefore inert, and pressing Ctrl-C repeatedly did nothing until SIGQUIT dumped
+        # core.
+        #
+        # Costs 786 ns, against roughly 85 ms per token.
+        Fiber.yield
+        # Abandon the turn on Ctrl-C. Checked per token rather than per tool step so a long answer
+        # stops promptly; the partial text stays on screen and in history, which is what makes the
+        # next instruction ("no, not that file") land in context that explains itself.
+        if AgentDemo.cancelled?
+          STDERR.puts "\n  #{"interrupted".colorize(:yellow)}"
+          break
+        end
+        # Steering: a line typed during generation stops it and is delivered as the next message.
+        # Polled every 8 tokens rather than every one because it is a syscall, and 8 tokens is well
+        # under a second of latency at this model's speed.
+        if generated.size % 8 == 0 && AgentDemo.poll_steer
+          STDERR.puts "\n  #{"steering".colorize(:cyan)}"
+          break
+        end
+        # Live rate on the bar. This is the number the user actually wants during a long answer, and it
+        # did not exist anywhere before: prefill had a progress line, decode had nothing but the text.
+        if (bar = @status_bar) && generated.size % 8 == 0 && generated.size > 0
+          secs = (Time.instant - gen_started).total_seconds
+          rate = secs > 0 ? generated.size / secs : 0.0
+          bar.text = " ctx #{context_tokens}/#{@max_context} · #{generated.size} tok · " \
+                     "#{rate.round(1)} tok/s · #{secs.round(0).to_i}s"
+        end
         row = logits.rows - 1
-        @sampler.apply_repetition_penalty!(logits, generated, window: 20, row: row)
+        # The repetition penalty must NOT run inside a tool call.
+        #
+        # Tool-call syntax is repetitive BY DESIGN -- <function=read_file> and </function> share the
+        # token "function", every argument repeats <parameter= and </parameter>. With window 20 the
+        # tokens needed to CLOSE the call are still inside the window from opening it, so they get
+        # penalised exactly when they are the only correct choice, and the sampler takes <|im_end|>
+        # instead. Observed: generation stopped 81 characters in, immediately after </parameter>,
+        # leaving </function></tool_call> unwritten and the call unparseable.
+        #
+        # Prose still gets the penalty, which is where it earns its keep.
+        unless AgentDemo.truncated_tool_call?(prev)
+          @sampler.apply_repetition_penalty!(logits, generated, window: 20, row: row)
+        end
         id = @sampler.sample(logits, row)
         break if id < 0 || @stop_ids.includes?(id)
         break unless logits[row, id].finite?
         generated << id
+        # Decoded unconditionally, not just when echoing: the tool-call state above is derived from
+        # it, so a non-echoing call (/ask) needs it too.
+        full = @tokenizer.decode(generated).scrub
         if r = renderer
-          full = @tokenizer.decode(generated).scrub
           r.feed(full[prev.size..]) if full.size > prev.size
-          prev = full
         end
+        prev = full
         logits = @net.run([id], stealth: true, return_matrix: true).as(SHAInet::SimpleMatrix)
         # The sampled token is now in the cache too, so the next turn can reuse it.
         @cache_ids << id
@@ -805,9 +1663,16 @@ module AgentDemo
     # Handle one user input: run the tool loop until the model answers plainly.
     def chat(input : String, max_tokens : Int32)
       @messages << Message.new("user", input)
+      @recent_calls.clear
+      # One OOM recovery per turn: a second failure after compacting is not a transient.
+      compacted_for_oom = false
+      empty_nudges = 0
       step = 0
       loop do
         step += 1
+        # A cancel during a tool step must also end the LOOP, not just the token stream it was in --
+        # otherwise the decoder returns early and the loop calmly starts the next step.
+        break if AgentDemo.cancelled?
         # The LAST allowed step still generates, it just may not call tools. Breaking before
         # generation (which is what this did) threw the turn away: the user got the cap
         # message and no answer, after the agent had already done the work. So tell the model
@@ -837,6 +1702,22 @@ module AgentDemo
         begin
           text, text_ids = generate(max_tokens) # streams the filtered prose inline
         rescue ex
+          # An allocation failure is recoverable, and losing the turn to it is the wrong answer.
+          #
+          # Auto-compaction only triggers above @max_context, but VRAM can run out BELOW it -- a
+          # reported session died at 15401 of 16384 tokens, failing a 64 MB allocation with 79 MB
+          # free, throwing away several minutes of tool work. The cache and context are exactly what
+          # the memory is holding, so drop both hard and try once more before giving up.
+          oom = ex.message.to_s.downcase.includes?("memory allocation") ||
+                ex.message.to_s.downcase.includes?("out of memory")
+          if oom && !compacted_for_oom
+            compacted_for_oom = true
+            reset_cache!
+            removed = compact!((@max_context * 0.5).to_i)
+            STDERR.puts "\n  [agent] out of GPU memory at #{context_tokens + removed} tokens; " \
+                        "compacted to #{context_tokens} (−#{removed}) and retrying".colorize(:yellow)
+            next
+          end
           STDERR.puts "\n  [agent] generation failed: #{ex.message}".colorize(:red)
           STDERR.puts "  (out of GPU memory? try /clear, a shorter request, or a smaller SHAINET_EXPERT_CACHE_MB)".colorize(:dark_gray)
           reset_cache!
@@ -853,13 +1734,79 @@ module AgentDemo
 
         # Keep the assistant's output (incl. any tool_call markup) verbatim.
         @messages << Message.new("assistant", text.strip, text_ids)
+
+        # A steer interrupted this generation: deliver it and go round again, with the partial output
+        # kept above so the model can see what it was doing when it was corrected. No tool calls are
+        # run from a generation that was cut off mid-sentence -- the call may be half-written, and the
+        # user's correction may well be about that very call.
+        if steer = AgentDemo.take_steer
+          @messages << Message.new("user", steer)
+          STDERR.puts "  #{"→ #{steer}".colorize(:cyan)}"
+          next
+        end
+
+        # A short reply with no tool call is almost always a DROPPED call, not an answer.
+        #
+        # This model's own chat template says reasoning may come "in natural language BEFORE the
+        # function call, but NOT after", so a turn that ends on a one-line preamble has stopped in
+        # the middle of the format it was told to use. Observed verbatim: asked to analyse a file,
+        # the model replied "Let's take a look at the file." and ended the turn -- the loop treated
+        # that as the final answer, printed it, and handed the prompt back having done nothing.
+        #
+        # Nudging costs one extra generation; accepting it costs the whole request. Bounded so a
+        # model that genuinely wants to answer briefly is not badgered, and skipped on the last step
+        # where there would be no chance to act on a call anyway.
+        truncated = AgentDemo.truncated_tool_call?(text)
+        if calls.empty? && !last_step && empty_nudges < EMPTY_REPLY_NUDGE_LIMIT &&
+           (truncated || AgentDemo.empty_reply?(visible))
+          empty_nudges += 1
+          if truncated
+            STDERR.puts "  [agent] tool call was cut off mid-write; asking for it again".colorize(:yellow)
+            @messages << Message.new("tool",
+              "Your last reply began a <tool_call> but stopped before closing it, so nothing ran. " \
+              "Send the SAME call again, complete, as the entire reply -- every <parameter> closed, " \
+              "then </function>, then </tool_call>. Write nothing after the closing </tool_call>.")
+          else
+            STDERR.puts "  [agent] reply was empty; asking the model to act or answer".colorize(:yellow)
+            @messages << Message.new("tool",
+              "Your last reply was empty, so nothing ran and the user saw nothing. Either emit a " \
+              "tool call as the entire reply, or give the complete answer.")
+          end
+          next
+        end
+
         break if calls.empty?
         # On the final step the reply IS the answer. Running its tool calls would spend the
         # results and then break on the next iteration, throwing them away unanswered.
         break if last_step
 
         calls.each do |c|
-          STDERR.puts "  #{"⚒ #{c.name}".colorize(:yellow)}(#{c.args.map { |k, v| "#{k}=#{v.inspect}" }.join(", ")})".colorize(:dark_gray)
+          STDERR.puts "  #{"⚒ #{c.name}".colorize(:yellow)}(#{AgentDemo.format_args(c.args)})".colorize(:dark_gray)
+
+          # Break identical repeated calls.
+          #
+          # Nothing else in the loop can. The repetition penalty runs with window 20 over the
+          # CURRENT message's tokens, but a tool call is ~45 tokens and each retry is a separate
+          # generate() call, so the penalty never sees that the same call was already made last
+          # turn. Observed in practice: a model asked for a path that did not exist, then reissued
+          # one malformed list_directory ten times in a row, each round costing a full prefill and
+          # ~94 tokens of context, until the step budget ran out.
+          sig = "#{c.name}(#{c.args.to_a.sort_by(&.[0]).map { |k, v| "#{k}=#{v}" }.join(",")})"
+          repeats = @recent_calls.count(sig)
+          if repeats >= REPEAT_CALL_LIMIT
+            STDERR.puts "  [agent] same call #{repeats + 1}x; telling the model to change approach".colorize(:yellow)
+            @recent_calls.clear
+            @messages << Message.new("tool",
+              "This exact call was already made #{repeats + 1} times and returned the same result " \
+              "each time. Repeating it will not help. Change approach: check the argument against " \
+              "the tool's description (list_directory takes a DIRECTORY path, not a shell command " \
+              "-- use run_command for shell), try a different tool, or answer with what you have " \
+              "and say what you could not determine.")
+            next
+          end
+          @recent_calls << sig
+          @recent_calls.shift if @recent_calls.size > RECENT_CALL_MEMORY
+
           tool = @tools.find { |t| t.name == c.name }
           result =
             if tool
@@ -872,6 +1819,7 @@ module AgentDemo
               "Error: unknown tool #{c.name}"
             end
           @messages << Message.new("tool", clamp_tool_result(result))
+          STDERR.puts "    #{AgentDemo.summarize_result(result).colorize(:dark_gray)}"
         end
       end
     end
@@ -913,7 +1861,20 @@ module AgentDemo
       s << "</parameter>\n</function>\n</tool_call>\n\n"
       s << "<IMPORTANT>\n- Function calls MUST be wrapped in <tool_call></tool_call> with an inner"
       s << " <function=...></function> block.\n- Provide any reasoning BEFORE the call, never after.\n"
-      s << "- If no function is needed, just answer normally.\n</IMPORTANT>"
+      s << "- If no function is needed, just answer normally.\n</IMPORTANT>\n\n"
+      # Locating before reading is the difference between three targeted reads and paging a whole
+      # file. Asked what to improve in a 1389-line file, the model read the head and then every
+      # remaining range in sequence -- five calls, about 24K tokens -- when glob plus search would
+      # have pointed at the handful of ranges that mattered. The bounded read stops any single call
+      # from being huge; only knowing WHERE to look stops the total from being huge.
+      s << "<SEARCH_FIRST>\nTo work on code you have not read, LOCATE before you read:\n"
+      s << "1. glob to see which files exist (e.g. pattern='src/**/*.cr').\n"
+      s << "2. search for the symbol, message or pattern you care about — it returns path:line, and\n"
+      s << "   context=3 shows the surrounding lines.\n"
+      s << "3. read_file with start_line/end_line around the lines search pointed at.\n"
+      s << "Reading a whole large file, or paging one range after another until you have all of it,"
+      s << " spends the context you need for the actual work. Search is cheap; a full read is not.\n"
+      s << "</SEARCH_FIRST>"
     end
   end
 end
@@ -947,11 +1908,31 @@ unless model_dir && (Dir.exists?(model_dir) || File.file?(model_dir.not_nil!))
   exit 1
 end
 
-Colorize.enabled = STDERR.tty?
+# Colour when a human is watching, and only then. A tty is not sufficient on its own: NO_COLOR is the
+# cross-tool convention for "I am a human on a tty and I still do not want escapes" (screen readers,
+# logging a session to a file through `script`, a terminal with a palette that renders dark_gray
+# unreadable), and TERM=dumb terminals do not interpret the sequences at all.
+Colorize.enabled = STDERR.tty? && ENV["NO_COLOR"]?.nil? && ENV["TERM"]? != "dumb"
 STDERR.sync = true # stream tokens as they arrive (no buffering)
 AgentDemo.print_banner(STDERR, "#{File.basename(model_dir)} · local coding agent on Network#run")
 
 STDERR.puts "Loading model from #{model_dir}...".colorize(:dark_gray)
+
+# Decide the context BEFORE loading, and tell the loader about it.
+#
+# These were two independent defaults that happened to agree, and when they stopped agreeing the
+# failure was an OOM mid-conversation rather than anything legible. The loader sizes its VRAM reserve
+# from SHAINET_MAX_CONTEXT so the KV cache has somewhere to grow; the agent separately decided how
+# many tokens it would allow. Loading first and reading the agent's context afterwards meant the
+# reserve was always built for the LOADER's default no matter what the agent went on to permit -- so
+# raising the agent's window silently produced a model with no room for it.
+#
+# 64K is the default because this architecture is built for it (the GGUF declares 262144) and because
+# a 16K window is the difference between an agent that can hold a session and one that compacts every
+# few turns. The loader places what fits and leaves the rest on the host, so a smaller card degrades
+# in speed rather than failing.
+agent_context = (ENV["SHAINET_AGENT_CONTEXT"]? || "65536").to_i
+ENV["SHAINET_MAX_CONTEXT"] ||= agent_context.to_s
 # A 30B takes about nine minutes here. Without a progress line that is indistinguishable
 # from a hang, and the layer loop is where nearly all of it goes.
 load_started = Time.monotonic
@@ -995,7 +1976,8 @@ STDERR.puts "Loaded in #{(Time.monotonic - t0).total_seconds.round(1)}s · #{mod
 # are cached in VRAM for reuse. Dense models (Qwen3.5, Qwen3-0.6B) have no experts to cache,
 # so reserving VRAM for this wastes 2+ GB that could serve KV context instead.
 # Override with SHAINET_EXPERT_CACHE_MB (0 disables).
-max_context = (ENV["SHAINET_AGENT_CONTEXT"]? || "16384").to_i
+# Set before the load, so the loader's VRAM reserve and this window cannot disagree.
+max_context = agent_context
 
 has_moe = net.hidden_layers.any? { |l| l.is_a?(SHAInet::LlamaBlock) && l.as(SHAInet::LlamaBlock).ffn.is_a?(SHAInet::MoEFF) }
 
@@ -1021,12 +2003,50 @@ end
 
 agent = AgentDemo::Agent.new(net, tokenizer, AgentDemo.build_tools, max_context)
 STDERR.puts "Ready · tools: #{AgentDemo.build_tools.map(&.name).join(", ")} · max context #{max_context} tok".colorize(:green)
-STDERR.puts "Commands: /context  /compact  /clear  /ask  /help   (Ctrl-D to exit)".colorize(:dark_gray)
+STDERR.puts "Commands: /context   /compact   /clear   /ask   /workspace   /help    (Ctrl-C interrupts a turn, Ctrl-D exits)".colorize(:dark_gray)
+
+# Ctrl-C interrupts the TURN; twice in a row at an idle prompt exits.
+#
+# The default handler kills the process, which here throws away 9 GB of loaded weights, the KV cache
+# and the conversation -- a brutal price for "not that file". Trapping it means a wrong turn costs the
+# turn. A second press while already idle is an explicit request to leave, so honour it rather than
+# leaving the user hunting for the exit.
+idle_interrupt = false
+Process.on_terminate do |reason|
+  if reason.interrupted?
+    if AgentDemo.generating?
+      AgentDemo.cancel!
+    elsif idle_interrupt
+      STDERR.puts "\nbye 👋".colorize(:cyan)
+      AgentDemo.disable_bracketed_paste
+      exit 0
+    else
+      idle_interrupt = true
+      STDERR.print "\n  #{"press Ctrl-C again to exit, or Ctrl-D".colorize(:dark_gray)}\n#{"You".colorize(:light_green).bold} ❯ "
+    end
+  else
+    # A real termination request (TERM, or the terminal going away) is not a change of mind about one
+    # turn -- do not swallow it into a cancel the user is not there to see.
+    AgentDemo.disable_bracketed_paste
+    exit 0
+  end
+end
+
+AgentDemo.enable_bracketed_paste
+BAR = AgentDemo::StatusBar.new(STDERR)
+BAR.install
+# Registered before the paste reset so the terminal is restored even on an abrupt exit: a process that
+# dies with a scroll region still set leaves the user's shell scrolling inside a box.
+at_exit { BAR.uninstall }
+at_exit { AgentDemo.disable_bracketed_paste }
+agent.status_bar = BAR
 
 loop do
   STDERR.print "\n#{"You".colorize(:light_green).bold} ❯ "
-  input = gets
+  input = AgentDemo.read_submission
   break if input.nil?
+  idle_interrupt = false
+  AgentDemo.clear_cancel!
   input = input.strip
   next if input.empty?
 
@@ -1036,6 +2056,7 @@ loop do
     STDERR.puts "  /compact  summarize + trim the conversation history now".colorize(:dark_gray)
     STDERR.puts "  /clear    reset the conversation".colorize(:dark_gray)
     STDERR.puts "  /ask      revoke 'allow all' and confirm each tool call again".colorize(:dark_gray)
+    STDERR.puts "  /workspace  show the workspace root, or /workspace <dir> to change it".colorize(:dark_gray)
     STDERR.puts "  /help     this message".colorize(:dark_gray)
     next
   when "/ask"
@@ -1064,9 +2085,41 @@ loop do
     agent.reset
     STDERR.puts "  conversation cleared".colorize(:dark_gray)
     next
+  when "/workspace"
+    # No argument: show where the file tools are confined.
+    STDERR.puts "  workspace: #{AgentDemo.workspace}"
+    next
+  when /^\/workspace\s+(.+)$/
+    # Switch the sandbox root. The old root's outside approvals are forgotten with it: they
+    # were granted against a different sandbox, and keeping them would let the new workspace
+    # inherit permissions the user never asked for here.
+    arg = input[/^\/workspace\s+(.+)$/, 1].strip
+    begin
+      AgentDemo.switch_workspace!(arg)
+      outside = AgentDemo::WorkspacePath.approved_outside_count
+      AgentDemo::WorkspacePath.reset_outside_approvals!
+      note = outside > 0 ? " (forgot #{outside} approved path(s) outside the old workspace)" : ""
+      STDERR.puts "  workspace → #{AgentDemo.workspace}#{note}"
+    rescue ex : ArgumentError
+      STDERR.puts "  #{ex.message}"
+    end
+    next
+  else
+    # A mistyped command used to go to the MODEL as an ordinary prompt: "/cotext" spent a whole
+    # generation explaining that it does not know what /cotext means. Anything starting with a slash
+    # was meant for the program, so say it is unknown rather than charging a turn for the typo.
+    if input.starts_with?('/')
+      STDERR.puts "  unknown command #{input.split(' ').first} · try /help".colorize(:dark_gray)
+      next
+    end
   end
 
-  agent.chat(input, max_tokens)
+  AgentDemo.generating = true
+  begin
+    agent.chat(input, max_tokens)
+  ensure
+    AgentDemo.generating = false
+  end
   STDERR.puts "  #{agent.status}".colorize(:dark_gray)
 end
 STDERR.puts "\nbye 👋".colorize(:cyan)

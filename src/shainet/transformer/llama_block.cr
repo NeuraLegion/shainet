@@ -293,11 +293,15 @@ module SHAInet
       return false unless @norm1.device_capable? && @norm2.device_capable?
       return false unless @w_q.is_a?(QuantizedWeight) && @w_k.is_a?(QuantizedWeight) &&
                           @w_v.is_a?(QuantizedWeight) && @w_o.is_a?(QuantizedWeight)
-      # A gated attention layer (Qwen3.5) must decline: apply_attn_gate! is wired into the two
-      # HOST paths only, so the device path would silently drop the gate. It did exactly that,
-      # and the symptom was that a kv-cached generation disagreed with the same prompt run
-      # uncached -- visible only by comparing the two, since each looked plausible alone.
-      return false unless @w_gate_attn.nil?
+      # A gated attention layer (Qwen3.5) used to decline outright, because the gate was applied on
+      # the two HOST paths and the PREFILL device path but NOT in attention_cached_device, which ran
+      # w_o on ungated attention. So the device path silently dropped the gate on every decode step,
+      # and the symptom was that a kv-cached generation disagreed with the same prompt run uncached
+      # -- visible only by comparing the two, since each looked plausible alone.
+      #
+      # attention_cached_device now applies it too, so the requirement is that the gate be
+      # REACHABLE, not absent. It still refuses rather than proceeding ungated.
+      return false unless device_attn_gate_reachable?
       return false unless gpu_attention?
       ffn = @ffn
       case ffn
@@ -464,11 +468,11 @@ module SHAInet
         CUDA.rope_forward(kd.device_ptr.not_nil!, ifr, pos, @num_kv_heads, head_dim, rot_dim)
       end
 
-      # Staging and workspace sized for a single query token.
+      # Staging and workspace sized for a single query token, for whichever attention path is in use.
       @@gpu_staging, @@gpu_staging_cap = grow_dev_buf(@@gpu_staging, @@gpu_staging_cap, 2 * kv_dim + @q_dim)
       @@gpu_attn_out, @@gpu_attn_out_cap = grow_dev_buf(@@gpu_attn_out, @@gpu_attn_out_cap, @q_dim)
       @@gpu_attn_ws, @@gpu_attn_ws_cap = grow_dev_buf(@@gpu_attn_ws, @@gpu_attn_ws_cap,
-        @num_heads * total_len, cap_limit: ATTN_WS_BUDGET_FLOATS.to_i32)
+        attn_ws_floats(1, total_len), cap_limit: ATTN_WS_BUDGET_FLOATS.to_i32)
       ensure_gpu_cache!(total_len, 1)
 
       Profile.measure("attn.dev_append") do
@@ -498,8 +502,24 @@ module SHAInet
         CUDA.memcpy(ao.device_ptr.not_nil!.as(Pointer(Void)), @@gpu_attn_out.as(Pointer(Void)),
           @q_dim.to_u64 * 4_u64, CUDA::MemcpyKind::DeviceToDevice)
         ao.mark_device_dirty!
+        # The gate belongs HERE, between attention and w_o, exactly as the two host paths and the
+        # prefill device path apply it. It was missing: this path ran w_o on ungated attention, so a
+        # Qwen3.5 stack silently lost the gate on every decode step. That is why
+        # block_device_capable? refused a gated layer outright, and why relaxing that refusal
+        # without this line turned 'system' at 24.16 into '2' at 19.42.
+        raise "device attention gate could not be applied" unless apply_device_attn_gate!(x, ao)
         @w_o.as(QuantizedWeight).gemv_into(ao, dst)
       end
+    end
+
+    # Whether the single-token device attention can apply this layer's gate. Checked by
+    # block_device_capable? so a layer whose gate is not reachable declines the device path instead
+    # of running ungated.
+    private def device_attn_gate_reachable? : Bool
+      wg = @w_gate_attn
+      return true if wg.nil?
+      return false unless CUDA.mul_sigmoid_available?
+      wg.is_a?(QuantizedWeight) || (wg.is_a?(CudaMatrix) && wg.rows == @d_model && wg.cols == @q_dim)
     end
 
     # GPU forward — full sequence
@@ -793,6 +813,11 @@ module SHAInet
       aq = attn_ws(@@attn_ws_aq, n, qdim)
 
       max_chunk = attn_chunk_tokens(total_len)
+      # The split path's workspace scales with chunk * splits, so cap the chunk to keep it inside a
+      # fixed budget. Without this the workspace grows with context and no reserve is ever enough.
+      if cap = split_attn_chunk_cap(total_len)
+        max_chunk = cap if cap < max_chunk
+      end
       max_chunk = n if n < max_chunk
       kv_cap = @num_kv_heads * max_chunk * head_dim
       q_cap = max_chunk * qdim
@@ -800,7 +825,12 @@ module SHAInet
       # through here any more.
       @@gpu_staging, @@gpu_staging_cap = grow_dev_buf(@@gpu_staging, @@gpu_staging_cap, 2 * kv_cap)
       @@gpu_attn_out, @@gpu_attn_out_cap = grow_dev_buf(@@gpu_attn_out, @@gpu_attn_out_cap, q_cap)
-      ws_floats = @num_heads * max_chunk * total_len
+      # Sized for whichever attention path use_split_attn? selects. The split path stores per-split
+      # partials (heads * tokens * splits * (head_dim + 2)) instead of a full score row
+      # (heads * tokens * total_len), which at 24 heads, a 256-token chunk and 16k of context is
+      # ~203 MB rather than ~384 MB -- and the score row was the largest single allocation in the
+      # process, the one that OOM'd a 16 GB card at 9.5k tokens.
+      ws_floats = attn_ws_floats(max_chunk, total_len)
       @@gpu_attn_ws, @@gpu_attn_ws_cap = grow_dev_buf(@@gpu_attn_ws, @@gpu_attn_ws_cap, ws_floats)
       ensure_gpu_cache!(total_len, max_chunk)
 
@@ -933,7 +963,16 @@ module SHAInet
     def self.prefill_chunk : Int32
       v = @@prefill_chunk
       return v if v
-      v = (ENV["SHAINET_PREFILL_CHUNK"]? || "8192").to_i
+      # 8192 meant "never chunk in practice", so the attention workspaces sized to the whole prompt
+      # and a long prefill needed VRAM in proportion to it. Measured on Qwen3.8-27B at the 2048 MB
+      # default reserve: a 2048-token prefill FAILED outright with 8192, and completes with 256
+      # leaving 808 MB spare. It is also not slower -- a 1400-token prefill went 20.0 to 25.9 per
+      # second, since a chunk that fits cache beats one that does not.
+      #
+      # The knock-on is layers: the reserve is what decides how many stay on the host, so bounding
+      # the workspace is what lets it come down. At a 1536 MB reserve this places 55 layers instead
+      # of 52 and still survives a 2048-token prefill.
+      v = (ENV["SHAINET_PREFILL_CHUNK"]? || "256").to_i
       v = 1 if v < 1
       @@prefill_chunk = v
       v
@@ -1241,13 +1280,18 @@ module SHAInet
       # workspace at ATTN_WS_BUDGET_FLOATS and also bounds the staging and
       # output buffers, which were previously linear in the full prompt length.
       max_chunk = attn_chunk_tokens(total_len)
+      # The split path's workspace scales with chunk * splits, so cap the chunk to keep it inside a
+      # fixed budget. Without this the workspace grows with context and no reserve is ever enough.
+      if cap = split_attn_chunk_cap(total_len)
+        max_chunk = cap if cap < max_chunk
+      end
       max_chunk = new_tokens if new_tokens < max_chunk
 
       chunk_floats = max_chunk * head_dim   # floats per kv_head per tensor
       kv_cap = @num_kv_heads * chunk_floats # staging size of K (and of V)
       q_cap = max_chunk * dm
       staging_floats = 2 * kv_cap + q_cap
-      ws_floats = @num_heads * max_chunk * total_len
+      ws_floats = attn_ws_floats(max_chunk, total_len)
 
       @@gpu_staging, @@gpu_staging_cap = grow_dev_buf(@@gpu_staging, @@gpu_staging_cap, staging_floats)
       @@gpu_attn_out, @@gpu_attn_out_cap = grow_dev_buf(@@gpu_attn_out, @@gpu_attn_out_cap, q_cap)
@@ -1542,9 +1586,90 @@ module SHAInet
       end
     end
 
+    # Ceiling on the SPLIT attention workspace, in fp32 elements (64 MB).
+    #
+    # The split partials are heads * chunk * splits * (head_dim + 2), and splits grows as
+    # context / ATTN_SPLIT_SCORES -- so at a fixed query chunk the workspace grows with context, just
+    # as the single-block score row did. That is what made a full-context session fail no matter how
+    # large the reserve was: at 15979 tokens the workspace wanted 131 MB (and grow_dev_buf asked for
+    # 148 MB) while 118 MB was free, and every megabyte added to the reserve was absorbed by the same
+    # growth. Holding chunk * splits under a budget makes the workspace CONSTANT in context, which is
+    # what lets the reserve be a fixed term rather than a losing race.
+    ATTN_SPLIT_WS_BUDGET_FLOATS = 16_i64 * 1024 * 1024
+
+    # Largest query chunk that keeps the split workspace inside its budget at this context length.
+    # Returns nil when the split path is not in use, so callers keep attn_chunk_tokens unchanged --
+    # that function's budget arithmetic is pinned by specs and is still correct for the single-block
+    # path.
+    def split_attn_chunk_cap(total_len : Int32) : Int32?
+      return unless use_split_attn?
+      splits = (total_len + ATTN_SPLIT_SCORES_HOST - 1) // ATTN_SPLIT_SCORES_HOST
+      return if splits <= 0
+      per_token = @num_heads.to_i64 * splits.to_i64 * (@head_dim + 2).to_i64
+      return if per_token <= 0
+      n = (ATTN_SPLIT_WS_BUDGET_FLOATS // per_token).to_i32
+      n < 1 ? 1 : n
+    end
+
+    # Mirrors ATTN_SPLIT_SCORES in the CUDA source. Kept here so the chunk cap can be computed
+    # without a device round trip; a mismatch would only make the cap conservative, not wrong.
+    ATTN_SPLIT_SCORES_HOST = 512
+
+    # Whether the split-KV attention path is in use, decided ONCE.
+    #
+    # Sizing and dispatch must agree: the split path needs a partials buffer
+    # (heads * tokens * splits * (head_dim + 2)) while the single-block path needs a full score row
+    # (heads * tokens * total_len), and the score row is far larger. If the workspace were sized for
+    # the split path but a later dispatch fell back to the single-block kernel, that kernel would
+    # write past the end of the buffer. So this predicate is the only place the choice is made, and
+    # both the allocation and the launch read it.
+    private def use_split_attn? : Bool
+      flag = @@use_split_attn
+      return flag unless flag.nil?
+      flag = ENV.fetch("SHAINET_SPLIT_ATTN", "1") != "0" && CUDA.attention_split_kv_available?
+      @@use_split_attn = flag
+      flag
+    end
+
+    @@use_split_attn : Bool? = nil
+
+    # Floats the attention workspace needs for the chosen path.
+    private def attn_ws_floats(tokens : Int32, total_len : Int32) : Int32
+      if use_split_attn?
+        need = CUDA.attention_split_ws_floats(tokens, @num_heads, @head_dim, total_len)
+        return need if need > 0
+      end
+      @num_heads * tokens * total_len
+    end
+
     # Dispatch the attention kernel for the active cache dtype.
+    #
+    # Prefers the split-KV ("flash-decoding") path, which adds the KV length as a grid dimension. The
+    # single-block kernels below parallelize over (head, token) only, so at decode -- one token -- they
+    # run num_heads blocks, about 2.6% of this card, and each block walks the whole KV length while
+    # staging its score row in GLOBAL memory. Measured at the real shape (24 heads, head_dim 256), the
+    # split path is 1.37x at 1k context rising to 6.87x at 14k, and stays nearly FLAT as context grows
+    # (0.298 ms to 0.944 ms across a 14x range) where the single-block kernel scales linearly. With 16
+    # attention layers that is ~104 ms of per-token attention at 14k becoming ~15 ms.
     private def attend_kv(q : Pointer(Float32), n : Int32, base_pos : Int32,
                           heads_per_kv : Int32, scale : Float32)
+      if use_split_attn?
+        ok = if kv_cache_fp16?
+               CUDA.attention_split_kv_f16(q, @gpu_k_cache.as(Pointer(UInt16)),
+                 @gpu_v_cache.as(Pointer(UInt16)), @@gpu_attn_out, @@gpu_attn_ws,
+                 n, base_pos, @num_heads, heads_per_kv, @head_dim, @gpu_cache_cap, scale)
+             else
+               CUDA.attention_split_kv_f32(q, @gpu_k_cache.as(Pointer(Float32)),
+                 @gpu_v_cache.as(Pointer(Float32)), @@gpu_attn_out, @@gpu_attn_ws,
+                 n, base_pos, @num_heads, heads_per_kv, @head_dim, @gpu_cache_cap, scale)
+             end
+        # The workspace was sized for THIS path, so falling through to the single-block kernel would
+        # overrun it. The predicate already confirmed the kernels load, so a false here is a real
+        # fault rather than a capability miss.
+        raise "split-KV attention kernel failed after reporting available" unless ok
+        return
+      end
+
       if kv_cache_fp16?
         CUDA.attention_kv_f16(q, @gpu_k_cache.as(Pointer(UInt16)),
           @gpu_v_cache.as(Pointer(UInt16)), @@gpu_attn_out, @@gpu_attn_ws,
@@ -1556,6 +1681,16 @@ module SHAInet
       end
     end
 
+    # Past this size, stop doubling and grow by a margin instead (fp32 elements; 16M = 64 MB).
+    #
+    # Doubling is free insurance while a buffer is small, but the attention scratch is the largest
+    # single allocation in the process and doubling it wastes VRAM in hundreds of megabytes. Measured
+    # on a 9543-token prefill: the workspace needed 24 heads x 256 chunk x 9543 = 58.6M floats
+    # (234 MB) and the doubling asked for 100.7M (384 MB), which is the allocation that OOM'd a 16 GB
+    # card. Above the threshold there are only a handful of reallocations over a whole run, so the
+    # churn doubling avoids is not worth paying 2x peak for.
+    LARGE_BUF_FLOATS = 16 * 1024 * 1024
+
     # Pure size policy for grow_dev_buf, split out so it can be asserted directly
     # without allocating anything or driving a GPU.
     #
@@ -1565,6 +1700,13 @@ module SHAInet
     # ceiling 2x the stated one. A single request larger than the limit still
     # wins, since under-allocating would corrupt the kernel's writes.
     def self.next_buf_cap(cur_cap : Int32, needed : Int32, cap_limit : Int32? = nil) : Int32
+      if needed >= LARGE_BUF_FLOATS
+        # An eighth of headroom absorbs the next few token-by-token growths without another
+        # allocation, while capping the waste at 12.5% instead of 100%.
+        grown = needed + needed // 8
+        grown = cap_limit if cap_limit && grown > cap_limit
+        return Math.max(needed, grown)
+      end
       doubled = cur_cap * 2
       doubled = cap_limit if cap_limit && doubled > cap_limit
       Math.max(needed, doubled)

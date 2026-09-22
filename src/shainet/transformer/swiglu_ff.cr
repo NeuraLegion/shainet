@@ -44,9 +44,18 @@ module SHAInet
     # Batched workspaces, keyed by {rows, hidden_cols}: prefill tiles to a fixed row
     # count so this stays a handful of buffers rather than one per distinct expert
     # load.
-    @@dev_gate_batch = Hash(Tuple(Int32, Int32), CudaMatrix).new
-    @@dev_up_batch = Hash(Tuple(Int32, Int32), CudaMatrix).new
-    @@dev_hidden_batch = Hash(Tuple(Int32, Int32), CudaMatrix).new
+    # One slot each, not one per shape: see the note in forward_device_batch.
+    @@dev_gate_batch = Hash(Symbol, CudaMatrix).new
+    @@dev_up_batch = Hash(Symbol, CudaMatrix).new
+    @@dev_hidden_batch = Hash(Symbol, CudaMatrix).new
+
+    protected def self.batch_buf(store : Hash(Symbol, CudaMatrix), rows : Int32, cols : Int32) : CudaMatrix
+      if existing = store[:buf]?
+        return existing if existing.rows == rows && existing.cols == cols
+        existing.free!
+      end
+      store[:buf] = CudaMatrix.new(rows, cols)
+    end
 
     # True when this expert can run the fully device-resident path: all three
     # projections quantized onto the device (or host-resident Q4, which streams
@@ -108,10 +117,16 @@ module SHAInet
       hidden_cols = gate_w.cols
       n = xb.rows
 
-      key = {n, hidden_cols}
-      gate_buf = (@@dev_gate_batch[key] ||= CudaMatrix.new(n, hidden_cols))
-      up_buf = (@@dev_up_batch[key] ||= CudaMatrix.new(n, hidden_cols))
-      hidden_buf = (@@dev_hidden_batch[key] ||= CudaMatrix.new(n, hidden_cols))
+      # One buffer per role, reallocated when the row count changes.
+      #
+      # These were keyed by {rows, hidden_cols} and kept a set per distinct sequence length. At
+      # [1400, 17408] each is 97.5 MB, so every new prompt length cost another ~292 MB of VRAM and a
+      # varying-length caller eventually OOM'd -- a 1400-token prefill failed even with a 2048 MB
+      # reserve after a shorter one had run. A generation does one prefill shape then a steady
+      # rows=1 shape, so eviction costs two reallocations and then nothing.
+      gate_buf = SwiGLUFF.batch_buf(@@dev_gate_batch, n, hidden_cols)
+      up_buf = SwiGLUFF.batch_buf(@@dev_up_batch, n, hidden_cols)
+      hidden_buf = SwiGLUFF.batch_buf(@@dev_hidden_batch, n, hidden_cols)
 
       Profile.measure("ffn.batch_gate_up") do
         gate_w.gemv_into(xb, gate_buf)

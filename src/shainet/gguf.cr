@@ -60,6 +60,27 @@ module SHAInet
       GGMLType::Q5_K => {176, 256},
       GGMLType::Q6_K => {210, 256},
       GGMLType::Q8_K => {292, 256},
+      # i-quants. Sizes from ggml-common.h's block structs:
+      #   IQ2_XXS  d + qs[QK_K/8] u16                          = 2 + 32      = 66
+      #   IQ2_XS   d + qs[QK_K/8] u16 + scales[QK_K/32]        = 2 + 32 + 8  = 74
+      #   IQ2_S    d + qs[QK_K/4] + qh[QK_K/32] + scales[..]   = 2 + 64+8+8  = 82
+      #   IQ3_XXS  d + qs[3*QK_K/8]                            = 2 + 96      = 98
+      #   IQ3_S    d + qs[QK_K/4] + qh[QK_K/32] + signs[QK_K/8] + scales[QK_K/64]
+      #                                                        = 2+64+8+32+4 = 110
+      #   IQ1_S    d + qs[QK_K/8] + qh[QK_K/32] u16            = 2 + 32 + 16 = 50
+      #   IQ1_M    qs[QK_K/8] + qh[QK_K/16] + scales[QK_K/32]  = 32 + 16 + 8 = 56 (no d: scales carry it)
+      #   IQ4_NL   d + qs[QK4_NL/2]                            = 2 + 16      = 18
+      #   IQ4_XS   d + scales_h u16 + scales_l[QK_K/64] + qs[QK_K/2]
+      #                                                        = 2+2+4+128   = 136
+      GGMLType::IQ2_XXS => {66, 256},
+      GGMLType::IQ2_XS  => {74, 256},
+      GGMLType::IQ2_S   => {82, 256},
+      GGMLType::IQ3_XXS => {98, 256},
+      GGMLType::IQ3_S   => {110, 256},
+      GGMLType::IQ1_S   => {50, 256},
+      GGMLType::IQ1_M   => {56, 256},
+      GGMLType::IQ4_NL  => {18, 32},
+      GGMLType::IQ4_XS  => {136, 256},
     }
 
     # Metadata value types.

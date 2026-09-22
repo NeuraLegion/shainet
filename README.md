@@ -12,8 +12,13 @@ SHAInet (Super Human Artificial Intelligence Network) is a neural network librar
 - Streaming data support for large datasets
 - HuggingFace model import via SafeTensors (no Python required)
 - LLM inference: GPT-2, LLaMA, Mistral, Qwen2, Qwen3, Qwen3-MoE, and Qwen3.5
-  (Qwen3.5's Gated DeltaNet hybrid stack runs, but its mixer is host-side: usable for
-  short prompts, not yet for an interactive agent -- see below)
+  (Qwen3.5's Gated DeltaNet hybrid stack runs on the GPU; a 27B k-quant GGUF fits
+  a 16 GB card with the trunk placed automatically -- see below)
+- Direct GGUF loading (Ollama blobs or `.gguf` files) with weights dequantized
+  inside the GEMV/GEMM kernels, and automatic layer placement -- no environment
+  variables required. Q4_K/Q6_K plus the i-quants IQ4_XS, IQ3_S and IQ3_XXS run on
+  dedicated kernels; the lower-bit types (IQ2_S/XS/XXS, Q2_K, IQ1_M) load too, so
+  mixed-precision files like ISTA-DASLab's GSQ-RCO builds work as shipped
 - KV-cache decoding, Q8/Q4 weight quantization, and MoE expert offload
   (run large Mixture-of-Experts models on small GPUs)
 
@@ -113,6 +118,48 @@ net.train(data: data,
 
 puts net.run([0, 1])
 ```
+
+### Load a GGUF model (Ollama blob or `.gguf` file)
+
+Point `HFLoader.load` at an Ollama model name, a blob, or a `.gguf` file. Q4_K and
+Q6_K weights are kept quantized and dequantized inside the GEMV/GEMM kernels, and
+layer placement is automatic — **no environment variables are needed**:
+
+```crystal
+net = SHAInet::HFLoader.load("qwen3.5:27b")          # Ollama model name
+net = SHAInet::HFLoader.load("/path/to/model.gguf")  # or a file
+net.use_kv_cache = true
+tokenizer = SHAInet::GGUF.extract_tokenizer("qwen3.5:27b")
+```
+
+The loader sums the real GGUF tensor sizes, measures free VRAM, and places as many
+layers on the card as fit, leaving the rest resident in host RAM. On a 16 GB card a
+27B Q4_K/Q6_K model places 52 of 64 layers plus `lm_head`.
+
+A mixed-precision i-quant build of the same 27B model fits **entirely** on the same
+card -- ISTA-DASLab's `Qwen3.8-27B-GSQ-RCO-IQ3_S` (11.8 GB) places all 64 layers with
+nothing left on the host. That matters more than the file size suggests: eliminating
+host-resident layers removes the per-token PCIe streaming that otherwise dominates
+decode. Measured on one 16 GB card, same prompt and same greedy output: **85 ms/token
+all-resident against 127 ms** for the Q4_K build at 52 of 64 layers.
+
+Files like these assign a quantization type per tensor rather than one type for the
+whole model, so a single file mixes eight of them. Those carrying most of the weight
+(IQ4_XS, IQ3_S, IQ3_XXS) have dedicated GEMV kernels; the low-bit tail is converted
+once at load time.
+
+Weights left on the host are handled differently depending on batch size, because
+the two regimes are bound by different resources. Generating one token is
+memory-bound — the CPU streams those weights at full DDR5 bandwidth, so it keeps
+up. Prefill at hundreds of rows is compute-bound instead, where a CPU is about two
+orders of magnitude off the GPU, so past 32 rows the quantized weight is uploaded
+to the card and the matmul runs there. This mirrors llama.cpp's `offload_op`
+scheduler hook and uses its 32-row threshold; override with
+`SHAINET_HOST_OFFLOAD_MIN_ROWS`, or disable with `SHAINET_HOST_OFFLOAD_OP=0`.
+
+For full fp32 determinism SHAInet sets `CUBLAS_PEDANTIC_MATH` on its cuBLAS
+handles, so TF32 tensor cores are not used for SGEMM and `NVIDIA_TF32_OVERRIDE=0`
+is not required. Set `SHAINET_CUBLAS_TF32=1` to allow TF32 back.
 
 ### Load a HuggingFace Model (SafeTensors)
 

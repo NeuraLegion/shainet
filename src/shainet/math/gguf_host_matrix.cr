@@ -13,11 +13,31 @@ module SHAInet
 
     @host_ptr : Pointer(UInt8)
     @byte_size : UInt64
+    # Set when the bytes are NOT mmap-backed but GC-allocated (the Q/gate split builds its buffers
+    # by copying raw rows). Holding the slice keeps them alive for the matrix's lifetime; without it
+    # only the raw pointer would reference them.
+    @owned : Bytes?
 
-    def initialize(@rows, @cols, @ggml_type, @host_ptr, @byte_size)
-      unless @ggml_type == GGUF::GGMLType::Q4_K || @ggml_type == GGUF::GGMLType::Q6_K
-        raise ArgumentError.new("GGUFHostMatrix: unsupported type #{@ggml_type}")
+    def initialize(@rows, @cols, @ggml_type, @host_ptr, @byte_size, @owned : Bytes? = nil)
+      unless GGUFHostMatrix.host_type_supported?(@ggml_type)
+        raise ArgumentError.new("GGUFHostMatrix: no CPU GEMV for #{@ggml_type}")
       end
+    end
+
+    # Which types can live on the host at all.
+    #
+    # The k-quants have a fused AVX2 GEMV; everything else falls back to dequantizing a row through
+    # the scalar reference and dotting it, which is slower but correct. Both are far better than the
+    # alternative: placement is driven by free VRAM, so refusing a type here does not keep it off the
+    # host, it just turns a slow layer into a crash after the model has finished loading.
+    def self.host_type_supported?(t : GGUF::GGMLType) : Bool
+      t.q4_k? || t.q6_k? || GGUF::BLOCK_SIZE.has_key?(t)
+    end
+
+    # Whether this type gets the fused AVX2 path rather than the reference fallback. Callers use it to
+    # decide placement PREFERENCE -- a host layer of i-quants is legal but worth avoiding.
+    def self.host_type_fast?(t : GGUF::GGMLType) : Bool
+      t.q4_k? || t.q6_k?
     end
 
     def device_bytes : UInt64
@@ -30,12 +50,53 @@ module SHAInet
       gemv_into(x, result)
     end
 
+    # Above this many rows, send the weight to the GPU and compute there instead of on the CPU.
+    #
+    # At one row a host weight is the right call: it streams at DDR5 bandwidth and the CPU is not the
+    # limit. Past a few dozen rows the same projection becomes compute-bound and the CPU is ~100x off
+    # the GPU, so paying the PCIe upload to borrow the card wins by a wide margin.
+    #
+    # 32 is llama.cpp's threshold -- its scheduler's offload_op hook moves an op whose weights live in
+    # a host buffer onto the GPU once the batch dimension reaches a hardcoded minimum of 32 rows.
+    #
+    # I tried lowering it to 8, reasoning that the upload is a fixed ~4 ms for ffn_gate's 47.8 MB
+    # while the CPU cost scales with rows, which put break-even near 5. Measurement disagreed: on a
+    # 9-token incremental prefill, offloading took 973 ms against 806 ms for the CPU path. At that
+    # few rows the weight stream still dominates and the upload is pure added cost, so the estimate
+    # was wrong and 32 stands. Tunable to re-measure the crossover on other hardware.
+    DEFAULT_BATCH_DEVICE_MIN_ROWS = 32
+
+    # Read ONCE. Both were ENV lookups evaluated on EVERY call, and a Crystal ENV lookup is a getenv
+    # linear scan of the environment plus a String allocation -- paid per matmul, per layer, per
+    # token, including for the untaken branch of a debug print.
+    @@debug : Bool = ENV["SHAINET_DEBUG"]? == "1"
+    @@offload_op : Bool = ENV.fetch("SHAINET_HOST_OFFLOAD_OP", "1") != "0"
+
+    @@batch_device_min_rows : Int32?
+
+    def self.batch_device_min_rows : Int32
+      rows = @@batch_device_min_rows
+      return rows if rows
+      env = ENV["SHAINET_HOST_OFFLOAD_MIN_ROWS"]?
+      rows = (env.try(&.to_i?) || DEFAULT_BATCH_DEVICE_MIN_ROWS)
+      @@batch_device_min_rows = rows
+      rows
+    end
+
     def gemv_into(x : CudaMatrix, result : CudaMatrix) : CudaMatrix
-      STDERR.puts "  [gguf host gemv] #{@ggml_type} M=#{x.rows} N=#{@cols} K=#{@rows} bytes=#{@byte_size}" if ENV["SHAINET_DEBUG"]? == "1"
+      if @@debug
+        STDERR.puts "  [gguf host gemv] #{@ggml_type} M=#{x.rows} N=#{@cols} K=#{@rows} bytes=#{@byte_size}"
+      end
 
       m = x.rows
       k = @rows
       n = @cols
+
+      if m >= GGUFHostMatrix.batch_device_min_rows && @@offload_op
+        if staged = GGUFMatrix.stage_host(k, n, @ggml_type, @host_ptr, @byte_size)
+          return staged.gemm_into(x, result)
+        end
+      end
 
       # Read activation from device to host
       x_host = Pointer(Float32).malloc(m * k)
@@ -69,6 +130,7 @@ module SHAInet
       if r_dptr && !r_dptr.null?
         CUDA.memcpy(r_dptr.as(Pointer(Void)), y_host.as(Pointer(Void)),
           (m * n * 4).to_u64, CUDA::MemcpyKind::HostToDevice)
+        result.mark_device_dirty!
       else
         result.raw_data.to_unsafe.copy_from(y_host, m * n)
       end
@@ -87,6 +149,42 @@ module SHAInet
         gemv_q4k_scalar(x, y, m, k, n)
       when .q6_k?
         gemv_q6k_scalar(x, y, m, k, n)
+      else
+        gemv_reference_scalar(x, y, m, k, n)
+      end
+    end
+
+    # GEMV for any type with a reference dequant, by dequantizing a row and dotting it.
+    #
+    # Slow on purpose-built terms -- it dequantizes the whole weight per call, where the k-quant paths
+    # fuse dequant into the dot product -- but it is the difference between a model that runs and one
+    # that raises. Layer placement is decided by free VRAM, so a long context or a busy card can push
+    # layers onto the host that hold ANY of the file's types; before this, such a layer crashed with
+    # "no CPU GEMV for IQ4_XS" after the model had already loaded.
+    #
+    # The row buffer is allocated once per call rather than per row, since n is in the thousands.
+    private def gemv_reference_scalar(x : Pointer(Float32), y : Pointer(Float32),
+                                      m : Int32, k : Int32, n : Int32)
+      # Parallel C path first. Single-threaded this measured about 1150 ms per token for ONE layer of a
+      # 27B i-quant model -- against roughly 85 ms per token for all 64 layers when resident -- so a
+      # single layer missing out on VRAM cost 14x. Spreading it over cores does not make the fallback
+      # good, but it turns a near-miss on VRAM from unusable into merely slow.
+      return if CPUKernels.gemv_any_host(@ggml_type.value.to_i32, @host_ptr, x, y, m, n, k)
+
+      bs, vals = GGUF::BLOCK_SIZE[@ggml_type]
+      bytes_per_row = ((k + vals - 1) // vals).to_i64 * bs
+      wbuf = Pointer(Float32).malloc(k)
+      t = @ggml_type.value.to_i32
+      n.times do |col|
+        unless CPUKernels.dequant_row(t, @host_ptr + col.to_i64 * bytes_per_row, wbuf, k)
+          raise ArgumentError.new("GGUFHostMatrix: no reference dequant for #{@ggml_type}")
+        end
+        m.times do |row|
+          xrow = x + row * k
+          dot = 0.0_f32
+          k.times { |i| dot += wbuf[i] * xrow[i] }
+          y[row * n + col] = dot
+        end
       end
     end
 
