@@ -25,6 +25,9 @@ require "random/secure"
 # Set SHAINET_API_KEY to require an `Authorization: Bearer <key>` header, and
 # pass an explicit host (e.g. 0.0.0.0) only when you understand the exposure.
 module OpenAIServer
+  # Logged under its own source so server lines are distinguishable from the library's `sha_inet:` ones
+  # at a glance, and can be filtered separately.
+  Log = ::Log.for("api")
   extend self
 
   # ---- OpenAI request schema (the fields we honor; unknown fields ignored) ----
@@ -307,7 +310,19 @@ module OpenAIServer
         sampler = SHAInet::Sampler.new(temperature: temperature, top_k: top_k,
           repetition_penalty: repetition_penalty, rng: rng)
 
+        # Prefill is timed and logged separately from decode because they fail differently and are
+        # bound by different things. A slow prefill means the prompt is large or the cache missed; slow
+        # decode means layers did not fit on the card. One combined duration cannot tell an operator
+        # which of those is happening, and on this model a host-resident layer costs about a second per
+        # TOKEN, so the difference is the whole diagnosis.
+        pf = Time.instant
         logits = @net.run(prompt_ids, stealth: true, return_matrix: true).as(SHAInet::SimpleMatrix)
+        pf_secs = (Time.instant - pf).total_seconds
+        Log.info do
+          "prefill #{prompt_ids.size} tok in #{pf_secs.round(2)}s " \
+          "(#{(prompt_ids.size / (pf_secs > 0 ? pf_secs : 1.0)).round(0).to_i} tok/s)"
+        end
+        dec = Time.instant
         generated = [] of Int32
         text = ""
         emitted = 0
@@ -357,6 +372,13 @@ module OpenAIServer
         calls = tools.empty? ? [] of ToolProtocol::Call : ToolProtocol.parse_calls(text)
         finish = "tool_calls" unless calls.empty?
         reasoning, answer = OpenAIServer.split_reasoning(text)
+        dec_secs = (Time.instant - dec).total_seconds
+        ms_per_tok = generated.size > 0 ? (dec_secs * 1000 / generated.size).round(0).to_i : 0
+        Log.info do
+          "decode #{generated.size} tok in #{dec_secs.round(2)}s (#{ms_per_tok} ms/tok) " \
+          "finish=#{finish}#{calls.empty? ? "" : " calls=#{calls.map(&.name).join(",")}"}" \
+          "#{reasoning.empty? ? "" : " reasoning=#{reasoning.size}ch"}"
+        end
         Generation.new(answer, prompt_ids.size, generated.size, finish, calls, tools, reasoning)
       end
     end
@@ -616,105 +638,134 @@ authorized = ->(req : HTTP::Request) : Bool {
 server = HTTP::Server.new do |ctx|
   req = ctx.request
   res = ctx.response
+  started = Time.instant
+  peer = req.remote_address.try(&.to_s) || "-"
 
-  unless authorized.call(req)
-    res.status = HTTP::Status::UNAUTHORIZED
-    res.content_type = "application/json"
-    res.print OpenAIServer.error_json("Missing or invalid API key.", "invalid_request_error")
-    next
-  end
+  begin
+    unless authorized.call(req)
+      res.status = HTTP::Status::UNAUTHORIZED
+      res.content_type = "application/json"
+      res.print OpenAIServer.error_json("Missing or invalid API key.", "invalid_request_error")
+      next
+    end
 
-  # Accept routes with or without the `/v1` prefix: some OpenAI clients are
-  # configured with a base URL that already includes `/v1`, others without.
-  route = req.path.sub(/^\/v1/, "")
+    # Accept routes with or without the `/v1` prefix: some OpenAI clients are
+    # configured with a base URL that already includes `/v1`, others without.
+    route = req.path.sub(/^\/v1/, "")
 
-  case {req.method, route}
-  when {"GET", "/health"}
-    res.content_type = "application/json"
-    res.print %({"status":"ok"})
-  when {"GET", "/models"}
-    res.content_type = "application/json"
-    models = JSON.build do |j|
-      j.object do
-        j.field "object", "list"
-        j.field "data" do
-          j.array do
-            j.object do
-              j.field "id", model_name
-              j.field "object", "model"
-              j.field "created", Time.utc.to_unix
-              j.field "owned_by", "shainet"
+    case {req.method, route}
+    when {"GET", "/health"}
+      res.content_type = "application/json"
+      res.print %({"status":"ok"})
+    when {"GET", "/models"}
+      res.content_type = "application/json"
+      models = JSON.build do |j|
+        j.object do
+          j.field "object", "list"
+          j.field "data" do
+            j.array do
+              j.object do
+                j.field "id", model_name
+                j.field "object", "model"
+                j.field "created", Time.utc.to_unix
+                j.field "owned_by", "shainet"
+              end
             end
           end
         end
       end
-    end
-    res.print models
-  when {"POST", "/chat/completions"}
-    body = req.body.try(&.gets_to_end) || ""
-    request =
-      begin
-        OpenAIServer::ChatCompletionRequest.from_json(body)
-      rescue ex : JSON::ParseException | ArgumentError
+      res.print models
+    when {"POST", "/chat/completions"}
+      body = req.body.try(&.gets_to_end) || ""
+      request =
+        begin
+          OpenAIServer::ChatCompletionRequest.from_json(body)
+        rescue ex : JSON::ParseException | ArgumentError
+          res.status = HTTP::Status::BAD_REQUEST
+          res.content_type = "application/json"
+          res.print OpenAIServer.error_json("Invalid request body: #{ex.message}")
+          next
+        end
+
+      if request.messages.empty?
         res.status = HTTP::Status::BAD_REQUEST
         res.content_type = "application/json"
-        res.print OpenAIServer.error_json("Invalid request body: #{ex.message}")
+        res.print OpenAIServer.error_json("'messages' must not be empty.")
         next
       end
 
-    if request.messages.empty?
-      res.status = HTTP::Status::BAD_REQUEST
-      res.content_type = "application/json"
-      res.print OpenAIServer.error_json("'messages' must not be empty.")
-      next
-    end
+      max_tokens = request.max_tokens || default_max_tokens
+      temperature = request.temperature || 0.7
+      temperature = 0.01 if temperature <= 0.0 # sampler requires > 0; ~greedy
+      # OpenAI exposes top_p, not top_k; approximate with a fixed top_k and map
+      # frequency/presence penalty onto SHAInet's repetition penalty.
+      top_k = 40
+      rep_pen = 1.0 + (request.frequency_penalty || request.presence_penalty || 0.0).clamp(0.0, 1.0)
+      stops = OpenAIServer.normalize_stop(request.stop)
+      model = request.model || model_name
 
-    max_tokens = request.max_tokens || default_max_tokens
-    temperature = request.temperature || 0.7
-    temperature = 0.01 if temperature <= 0.0 # sampler requires > 0; ~greedy
-    # OpenAI exposes top_p, not top_k; approximate with a fixed top_k and map
-    # frequency/presence penalty onto SHAInet's repetition penalty.
-    top_k = 40
-    rep_pen = 1.0 + (request.frequency_penalty || request.presence_penalty || 0.0).clamp(0.0, 1.0)
-    stops = OpenAIServer.normalize_stop(request.stop)
-    model = request.model || model_name
-
-    if msg = engine.context_error(request.messages, max_tokens)
-      res.status = HTTP::Status::BAD_REQUEST
-      res.content_type = "application/json"
-      res.print OpenAIServer.error_json(msg, "context_length_exceeded")
-      next
-    end
-
-    if request.stream?
-      res.content_type = "text/event-stream"
-      res.headers["Cache-Control"] = "no-cache"
-      res.headers["Connection"] = "keep-alive"
-      id = OpenAIServer.completion_id
-      created = Time.utc.to_unix
-
-      send = ->(chunk : String) {
-        res.print "data: #{chunk}\n\n"
-        res.flush
-      }
-      send.call(OpenAIServer.chunk_json(id, model, created, delta_role: "assistant"))
-
-      gen = engine.generate(request.messages, max_tokens, temperature, top_k, rep_pen, stops, request.seed, request.tool_defs, request.forced_tool) do |piece|
-        send.call(OpenAIServer.chunk_json(id, model, created, delta_content: piece))
+      # What the caller actually asked for. Logged before generation rather than after, so a request that
+      # hangs or dies mid-way still shows what it was -- which is the case where you most want to know.
+      # Message ROLES rather than content: the shape is what explains a bad answer (a missing system
+      # message, a tool result that never arrived), and prompts are the caller's data, not ours to spill
+      # into a log file.
+      OpenAIServer::Log.info do
+        roles = request.messages.map(&.role).join(">")
+        tool_names = request.tool_defs.map(&.name)
+        "#{peer} chat model=#{model} msgs=#{request.messages.size} [#{roles}] " \
+        "max_tokens=#{max_tokens} temp=#{temperature.round(2)}#{request.stream? ? " stream" : ""}" \
+        "#{tool_names.empty? ? "" : " tools=#{tool_names.join(",")}"}" \
+        "#{request.forced_tool ? " forced=#{request.forced_tool}" : ""}" \
+        "#{stops.empty? ? "" : " stops=#{stops.size}"}"
       end
 
-      send.call(OpenAIServer.chunk_json(id, model, created, finish_reason: gen.finish_reason))
-      res.print "data: [DONE]\n\n"
-      res.flush
+      if msg = engine.context_error(request.messages, max_tokens)
+        res.status = HTTP::Status::BAD_REQUEST
+        res.content_type = "application/json"
+        res.print OpenAIServer.error_json(msg, "context_length_exceeded")
+        next
+      end
+
+      if request.stream?
+        res.content_type = "text/event-stream"
+        res.headers["Cache-Control"] = "no-cache"
+        res.headers["Connection"] = "keep-alive"
+        id = OpenAIServer.completion_id
+        created = Time.utc.to_unix
+
+        send = ->(chunk : String) {
+          res.print "data: #{chunk}\n\n"
+          res.flush
+        }
+        send.call(OpenAIServer.chunk_json(id, model, created, delta_role: "assistant"))
+
+        gen = engine.generate(request.messages, max_tokens, temperature, top_k, rep_pen, stops, request.seed, request.tool_defs, request.forced_tool) do |piece|
+          send.call(OpenAIServer.chunk_json(id, model, created, delta_content: piece))
+        end
+
+        send.call(OpenAIServer.chunk_json(id, model, created, finish_reason: gen.finish_reason))
+        res.print "data: [DONE]\n\n"
+        res.flush
+      else
+        gen = engine.generate(request.messages, max_tokens, temperature, top_k, rep_pen, stops, request.seed, request.tool_defs, request.forced_tool) { }
+        res.content_type = "application/json"
+        res.print OpenAIServer.chat_completion_json(OpenAIServer.completion_id, model, gen)
+      end
     else
-      gen = engine.generate(request.messages, max_tokens, temperature, top_k, rep_pen, stops, request.seed, request.tool_defs, request.forced_tool) { }
+      res.status = HTTP::Status::NOT_FOUND
       res.content_type = "application/json"
-      res.print OpenAIServer.chat_completion_json(OpenAIServer.completion_id, model, gen)
+      res.print OpenAIServer.error_json("Unknown route: #{req.method} #{req.path}", "not_found")
     end
-  else
-    res.status = HTTP::Status::NOT_FOUND
-    res.content_type = "application/json"
-    res.print OpenAIServer.error_json("Unknown route: #{req.method} #{req.path}", "not_found")
+  ensure
+    # One line per request, on EVERY exit path -- which is why it is an ensure rather than a call at the
+    # end of each branch. A client that gets a 404 on a route this server does not implement, or a 400
+    # on a body it rejected, previously left no trace at all: the failure was visible only to the
+    # client, and from here the server looked idle. That is the first thing anyone needs when a client
+    # will not talk to it.
+    OpenAIServer::Log.info do
+      "#{peer} #{req.method} #{req.path} -> #{res.status.code} " \
+      "in #{(Time.instant - started).total_milliseconds.round(0).to_i}ms"
+    end
   end
 end
 
@@ -723,11 +774,4 @@ STDERR.puts "OpenAI-compatible API on http://#{address} (model: #{model_name})"
 STDERR.puts "  POST /v1/chat/completions   GET /v1/models   GET /health"
 STDERR.puts "  tools: OpenAI function calling (tools / tool_choice / role:\"tool\")"
 STDERR.puts "  auth: #{api_key ? "Bearer token required (SHAINET_API_KEY)" : "none (localhost only)"}"
-# Printed because getting a client pointed here is mostly a matter of two environment variables, and
-# one of them is not guessable. bright-agent's ollama provider is OpenAI-compat at /v1 (not Ollama's
-# native /api/chat), and it is auto-selected from a :11434 base URL -- but selecting it does NOT change
-# the API mode, which defaults to the /v1/responses API this server does not implement. Without
-# AI_API_MODE=chat the connection fails on a route that looks like our bug and is not.
-STDERR.puts "  bright-agent: AI_API_MODE=chat INFERENCE_PROVIDER=ollama " \
-            "INFERENCE_URL=http://#{address}/v1 AI_MODEL=#{model_name}"
 server.listen
