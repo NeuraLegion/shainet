@@ -396,7 +396,21 @@ module SHAInet
               else
                 256
               end
-      return if chunk == 256
+      # Log the floor case too, and say what it costs.
+      #
+      # This returned silently at 256, so the slowest tier was the one configuration that left no trace
+      # -- and it is the tier a 64K context always lands on, since that projects about 1049 MB of
+      # headroom against the 1400 floor. Measured on this model: 256 gives about 128 tok/s where 512
+      # gives 150 and 1024 gives 179-185, so a silent floor is a silent 1.4x. Anyone reading a slow
+      # prefill in the log now has the number and the override in front of them.
+      if chunk == 256
+        Log.info do
+          "gguf: prefill chunk 256 (floor; #{headroom_mb} MB projected headroom < 1400). This is the " \
+          "slowest tier -- about 128 tok/s against 179-185 at 1024. Override with " \
+          "SHAINET_PREFILL_CHUNK=1024 if your prompts stay well short of #{max_context} tokens."
+        end
+        return
+      end
       GatedDeltaNetBlock.resident_chunk = chunk
       LlamaBlock.prefill_chunk = chunk
       # The network-level slice has to be at least as large, or it becomes the binding cap and the
