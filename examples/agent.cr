@@ -734,7 +734,14 @@ module AgentDemo
         next "Error: empty command" if cmd.empty?
         next "Declined by user." unless AgentDemo.confirm?("run: #{cmd}")
         buf = IO::Memory.new
-        status = Process.run("/bin/sh", ["-c", cmd], output: buf, error: buf)
+        # Run in the workspace, not the directory the process was launched in.
+        #
+        # Without chdir, /workspace moved where the FILE tools look but not where a shell command runs,
+        # so list_directory and `ls` reported different directories and the model could not reconcile
+        # them: it saw a file that "existed" via list_directory and did not exist via ls, and burned
+        # several commands chasing the contradiction. The two views must be the same directory. Reads
+        # the workspace per call so a /workspace switch mid-session takes effect here too.
+        status = Process.run("/bin/sh", ["-c", cmd], output: buf, error: buf, chdir: AgentDemo.workspace)
         result = buf.to_s
         result = "#{result.byte_slice(0, MAX_READ_BYTES)}\n... [truncated]" if result.bytesize > MAX_READ_BYTES
         "exit=#{status.exit_code}\n#{result}"
