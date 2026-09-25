@@ -934,34 +934,31 @@ module AgentDemo
     STDERR.flush
   end
 
-  # Read one submission, joining a bracketed paste into a single multi-line string.
+  # Read one submission, splicing a bracketed paste into the surrounding typed text.
   #
-  # Plain `gets` ends the turn at the first newline, so pasting a stack trace or a code block sent the
-  # first line as the prompt and left the rest queued as separate turns -- the model answered a
-  # fragment while the remainder arrived as nonsense follow-ups. Returns nil on EOF (Ctrl-D).
+  # A paste marker is a DELIMITER inside a line, not a mode for the whole submission. The first version
+  # treated it as a mode: on seeing PASTE_START it kept only the bytes after it, which silently DROPPED
+  # everything the user typed before the paste. Observed: "analyze <paste>2606.14164v1.pdf</paste>, see
+  # what we can add" arrived as just "2606.14164v1.pdf" -- the instruction around the pasted filename
+  # was thrown away, so the agent had a bare filename and no task.
+  #
+  # The markers are now simply removed wherever they fall, and content is accumulated until every
+  # opened paste has closed. A paste entirely within one line needs no extra reads; a multi-line paste
+  # keeps reading until the count balances. Returns nil on EOF (Ctrl-D).
   def self.read_submission : String?
     line = gets
     return if line.nil?
+    return line.chomp unless line.includes?(PASTE_START) || line.includes?(PASTE_END)
 
-    unless line.includes?(PASTE_START)
-      return line.chomp
+    buf = line
+    # Keep reading while more paste-starts have been seen than paste-ends: the paste spans lines.
+    while buf.split(PASTE_START).size > buf.split(PASTE_END).size
+      nxt = gets
+      break if nxt.nil?
+      buf += nxt
     end
 
-    # Everything from the marker onward is pasted content; keep reading until the closing marker.
-    buf = [] of String
-    first = line.split(PASTE_START, 2)[1]
-    if first.includes?(PASTE_END)
-      return first.split(PASTE_END, 2)[0].chomp
-    end
-    buf << first.chomp
-    while nxt = gets
-      if nxt.includes?(PASTE_END)
-        buf << nxt.split(PASTE_END, 2)[0]
-        break
-      end
-      buf << nxt.chomp
-    end
-    text = buf.join("\n")
+    text = buf.gsub(PASTE_START, "").gsub(PASTE_END, "").chomp
     lines = text.count('\n') + 1
     STDERR.puts "  #{"pasted #{lines} line(s), #{text.bytesize} B".colorize(:dark_gray)}" if lines > 1
     text
