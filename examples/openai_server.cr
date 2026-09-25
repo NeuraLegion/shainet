@@ -328,7 +328,44 @@ module OpenAIServer
         emitted = 0
         finish = "length"
 
-        max_tokens.times do
+        # The caller's max_tokens caps the ANSWER, not the thinking that precedes it.
+        #
+        # Taken literally it does neither, it just stops generation -- and on a reasoning model that
+        # reliably produces the worst possible outcome. Observed live: a client asking for 512 tokens got
+        # three consecutive turns where all 512 went inside <think>, the cap landed mid-thought, and the
+        # reply came back structurally valid and empty. The client could not act on it, retried, and hit
+        # the same wall at 145 seconds a round.
+        #
+        # OpenAI's own answer to this is not to ignore the parameter but to refuse a value too small for
+        # a reasoning request -- smaller values are REJECTED rather than silently returning nothing. We
+        # cannot reject usefully here (the caller cannot know the thinking length in advance, and
+        # bright-agent's 512 is hardcoded), so the cap is honoured where it is meaningful and suspended
+        # where it is destructive: while a thought is still open, generation continues.
+        #
+        # The ceiling is what the context allows, not infinity, so a model that never closes a thought
+        # stops at a real boundary instead of running until something else breaks.
+        # The extension is BOUNDED, and not by the context. Letting it run to the context limit sounded
+        # principled and is not: with a 9K prompt in a 64K window that is 56,000 tokens, and at ~110
+        # ms/token this model would sit in one request for over an hour before giving up. A fixed grace
+        # is both predictable and small enough to fail fast -- 2048 extra tokens is under four minutes.
+        grace = (ENV["SHAINET_REASONING_GRACE"]? || "2048").to_i
+        room = @max_context - prompt_ids.size - 8
+        ceiling = Math.min(Math.max(max_tokens, max_tokens + grace), Math.max(max_tokens, room))
+        extended = false
+
+        while generated.size < ceiling
+          if generated.size >= max_tokens
+            # At the cap. Stop unless a thought is still open, in which case the answer has not been
+            # written yet and stopping here guarantees an empty reply.
+            break unless ToolProtocol.truncated_think?(text)
+            unless extended
+              extended = true
+              Log.info do
+                "still inside <think> at max_tokens=#{max_tokens}; continuing to #{ceiling} so the " \
+                "answer has room (reasoning does not count against the caller's budget)"
+              end
+            end
+          end
           # Let other fibers run.
           #
           # Crystal's HTTP server is fiber-based, and this loop is CPU/GPU bound with no yield point of
@@ -376,8 +413,35 @@ module OpenAIServer
         ms_per_tok = generated.size > 0 ? (dec_secs * 1000 / generated.size).round(0).to_i : 0
         Log.info do
           "decode #{generated.size} tok in #{dec_secs.round(2)}s (#{ms_per_tok} ms/tok) " \
-          "finish=#{finish}#{calls.empty? ? "" : " calls=#{calls.map(&.name).join(",")}"}" \
+          "finish=#{finish} content=#{answer.size}ch" \
+          "#{calls.empty? ? "" : " calls=#{calls.map(&.name).join(",")}"}" \
           "#{reasoning.empty? ? "" : " reasoning=#{reasoning.size}ch"}"
+        end
+        # The failure this turn CANNOT be seen from the numbers above alone, and it is a real one: the
+        # model spent its whole token budget inside <think> and was cut off before writing either an
+        # answer or a tool call. The reply is then structurally valid and useless -- empty content, no
+        # calls -- so a client re-prompts, gets the same thing, and loops. Observed: three consecutive
+        # rounds of 512 tokens and ~2100 characters of reasoning, 145 seconds each, with the caller's
+        # message list growing assistant>user>assistant>user because it had nothing to act on.
+        #
+        # Named explicitly with the remedy, because the fix is the CALLER's max_tokens and nothing in
+        # the response says so.
+        if finish == "length" && answer.empty? && calls.empty? && !reasoning.empty?
+          Log.warn do
+            "reply is EMPTY: all #{generated.size} tokens went to reasoning (#{reasoning.size} chars) " \
+            "and the turn hit max_tokens before any answer or tool call. The caller will see " \
+            "content=\"\" and is likely to retry into the same wall -- raise max_tokens above " \
+            "#{generated.size} for this prompt."
+          end
+        elsif calls.empty? && ToolProtocol.truncated?(text)
+          # A DIFFERENT failure with the same symptom. The model opened <tool_call> and never closed it,
+          # so the parser correctly finds nothing and the client sees a reply with no calls -- which it
+          # reads as a final answer. The remedy is the same knob, but the cause is not "it thought too
+          # long", and conflating the two sends anyone debugging in the wrong direction.
+          Log.warn do
+            "TRUNCATED tool call: a <tool_call> was opened and never closed (finish=#{finish}), so no " \
+            "call could be parsed and the caller will read this as a final answer. Raise max_tokens."
+          end
         end
         Generation.new(answer, prompt_ids.size, generated.size, finish, calls, tools, reasoning)
       end
@@ -421,6 +485,17 @@ module OpenAIServer
       reasoning << answer[(i + "<think>".size)..].strip
       answer = answer[0, i]
     end
+    # Tool-call markup is not prose and must not travel as content.
+    #
+    # The calls are parsed from the raw text separately and returned as a structured tool_calls array, so
+    # leaving the XML in here would send it TWICE -- once structured and once as text a client would
+    # display to its user and echo back on the next turn. Same failure as the <think> leak, one layer
+    # down. An unterminated opener is dropped along with everything after it, since a half-written call
+    # is not something a caller can use either.
+    answer = answer.gsub(/<tool_call>.*?<\/tool_call>/m, "")
+    if i = answer.index("<tool_call>")
+      answer = answer[0, i]
+    end
     {reasoning.reject(&.empty?).join("\n\n"), answer.strip}
   end
 
@@ -452,10 +527,20 @@ module OpenAIServer
                   # what a client's own type expects. The XML is stripped either way: a client that
                   # received the raw <tool_call> markup as content would show it to its user and, worse,
                   # echo it back as text on the next turn alongside the structured call.
-                  if gen.calls.empty?
-                    j.field "content", gen.text
-                  else
+                  # content and tool_calls are not exclusive. OpenAI's schema allows both, and this model
+                  # routinely writes a sentence of intent beside its calls -- measured at 561-703
+                  # characters per turn on a real run, all of which was previously thrown away because
+                  # this branch set content to null whenever calls were present. A client that shows
+                  # intermediate progress to a user had nothing to show.
+                  #
+                  # null only when the prose is genuinely empty, which is what OpenAI returns and what a
+                  # client's own type expects for a pure tool-call turn.
+                  if gen.text.empty?
                     j.field "content", nil
+                  else
+                    j.field "content", gen.text
+                  end
+                  unless gen.calls.empty?
                     j.field "tool_calls" do
                       j.array do
                         gen.calls.each do |c|
@@ -628,7 +713,10 @@ model_name = File.basename(model_dir.rstrip("/")).sub(/\.gguf$/i, "")
 engine = OpenAIServer::Engine.new(net, tokenizer, model_name, server_context)
 
 api_key = ENV["SHAINET_API_KEY"]?
-default_max_tokens = (ENV["SHAINET_MAX_TOKENS"]? || "512").to_i
+# Used only when the caller sends no max_tokens. 512 was a text-model default: on a reasoning model the
+# thinking alone routinely exceeds it, so a caller that omits the field was being handed the empty-reply
+# failure by default rather than by its own choice.
+default_max_tokens = (ENV["SHAINET_MAX_TOKENS"]? || "4096").to_i
 
 authorized = ->(req : HTTP::Request) : Bool {
   return true unless k = api_key
