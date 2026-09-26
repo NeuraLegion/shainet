@@ -11,5 +11,11 @@ development_dependencies:
   ameba:
     github: crystal-ameba/ameba
     branch: master
+  # Used by examples/agent.cr for line editing and history. A dev dependency, not a runtime one:
+  # the shainet library never requires it, so consumers of the shard do not pull libreadline; only
+  # building the bundled agent example does.
+  readline:
+    github: crystal-lang/crystal-readline
+    version: 0.1.1
 
 license: MIT

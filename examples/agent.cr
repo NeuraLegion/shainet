@@ -1,6 +1,7 @@
 require "../src/shainet"
 require "json"
 require "colorize"
+require "readline"
 require "./agent_workspace"
 require "./agent_v4a"
 
@@ -953,22 +954,91 @@ module AgentDemo
   # opened paste has closed. A paste entirely within one line needs no extra reads; a multi-line paste
   # keeps reading until the count balances. Returns nil on EOF (Ctrl-D).
   def self.read_submission : String?
-    line = gets
+    line = read_line_edited
     return if line.nil?
     return line.chomp unless line.includes?(PASTE_START) || line.includes?(PASTE_END)
 
     buf = line
     # Keep reading while more paste-starts have been seen than paste-ends: the paste spans lines.
     while buf.split(PASTE_START).size > buf.split(PASTE_END).size
-      nxt = gets
+      nxt = read_line_edited(continued: true)
       break if nxt.nil?
-      buf += nxt
+      buf += "\n#{nxt}"
     end
 
     text = buf.gsub(PASTE_START, "").gsub(PASTE_END, "").chomp
     lines = text.count('\n') + 1
     STDERR.puts "  #{"pasted #{lines} line(s), #{text.bytesize} B".colorize(:dark_gray)}" if lines > 1
     text
+  end
+
+  # The prompt readline draws, and where history is kept across sessions.
+  PROMPT       = "#{"You".colorize(:light_green).bold} \u276f "
+  HISTORY_FILE = File.join(ENV["HOME"]? || ".", ".shainet_agent_history")
+  MAX_HISTORY  = 1000
+
+  @@history_loaded = false
+  @@last_history : String? = nil
+  # Our own copy of the session's entries, because the crystal-readline shard binds add_history but
+  # exposes NO way to read the history list back for saving.
+  @@history = [] of String
+
+  # Read one edited line: arrow-key history, in-line editing (Ctrl-A/E/W, left/right), and a persistent
+  # history file -- the biggest gap the earlier harness review named, since a coding agent has you
+  # retyping paths and commands constantly. Uses the crystal-readline shard (a libreadline binding), so
+  # this is line editing the terminal already knows how to do rather than a reimplementation.
+  #
+  # Falls back to plain gets when stdin is not a tty (piped input, a test harness): readline needs a
+  # terminal, and forcing it on a pipe would hang. A `continued` line of a multi-line paste draws a
+  # blank prompt and is not recorded on its own -- the whole submission is one history entry.
+  #
+  # Returns nil on EOF (Ctrl-D), which the shard returns as nil.
+  def self.read_line_edited(continued : Bool = false) : String?
+    unless STDIN.tty?
+      line = gets
+      return line.nil? ? nil : line.chomp
+    end
+    load_history unless @@history_loaded
+    prompt = continued ? "" : PROMPT
+    # add_history: true lets libreadline record this line for arrow-key recall. A continuation line
+    # passes false. We also keep our own copy in @@history for persistence, since the shard exposes no
+    # way to read libreadline's history list back out for saving.
+    add = !continued
+    line = begin
+      Readline.readline(prompt, add_history: add)
+    rescue
+      nil
+    end
+    return if line.nil?
+    if add && !line.strip.empty? && line != @@last_history
+      @@history << line
+      @@last_history = line
+    end
+    line
+  end
+
+  private def self.load_history
+    @@history_loaded = true
+    return unless File.exists?(HISTORY_FILE)
+    File.each_line(HISTORY_FILE) do |l|
+      next if l.strip.empty?
+      # Seed libreadline's own history directly -- the shard has no public add method, but its
+      # LibReadline binding does, and that is what makes the file's entries reachable with up-arrow.
+      LibReadline.add_history(l)
+      @@history << l
+      @@last_history = l
+    end
+  rescue
+    # A corrupt or unreadable history file must never stop the agent starting.
+  end
+
+  # Append the session's entries, capped so the file cannot grow without bound. Called at exit.
+  def self.save_history
+    return unless @@history_loaded
+    lines = @@history.last(MAX_HISTORY)
+    File.write(HISTORY_FILE, lines.join("\n") + "\n") unless lines.empty?
+  rescue
+    # History is a convenience; failing to persist it must not crash a clean exit.
   end
 
   # One dimmed line describing what a tool returned.
@@ -1717,8 +1787,30 @@ module AgentDemo
           if oom && !compacted_for_oom
             compacted_for_oom = true
             reset_cache!
-            removed = compact!((@max_context * 0.5).to_i)
-            STDERR.puts "\n  [agent] out of GPU memory at #{context_tokens + removed} tokens; " \
+            # Compact below where it ACTUALLY failed, not to half the context.
+            #
+            # The bug: this compacted to @max_context * 0.5. VRAM runs out well below the context limit
+            # -- the KV reserve plus the transient prefill workspace can exhaust the card at a token
+            # count the context budget still considers fine. Observed: OOM at 17817 tokens with a 40960
+            # context, so the 20480 target was ABOVE the failure point, compact! removed 0 (before <=
+            # target returns early), and the identical prompt was retried -- straight into an illegal
+            # memory access that corrupted CUDA state, because the first OOM had already left the
+            # context half-allocated in a way reset_cache! does not fully undo.
+            #
+            # Target 60% of what failed, so the retry is materially smaller with headroom for the
+            # workspace this time.
+            failed_at = context_tokens
+            target = (failed_at * 0.6).to_i
+            removed = compact!(target)
+            if removed == 0
+              # Could not shrink below the failure point (one huge message, or already minimal).
+              # Retrying would hit the same wall and the same CUDA corruption, so stop cleanly.
+              STDERR.puts "\n  [agent] out of GPU memory at #{failed_at} tokens and cannot compact " \
+                          "below it (one message may be too large). Try /clear or a shorter request, " \
+                          "or restart with a smaller SHAINET_AGENT_CONTEXT.".colorize(:yellow)
+              break
+            end
+            STDERR.puts "\n  [agent] out of GPU memory at #{failed_at} tokens; " \
                         "compacted to #{context_tokens} (−#{removed}) and retrying".colorize(:yellow)
             next
           end
@@ -2026,7 +2118,7 @@ Process.on_terminate do |reason|
       exit 0
     else
       idle_interrupt = true
-      STDERR.print "\n  #{"press Ctrl-C again to exit, or Ctrl-D".colorize(:dark_gray)}\n#{"You".colorize(:light_green).bold} ❯ "
+      STDERR.print "\n  #{"press Ctrl-C again to exit, or Ctrl-D".colorize(:dark_gray)}\n"
     end
   else
     # A real termination request (TERM, or the terminal going away) is not a change of mind about one
@@ -2043,10 +2135,13 @@ BAR.install
 # dies with a scroll region still set leaves the user's shell scrolling inside a box.
 at_exit { BAR.uninstall }
 at_exit { AgentDemo.disable_bracketed_paste }
+at_exit { AgentDemo.save_history }
 agent.status_bar = BAR
 
 loop do
-  STDERR.print "\n#{"You".colorize(:light_green).bold} ❯ "
+  # No manual "You ❯" print here: readline draws PROMPT itself so its line editing works within it.
+  # On a pipe (no tty) read_submission falls back to gets, and a leading newline keeps turns spaced.
+  STDERR.print "\n" if STDIN.tty?
   input = AgentDemo.read_submission
   break if input.nil?
   idle_interrupt = false
