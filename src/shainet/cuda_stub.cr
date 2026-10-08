@@ -265,6 +265,14 @@ module SHAInet
       raise "CUDA disabled"
     end
 
+    def gemv_q5k(*args)
+      raise "CUDA disabled"
+    end
+
+    def dequant_q5k_rows(*args)
+      raise "CUDA disabled"
+    end
+
     def dequant_q4k_rows(*args)
       raise "CUDA disabled"
     end

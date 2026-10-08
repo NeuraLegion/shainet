@@ -266,6 +266,42 @@ static void dequant_q6k_row_f32(const uint8_t *w, float *out, int K) {
     }
 }
 
+/* Dequantize one Q5_K row to fp32 (ggml dequantize_row_q5_K).
+ *
+ * 176 bytes per 256 values: f16 d, f16 dmin, scales[12] (packed exactly as Q4_K's), qh[32], qs[128].
+ * Each 64-value sub-block j takes its low nibbles from qs[32j..32j+31] (values 64j..64j+31) and its
+ * high nibbles from the same bytes (values 64j+32..64j+63); the fifth bit of value l in that pair
+ * comes from bit 2j (low) and 2j+1 (high) of qh[l]. Some k-quant files store only the LM head this
+ * way (Q5_K_M-style "output.weight" in otherwise i-quant GGUFs), so without it nothing decodes. */
+static void dequant_q5k_row_f32(const uint8_t *w, float *out, int K) {
+    int nb = (K + 255) / 256;
+    for (int blk = 0; blk < nb; blk++) {
+        const uint8_t *block = w + blk * 176;
+        float d    = f16_to_f32(*(const uint16_t *)(block + 0));
+        float dmin = f16_to_f32(*(const uint16_t *)(block + 2));
+        const uint8_t *sc = block + 4;
+        const uint8_t *qh = block + 16;
+        const uint8_t *qs = block + 48;
+        int base_k = blk * 256;
+
+        for (int j = 0; j < 4; j++) {
+            uint8_t sc0, m0, sc1, m1;
+            get_scale_min_k4(j * 2,     sc, &sc0, &m0);
+            get_scale_min_k4(j * 2 + 1, sc, &sc1, &m1);
+            float d1 = d * (float)sc0, mn1 = dmin * (float)m0;
+            float d2 = d * (float)sc1, mn2 = dmin * (float)m1;
+            const uint8_t *ql = qs + j * 32;
+            uint8_t u1 = (uint8_t)(1u << (2 * j)), u2 = (uint8_t)(2u << (2 * j));
+            int k0 = base_k + j * 64;
+            for (int l = 0; l < 32; l++) {
+                int ka = k0 + l, kb = k0 + l + 32;
+                if (ka < K) out[ka] = d1 * (float)((ql[l] & 0x0F) + ((qh[l] & u1) ? 16 : 0)) - mn1;
+                if (kb < K) out[kb] = d2 * (float)((ql[l] >> 4)   + ((qh[l] & u2) ? 16 : 0)) - mn2;
+            }
+        }
+    }
+}
+
 /* fp32 dot product, AVX2 with FMA. */
 /* ─────────── Q8 activation quantization + integer dot products ───────────
  *
@@ -882,6 +918,7 @@ static int block_shape(int t, int *bs, int *vals) {
     switch (t) {
     case 10: *bs =  84; *vals = 256; return 1; /* Q2_K     */
     case 12: *bs = 144; *vals = 256; return 1; /* Q4_K     */
+    case 13: *bs = 176; *vals = 256; return 1; /* Q5_K     */
     case 14: *bs = 210; *vals = 256; return 1; /* Q6_K     */
     case 16: *bs =  66; *vals = 256; return 1; /* IQ2_XXS  */
     case 17: *bs =  74; *vals = 256; return 1; /* IQ2_XS   */
@@ -947,6 +984,7 @@ int dequant_any_row(int t, const uint8_t *w, float *out, int K) {
     switch (t) {
     case 10: dequant_q2k_row_f32(w, out, K); return 1;    // Q2_K
     case 12: dequant_q4k_row_f32(w, out, K); return 1;    // Q4_K
+    case 13: dequant_q5k_row_f32(w, out, K); return 1;    // Q5_K
     case 14: dequant_q6k_row_f32(w, out, K); return 1;    // Q6_K
     case 16: dequant_iq2xxs_row_f32(w, out, K); return 1; // IQ2_XXS
     case 17: dequant_iq2xs_row_f32(w, out, K); return 1;  // IQ2_XS
