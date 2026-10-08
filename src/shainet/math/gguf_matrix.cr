@@ -148,6 +148,9 @@ module SHAInet
       when .q6_k?
         CUDA.gemv_q6k(x.device_ptr.not_nil!, @dev_ptr, result.device_ptr.not_nil!,
           x.rows, @cols, @rows)
+      when .q5_k?
+        CUDA.gemv_q5k(x.device_ptr.not_nil!, @dev_ptr, result.device_ptr.not_nil!,
+          x.rows, @cols, @rows)
       else
         raise ArgumentError.new("unsupported GGUF type for gemv: #{@ggml_type}")
       end
@@ -190,7 +193,7 @@ module SHAInet
     # here must be transcoded at load rather than reaching a kernel that cannot read it.
     def self.device_type_supported?(t : GGUF::GGMLType) : Bool
       return t.q4_k? || t.q6_k? if @@force_transcode_iq
-      t.q4_k? || t.q6_k? || t.iq4_xs? || t.iq3_s? || t.iq3_xxs? ||
+      t.q4_k? || t.q5_k? || t.q6_k? || t.iq4_xs? || t.iq3_s? || t.iq3_xxs? ||
         t.q2_k? || t.iq2_xxs? || t.iq2_xs? || t.iq2_s? || t.iq1_m? || t.iq1_s?
     end
 
@@ -308,6 +311,7 @@ module SHAInet
           when .iq1_s?   then CUDA.dequant_iq1s_rows(@dev_ptr, buf, row0, rows, k)
           when .q4_k?    then CUDA.dequant_q4k_rows(@dev_ptr, buf, row0, rows, k)
           when .q6_k?    then CUDA.dequant_q6k_rows(@dev_ptr, buf, row0, rows, k)
+          when .q5_k?    then CUDA.dequant_q5k_rows(@dev_ptr, buf, row0, rows, k)
           else                raise ArgumentError.new("unsupported GGUF type for gemm: #{@ggml_type}")
           end
           CUDA.gemm_tn(handle, buf, xp, rp + row0,

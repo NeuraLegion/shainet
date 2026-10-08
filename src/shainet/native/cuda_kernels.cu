@@ -2302,6 +2302,72 @@ __global__ void gemv_q4k_kernel(const float* __restrict__ x,
     if (lane == 0) y[(long)m * N + n] = acc;
 }
 
+// Q5_K block (176 bytes, 256 values): fp16 d, fp16 dmin, scales[12] (Q4_K packing), qh[32], qs[128].
+// Identical to Q4_K plus a fifth bit per value: for qs byte b in 64-value sub-block j at offset l,
+// the low nibble's high bit is qh[l] bit 2j and the high nibble's is bit 2j+1. Some i-quant GGUFs
+// store only output.weight this way, so the LM head needs it.
+#define GGUF_Q5K_BLOCK_BYTES 176
+
+// Q5_K GEMV with Q4_K's lane assignment: a lane owns four consecutive qs bytes (eight values) and the
+// four matching qh bytes, so every byte is read exactly once per row.
+__global__ void gemv_q5k_kernel(const float* __restrict__ x,
+                                const unsigned char* __restrict__ w,
+                                float* __restrict__ y,
+                                int M, int N, int K) {
+    const int warp = threadIdx.x >> 5;
+    const int lane = threadIdx.x & 31;
+    const int n = blockIdx.x * (blockDim.x >> 5) + warp;
+    const int m = blockIdx.y;
+    if (n >= N || m >= M) return;
+
+    const int nblocks = K / GGUF_QK_K;
+    const long row_bytes = (long)nblocks * GGUF_Q5K_BLOCK_BYTES;
+    const unsigned char* wrow = w + (long)n * row_bytes;
+    const float* xrow = x + (long)m * K;
+
+    const int b0 = lane * 4;
+    const int j64 = b0 >> 5;
+    const int off = b0 & 31;
+    const int glo = j64 * 2;
+    const int ghi = glo + 1;
+    const int vlo = j64 * 64 + off;
+    const int vhi = vlo + 32;
+    const unsigned int ulo = 1u << (2 * j64);
+    const unsigned int uhi = 2u << (2 * j64);
+
+    float acc = 0.0f;
+    for (int b = 0; b < nblocks; ++b) {
+        const unsigned char* block = wrow + (long)b * GGUF_Q5K_BLOCK_BYTES;
+        const float d    = __half2float(*((const __half*)(block + 0)));
+        const float dmin = __half2float(*((const __half*)(block + 2)));
+
+        unsigned char sc_l, mn_l, sc_h, mn_h;
+        get_scale_min_k4(glo, block + 4, &sc_l, &mn_l);
+        get_scale_min_k4(ghi, block + 4, &sc_h, &mn_h);
+        const float dl = d * (float)sc_l, ml = dmin * (float)mn_l;
+        const float dh = d * (float)sc_h, mh = dmin * (float)mn_h;
+
+        // 48 + b0 and 16 + off are multiples of 4, so both 32-bit loads are aligned.
+        const uchar4 q = *((const uchar4*)(block + 48 + b0));
+        const uchar4 h = *((const uchar4*)(block + 16 + off));
+        const float4 xlo = *((const float4*)(xrow + b * GGUF_QK_K + vlo));
+        const float4 xhi = *((const float4*)(xrow + b * GGUF_QK_K + vhi));
+
+        acc += (dl * (float)((q.x & 0xF) + ((h.x & ulo) ? 16 : 0)) - ml) * xlo.x;
+        acc += (dl * (float)((q.y & 0xF) + ((h.y & ulo) ? 16 : 0)) - ml) * xlo.y;
+        acc += (dl * (float)((q.z & 0xF) + ((h.z & ulo) ? 16 : 0)) - ml) * xlo.z;
+        acc += (dl * (float)((q.w & 0xF) + ((h.w & ulo) ? 16 : 0)) - ml) * xlo.w;
+        acc += (dh * (float)((q.x >> 4) + ((h.x & uhi) ? 16 : 0)) - mh) * xhi.x;
+        acc += (dh * (float)((q.y >> 4) + ((h.y & uhi) ? 16 : 0)) - mh) * xhi.y;
+        acc += (dh * (float)((q.z >> 4) + ((h.z & uhi) ? 16 : 0)) - mh) * xhi.z;
+        acc += (dh * (float)((q.w >> 4) + ((h.w & uhi) ? 16 : 0)) - mh) * xhi.w;
+    }
+
+    #pragma unroll
+    for (int s = 16; s > 0; s >>= 1) acc += __shfl_down_sync(0xFFFFFFFF, acc, s);
+    if (lane == 0) y[(long)m * N + n] = acc;
+}
+
 // Q6_K GEMV, warp per output row, each byte read EXACTLY ONCE. Same reasoning as Q4_K above.
 //
 // Q6_K packs three bytes into four values: for a chunk of 128 and an offset l in [0,32),
@@ -2619,6 +2685,40 @@ __global__ void dequant_q4k_rows_kernel(const unsigned char* __restrict__ w,
     }
 }
 
+__global__ void dequant_q5k_rows_kernel(const unsigned char* __restrict__ w,
+                                        float* __restrict__ out,
+                                        int row0, int n_rows, int K) {
+    int r = blockIdx.x;
+    if (r >= n_rows) return;
+
+    int nblocks = K / GGUF_QK_K;
+    long row_bytes = (long)nblocks * GGUF_Q5K_BLOCK_BYTES;
+    const unsigned char* wrow = w + (long)(row0 + r) * row_bytes;
+    float* orow = out + (long)r * K;
+
+    for (int blk = blockIdx.y; blk < nblocks; blk += gridDim.y) {
+        const unsigned char* block = wrow + (long)blk * GGUF_Q5K_BLOCK_BYTES;
+        float d    = __half2float(*((const __half*)(block + 0)));
+        float dmin = __half2float(*((const __half*)(block + 2)));
+        const unsigned char* scales = block + 4;
+        const unsigned char* qh     = block + 16;
+        const unsigned char* qs     = block + 48;
+        int base_k = blk * GGUF_QK_K;
+
+        for (int k = threadIdx.x; k < GGUF_QK_K; k += blockDim.x) {
+            unsigned char sc, mn;
+            get_scale_min_k4(k / 32, scales, &sc, &mn);
+            int j = k / 64;
+            int o = k % 64;
+            int l = o & 31;
+            int hi = o >> 5; // 0 = low nibble, 1 = high nibble
+            int nib = hi ? (qs[j * 32 + l] >> 4) : (qs[j * 32 + l] & 0xF);
+            int bit = (qh[l] >> (2 * j + hi)) & 1;
+            orow[base_k + k] = d * (float)sc * (float)(nib + 16 * bit) - dmin * (float)mn;
+        }
+    }
+}
+
 __global__ void dequant_q6k_rows_kernel(const unsigned char* __restrict__ w,
                                         float* __restrict__ out,
                                         int row0, int n_rows, int K) {
@@ -2814,6 +2914,25 @@ void dequant_q4k_rows(const unsigned char* w, float* out, int row0, int n_rows, 
     int by = nblocks < 32 ? nblocks : 32;
     dim3 grid(n_rows, by);
     dequant_q4k_rows_kernel<<<grid, 256>>>(w, out, row0, n_rows, K);
+}
+
+void dequant_q5k_rows(const unsigned char* w, float* out, int row0, int n_rows, int K) {
+    if (n_rows <= 0 || K <= 0) return;
+    int nblocks = K / GGUF_QK_K;
+    int by = nblocks < 32 ? nblocks : 32;
+    dim3 grid(n_rows, by);
+    dequant_q5k_rows_kernel<<<grid, 256>>>(w, out, row0, n_rows, K);
+}
+
+void gemv_q5k(const float* x, const unsigned char* w, float* y, int M, int N, int K) {
+    const int warps = 4;
+    const int threads = warps * 32;
+    dim3 grid((N + warps - 1) / warps, M);
+    gemv_q5k_kernel<<<grid, threads>>>(x, w, y, M, N, K);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error in gemv_q5k: %s\n", cudaGetErrorString(err));
+    }
 }
 
 void dequant_q6k_rows(const unsigned char* w, float* out, int row0, int n_rows, int K) {

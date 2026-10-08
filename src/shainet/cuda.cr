@@ -395,6 +395,8 @@ module SHAInet
     @@dequant_iq1s_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@gemv_q4k_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@gemv_q6k_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@gemv_q5k_proc : Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
+    @@dequant_q5k_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@dequant_q4k_rows_proc : Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void)?
     @@gdn_gates_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Void)?
     @@short_conv_proc : Proc(Pointer(Float32), Pointer(Float32), Pointer(Float32), Pointer(Float32), Int32, Int32, Int32, Void)?
@@ -727,6 +729,27 @@ module SHAInet
       end
       raise "CUDA kernels not available" unless fn
       fn.call(x, w, y, m, n, k)
+    end
+
+    # GGUF k-quant GEMV for Q5_K format (176-byte blocks, K must be a multiple of 256).
+    def gemv_q5k(x : Pointer(Float32), w : Pointer(UInt8), y : Pointer(Float32),
+                 m : Int32, n : Int32, k : Int32)
+      unless fn = @@gemv_q5k_proc
+        @@gemv_q5k_proc = fn = load_kernel_proc("gemv_q5k",
+          Proc(Pointer(Float32), Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(x, w, y, m, n, k)
+    end
+
+    def dequant_q5k_rows(w : Pointer(UInt8), dst : Pointer(Float32),
+                         row0 : Int32, n_rows : Int32, k : Int32)
+      unless fn = @@dequant_q5k_rows_proc
+        @@dequant_q5k_rows_proc = fn = load_kernel_proc("dequant_q5k_rows",
+          Proc(Pointer(UInt8), Pointer(Float32), Int32, Int32, Int32, Void))
+      end
+      raise "CUDA kernels not available" unless fn
+      fn.call(w, dst, row0, n_rows, k)
     end
 
     # GGUF k-quant GEMV for Q6_K format (210-byte blocks, K must be a multiple of 256).
